@@ -33,6 +33,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Automatic update checks are enabled by default (at most once a day). Installing
   an update still requires explicit user confirmation.
 
+## [0.1.1] - 2026-10-30
+
+### Added
+
+- The welcome screen now shows the running version under the LazeCode wordmark,
+  so an applied update is visible without opening Settings.
+
+### Changed
+
+- Release artifacts are signed with a new updater key pair; in-app updates are
+  verified against the public key shipped in this build.
+
 ## [0.1.0] - 2026-10-29
 
 ### Added

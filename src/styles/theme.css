@@ -3578,6 +3578,12 @@ body[data-variant="2"] .empty-app-title {
   letter-spacing: 0.5px;
 }
 
+.welcome-version {
+  font-size: 12px;
+  color: var(--text-muted);
+  letter-spacing: 0.2px;
+}
+
 .welcome-subtitle {
   font-size: 13px;
   color: var(--text-secondary);

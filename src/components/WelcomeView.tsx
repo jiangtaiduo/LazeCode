@@ -9,6 +9,7 @@ import {
   SettingsStripeIcon
 } from './FileIcons';
 import { t } from '../services/i18n';
+import { APP_VERSION } from '../services/appVersion';
 
 interface WelcomeViewProps {
   onOpenProject: () => void;
@@ -42,6 +43,7 @@ export const WelcomeView: React.FC<WelcomeViewProps> = ({
             <span className="welcome-logo-icon"><ProjectStripeIcon size={24} color="#ffffff" /></span>
           </div>
           <h1 className="welcome-title">LazeCode</h1>
+          <div className="welcome-version">v{APP_VERSION}</div>
           <p className="welcome-subtitle">
             {t().welcome.subtitle}
           </p>

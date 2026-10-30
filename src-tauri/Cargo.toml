@@ -1,6 +1,6 @@
 [package]
 name = "lazecode"
-version = "0.1.0"
+version = "0.1.1"
 description = "Minimal editor, Git client and terminal for macOS 27; run any coding agent in the terminal"
 keywords = ["git", "ide", "terminal", "macos", "tauri"]
 authors = ["LazeCode contributors"]

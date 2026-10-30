@@ -1,0 +1,6710 @@
+/* ==========================================================================
+   LazeCode IDE · 界面样式基座 + macOS Native 双主题 token
+
+   本文件供养三部分内容：
+     1) 设计 token（字体/字号阶梯/间距/圆角/动效 + 深色兜底语义色）
+     2) 公共 reset 与结构规则（布局、组件骨架，与明暗无关）
+     3) 通用控件基类（按钮/菜单/弹窗/对话框/树/终端/差量视图）
+
+   主题专属的语义色、玻璃材质与结构签名全部在 src/styles/variants/：
+     variant-1.css = macOS Native 深色（默认）
+     variant-2.css = macOS Native 浅色
+   运行时只注入当前一个文件，见 src/main.tsx 的 applyThemeVariant。
+   ========================================================================== */
+
+/* ==========================================================================
+   设计 token 体系（macOS 27 原生标准）
+
+   两层结构：
+     theme.css 的 :root      —— 主题无关的结构 token（字体、字号、间距、圆角、
+                               动效曲线）+ 深色兜底值。任何 variant 未覆盖的
+                               变量都能从这里取到，浅色/深色双主题共用同一套结构。
+     variants/variant-*.css  —— 语义色 token（背景、文字、边框、Git 状态…）。
+                               只有两个文件：1 = macOS Native 深色，2 = 浅色。
+
+   为什么语义色全部走 token：全站曾硬编码 223 处十六进制/rgba，浅色主题
+   无法覆盖。现在颜色只在这里与两个 variant 里出现，别处一律 var()。
+
+   命名遵循 macOS 系统语义：
+     --sys-*        系统材质（Liquid Glass 的层级）
+     --menu-*       菜单族（右键菜单/子菜单/标题栏下拉）统一通道
+     --scrim-*      遮罩（模态背后的压暗层，随明暗反转）
+   ========================================================================== */
+
+:root {
+  /* ---------- 结构 token（与明暗无关） ---------- */
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC",
+    "Helvetica Neue", "Segoe UI", sans-serif;
+  --font-code: "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Monaco, Consolas, monospace;
+
+  /* macOS 界面字号阶梯：11 辅助 / 12 次小 / 13 控件默认 / 14 面板标题 */
+  --text-tiny: 11px;
+  --text-caption: 12px;
+  --text-body: 13px;
+  --text-title: 14px;
+
+  /* 窗口内衬圆角：与 macOS 27 系统窗口圆角对齐（10 CSS px 视觉值） */
+  --window-radius: 10px;
+
+  /* 标题栏 / 工具栏高度：36 介于 macOS Safari 标题栏与 PyCharm Log 面板
+     标题行之间（原 48 过高，已降）。侧栏按钮 32，底部面板标题 28。*/
+  --titlebar-h: 40px;
+  --toolbar-h: 38px;
+  --panel-title-h: 26px;
+
+  /* 间距阶梯：4 / 8 / 12 / 16（macOS 8pt 网格） */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+
+  /* 圆角：macOS 27 Liquid Glass 用连续圆角，控件 6~8、窗口 12、浮层 14 */
+  --radius-sm: 4px;
+  --radius-btn: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 9999px;
+
+  /* 动效：macOS 的 ease 曲线（cubic-bezier(0.25, 0.1, 0.25, 1)） */
+  --ease-mac: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --dur-fast: 0.12s;
+  --dur-normal: 0.2s;
+
+  /* ---------- 语义色：深色兜底（variant-1 会重新定义同一组） ---------- */
+  --bg-app: #1e1f22;
+  --bg-sidebar: #25272b;
+  --bg-sidebar-strip: #1e1f22;
+  --bg-editor: #1e1f22;
+  --bg-header: #2b2d30;
+  --bg-bottom: #1e1f22;
+  --bg-tab-active: #1e1f22;
+  --bg-tab-inactive: #2b2d30;
+  --bg-app-deep: #1e2227;
+  /* 模态对话框实体底色（100% 不透明实色，杜绝透出背景文字） */
+  --bg-dialog: #2b2d30;
+  --bg-dialog-sidebar: #232529;
+  --bg-dialog-header: #2b2d30;
+  --bg-dialog-footer: #26282c;
+  --bg-dialog-input: #1e1f22;
+  --bg-dialog-card: #313438;
+  --term-bg: #282c34;
+  --term-fg: #bcbec4;
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-selected: rgba(53, 116, 240, 0.22);
+  --bg-selected-row: #2e436e;
+  /* 选中行悬停提亮：variant 预计算，避免 color-mix() 的兼容与重复计算开销 */
+  --bg-selected-row-hover: #546588;
+
+  --border-color: #393b40;
+  --border-subtle: #2d2f33;
+  --border-strong: #4b4d52;
+
+  --text-primary: #dfe1e5;
+  --text-secondary: #8c8f96;
+  --text-muted: #7a7e85;
+  --text-blue-mod: #79aeff;
+  --text-bright: #ffffff;
+
+  --accent: #3574f0;
+  --accent-hover: #4e88ff;
+  --accent-press: #3062cc;
+  --accent-contrast: #ffffff;
+
+  --git-green: #3fb950;
+  --git-purple: #a371f7;
+  --git-blue: #58a6ff;
+  --git-del: #f85149;
+  --git-del-strong: #c93c37;
+  --git-mod: #e5c07b;
+  --git-tag: #e3b341;
+  --git-del-bg: #482b2b; /* 删除：浅红色底色 */
+  --git-add-bg: #2c4134; /* 新增/变更：PyCharm 墨绿色底色 */
+  --git-conflict-bg: #542628; /* 冲突：深红色底色 */
+  --warn: #d98d3a;
+
+  /* 叠加层：深色主题=白色叠加，浅色主题覆盖为黑色叠加 */
+  --overlay-hover: rgba(255, 255, 255, 0.12);
+  --overlay-hover-solid: #43454a;
+  --overlay-faint: rgba(255, 255, 255, 0.06);
+  --overlay-faint-solid: #26282c;
+  --overlay-ultra: rgba(255, 255, 255, 0.04);
+  --overlay-strong: rgba(255, 255, 255, 0.35);
+
+  /* 遮罩：深色主题=压暗，浅色主题改为压白 */
+  --scrim-subtle: rgba(0, 0, 0, 0.25);
+  --scrim: rgba(0, 0, 0, 0.4);
+  --scrim-strong: rgba(0, 0, 0, 0.55);
+
+  --scrollbar-thumb: rgba(255, 255, 255, 0.15);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.25);
+
+  --shadow-dialog: 0 18px 48px rgba(0, 0, 0, 0.55);
+  --shadow-menu: 0 10px 32px rgba(0, 0, 0, 0.5);
+  --shadow-popup: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --icon-stroke: 1.4;
+  --win-close: #ff5f57;
+
+  /* ---------- 派生色（半透明叠加 / 描边） ----------
+     这些不是独立语义，而是由上面的主语义派生的「淡背景 / 描边」：
+     深色 = 白系叠加，浅色 variant 覆盖为黑系。 */
+  --accent-soft: rgba(53, 116, 240, 0.18);
+  --accent-line: rgba(53, 116, 240, 0.45);
+  --accent-glow: rgba(53, 116, 240, 0.35);
+  --git-del-faint: rgba(72, 43, 43, 0.45);
+  --git-del-line: #6e3538;
+  --git-add-faint: rgba(44, 65, 52, 0.55);
+  --git-add-line: #3a5843;
+  --git-conflict-faint: rgba(84, 38, 40, 0.65);
+  --git-conflict-line: #8b3438;
+  --git-blue-faint: rgba(88, 166, 255, 0.09);
+  --git-tag-line: rgba(227, 179, 65, 0.45);
+  --warn-faint: rgba(217, 141, 58, 0.08);
+  --warn-line: rgba(217, 141, 58, 0.35);
+
+  /* 菜单/弹层的统一底色与模糊：右键菜单、子菜单、标题栏下拉都吃这两个 token，
+     保证同一主题下所有弹出面的透明度一致（避免只有本体调亮、子菜单仍用基座值）。 */
+  --menu-bg: var(--bg-header);
+  --menu-blur: none;
+  --menu-border: var(--border-color);
+  --menu-shadow: var(--shadow-menu);
+  --menu-item-radius: var(--radius-btn);
+  --menu-item-hover: var(--bg-selected);
+  --menu-item-active-text: var(--text-bright);
+
+  /* Liquid Glass：variant 打开，深色兜底 none */
+  --blur-glass: none;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  font-family: var(--font-ui);
+  background: var(--bg-app);
+  color: var(--text-primary);
+  user-select: none;
+}
+
+/* macOS 27 的 Liquid Glass 窗口：内容区四角随系统窗口圆角内衬。
+   窗口本身由 Tauri 提供圆角，内容若不跟着切，右下/左下角会露出
+   系统圆角之外的窗口底色（WKWebView 不裁剪内容到窗口形状）。
+   root 之外不再需要每块面板单独设圆角 —— 它们本来就被系统裁过。 */
+#root {
+  border-radius: var(--window-radius);
+  overflow: hidden;
+}
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: var(--radius-btn); }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
+
+/* ==========================================================================
+   Structural Elements Base Classes
+   ========================================================================== */
+.ide-titlebar {
+  height: var(--titlebar-h);
+  background-color: var(--bg-app);
+  border-bottom: 1px solid var(--bg-header);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  flex-shrink: 0;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-app-region: drag;
+  cursor: default;
+}
+
+.ide-titlebar button,
+.ide-titlebar input,
+.ide-titlebar select,
+.ide-titlebar textarea,
+.ide-titlebar .win-btn,
+.ide-titlebar .tb-btn,
+.ide-titlebar .pycharm-dropdown-wrapper {
+  -webkit-app-region: no-drag;
+}
+
+body.platform-mac .ide-titlebar {
+  padding-left: 78px;
+  background-color: rgba(30, 31, 34, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+/* Titlebar Left Cluster (Project & Git Branch Dropdowns) */
+.titlebar-left-cluster {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.pycharm-dropdown-wrapper {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  height: 100%;
+}
+.titlebar-op-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+}
+
+.pycharm-project-pill,
+.pycharm-branch-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  padding: 4px 8px;
+  border-radius: var(--radius-btn);
+  cursor: pointer;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  transition: background 0.15s ease;
+}
+
+.pycharm-project-pill:hover,
+.pycharm-branch-pill:hover,
+.pycharm-project-pill.active,
+.pycharm-branch-pill.active {
+  background: var(--overlay-hover);
+}
+
+.pycharm-project-badge {
+  /* 与顶栏冲突/继续按钮（24×24）保持同一视觉尺寸 */
+  width: 24px;
+  height: 24px;
+  background: var(--git-green);
+  color: var(--text-bright);
+  font-weight: 700;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.pycharm-project-name,
+.pycharm-branch-name {
+  font-weight: 500;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.branch-sync-badge {
+  font-size: 10px;
+  color: var(--git-green, var(--git-green));
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.pycharm-dropdown-arrow {
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-left: 1px;
+}
+
+/* PyCharm Popups & Menus */
+.pycharm-menu-popup {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 9999;
+  width: 320px;
+  max-height: 480px;
+  /* 与右键菜单/子菜单同源：高不透明度保证不被背后代码干扰 */
+  background: var(--menu-bg);
+  backdrop-filter: var(--menu-blur);
+  -webkit-backdrop-filter: var(--menu-blur);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 36px var(--scrim-strong), 0 2px 8px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.pycharm-menu-header {
+  padding: 8px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-app);
+}
+
+.pycharm-menu-search {
+  width: 100%;
+  background: var(--bg-header);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-btn);
+  color: var(--text-primary);
+  padding: 5px 8px;
+  font-size: 12px;
+  outline: none;
+  box-sizing: border-box;
+}
+.pycharm-menu-search:focus {
+  border-color: var(--accent);
+}
+
+.pycharm-menu-actions {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+}
+
+.pycharm-menu-action-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.pycharm-menu-action-btn:hover {
+  background: var(--accent);
+  color: var(--text-bright);
+}
+.action-shortcut {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+.pycharm-menu-action-btn:hover .action-shortcut {
+  color: var(--text-bright);
+}
+
+.pycharm-menu-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  padding: 8px 12px 4px 12px;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.project-menu-section-divider {
+  border-top: 1px solid var(--border-color);
+  margin-top: 6px;
+  padding-top: 8px;
+}
+
+.pycharm-menu-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+  max-height: 280px;
+}
+
+/* 项目下拉：打开的项目分区 */
+.project-menu-popup {
+  width: 350px;
+  padding: 6px 4px;
+}
+.menu-item-window-hint { display: inline-flex; align-items: center; flex-shrink: 0; margin-left: auto; }
+.pycharm-menu-empty {
+  padding: 12px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.pycharm-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+.pycharm-menu-item:hover {
+  background: var(--accent);
+  color: var(--text-bright);
+}
+.pycharm-menu-item.selected {
+  background: var(--accent-soft);
+  color: var(--text-primary);
+}
+
+.menu-item-badge {
+  width: 18px;
+  height: 18px;
+  background: var(--git-green);
+  color: var(--text-bright);
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: var(--radius-btn);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.menu-item-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.menu-item-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.menu-item-path {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pycharm-menu-item:hover .menu-item-path {
+  color: var(--text-primary);
+}
+.menu-item-check {
+  color: var(--accent);
+  font-weight: bold;
+  font-size: 13px;
+}
+.pycharm-menu-item:hover .menu-item-check {
+  color: var(--text-bright);
+}
+
+/* 项目列表项对齐 PyCharm 实测（Image #2 风格） */
+.pycharm-menu-item.project-item {
+  align-items: flex-start;
+  gap: 10px;
+  padding: 6px 10px;
+  margin: 1px 4px;
+  border-radius: 6px;
+  transition: background-color 0.1s ease;
+  user-select: none;
+}
+.pycharm-menu-item.project-item:hover {
+  background: var(--overlay-hover);
+  color: var(--text-primary);
+}
+.pycharm-menu-item.project-item.selected {
+  background: #393b40;
+  color: var(--text-primary);
+}
+body[data-variant="2"] .pycharm-menu-item.project-item.selected {
+  background: #dbe4ee;
+}
+.menu-item-badge.project-badge {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 2px;
+  letter-spacing: -0.2px;
+}
+.pycharm-menu-item.project-item .menu-item-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pycharm-menu-item.project-item .menu-item-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.25;
+}
+.pycharm-menu-item.project-item .menu-item-path {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.25;
+}
+.pycharm-menu-item.project-item:hover .menu-item-path {
+  color: var(--text-muted);
+}
+.menu-item-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  line-height: 1.2;
+}
+.menu-item-branch-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pycharm-menu-item.project-item .menu-item-remove {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  margin-left: auto;
+}
+.pycharm-menu-item.project-item:hover .menu-item-remove {
+  display: inline-flex;
+}
+.pycharm-menu-item.project-item .menu-item-remove:hover {
+  background: var(--overlay-hover);
+  color: var(--text-bright);
+}
+
+/* 分支行右侧「有子菜单」指示箭头 */
+.menu-item-sub-chevron {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  margin-left: 6px;
+}
+
+/* 最近项目行右侧：从记录中移除（垃圾桶） */
+.menu-item-remove {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  margin-left: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.menu-item-remove:hover {
+  background: var(--overlay-hover);
+  color: var(--git-del, var(--git-del));
+}
+
+/* 分支下拉：列表区单滚动容器 + 底部拖动把柄 */
+.branch-menu-popup .branch-menu-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.branch-menu-popup .pycharm-menu-list {
+  flex: none;
+  max-height: none;
+  overflow: visible;
+}
+.branch-menu-popup {
+  width: 350px;
+}
+.git-menu-search-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-app);
+  border-bottom: 1px solid var(--border-color);
+}
+.git-menu-search-header .pycharm-menu-search {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: 12px;
+  color: var(--text-primary);
+  font-family: inherit;
+}
+.git-menu-search-header .menu-header-gear {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.git-popup-top-actions,
+.git-popup-op-actions {
+  padding: 2px 0;
+}
+.git-action-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  margin: 1px 4px;
+  color: var(--text-primary);
+}
+.git-action-item:hover {
+  background: var(--accent);
+  color: #ffffff;
+}
+.git-action-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  flex-shrink: 0;
+}
+.git-action-label {
+  flex: 1;
+  white-space: nowrap;
+}
+.git-action-shortcut {
+  font-family: var(--font-code);
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+.git-action-item:hover .git-action-shortcut {
+  color: #ffffff;
+}
+.git-menu-divider {
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 4px 6px;
+}
+.branch-collapsible-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+.branch-collapsible-header:hover {
+  color: var(--text-primary);
+}
+.branch-row-badge-ahead {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--git-green);
+  margin-left: 6px;
+}
+.branch-row-tracking {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: auto;
+  margin-right: 6px;
+}
+.pycharm-menu-item:hover .branch-row-tracking {
+  color: rgba(255, 255, 255, 0.7);
+}
+.branch-menu-resize-grip {
+  flex-shrink: 0;
+  height: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: ns-resize;
+  touch-action: none;
+  background: var(--bg-app);
+  border-top: 1px solid var(--border-color);
+}
+.branch-menu-resize-grip::after {
+  content: '';
+  width: 36px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--overlay-hover-solid);
+  transition: background-color 0.15s ease;
+}
+.branch-menu-resize-grip:hover {
+  background: var(--overlay-faint-solid);
+}
+.branch-menu-resize-grip:hover::after {
+  background: var(--accent);
+}
+/* Create new branch form */
+.pycharm-new-branch-form {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pycharm-new-branch-input {
+  background: var(--bg-app);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-btn);
+  color: var(--text-primary);
+  padding: 5px 8px;
+  font-size: 12px;
+  outline: none;
+}
+.pycharm-new-branch-input:focus {
+  border-color: var(--accent);
+}
+.pycharm-new-branch-btns {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.pycharm-btn-primary {
+  background: var(--accent);
+  border: none;
+  color: var(--accent-contrast);
+  padding: 4px 10px;
+  border-radius: var(--radius-btn);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.pycharm-btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.pycharm-btn-secondary {
+  background: var(--border-color);
+  border: 1px solid var(--border-strong);
+  color: var(--text-primary);
+  padding: 4px 10px;
+  border-radius: var(--radius-btn);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+/* Titlebar Right Actions */
+.titlebar-actions { display: flex; align-items: center; gap: 8px; }
+.titlebar-search-btn {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  border-radius: var(--radius-btn);
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.titlebar-search-btn:hover {
+  background: var(--overlay-hover);
+  color: var(--text-bright);
+}
+.titlebar-update-badge {
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px 0 7px;
+  border: 1px solid var(--git-add-line);
+  border-radius: var(--radius-pill);
+  background: var(--git-add-faint);
+  color: var(--git-green);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+.titlebar-update-badge:hover {
+  border-color: var(--git-green);
+  filter: brightness(1.12);
+}
+.titlebar-update-badge:active {
+  filter: brightness(0.95);
+}
+.titlebar-update-badge:focus-visible {
+  outline: 2px solid var(--git-add-line);
+  outline-offset: 1px;
+}
+.titlebar-update-badge svg {
+  flex-shrink: 0;
+}
+.titlebar-search-pill {
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  background: var(--overlay-faint);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-btn);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.titlebar-search-pill:hover {
+  background: var(--overlay-hover);
+  border-color: var(--border-color);
+  color: var(--text-primary);
+}
+.titlebar-search-pill .search-pill-label {
+  white-space: nowrap;
+  font-weight: 400;
+}
+.titlebar-search-pill .search-pill-shortcut {
+  font-family: var(--font-code);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--overlay-hover);
+  color: var(--text-muted);
+  border: 1px solid var(--border-subtle);
+}
+.tb-btn { width: 24px; height: 24px; border: none; background: transparent; color: var(--text-secondary); border-radius: var(--radius-btn); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.tb-btn:hover { background: var(--overlay-hover); color: var(--text-bright); }
+.win-caption-buttons { display: flex; align-items: center; height: 100%; margin-left: 8px; }
+/* <button>：去掉浏览器默认边框/内边距/背景，避免与 <span> 时代的观感偏差 */
+.win-btn { width: 52px; height: var(--titlebar-h); display: inline-flex; align-items: center; justify-content: center; color: var(--text-secondary); cursor: pointer; border: none; background: transparent; padding: 0; font: inherit; }
+.win-btn:hover { background: var(--overlay-hover); color: var(--text-bright); }
+.win-btn.win-close:hover { background: var(--win-close); color: var(--text-bright); }
+
+/* Left Tool Sidebar Strip (PyCharm Style) */
+.tool-sidebar-strip {
+  width: 40px;
+  background-color: var(--bg-sidebar-strip);
+  border-right: none;         /* 玻璃面板自带 hairline；由 variant 决定分隔色 */
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  flex-shrink: 0;
+}
+body.platform-mac .tool-sidebar-strip {
+  background-color: rgba(30, 31, 34, 0.80);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+.strip-top, .strip-bottom { display: flex; flex-direction: column; gap: 6px; align-items: center; }
+.strip-btn { width: 32px; height: 32px; border-radius: var(--radius-btn); border: none; background: transparent; color: var(--text-secondary); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; position: relative; }
+.strip-btn:hover { background: var(--overlay-hover); color: var(--text-bright); }
+.strip-btn.active {
+  background: var(--overlay-hover);
+  color: var(--text-bright);
+}
+.strip-btn.active::before {
+  content: '';
+  position: absolute;
+  left: -4px;
+  top: 7px;
+  bottom: 7px;
+  width: 3px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
+}
+/* 变更清单非空指示：Commit 图标右上角小圆点。颜色与文件树"目录含未提交"
+   蓝点（.tree-git-dot）同源 --text-blue-mod；描边取侧栏底色，在深浅两套
+   variant 下都与底部分离。 */
+.strip-btn .strip-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-blue-mod);
+  border: 1.5px solid var(--bg-sidebar-strip);
+  pointer-events: none;
+}
+
+/* Project Drawer (Screenshot 1) */
+.project-drawer {
+  width: 270px;
+  background-color: var(--bg-app);
+  border-right: 1px solid var(--bg-header);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.tool-window-header {
+  height: 34px;
+  background-color: var(--bg-app);
+  border-bottom: 1px solid var(--bg-header);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  flex-shrink: 0;
+}
+.tool-window-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.tool-window-actions { display: flex; align-items: center; gap: 2px; }
+.tb-icon-btn {
+  width: 22px;
+  height: 22px;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  border-radius: var(--radius-btn);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.tb-icon-btn:hover { background: var(--overlay-hover); color: var(--text-bright); }
+/* 切换类按钮的激活态（如「按文件夹结构查看」开启时） */
+.tb-icon-btn.active { background: var(--overlay-hover); color: var(--text-bright); }
+.tb-icon-btn:disabled { opacity: 0.4; cursor: default; }
+.tb-icon-btn:disabled:hover { background: transparent; color: var(--text-secondary); }
+
+.project-tree-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 12.5px;
+}
+.tree-root-item {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  color: var(--text-primary);
+  overflow: hidden;
+  min-width: 0;
+  cursor: pointer;
+}
+.tree-root-item:hover {
+  background: var(--bg-hover, var(--overlay-faint));
+}
+/* 追加查看的外部目录：与项目根视觉区分（描边底色 + 徽标） */
+.tree-external-root {
+  margin-top: 4px;
+  background: var(--overlay-faint);
+  border-top: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.tree-external-root .tree-root-name {
+  color: var(--text-secondary, var(--text-secondary));
+  font-weight: 500;
+}
+.external-root-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1;
+  padding: 2px 5px;
+  border-radius: 3px;
+  color: var(--text-secondary, var(--text-secondary));
+  background: var(--overlay-hover-solid);
+  border: 1px solid var(--border-strong);
+}
+.external-root-close {
+  flex-shrink: 0;
+  margin-left: 4px;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted, var(--text-muted));
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.tree-external-root:hover .external-root-close {
+  opacity: 1;
+}
+.external-root-close:hover {
+  background: var(--overlay-hover);
+  color: var(--text-primary, var(--text-primary));
+}
+.tree-root-name {
+  font-weight: 600;
+  color: var(--text-primary);
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 50%;
+}
+.tree-root-path {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.tree-node-row {
+  height: 22px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 8px;
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+  overflow: hidden;   /* 名称超宽截断，绝不换行 */
+  min-width: 0;
+  border-radius: 4px;
+  margin: 0 2px;
+}
+/* 悬停底色只作用于未选中行 */
+.tree-node-row:hover {
+  background: var(--bg-hover);
+}
+/* 当前打开文件：淡 accent 底（ProjectDrawer 以 `opened` 类标记 activeFile）。
+   与多选 `.selected`（实色）刻意区分；悬停时保持淡底不被 hover 灰冲掉。
+   位置必须在 :hover 之后、.selected 之前：同优先级下靠源码顺序，
+   让多选实色在"又打开又多选"时获胜。 */
+.tree-node-row.opened,
+.tree-node-row.opened:hover {
+  background: var(--bg-selected);
+}
+/* 选中行：保持选中色不被悬停覆盖，悬停时仅微微提亮 */
+.tree-node-row.selected,
+.tree-node-row.selected:hover {
+  background: var(--bg-selected-row);
+  color: var(--text-bright);
+}
+/* 悬停提亮用 variant 各自预计算的 --bg-selected-row-hover，
+   不用 color-mix()：一是兼容 older WebView，二是每条都实时混色没必要 */
+.tree-node-row.selected:hover {
+  background: var(--bg-selected-row-hover, var(--bg-selected-row));
+}
+.tree-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tree-chevron {
+  width: 12px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.tree-chevron-placeholder {
+  width: 12px;
+  display: inline-block;
+}
+.tree-icon-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 2px;
+}
+.tree-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ==========================================================================
+   Compare Drawer (Changes Between X and Y · 对齐 PyCharm 截图 Image #2)
+   ========================================================================== */
+.compare-drawer {
+  width: 320px;
+  background-color: var(--bg-app);
+  border-right: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow: hidden;
+  user-select: none;
+}
+.compare-drawer-header {
+  height: 34px;
+  background-color: var(--bg-app);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 0 12px;
+  flex-shrink: 0;
+  gap: 8px;
+}
+.compare-tab-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+.compare-tab-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-bright);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.compare-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+}
+.compare-tab-close:hover {
+  background: var(--overlay-hover);
+  color: var(--text-bright);
+}
+.compare-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.compare-drawer-toolbar {
+  height: 28px;
+  background-color: var(--bg-app);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+  flex-shrink: 0;
+}
+.compare-tb-left,
+.compare-tb-right {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.compare-tree-container {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px 0;
+}
+.compare-tree-hint {
+  padding: 16px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+}
+.compare-tree-error {
+  padding: 16px 12px;
+  font-size: 11px;
+  color: var(--git-del);
+  text-align: center;
+}
+.compare-tree-root {
+  height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.compare-tree-root:hover {
+  background: var(--bg-hover);
+}
+.compare-root-name {
+  font-weight: 500;
+}
+.compare-root-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-left: 2px;
+}
+.compare-dir-row {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 1px 4px;
+  padding-right: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  border-radius: 4px;
+  user-select: none;
+  color: var(--text-primary);
+}
+.compare-dir-row:hover {
+  background: var(--bg-hover);
+}
+.compare-dir-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.compare-file-row {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 26px;
+  margin: 1px 4px;
+  cursor: pointer;
+  font-size: 12px;
+  border-radius: 4px;
+  user-select: none;
+}
+.compare-file-row.flat-mode {
+  padding-left: 10px;
+}
+.compare-file-row:hover:not(.selected) {
+  background: var(--bg-hover);
+}
+.compare-file-row.selected {
+  background: #3574f0;
+  color: #ffffff;
+}
+.compare-file-row.selected .compare-file-name {
+  color: #ffffff !important;
+}
+.compare-file-row.selected .compare-file-icon {
+  color: rgba(255, 255, 255, 0.9) !important;
+}
+.compare-file-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.compare-file-name {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* ==========================================================================
+   Compare Branches (PyCharm：上下两条独立提交日志 + 各自文件树)
+   ========================================================================== */
+/* 常驻容器：切到 Diff / 编辑器时只隐藏不卸载，返回时保留 Pane 内部状态。 */
+.compare-branches-canvas {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+.compare-branches-canvas.is-hidden {
+  display: none;
+}
+.compare-branches-view {
+  position: relative;
+  flex: 1;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  display: grid;
+  overflow: hidden;
+  background: var(--bg-app);
+}
+.compare-branches-view.cb-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 10px;
+}
+.cb-state-title { font-size: 13px; font-weight: 600; color: var(--text-bright); }
+.cb-state-error { max-width: 560px; font-size: 11px; line-height: 16px; color: var(--git-del); text-align: center; }
+.cb-retry-btn {
+  height: 26px;
+  padding: 0 16px;
+  border: 1px solid var(--accent-line);
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--text-bright);
+  font-size: 12px;
+  cursor: pointer;
+}
+.cb-retry-btn:hover { background: var(--accent); color: var(--accent-contrast); }
+.cb-global-error {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  padding: 6px 10px;
+  background: var(--git-del-bg, rgba(248, 81, 73, 0.14));
+  color: var(--git-del);
+  font-size: 11px;
+  border-bottom: 1px solid var(--git-del);
+}
+.cb-pane {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  outline: none;
+}
+.cb-banner {
+  height: 28px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  background: rgba(227, 179, 65, 0.1);
+  border-bottom: 1px solid var(--border-subtle);
+  color: #e3b341;
+  font-size: 12px;
+  user-select: none;
+}
+.cb-banner-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cb-swap-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.cb-swap-btn:hover { background: var(--bg-hover); color: var(--text-bright); border-color: var(--border-subtle); }
+.cb-body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+.cb-log-col { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.cb-toolbar {
+  height: 30px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-app);
+}
+.cb-search-box {
+  flex: 1 1 120px;
+  min-width: 80px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: var(--overlay-faint);
+  color: var(--text-muted);
+}
+.cb-search-box:focus-within { border-color: var(--accent); background: var(--bg-app); }
+.cb-search-icon { display: inline-flex; flex-shrink: 0; }
+.cb-search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-family: inherit;
+}
+.cb-toggle {
+  height: 18px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-family: var(--font-code);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.cb-toggle:hover { background: var(--bg-hover); color: var(--text-bright); }
+.cb-toggle.active { background: var(--accent-soft); border-color: var(--accent-line); color: var(--git-blue); }
+.cb-filter-btn {
+  height: 22px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.cb-filter-btn:hover { background: var(--bg-hover); color: var(--text-bright); }
+.cb-filter-btn.active { background: var(--accent-soft); border-color: var(--accent-line); color: var(--git-blue); }
+.cb-clear-filters {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 16px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.cb-clear-filters:hover { background: var(--bg-hover); color: var(--text-bright); }
+.cb-toolbar-right { margin-left: auto; display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.cb-icon-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.cb-icon-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-bright); }
+.cb-icon-btn.active { background: var(--accent-soft); border-color: var(--accent-line); color: var(--git-blue); }
+.cb-icon-btn:disabled { opacity: 0.4; cursor: default; }
+.cb-inline-error {
+  padding: 4px 8px;
+  color: var(--git-del);
+  background: var(--git-del-bg, rgba(248, 81, 73, 0.1));
+  font-size: 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.cb-log-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+.cb-log-row { padding-left: 0; gap: 6px; }
+.cb-log-row .log-subject { max-width: 43%; }
+.cb-log-row .log-graph { padding-left: 2px; }
+.cb-log-graph { min-width: 0; }
+.cb-empty {
+  padding: 18px 12px;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-align: center;
+}
+.cb-load-more-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px;
+}
+.cb-load-more {
+  height: 22px;
+  padding: 0 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--bg-sidebar);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.cb-load-more:hover:not(:disabled) { color: var(--text-bright); border-color: var(--accent-line); }
+.cb-load-more:disabled { opacity: 0.5; cursor: default; }
+.cb-truncated { color: var(--text-muted); font-size: 10px; }
+.cb-splitter {
+  position: relative;
+  height: 8px;
+  cursor: row-resize;
+  background: var(--bg-app);
+  z-index: 10;
+  touch-action: none;
+}
+.cb-splitter::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 3px;
+  height: 2px;
+  background: var(--border-subtle);
+  transition: background-color 0.15s ease;
+  pointer-events: none;
+}
+.cb-splitter:hover::after,
+.cb-splitter:active::after { background: var(--accent); }
+.cb-details-resizer {
+  position: relative;
+  width: 8px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  margin: 0 -4px;
+  z-index: 10;
+  touch-action: none;
+}
+.cb-details-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background: transparent;
+  transition: background-color 0.15s ease;
+  pointer-events: none;
+}
+.cb-details-resizer:hover::after,
+.cb-details-resizer:active::after { background: var(--accent); }
+.cb-details {
+  flex-shrink: 0;
+  min-width: 170px;
+  max-width: 70%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-left: 1px solid var(--border-color);
+  background: var(--bg-sidebar);
+}
+.cb-details-header {
+  height: 26px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 0 6px 0 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.cb-details-title { color: var(--text-secondary); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cb-details-actions { display: flex; align-items: center; gap: 1px; flex-shrink: 0; }
+.cb-file-tree { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 2px 0; }
+.cb-dir-row,
+.cb-file-row {
+  height: 21px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-right: 8px;
+  cursor: pointer;
+  font-size: 11px;
+  user-select: none;
+  white-space: nowrap;
+}
+.cb-root-row {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px 0 6px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-bright);
+  user-select: none;
+  white-space: nowrap;
+}
+.cb-root-row:hover { background: var(--bg-hover); }
+.cb-root-name { overflow: hidden; text-overflow: ellipsis; }
+.cb-root-count { margin-left: auto; color: var(--text-muted); font-size: 10px; font-weight: 400; padding-left: 6px; }
+.cb-dir-row:hover { background: var(--bg-hover); }
+.cb-dir-name { overflow: hidden; text-overflow: ellipsis; }
+.cb-dir-count { margin-left: auto; color: var(--text-muted); font-size: 10px; padding-left: 6px; }
+.cb-chevron { display: inline-flex; width: 10px; flex-shrink: 0; align-items: center; justify-content: center; }
+.cb-file-row:hover:not(.selected) { background: var(--bg-hover); }
+.cb-file-row.selected { background: #3574f0; }
+.cb-file-row.selected .cb-file-name { color: #ffffff !important; }
+.cb-file-row.selected .cb-file-icon { color: #ffffff !important; }
+.cb-file-row.selected .cb-numstat .num-add,
+.cb-file-row.selected .cb-numstat .num-del { color: rgba(255, 255, 255, 0.86); }
+.cb-file-icon { display: inline-flex; align-items: center; flex-shrink: 0; }
+.cb-file-name { overflow: hidden; text-overflow: ellipsis; }
+.cb-file-spacer { flex: 1; }
+.cb-numstat { display: flex; gap: 5px; font-family: var(--font-code); font-size: 10px; flex-shrink: 0; }
+.cb-numstat .num-add { color: var(--git-green); font-style: normal; }
+.cb-numstat .num-del { color: var(--git-del); font-style: normal; }
+.cb-details-empty { padding-top: 20px; }
+.cb-details-meta {
+  flex-shrink: 0;
+  max-height: 44%;
+  overflow-y: auto;
+  border-top: 1px solid var(--border-subtle);
+  padding: 7px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 10px;
+  line-height: 15px;
+}
+.cb-meta-message { color: var(--text-bright); font-size: 12px; font-weight: 600; line-height: 17px; white-space: pre-wrap; word-break: break-word; }
+.cb-meta-message.muted { color: var(--text-muted); font-size: 11px; font-weight: 400; }
+.cb-meta-line { display: flex; align-items: baseline; gap: 5px; min-width: 0; color: var(--text-secondary); }
+.cb-meta-hash { color: var(--accent); font-family: var(--font-code); font-weight: 600; flex-shrink: 0; }
+.cb-meta-email { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cb-meta-date { color: var(--text-muted); }
+.cb-meta-branches { color: var(--text-muted); border-top: 1px solid var(--border-subtle); padding-top: 5px; }
+.cb-path-form { display: flex; flex-direction: column; gap: 6px; padding: 4px; width: 250px; }
+.cb-filter-menu.branch-ctx-menu { max-height: 60vh; overflow-y: auto; }
+.cb-path-input {
+  background: var(--scrim-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 4px 6px;
+  color: var(--text-bright);
+  font-size: 11px;
+  outline: none;
+}
+.cb-path-input:focus { border-color: var(--accent); }
+.cb-path-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.cb-path-btn {
+  padding: 2px 10px;
+  background: var(--bg-sidebar-strip);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.cb-path-btn:hover { color: var(--text-bright); }
+.cb-path-btn.primary { background: var(--accent-soft); border-color: var(--accent-line); color: var(--git-blue); }
+
+/* Commit Drawer (Screenshot 2) */
+.pycharm-commit-drawer {
+  width: 380px;
+  background-color: var(--bg-app);
+  border-right: 1px solid var(--bg-header);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.commit-drawer-header {
+  height: 34px;
+  background-color: var(--bg-app);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  flex-shrink: 0;
+}
+.commit-header-tabs {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 100%;
+}
+/* 双页签（Commit | Stash）：文字与下方 2px 亮蓝指示条（对齐常见 IDE 规范） */
+.commit-tab-title {
+  position: relative;
+  background: transparent;
+  border: none;
+  color: var(--text-muted, #8c9099);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 0 2px;
+  height: 100%;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  font-family: inherit;
+  transition: color 0.1s ease;
+}
+.commit-tab-title:hover {
+  color: var(--text-bright);
+}
+.commit-tab-title.active {
+  color: var(--text-bright, #dfe1e5);
+  font-weight: 600;
+}
+.commit-tab-title.active::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: #3574f0;
+}
+.commit-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.commit-toolbar {
+  height: 28px;
+  background-color: var(--bg-app);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* View Options (Eye 图标) 弹出菜单（参考常见 IDE 菜单布局） */
+.commit-view-menu-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.commit-view-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  /* 高于抽屉 1500 / 底部面板 1200（theme variants）：眼睛菜单经 portal 挂到
+     body，若沿用 1000 会被面板自身盖住，看起来像「点了没反应」。 */
+  z-index: 1600;
+  min-width: 170px;
+  background-color: var(--bg-app);
+  background-image: linear-gradient(0deg, var(--bg-header), var(--bg-header));
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  box-shadow: 0 10px 28px var(--scrim-strong, rgba(0, 0, 0, 0.45));
+  padding: 4px 0;
+  user-select: none;
+  animation: py-dialog-pop 0.1s ease;
+}
+.commit-view-menu-header {
+  padding: 5px 12px 3px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted, #8c9099);
+}
+.commit-view-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.commit-view-menu-item:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.08));
+  color: var(--text-bright);
+}
+.commit-view-menu-item.active {
+  background: #3574f0;
+  color: #ffffff;
+}
+.commit-view-menu-item.active .commit-view-shortcut {
+  color: rgba(255, 255, 255, 0.85);
+}
+.commit-view-item-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.commit-view-check {
+  width: 12px;
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 700;
+}
+.commit-view-shortcut {
+  font-size: 11px;
+  color: var(--text-muted, #8c9099);
+  margin-left: 16px;
+}
+.commit-view-menu-sep {
+  height: 1px;
+  background: var(--border-subtle, rgba(255, 255, 255, 0.08));
+  margin: 4px 0;
+}
+/* 详情区眼睛菜单：PyCharm 用蓝色标记鼠标悬停行，勾选状态只由左侧 ✓ 表示 */
+.details-view-menu .commit-view-menu-item:hover {
+  background: #3574f0;
+  color: #ffffff;
+}
+.details-view-menu .commit-view-menu-item:hover .commit-view-shortcut {
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.commit-tree-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+  font-size: 12px;
+}
+/* ===== Changelist 分组（对齐 PyCharm Commit 面板） ===== */
+.commit-group {
+  margin-bottom: 2px;
+}
+.commit-group-row {
+  height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px 0 6px;
+  cursor: pointer;
+  user-select: none;
+  background: var(--overlay-faint);
+}
+.commit-group-row:hover {
+  background: var(--bg-hover);
+}
+/* Shelf 页选中的贮藏条目 */
+.commit-group-row.selected,
+.commit-group-row.selected:hover {
+  background: var(--bg-selected-row);
+}
+
+/* 变更列表操作弹窗的选项列表（删除确认 / Unshelve 目标选择） */
+.py-choice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 4px 14px 10px;
+}
+.py-choice-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+}
+.py-choice-row input[type='radio'] {
+  accent-color: var(--accent);
+  margin: 0;
+  flex-shrink: 0;
+}
+.py-choice-row .py-name-input {
+  flex: 1;
+  margin: 0;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.commit-group-name {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--text-primary);
+}
+.commit-group-count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.commit-group-files {
+  padding: 1px 0 4px;
+}
+
+/* 「按文件夹结构查看」的目录行（对齐 PyCharm 目录节点） */
+.commit-dir-row {
+  height: 22px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 8px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 4px;
+  margin: 0 2px;
+}
+.commit-dir-row:hover { background: var(--bg-hover); }
+.commit-dir-row .git-file-name { color: var(--text-primary); font-size: 12.5px; }
+.commit-dir-count {
+  margin-left: 6px;
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--text-muted, #8c9099);
+}
+/* 变更文件行：勾选框 + 图标 + 文件名 + 右侧目录提示 */
+.change-file-row {
+  height: 22px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px 0 36px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 4px;
+  margin: 0 2px;
+}
+.change-file-row:hover {
+  background: var(--bg-hover);
+}
+.change-file-row.selected,
+.change-file-row.selected:hover {
+  background: var(--bg-selected-row);
+  color: var(--text-bright);
+}
+.git-file-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 2px;
+  flex-shrink: 0;
+}
+.git-file-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-dir-hint {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: right;
+  margin-left: auto;
+  margin-right: 4px;
+}
+
+/* 变更文件行尾的回滚按钮：悬浮行时出现（对齐 PyCharm Rollback 交互） */
+.file-rollback-btn {
+  margin-left: auto;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-btn);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.file-rollback-btn:hover {
+  background: var(--border-color);
+  color: var(--text-primary);
+}
+.change-file-row:hover .file-rollback-btn {
+  display: inline-flex;
+}
+.commit-conflict-subgroup {
+  margin: 1px 0;
+}
+.commit-conflict-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px 0 20px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  font-size: 12px;
+}
+.commit-conflict-row:hover {
+  background-color: var(--overlay-faint);
+}
+.commit-conflict-title {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.commit-resolve-link {
+  font-size: 12px;
+  font-weight: 500;
+  color: #3574f0;
+  background: none;
+  border: none;
+  padding: 0 4px;
+  margin-left: 4px;
+  cursor: pointer;
+  text-decoration: none;
+}
+.commit-resolve-link:hover {
+  text-decoration: underline;
+  color: #4e88ff;
+}
+.commit-conflict-files {
+  display: flex;
+  flex-direction: column;
+}
+
+/* File Status Colors matching PyCharm */
+.status-modified {
+  color: var(--git-blue); /* Blue */
+}
+.status-added {
+  color: var(--git-green); /* Green */
+}
+.status-deleted {
+  color: var(--git-del); /* Red */
+  text-decoration: line-through;
+}
+.status-unversioned {
+  color: #d08770 !important; /* Brown/orange — 未跟踪新文件（对齐 PyCharm 实测图 2） */
+}
+.status-ignored {
+  color: #6e7681 !important; /* Muted gray — 被忽略文件（对齐 PyCharm 实测图 2） */
+}
+.status-conflict {
+  color: #ff7b72 !important; /* Light red / salmon — 冲突文件（对齐 PyCharm 实测） */
+  font-weight: 500;
+}
+
+/* ===== PyCharm 风格勾选框：干掉原生大白方块，自绘贴合暗色主题 =====
+   作用于全部 input[type=checkbox]（变更文件多选、Amend、Push/Stash 选项） */
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  margin: 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-header);
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+input[type="checkbox"]:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+input[type="checkbox"]:checked:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+/* 对勾：旋转的双边框，颜色走 --accent-contrast（各 variant 已按强调色深浅配好） */
+input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 1.5px;
+  width: 4px;
+  height: 7px;
+  /* 全局 * 是 border-box，这里显式还原 content-box，几何（4+2 x 7+2）才可控 */
+  box-sizing: content-box;
+  border: solid var(--accent-contrast);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+/* 半选（分组头部分勾选）：横杠代替对勾。
+   必须排在 :checked::after 之后 —— 规范里 indeterminate 元素同样命中 :checked，
+   同特异性下靠后覆盖 */
+input[type="checkbox"]:indeterminate::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 5px;
+  width: 8px;
+  height: 0;
+  box-sizing: content-box;
+  border: solid var(--accent-contrast);
+  border-width: 0 0 2px 0;
+  transform: none;
+}
+input[type="checkbox"]:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+input[type="checkbox"]:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Bottom Commit Box */
+.commit-bottom-box {
+  border-top: 1px solid var(--bg-header);
+  background-color: var(--bg-app);
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ===== 文件树 / 变更清单抽屉竖向拖拽把手 ===== */
+.drawer-resizer-v {
+  position: relative;
+  width: 12px;
+  margin: 0 -6px;
+  cursor: col-resize;
+  background: transparent;
+  flex-shrink: 0;
+  z-index: 1050;
+  touch-action: none;
+}
+.drawer-resizer-v::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 2px;
+  background-color: transparent;
+  transition: background-color 0.15s ease;
+  pointer-events: none;
+}
+.drawer-resizer-v:hover::after,
+.drawer-resizer-v:active::after {
+  background-color: var(--accent);
+}
+.commit-options-row {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+/* 拖拽把手通用：禁用触控手势（双指滚动/长按）抢占指针事件，
+   保证 setPointerCapture 后 pointercancel 不被系统手势误触发 */
+.drawer-resizer-v,
+.bottom-panel-resizer,
+.terminal-dock-resizer,
+.terminal-dock-grip,
+.git-col-resizer,
+.details-split-resizer,
+.branch-menu-resize-grip {
+  touch-action: none;
+}
+.commit-history-dropdown-wrapper {
+  position: relative;
+}
+.commit-history-popup {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  right: 0;
+  width: 240px;
+  background: var(--bg-header);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 16px var(--scrim);
+  padding: 4px 0;
+  z-index: 999;
+}
+.history-header {
+  font-size: 10px;
+  color: var(--text-secondary);
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+.history-item {
+  padding: 5px 8px;
+  font-size: 11.5px;
+  color: var(--text-primary);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-item:hover {
+  background: var(--accent);
+  color: var(--text-bright);
+}
+.history-item.history-clear {
+  color: var(--text-secondary);
+  border-top: 1px solid var(--border-color);
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
+.commit-textarea {
+  width: 100%;
+  height: 80px;
+  background-color: var(--bg-header);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-btn);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 8px;
+  resize: none;
+  outline: none;
+  box-sizing: border-box;
+  overflow-x: hidden !important;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+.commit-textarea::-webkit-scrollbar:horizontal {
+  display: none !important;
+  height: 0 !important;
+  width: 0 !important;
+}
+.commit-textarea:focus {
+  border-color: var(--accent);
+}
+
+.commit-actions-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pycharm-commit-btn {
+  height: 28px;
+  border-radius: var(--radius-btn);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+  border: none;
+}
+.pycharm-commit-btn.primary {
+  background-color: var(--accent);
+  color: var(--accent-contrast);
+}
+.pycharm-commit-btn.primary:hover {
+  background-color: var(--accent-press);
+}
+.pycharm-commit-btn.primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.pycharm-commit-btn.secondary {
+  background-color: var(--border-color);
+  border: 1px solid var(--border-strong);
+  color: var(--text-primary);
+  flex: 1;
+}
+.pycharm-commit-btn.secondary:hover {
+  background-color: var(--overlay-hover-solid);
+}
+.pycharm-commit-btn.secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+/* Diff Viewer */
+.diff-view-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background-color: var(--bg-app); }
+.pycharm-diff-toolbar { height: 28px; background-color: var(--bg-sidebar); border-bottom: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between; padding: 0 8px; font-size: 11px; flex-shrink: 0; white-space: nowrap; overflow: hidden; }
+.diff-tb-left { display: flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap; }
+.diff-icon-btn { width: 20px; height: 20px; background: transparent; border: none; color: var(--text-secondary); border-radius: var(--radius-btn); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; font-size: 12px; flex-shrink: 0; }
+.diff-icon-btn:hover { background: var(--bg-hover); color: var(--text-bright); }
+.diff-icon-btn:disabled { opacity: 0.35; cursor: default; }
+.diff-icon-btn:disabled:hover { background: transparent; color: var(--text-secondary); }
+.diff-toolbar-sep { width: 1px; height: 14px; background: var(--border-subtle); margin: 0 1px; flex-shrink: 0; }
+.diff-hunk-counter { height: 20px; min-width: 38px; padding: 0 6px; display: inline-flex; align-items: center; justify-content: center; background-color: var(--overlay-faint); border: 1px solid var(--border-subtle); border-radius: var(--radius-btn); color: var(--text-primary); font-size: 11px; font-variant-numeric: tabular-nums; box-sizing: border-box; flex-shrink: 0; }
+.diff-select { height: 20px; background-color: var(--overlay-faint); border: 1px solid var(--border-subtle); color: var(--text-primary); font-size: 11px; padding: 1px 6px; border-radius: var(--radius-btn); outline: none; flex-shrink: 0; white-space: nowrap; box-sizing: border-box; }
+.diff-stat-text { color: var(--text-muted); font-size: 11px; white-space: nowrap; flex-shrink: 0; }
+/* 与 .diff-tb-left 成对：未定义时是 display:block，里面的 <span> 文字与
+   20px 高的关闭按钮按 inline baseline 对齐 —— 文字被顶上去 3px，
+   与按钮相。显式成 flex + center 才能真正垂直居中。 */
+.diff-tb-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap; }
+
+/* PyCharm Diff 边界提示浮动气泡（Balloon Notification：实底纯色不透明，悬浮于 ▲/▼ 按钮下方，彻底遮盖底层文本） */
+.diff-edge-balloon {
+  position: absolute;
+  top: 33px;
+  left: 10px;
+  z-index: 100;
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  background-color: #23272e;
+  border: 1px solid #3574f0;
+  border-radius: var(--radius-btn);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.65), 0 2px 6px rgba(0, 0, 0, 0.4);
+  color: #dfe1e5;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  pointer-events: none;
+  animation: diff-balloon-in 0.15s ease-out;
+}
+
+/* PyCharm 风格：无法对比的二进制/未知文件类型空态提示（实测 Image #1：居中纯文字展示） */
+.diff-unknown-file-type {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  background-color: var(--bg-app);
+  color: var(--text-muted);
+  font-size: 13px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  user-select: none;
+}
+.diff-edge-balloon::before {
+  content: '';
+  position: absolute;
+  top: -5px;
+  left: 18px;
+  width: 8px;
+  height: 8px;
+  background-color: #23272e;
+  border-left: 1px solid #3574f0;
+  border-top: 1px solid #3574f0;
+  transform: rotate(45deg);
+}
+body[data-variant="2"] .diff-edge-balloon {
+  background-color: #ffffff;
+  border-color: #3574f0;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0, 0, 0, 0.08);
+  color: #1e1f22;
+}
+body[data-variant="2"] .diff-edge-balloon::before {
+  background-color: #ffffff;
+  border-color: #3574f0;
+}
+@keyframes diff-balloon-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* 当前聚焦的差异块高亮矩形框（完整框起整个变更区域，对齐 PyCharm） */
+.diff-hunk-active-box {
+  position: absolute;
+  pointer-events: none;
+  border: 1px solid #3574f0;
+  border-radius: 0;
+  background: transparent !important;
+  box-shadow: 0 0 4px rgba(53, 116, 240, 0.3);
+  box-sizing: border-box;
+  z-index: 15;
+}
+
+.diff-hunk-active-box-pulse {
+  animation: diff-hunk-box-pulse 0.4s ease-out;
+}
+
+@keyframes diff-hunk-box-pulse {
+  0% {
+    border-color: #58a6ff;
+    box-shadow: 0 0 8px rgba(53, 116, 240, 0.5);
+  }
+  100% {
+    border-color: #3574f0;
+    box-shadow: 0 0 4px rgba(53, 116, 240, 0.3);
+  }
+}
+
+body[data-variant="2"] .diff-hunk-active-box {
+  border-color: #2f6fed;
+  background: transparent !important;
+  box-shadow: 0 0 4px rgba(47, 111, 237, 0.25);
+}
+
+/* Monaco DiffEditor 差异色彩渲染（新增墨绿 #2c4134，删除浅红 #482b2b） */
+.monaco-diff-editor .line-insert {
+  background-color: #2c4134 !important;
+}
+/* 并排模式下新增/删除块在另一侧没有对应行，Monaco 用 view zone 填空白。
+   之前把这块也涂成整片绿，远看像“修改行”；这里清掉填充，只留一条竖线标记
+   插入/删除边界。 */
+.monaco-diff-editor .diagonal-fill {
+  background: transparent !important;
+  background-image: none !important;
+}
+.monaco-diff-editor .original-in-monaco-diff-editor .diagonal-fill {
+  border-right: 3px solid var(--git-green, #3fb950);
+  box-sizing: border-box;
+}
+.monaco-diff-editor .modified-in-monaco-diff-editor .diagonal-fill {
+  border-left: 3px solid var(--git-del, #f85149);
+  box-sizing: border-box;
+}
+.monaco-diff-editor .char-insert {
+  background-color: #385542 !important;
+}
+.monaco-diff-editor .line-delete {
+  background-color: #482b2b !important;
+}
+.monaco-diff-editor .char-delete {
+  background-color: #5e3436 !important;
+}
+.monaco-diff-editor .margin-view-overlays .insert-sign {
+  color: #3fb950 !important;
+}
+.monaco-diff-editor .margin-view-overlays .delete-sign {
+  color: #f85149 !important;
+}
+
+/* DiffViewer 的 legacy 按行渲染样式（pycharm-diff-body / diff-gutter /
+   del-hunk / diff-minimap 等）已在改用 Monaco DiffEditor 时删除：
+   全量 grep src/ 下这些 class 零消费方，其中 del-hunk/add-hunk 还带
+   两个不随主题切换的硬编码色（浅色主题下会污染）。 */
+
+/* Diff 文件名条。这几个 class 从 prototype/ 抄来后一直没在主题里定义，
+   于是继承了 body 默认字号（约 13px），比它上面那条 11px 的工具栏大一截，
+   整条 diff 头部因此看起来脱节。这里补齐：与工具栏同高同底色，
+   文件名用 12px，与 Git 面板的 .git-tab-title 同一档。 */
+.diff-pane-titlebar { height: 28px; background-color: var(--bg-sidebar); border-bottom: 1px solid var(--border-color); display: flex; align-items: center; gap: 8px; padding: 0 8px; flex-shrink: 0; font-size: 12px; min-width: 0; }
+.diff-commit-hash { color: var(--text-muted); font-size: 11px; flex-shrink: 0; }
+.diff-file-target { color: var(--text-bright); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+/* 新增/删除标签：未定义时会裸着渲染成普通白字，字号随父级。 */
+.git-tag { font-size: 10px; line-height: 1; padding: 2px 5px; border-radius: 3px; border: 1px solid var(--border-subtle); color: var(--text-muted); flex-shrink: 0; }
+.git-tag.git-staged { border-color: var(--git-add-line); color: var(--git-green); background: var(--git-add-faint); }
+.git-tag.git-del { border-color: var(--git-del-faint); color: var(--git-del); background: var(--git-del-bg); }
+
+/* Bottom Git Tool Window */
+.pycharm-bottom-git {
+  height: 290px;
+  min-height: 32px;
+  background-color: var(--bg-bottom);
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.pycharm-bottom-git:focus { outline: none; }
+.bottom-git-header { height: 28px; background-color: var(--bg-header); border-bottom: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between; padding: 0 8px; flex-shrink: 0; }
+.git-header-tabs { display: flex; align-items: center; gap: 12px; }
+.git-tab-title { font-size: 12px; font-weight: 700; color: var(--text-bright); }
+.git-subtabs { display: flex; gap: 2px; }
+.subtab-btn { height: 22px; background: transparent; border: 1px solid transparent; border-radius: var(--radius-btn); color: var(--text-secondary); font-size: 11px; padding: 0 8px; cursor: pointer; }
+.subtab-btn:hover { background: var(--bg-hover); color: var(--text-bright); }
+.subtab-btn.active { background: var(--overlay-hover); border-color: var(--border-subtle); color: var(--text-bright); font-weight: 600; }
+.git-header-window-actions { display: flex; gap: 2px; }
+.win-action-btn { width: 20px; height: 20px; background: transparent; border: none; color: var(--text-muted); border-radius: var(--radius-btn); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.win-action-btn:hover { background: var(--bg-hover); color: var(--text-bright); }
+
+.git-four-column-body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+
+.git-no-repo-banner { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
+.git-no-repo-banner .no-repo-text { font-size: 12px; color: var(--text-secondary); }
+.git-no-repo-banner .no-repo-init-btn { height: 26px; padding: 0 14px; background: var(--accent); border: none; border-radius: var(--radius-btn); color: var(--accent-contrast); font-size: 12px; cursor: pointer; }
+.git-no-repo-banner .no-repo-init-btn:hover { filter: brightness(1.1); }
+.git-no-repo-banner .no-repo-init-btn:disabled { opacity: 0.5; cursor: default; }
+
+.git-load-more-wrap { padding: 6px 0 10px; text-align: center; }
+.git-load-more { height: 24px; padding: 0 16px; background: transparent; border: 1px solid var(--border-subtle); border-radius: var(--radius-btn); color: var(--text-secondary); font-size: 11px; cursor: pointer; }
+.git-load-more:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-bright); }
+.git-load-more:disabled { opacity: 0.5; cursor: default; }
+
+.git-col-branches.branches-hidden { border-right-color: var(--border-subtle); }
+.git-col-branches {
+  width: 200px;
+  background-color: var(--bg-sidebar);
+  border-right: 1px solid var(--border-color);
+  flex-shrink: 0;
+  font-size: 11px;
+  display: flex;
+  overflow: hidden;
+}
+.branch-vertical-toolbar {
+  width: 30px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 4px 0;
+  background: var(--bg-sidebar);
+}
+.branch-tool-btn {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-btn);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.branch-tool-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-bright); }
+.branch-tool-btn.active { background: var(--bg-hover); color: var(--text-bright); }
+.branch-tool-btn:disabled { opacity: 0.35; cursor: default; }
+.branch-tool-sep { width: 16px; height: 1px; background: var(--border-subtle); margin: 3px 0; flex-shrink: 0; }
+.branch-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.branch-search-wrap {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 5px 6px 3px;
+  padding: 2px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-btn);
+  background: var(--scrim-subtle);
+  flex-shrink: 0;
+}
+.branch-search-input { flex: 1; min-width: 0; background: transparent; border: none; outline: none; color: var(--text-bright); font-size: 11px; }
+.branch-tree-scroll { flex: 1; overflow-y: auto; padding: 4px 0 8px; }
+.b-row { height: 22px; display: flex; align-items: center; gap: 5px; padding: 0 8px; color: var(--text-secondary); font-weight: 600; }
+.b-group-row { cursor: pointer; user-select: none; }
+.b-head-label { cursor: default; font-weight: 500; padding-left: 24px; }
+.b-group-row:hover { background: var(--bg-hover); }
+.b-nested { padding-left: 10px; }
+.b-item { height: 22px; display: flex; align-items: center; gap: 6px; padding: 0 8px; border-radius: var(--radius-btn); cursor: pointer; color: var(--text-primary); margin: 1px 4px; overflow: hidden; }
+/* 分支名过长省略号截断、不折行；全名由行 title 悬停展示（见 renderRefRow） */
+.b-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.b-icon, .b-up-arrow { flex-shrink: 0; }
+.b-item:hover { background: var(--bg-hover); }
+.b-item.selected { background: var(--bg-selected-row); color: var(--text-bright); }
+.b-item.selected:hover { background: var(--bg-selected-row-hover, var(--bg-selected-row)); }
+/* 当前分支只加粗并用标签图标标识；底色只属于真正的选中项 */
+.b-item.active { color: var(--text-bright); font-weight: 600; }
+.b-folder-row { color: var(--text-secondary); }
+.b-chevron { width: 10px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.branches-empty, .branch-empty { padding: 8px 10px; color: var(--text-muted); font-size: 10px; }
+.b-up-arrow { color: var(--git-green); font-size: 10px; margin-left: auto; }
+
+.git-col-commits { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background-color: var(--bg-bottom); }
+.git-filter-bar { height: 28px; background-color: var(--bg-sidebar); border-bottom: 1px solid var(--border-color); display: flex; align-items: center; padding: 0 8px; gap: 8px; flex-shrink: 0; font-size: 11px; }
+/* Git Log 搜索框（输入框内嵌 Q▾ 搜索图标及 .* 与 Cc 开关） */
+.git-log-search-box {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-sidebar-strip, #1e1f22);
+  border: 1px solid var(--border-subtle, #393b40);
+  border-radius: 4px;
+  height: 22px;
+  padding: 0 4px 0 6px;
+  min-width: 180px;
+  max-width: 240px;
+  flex: 0 1 200px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.git-log-search-box:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent-soft, rgba(53, 116, 240, 0.25));
+}
+.git-log-search-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 11px;
+  padding: 0;
+  outline: none;
+  line-height: 20px;
+}
+.git-log-search-input::placeholder {
+  color: var(--text-muted);
+  opacity: 0.8;
+}
+.git-log-search-toggle {
+  height: 16px;
+  min-width: 16px;
+  padding: 0 3px;
+  background: transparent;
+  border: none;
+  border-radius: 2px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--font-code);
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  user-select: none;
+  transition: background-color 0.1s ease, color 0.1s ease;
+}
+.git-log-search-toggle:hover {
+  background: var(--overlay-hover);
+  color: var(--text-bright);
+}
+.git-log-search-toggle.active {
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--text-bright);
+  font-weight: 600;
+}
+body[data-variant="2"] .git-log-search-toggle.active {
+  background: rgba(0, 0, 0, 0.10);
+  color: #1e1f22;
+}
+.filter-dropdowns { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); }
+.filter-hint { color: var(--text-muted); font-size: 10px; }
+.filter-actions-right { margin-left: auto; display: flex; gap: 4px; }
+.f-act-btn { width: 20px; height: 20px; background: transparent; border: none; color: var(--text-muted); border-radius: 2px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; }
+.f-act-btn:hover { background: var(--bg-hover); color: var(--text-bright); }
+/* refreshGit 在途：刷新按钮旋转，避免用户以为没反应 */
+.f-act-btn.is-refreshing svg,
+.tb-icon-btn.is-refreshing svg {
+  animation: btn-spin 0.8s linear infinite;
+}
+.f-act-btn.is-refreshing,
+.tb-icon-btn.is-refreshing {
+  opacity: 0.7;
+  cursor: default;
+}
+
+/* 提交日志：PyCharm 单行列表（无表头） */
+.git-log-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.dag-svg { display: block; }
+/* 长跨度断开段的跳转箭头：子提交处 ▼ 指向父提交，父提交处 ▲ 指向子提交。
+   中间行完全省略竖线。点击由行级 handleRowClick 按坐标判定
+   （WKWebView 上 SVG 子元素收不到点击），这里负责指针光标与悬停反馈。 */
+.dag-fold-arrow { cursor: pointer; }
+.dag-fold-arrow:hover { filter: brightness(1.6) drop-shadow(0 0 2px rgba(255, 255, 255, 0.6)); }
+
+@keyframes log-jump-flash {
+  0% { background: var(--accent-dim, rgba(53, 116, 240, 0.45)); }
+  100% { background: transparent; }
+}
+.log-row.log-jump-highlight {
+  animation: log-jump-flash 1.5s ease-out;
+}
+/* height 必须等于 GraphCell 的 GRAPH_H(26)：SVG 是 26px，行盒比它高哪怕
+   1px，align-items:center 就会在上下各留半像素，竖直连线被切成一段段 ——
+   用户看到的是「线断开了」，而后端数据其实完全连续。border-bottom 改用
+   inset 阴影，不占布局高度。 */
+.log-row { box-sizing: border-box; height: 26px; display: flex; align-items: center; gap: 8px; padding-right: 10px; cursor: pointer; border-bottom: 0; box-shadow: inset 0 -1px 0 var(--overlay-faint); user-select: none; -webkit-user-select: none; }
+/* 双击/右键文件行、提交行只触发操作，不进入浏览器文本选择态（对齐 PyCharm） */
+.change-file-row,
+.change-file-row *,
+.commit-group-row,
+.commit-group-row *,
+.commit-dir-row,
+.commit-dir-row *,
+.cb-file-row,
+.cb-file-row *,
+.compare-file-row,
+.compare-file-row *,
+.log-row,
+.log-row *,
+.tree-node-row,
+.tree-node-row * {
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* 不在当前 HEAD 历史的提交（HEAD 停在历史版本时其后的提交/旁支提交）：
+   背景置灰，对齐 PyCharm。必须排在 :hover/.active 之前，悬停与选中态优先 */
+.log-row.outside-head { background: var(--overlay-faint); }
+.log-row:hover { background: var(--bg-hover); }
+.log-row.active { background: var(--bg-selected-row); }
+.log-graph { display: inline-flex; flex-shrink: 0; align-items: center; padding-left: 4px; }
+.log-subject { display: inline-flex; align-items: center; gap: 5px; flex: 0 1 auto; max-width: 46%; min-width: 0; }
+.log-subject-text { font-size: 12px; line-height: 26px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-refs { display: inline-flex; align-items: center; gap: 8px; flex: 0 1 auto; min-width: 0; overflow: hidden; }
+/* 分支 tag 溢出用省略号截断（flex 容器本身吃不到 text-overflow，名字单独包一层 span） */
+.log-ref { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; white-space: nowrap; flex: 0 1 auto; min-width: 0; }
+.log-ref-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.log-ref.head { color: var(--git-green); font-weight: 600; }
+.log-ref.local { color: var(--git-green); }
+.log-ref.main { color: var(--git-blue); }
+.log-ref.remote { color: var(--git-purple); }
+.log-ref.tag { color: var(--git-tag); }
+.log-ref.stash { color: var(--text-muted); }
+.log-spacer { flex: 1 1 auto; min-width: 8px; }
+/* 用户名 76 / 日期 104：右对齐贴内容，两列之间不再露出大段空白 */
+.log-author { width: 76px; flex-shrink: 0; text-align: right; color: var(--text-secondary); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-date { width: 104px; flex-shrink: 0; text-align: right; color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+
+/* 日志工具栏：* Cc 与 Branch/User/Date/Paths 过滤 */
+.log-case-btn { height: 20px; padding: 0 6px; background: transparent; border: 1px solid transparent; border-radius: 4px; color: var(--text-muted); font-size: 11px; font-family: var(--font-code); cursor: pointer; }
+.log-case-btn:hover { background: var(--bg-hover); color: var(--text-bright); }
+.log-case-btn.active { background: var(--accent-soft); border-color: var(--accent-line); color: var(--git-blue); }
+.git-col-resizer {
+  position: relative;
+  width: 12px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  margin: 0 -6px;
+  z-index: 10;
+  touch-action: none;
+}
+.git-col-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 2px;
+  background-color: transparent;
+  transition: background-color 0.15s ease;
+  pointer-events: none;
+}
+.git-col-resizer:hover::after,
+.git-col-resizer:active::after {
+  background-color: var(--accent);
+}
+/* 详情列上下分割条：文件清单区（上）↔ 提交信息区（下） */
+.details-split-resizer {
+  position: relative;
+  height: 12px;
+  margin: -5px 0 -6px;
+  flex-shrink: 0;
+  cursor: row-resize;
+  background: transparent;
+  z-index: 10;
+  touch-action: none;
+}
+.details-split-resizer::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 5px;
+  height: 2px;
+  background-color: transparent;
+  transition: background-color 0.15s ease;
+  pointer-events: none;
+}
+.details-split-resizer:hover::after,
+.details-split-resizer:active::after {
+  background-color: var(--accent);
+}
+
+.log-filter { position: relative; }
+.log-filter-btn { display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 6px; background: transparent; border: 1px solid transparent; border-radius: 4px; color: var(--text-secondary); font-size: 11px; cursor: pointer; }
+.log-filter-btn:hover { background: var(--bg-hover); color: var(--text-bright); }
+.log-filter-btn.active { background: var(--accent-soft); border-color: var(--accent-line); color: var(--git-blue); }
+.log-filter-popup { position: absolute; top: 24px; left: 0; z-index: 60; max-height: 280px; overflow-y: auto; padding: 4px; background: var(--bg-sidebar); border: 1px solid var(--border-color); border-radius: 6px; box-shadow: 0 10px 28px var(--scrim-strong); }
+.log-filter-item { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 4px; font-size: 11px; color: var(--text-secondary); cursor: pointer; white-space: nowrap; }
+.log-filter-item:hover { background: var(--bg-hover); color: var(--text-bright); }
+.log-filter-item.selected { color: var(--accent); }
+.log-filter-label { overflow: hidden; text-overflow: ellipsis; }
+.log-filter-mark { margin-left: auto; padding-left: 8px; color: var(--text-muted); font-size: 9px; }
+.log-path-form { display: flex; flex-direction: column; gap: 6px; padding: 4px; }
+.log-path-input { background: var(--scrim-subtle); border: 1px solid var(--border-subtle); border-radius: 4px; padding: 3px 6px; color: var(--text-bright); font-size: 11px; outline: none; }
+.log-path-actions { display: flex; gap: 6px; justify-content: flex-end; }
+.log-path-btn { padding: 2px 10px; background: var(--bg-sidebar-strip); border: 1px solid var(--border-subtle); border-radius: 4px; color: var(--text-secondary); font-size: 11px; cursor: pointer; }
+.log-path-btn:hover { color: var(--text-bright); }
+.log-path-btn.primary { background: var(--accent-soft); border-color: var(--accent-line); color: var(--git-blue); }
+
+.git-col-details { width: 290px; background-color: var(--bg-sidebar); border-left: 1px solid var(--border-color); display: flex; flex-direction: column; flex-shrink: 0; overflow: hidden; }
+.details-top-files { border-bottom: 1px solid var(--border-subtle); overflow-y: auto; padding: 4px 6px; font-size: 11px; }
+.details-files-header { height: 20px; display: flex; align-items: center; gap: 5px; color: var(--text-secondary); }
+.details-file-item { height: 20px; display: flex; align-items: center; gap: 6px; padding-left: 16px; padding-right: 4px; cursor: pointer; border-radius: 2px; }
+.details-file-item.active { background: var(--bg-selected); color: var(--accent); }
+.details-file-icon { display: inline-flex; width: 14px; flex-shrink: 0; align-items: center; justify-content: center; }
+.details-file-stats { display: inline-flex; gap: 3px; flex-shrink: 0; font-size: 10px; }
+/* 提交详情文件树（对齐 PyCharm Git Log 右侧；Show Details 关闭时不渲染 +/−） */
+.details-tree-root {
+  height: 22px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 2px;
+}
+.details-tree-root:hover { background: var(--bg-hover); }
+.details-root-name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.details-root-count,
+.details-dir-count {
+  margin-left: auto;
+  padding-left: 6px;
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.details-tree-children { min-width: 0; }
+.details-dir-row {
+  height: 20px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 4px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 2px;
+}
+.details-dir-row:hover { background: var(--bg-hover); }
+.details-dir-name {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.details-chevron {
+  width: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.file-status-icon.mod { color: var(--accent); font-weight: bold; font-size: 10px; }
+
+.details-bottom-meta { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; font-size: 11px; }
+.meta-commit-title { font-weight: 700; color: var(--text-bright); line-height: 16px; }
+.meta-commit-author { color: var(--text-secondary); font-size: 10px; line-height: 15px; }
+.hash-text { color: var(--accent); font-family: var(--font-code); font-weight: 600; margin-right: 4px; }
+.meta-commit-branches { color: var(--text-muted); font-size: 10px; border-top: 1px solid var(--border-subtle); padding-top: 6px; }
+
+/* Project Drawer (File Tree) */
+.project-drawer {
+  width: 260px;
+  background-color: var(--bg-sidebar);
+  border-right: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.project-drawer-header {
+  height: 32px;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 0 10px;
+  flex-shrink: 0;
+}
+
+.project-drawer-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  letter-spacing: 0.5px;
+}
+
+.project-drawer-tools {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.drawer-tool-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-btn);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.drawer-tool-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.drawer-open-btn {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: var(--radius-btn);
+}
+.drawer-open-btn:hover {
+  background: var(--bg-selected);
+}
+
+.project-drawer-filter {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  position: relative;
+  flex-shrink: 0;
+}
+
+.tree-filter-input {
+  width: 100%;
+  height: 22px;
+  background: var(--scrim-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-btn);
+  color: var(--text-primary);
+  font-size: 11px;
+  padding: 0 20px 0 6px;
+  outline: none;
+}
+.tree-filter-input:focus {
+  border-color: var(--accent);
+}
+
+.filter-clear-btn {
+  position: absolute;
+  right: 12px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.project-tree-container {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px 0;
+  font-size: 12px;
+}
+
+.project-tree-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 10px;
+  padding: 20px;
+  color: var(--text-muted);
+  text-align: center;
+}
+.empty-msg {
+  font-size: 12px;
+}
+.primary-btn {
+  background: var(--accent);
+  color: var(--text-bright);
+  border: none;
+  padding: 6px 12px;
+  border-radius: var(--radius-btn);
+  font-size: 11px;
+  cursor: pointer;
+  font-weight: 500;
+}
+.primary-btn:hover {
+  opacity: 0.9;
+}
+
+.project-tree-root {
+  display: flex;
+  flex-direction: column;
+}
+
+.tree-root-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.tree-list {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 旧版 .tree-node-row 重复定义已删除：悬停/选中样式统一收敛到上方唯一规则，
+   避免同优先级 :hover 在源码顺序上覆盖 .selected 导致选中色被悬停色冲掉 */
+
+.tree-file-icon-badge {
+  font-size: 9px;
+  font-weight: 700;
+  font-family: var(--font-code);
+  padding: 0 3px;
+  border-radius: 2px;
+  border: 1px solid currentColor;
+  line-height: 12px;
+}
+
+.tree-node-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-git-badge {
+  font-size: 9px;
+  font-weight: 700;
+  margin-left: auto;
+}
+.tree-git-badge.git-m { color: var(--git-mod); }
+.tree-git-badge.git-a { color: var(--git-green); }
+.tree-git-badge.git-d { color: var(--git-del); }
+.tree-git-badge.git-u { color: var(--git-blue); }
+
+/* 中央工作区：网格布局（主区 / 控制台停靠区 / 底部 Git 面板 / 状态栏） */
+.ide-center-workspace {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    'main dock'
+    'bottom bottom'
+    'status status';
+  overflow: hidden;
+  background-color: var(--bg-editor);
+}
+
+/* 控制台停靠在底部时：停靠区独占一整行 */
+.ide-center-workspace:not(.terminal-docked-right) {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto auto auto;
+  grid-template-areas:
+    'main'
+    'dock'
+    'bottom'
+    'status';
+}
+
+/* 主区（编辑器标签栏 + 画布 / 欢迎页） */
+.ide-main-region {
+  grid-area: main;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 底部面板拖过窗口高度 75% 后（App 给它加 is-dominant）：主区已被压到不足
+   1/4，编辑器只剩一条无法使用的窄缝，背景露出来反而像渲染残留 —— 直接隐掉，
+   Git/终端面板继续往顶栏底部拖（网格行可把 main 压到 0），主区全程不闪。
+   display:none 会丢标签/monaco 布局，所以只擦内容（visibility:hidden），壳保留。 */
+.ide-center-workspace.is-panel-dominant .ide-main-region > * {
+  visibility: hidden;
+}
+
+/* 控制台停靠容器：同一 DOM 节点在底部整行 / 右侧竖条之间移动，不卸载 */
+.ide-terminal-dock {
+  grid-area: dock;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background-color: var(--bg-bottom);
+}
+
+.ide-center-workspace:not(.terminal-docked-right) .ide-terminal-dock {
+  border-top: 1px solid var(--border-color);
+}
+
+.terminal-docked-right .ide-terminal-dock {
+  border-left: 1px solid var(--border-color);
+}
+
+/* 控制台尺寸调节把手：底部模式在容器上缘，贴右模式在容器左缘 */
+.terminal-dock-resizer {
+  position: absolute;
+  z-index: 1000;
+  display: none;
+  background: transparent;
+  touch-action: none;
+}
+.terminal-dock-resizer::after {
+  content: '';
+  position: absolute;
+  background-color: transparent;
+  transition: background-color 0.15s ease;
+  pointer-events: none;
+}
+.terminal-dock-resizer.dock-bottom {
+  top: -6px;
+  left: 0;
+  right: 0;
+  height: 12px;
+  cursor: row-resize;
+}
+.terminal-dock-resizer.dock-bottom::after {
+  left: 0;
+  right: 0;
+  top: 5px;
+  height: 2px;
+}
+.terminal-dock-resizer.dock-right {
+  left: -6px;
+  top: 0;
+  bottom: 0;
+  width: 12px;
+  cursor: col-resize;
+}
+.terminal-dock-resizer.dock-right::after {
+  top: 0;
+  bottom: 0;
+  left: 5px;
+  width: 2px;
+}
+.terminal-docked-right .terminal-dock-resizer.dock-right {
+  display: block;
+}
+/* 控制台贴右 + 最大化：主区压成 0 宽，控制台独占整行；此时没有可拖的尺寸 */
+.ide-center-workspace.terminal-docked-right.terminal-maximized {
+  grid-template-columns: minmax(0, 0) minmax(0, 1fr);
+}
+.terminal-docked-right.terminal-maximized .terminal-dock-resizer.dock-right {
+  display: none;
+}
+.ide-center-workspace:not(.terminal-docked-right) .terminal-dock-resizer.dock-bottom {
+  display: block;
+}
+.terminal-dock-resizer:hover::after,
+.terminal-dock-resizer:active::after {
+  background-color: var(--accent);
+}
+/* 拖动控制台把柄时的吸附预览：高亮即将停靠的目标区域 */
+.terminal-snap-preview {
+  position: fixed;
+  z-index: 3000;
+  pointer-events: none;
+  box-sizing: border-box;
+  border: 2px solid var(--accent);
+  background: var(--accent-soft);
+  border-radius: 4px;
+}
+
+/* 控制台把柄（按住拖拽换位） */
+.terminal-dock-grip {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-btn);
+  color: var(--text-secondary);
+  cursor: grab;
+  user-select: none;
+}
+
+.terminal-dock-grip:hover {
+  background: var(--bg-hover);
+  color: var(--text-bright);
+}
+
+.terminal-dock-grip:active {
+  cursor: grabbing;
+}
+
+.terminal-dock-grip.snapping {
+  color: var(--accent);
+}
+
+.ide-tab-bar {
+  height: 30px;
+  background-color: var(--bg-header);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: stretch;
+  padding: 0;
+  flex-shrink: 0;
+  user-select: none;
+  -webkit-user-select: none;
+  overflow: hidden;
+}
+
+.ide-tab-list {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0;
+  height: 100%;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+}
+
+.ide-tab-list::-webkit-scrollbar {
+  height: 0px;
+  display: none;
+}
+
+.ide-tab {
+  height: 100%;
+  background-color: transparent;
+  color: var(--text-secondary);
+  border-radius: 0;
+  border: none;
+  border-right: 1px solid var(--border-subtle);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  max-width: 220px;
+  flex-shrink: 0;
+  position: relative;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.ide-tab:hover {
+  background-color: var(--overlay-faint);
+  color: var(--text-primary);
+}
+
+.ide-tab.active {
+  background-color: var(--bg-editor);
+  color: var(--text-bright);
+  border-right: 1px solid var(--border-color);
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+  font-weight: 500;
+}
+
+.ide-tab.is-diff-tab.active {
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+
+.tab-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  font-family: inherit;
+}
+
+.tab-close-btn {
+  width: 16px;
+  height: 16px;
+  border-radius: var(--radius-btn);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.ide-tab:hover .tab-close-btn,
+.ide-tab.active .tab-close-btn {
+  opacity: 1;
+}
+
+.tab-close-btn:hover {
+  background: var(--scrollbar-thumb);
+  color: var(--text-bright);
+}
+
+/* Tab Bar Actions (Right-aligned More Tabs button) */
+.tab-bar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  border-left: 1px solid var(--border-color);
+  background-color: var(--bg-header);
+  flex-shrink: 0;
+  z-index: 2;
+}
+
+.tab-bar-action-btn {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-btn);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.tab-bar-action-btn:hover,
+.tab-bar-action-btn.active {
+  background-color: var(--overlay-faint);
+  color: var(--text-primary);
+}
+
+/* Editor Tab Dropdown Menu (More Tabs) */
+.editor-tab-dropdown-menu {
+  min-width: 220px;
+  max-width: 360px;
+  max-height: 380px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.tab-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background-color 0.1s ease;
+}
+
+.tab-dropdown-item:hover {
+  background-color: var(--overlay-faint);
+}
+
+.tab-dropdown-item.active {
+  background-color: var(--overlay-active);
+  color: var(--text-bright);
+  font-weight: 500;
+}
+
+.tab-dropdown-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.tab-dropdown-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-dropdown-close {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-btn);
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.tab-dropdown-item:hover .tab-dropdown-close {
+  opacity: 1;
+}
+
+.tab-dropdown-close:hover {
+  background: var(--scrollbar-thumb);
+  color: var(--text-bright);
+}
+
+/* Editor Empty State */
+.editor-empty-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+/* EditorView（含 monaco 内核）动态 chunk 下载中的占位 */
+.editor-lazy-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--text-muted);
+  user-select: none;
+}
+.editor-lazy-spinner {
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--overlay-hover);
+  border-top-color: var(--accent-primary, var(--accent));
+  border-radius: 50%;
+  animation: editor-lazy-spin 0.8s linear infinite;
+}
+.editor-lazy-label {
+  font-size: 12px;
+}
+@keyframes editor-lazy-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .editor-lazy-spinner { animation-duration: 3s; }
+}
+.empty-app-title {
+  font-size: 56px;
+  font-weight: 800;
+  letter-spacing: -1.5px;
+  color: var(--text-primary);
+  opacity: 0.35;
+  user-select: none;
+  line-height: 1;
+  margin-bottom: 6px;
+  text-align: center;
+}
+body[data-variant="2"] .empty-app-title {
+  color: #1e1f22;
+  opacity: 0.22;
+}
+.empty-shortcuts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+.empty-shortcut-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
+}
+.empty-shortcut-row kbd {
+  font-family: var(--font-code);
+  font-size: 10px;
+  background: var(--overlay-hover);
+  padding: 2px 6px;
+  border-radius: var(--radius-btn);
+  color: var(--text-secondary);
+}
+
+/* Welcome View */
+.welcome-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow-y: auto;
+  padding: 24px;
+  background-color: var(--bg-editor);
+}
+
+.welcome-container {
+  width: 100%;
+  max-width: 820px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+.welcome-brand {
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.welcome-logo-box {
+  width: 52px;
+  height: 52px;
+  background: linear-gradient(135deg, var(--accent), var(--git-green));
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+  box-shadow: 0 4px 16px var(--accent-glow);
+}
+.welcome-logo-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.welcome-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+  letter-spacing: 0.5px;
+}
+
+.welcome-subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.welcome-content-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+.welcome-card {
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.welcome-card-header {
+  height: 36px;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  background: var(--scrim-subtle);
+}
+
+.welcome-card-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.welcome-recents-count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.welcome-actions-list {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.welcome-action-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  background: var(--scrim-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  /* 只过渡 hover 真正改写的两个属性，不用 transition: all */
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+.welcome-action-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+.action-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.action-text {
+  flex: 1;
+}
+.action-main {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.action-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.welcome-kbd {
+  font-family: var(--font-code);
+  font-size: 10px;
+  background: var(--overlay-hover);
+  padding: 2px 6px;
+  border-radius: var(--radius-btn);
+  color: var(--text-secondary);
+}
+
+.welcome-recents-list {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.welcome-recent-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-btn);
+  cursor: pointer;
+  transition: background-color 0.1s;
+}
+.welcome-recent-item:hover {
+  background: var(--bg-hover);
+}
+
+.recent-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.recent-item-info {
+  flex: 1;
+  min-width: 0;
+}
+.recent-item-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recent-item-path {
+  font-size: 10px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 1px;
+}
+
+.recent-item-remove {
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: var(--radius-btn);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+}
+.welcome-recent-item:hover .recent-item-remove {
+  display: inline-flex;
+}
+.recent-item-remove:hover {
+  background: var(--scrollbar-thumb);
+  color: var(--text-bright);
+}
+
+.welcome-recents-empty {
+  padding: 30px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--text-muted);
+}
+.empty-icon {
+  font-size: 24px;
+}
+.empty-text {
+  font-size: 12px;
+}
+.welcome-link-btn {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  font-size: 11px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.welcome-footer-hints {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.hint-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.hint-item kbd {
+  font-family: var(--font-code);
+  font-size: 10px;
+  background: var(--overlay-hover);
+  padding: 1px 5px;
+  border-radius: var(--radius-btn);
+  color: var(--text-secondary);
+}
+.ide-center-canvas {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+/* 底部工具面板的浮层容器（引擎演示 / 基准 / 终端） */
+.ide-floating-panel {
+  padding: 10px 12px;
+  background-color: var(--bg-app);
+  border-top: 1px solid var(--border-color);
+  overflow: auto;
+  flex-shrink: 0;
+}
+
+.ide-panel-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.ide-statusbar {
+  grid-area: status;
+  height: var(--panel-title-h);
+  background-color: var(--bg-header);
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.statusbar-left,
+.statusbar-right {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.statusbar-crumb-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.statusbar-crumb {
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  transition: color 0.12s ease;
+}
+
+.statusbar-crumb.active {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.statusbar-crumb-sep {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.statusbar-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: var(--radius-btn);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: default;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.statusbar-item:hover {
+  background-color: var(--overlay-hover);
+  color: var(--text-bright);
+}
+
+.statusbar-item.active-lang {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.statusbar-dirty {
+  color: var(--git-mod);
+}
+
+/* ==========================================================================
+   Ghostty Terminal Adaptive & Multi-Tab Styles
+   ========================================================================== */
+.ghostty-terminal-wrapper {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--term-bg);
+  overflow: hidden;
+}
+
+.terminal-header-bar {
+  height: 30px;
+  background-color: var(--bg-header);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 6px;
+  flex-shrink: 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.terminal-tabs-list {
+  display: flex;
+  align-items: flex-end;
+  height: 100%;
+  gap: 2px;
+  overflow-x: auto;
+}
+
+.terminal-tab-item {
+  height: 26px;
+  background-color: var(--bg-tab-inactive);
+  color: var(--text-secondary);
+  border-top-left-radius: 4px;
+  border-top-right-radius: 4px;
+  border-top: 2px solid transparent;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 10px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.1s;
+}
+.terminal-tab-item:hover {
+  background-color: var(--bg-hover);
+  color: var(--text-primary);
+}
+.terminal-tab-item.active {
+  background-color: var(--term-bg);
+  color: var(--text-bright);
+  border-top-color: var(--accent);
+  font-weight: 500;
+}
+
+.tab-term-icon {
+  font-family: var(--font-code);
+  font-size: 10px;
+  color: var(--accent);
+}
+.tab-term-name {
+  font-size: 11px;
+}
+.tab-term-close {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.tab-term-close:hover {
+  background: var(--overlay-hover);
+  color: var(--text-bright);
+}
+
+/* 重命名输入：替换 tab-term-name，保持同一行内无跳动 */
+.tab-term-rename {
+  width: 96px;
+  height: 18px;
+  padding: 0 4px;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  background: var(--bg-editor);
+  color: var(--text-bright);
+  font-size: 11px;
+  font-family: inherit;
+  outline: none;
+}
+
+/* 终端标签右键菜单：只有 4 行，覆盖 .branch-ctx-menu 的 260px 定宽 */
+.terminal-tab-ctx-menu.branch-ctx-menu {
+  width: 150px;
+  padding: 4px;
+}
+.terminal-tab-ctx-menu .ctx-item {
+  font-size: 11px;
+  padding: 5px 12px 5px 10px;
+  text-align: left;
+}
+
+/* 编辑器标签右键菜单：同样是 5 行短菜单，与终端菜单同一宽度口径 */
+.editor-tab-ctx-menu.branch-ctx-menu {
+  width: 150px;
+  padding: 4px;
+}
+.editor-tab-ctx-menu .ctx-item {
+  font-size: 11px;
+  padding: 5px 12px 5px 10px;
+  text-align: left;
+}
+
+.terminal-add-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-btn);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 14px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 2px;
+}
+.terminal-add-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-bright);
+}
+
+.terminal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.terminal-tool-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-btn);
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.terminal-tool-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-bright);
+}
+
+.terminal-body-container {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 一个标签内的分屏容器：row=左右，column=上下；none 等价于单屏 */
+.terminal-tab-panes {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  overflow: hidden;
+}
+.terminal-tab-panes.terminal-split-row { flex-direction: row; }
+.terminal-tab-panes.terminal-split-column { flex-direction: column; }
+
+.terminal-pane {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+  position: relative;
+}
+.terminal-split-row > .terminal-pane + .terminal-pane {
+  border-left: 1px solid var(--border-color);
+}
+.terminal-split-column > .terminal-pane + .terminal-pane {
+  border-top: 1px solid var(--border-color);
+}
+/* 分屏关闭按钮：悬停分屏时出现，避免常驻遮挡终端内容 */
+.terminal-pane-close {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  z-index: 7;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  background: var(--bg-header);
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+.terminal-pane:hover .terminal-pane-close {
+  opacity: 1;
+}
+.terminal-pane-close:hover {
+  color: var(--text-bright);
+  border-color: var(--accent);
+}
+
+/* 活动分屏的焦点提示：只在分屏时出现，单屏不额外描边 */
+.terminal-split-row > .terminal-pane.active::after,
+.terminal-split-column > .terminal-pane.active::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
+  z-index: 5;
+}
+
+.single-terminal-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.terminal-canvas-host {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 8px;
+  background-color: var(--term-bg);
+  /* IME 隐藏 textarea 的定位包含块：候选框跟随光标依赖此坐标系 */
+  position: relative;
+  /* 画布自绘选区；禁掉 WebKit 原生选择层（配合 canvas mousedown 的
+     preventDefault），防止原生 selection 在 canvas 重绘后残留蓝色幽灵条纹 */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.terminal-statusbar {
+  height: 20px;
+  background-color: var(--bg-app-deep);
+  border-top: 1px solid var(--bg-hover);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 10px;
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.terminal-status-cwd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.terminal-status-shell {
+  flex-shrink: 0;
+  font-family: var(--font-code);
+}
+
+/* 状态栏视口指示器：滚入历史时出现，点击回到最新输出 */
+.terminal-scroll-pill {
+  margin-left: 10px;
+  padding: 0 8px;
+  height: 14px;
+  line-height: 12px;
+  border: 1px solid var(--bg-hover);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+.terminal-scroll-pill:hover {
+  background: var(--bg-hover);
+  color: var(--text-bright);
+}
+.terminal-scroll-pill.scrolled {
+  color: var(--warn);
+  border-color: var(--git-tag-line);
+}
+
+/* Commit Drawer Enhancements */
+.commit-files-count-badge {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.changes-tree-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 6px;
+  color: var(--text-muted);
+  padding: 20px 10px;
+  text-align: center;
+}
+.changes-tree-empty .empty-icon {
+  font-size: 20px;
+  color: var(--git-green);
+}
+.changes-tree-empty .empty-text {
+  font-size: 11px;
+}
+
+.changes-list-container {
+  display: flex;
+  flex-direction: column;
+}
+
+.changes-files-group {
+  display: flex;
+  flex-direction: column;
+  padding-left: 6px;
+}
+
+.change-file-name-block {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.change-filename {
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.change-filedir {
+  font-size: 9px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.change-add-stat {
+  font-size: 9px;
+  color: var(--git-green);
+  font-family: var(--font-code);
+  font-weight: 700;
+}
+.change-del-stat {
+  font-size: 9px;
+  color: var(--git-del);
+  font-family: var(--font-code);
+  font-weight: 700;
+}
+
+.commit-selected-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* Bottom Panel Resizer */
+.ide-bottom-panel-wrapper {
+  grid-area: bottom;
+  min-height: 0;
+  border-top: 1px solid var(--border-color);
+  background-color: var(--bg-bottom);
+}
+
+.bottom-panel-resizer {
+  position: absolute;
+  top: -6px;
+  left: 0;
+  right: 0;
+  height: 12px;
+  cursor: row-resize;
+  z-index: 1000;
+  background: transparent;
+  touch-action: none;
+}
+.bottom-panel-resizer::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 5px;
+  height: 2px;
+  background-color: transparent;
+  transition: background-color 0.15s ease;
+  pointer-events: none;
+}
+.bottom-panel-resizer:hover::after,
+.bottom-panel-resizer:active::after {
+  background-color: var(--accent);
+}
+
+
+/* ==========================================================================
+   Search Everywhere 弹层（此前这些类没有任何样式定义，弹层会退化成文档流里的透明块）
+   ========================================================================== */
+.search-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 92px;
+  background: var(--scrim);
+}
+
+.search-modal-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(720px, calc(100vw - 48px));
+  max-height: min(560px, calc(100vh - 150px));
+  overflow: hidden;
+  font-size: 12px;
+  background: var(--bg-header);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 48px var(--scrim-strong);
+}
+
+.search-modal-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.search-tab-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.search-tab-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.search-tab-btn.active { background: var(--bg-selected); color: var(--text-bright); }
+
+.search-modal-hint { margin-left: auto; font-size: 11px; color: var(--text-muted); }
+
+.search-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.search-input-icon { color: var(--text-muted); }
+
+.search-main-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-primary);
+  background: transparent;
+  border: none;
+  outline: none;
+}
+
+.search-main-input::placeholder { color: var(--text-muted); }
+.search-spinner { color: var(--text-muted); }
+
+.search-results-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 0; }
+.search-empty-prompt { padding: 18px 14px; font-size: 12px; color: var(--text-muted); text-align: center; }
+.search-error-msg { padding: 8px 14px; font-size: 12px; color: var(--git-del); }
+
+.search-result-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.search-result-item.selected { background: var(--bg-selected-row); color: var(--text-primary); }
+.search-result-item.content-hit { align-items: flex-start; }
+
+.result-item-icon { display: inline-flex; width: 16px; justify-content: center; }
+.result-item-name { font-size: 12px; color: var(--text-primary); }
+.result-item-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-muted); }
+
+.content-hit-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.content-hit-header { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.content-hit-file { font-size: 12px; color: var(--text-primary); }
+.content-hit-line { font-size: 11px; color: var(--accent); }
+.content-hit-fullpath { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-muted); }
+.content-hit-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-code); font-size: 11px; color: var(--text-secondary); }
+
+.search-modal-footer {
+  display: flex;
+  gap: 14px;
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* ==========================================================================
+   编辑器错误面板 / 状态栏提示 / 标签未保存标记
+   ========================================================================== */
+.editor-error-panel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 32px;
+  text-align: center;
+  background: var(--bg-editor);
+}
+
+.editor-error-icon { font-size: 26px; color: var(--warn); }
+.editor-error-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.editor-error-detail { max-width: 620px; font-family: var(--font-code); font-size: 12px; color: var(--text-secondary); word-break: break-all; }
+.editor-error-actions { display: flex; gap: 8px; margin-top: 10px; }
+.editor-error-actions button {
+  padding: 5px 14px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-button, transparent);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.editor-error-actions button:hover { border-color: var(--accent); color: var(--accent); }
+
+.statusbar-message { color: var(--accent); }
+.statusbar-dirty { color: var(--warn); }
+
+.tab-dirty-dot { font-size: 12px; line-height: 1; color: var(--warn); }
+.inspection-check.has-problems { color: var(--warn); font-weight: 600; }
+
+/* ==========================================================================
+   文件树 Git 状态着色（PyCharm 风格）
+   ========================================================================== */
+.tree-git-badge { margin-left: auto; padding-right: 6px; font-size: 10px; font-weight: 700; }
+.git-status-m { color: var(--text-blue-mod); }
+.git-status-a { color: var(--git-green); }
+.git-status-d { color: var(--git-del); }
+.git-status-u { color: var(--warn); }
+.git-status-s { color: var(--git-purple); }
+.tree-git-dot { margin-left: auto; width: 6px; height: 6px; margin-right: 8px; border-radius: 50%; background: var(--text-blue-mod); }
+
+/* ==========================================================================
+   Git Console 页签（展示真实 IPC 调用日志）
+   ========================================================================== */
+.git-console-subpane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 10px;
+  font-family: var(--font-code);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  background: var(--bg-app);
+}
+
+.console-line { white-space: pre-wrap; word-break: break-all; }
+.console-line.console-error { color: var(--git-del); }
+.console-line.console-empty { color: var(--text-muted); }
+
+/* ==========================================================================
+   终端：启动失败提示（此前该类无样式，出错时几乎是不可见的纯文本）
+   ========================================================================== */
+.terminal-error-box {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  font-size: 12px;
+  color: var(--git-del);
+  text-align: center;
+  background: var(--bg-app);
+  border-top: 1px solid var(--border-color);
+}
+
+/* ==========================================================================
+   Git 通用对话框（Push / Update Project）· 对齐 PyCharm 弹窗风格
+   ========================================================================== */
+
+/* 按钮 loading 圈（Push 推送中等） */
+.btn-spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  vertical-align: -1px;
+  border: 2px solid var(--overlay-strong);
+  border-top-color: var(--text-bright);
+  border-radius: 50%;
+  animation: btn-spin 0.8s linear infinite;
+}
+@keyframes btn-spin {
+  to { transform: rotate(360deg); }
+}
+/* ==========================================================================
+   全局确认弹窗
+   ========================================================================== */
+.py-confirm-backdrop {
+  z-index: 2500;
+  background: var(--scrim, rgba(0, 0, 0, 0.45));
+}
+
+.py-confirm-dialog {
+  width: min(440px, calc(100vw - 32px));
+  background-color: var(--bg-app);
+  background-image: linear-gradient(0deg, var(--bg-header), var(--bg-header));
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 16px 40px var(--scrim-strong, rgba(0, 0, 0, 0.45));
+  padding: 18px 20px 16px 20px;
+  display: flex;
+  flex-direction: column;
+  user-select: none;
+  animation: py-dialog-pop 0.12s cubic-bezier(0, 0, 0.2, 1);
+}
+
+@keyframes py-dialog-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.py-confirm-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.py-confirm-icon-wrap {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.py-confirm-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.py-confirm-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-bright, #dfe1e5);
+  line-height: 1.25;
+}
+
+.py-confirm-message {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--text-secondary, #abb2bf);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.py-confirm-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.py-confirm-btn {
+  height: 28px;
+  min-width: 72px;
+  padding: 0 14px;
+  font-size: 12.5px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  transition: background-color 0.1s ease, border-color 0.1s ease, filter 0.1s ease;
+}
+
+/* Cancel 按钮：灰底微边框 */
+.py-confirm-btn-cancel {
+  background: #393b40;
+  border: 1px solid #4e5157;
+  color: #dfe1e5;
+  font-weight: 400;
+}
+.py-confirm-btn-cancel:hover {
+  background: #43454a;
+  border-color: #5c616b;
+  color: #ffffff;
+}
+body[data-variant="2"] .py-confirm-btn-cancel {
+  background: #f2f2f2;
+  border-color: #c4c4c4;
+  color: #1e1f22;
+}
+body[data-variant="2"] .py-confirm-btn-cancel:hover {
+  background: #e6e6e6;
+  border-color: #ababab;
+}
+
+/* Action 按钮：亮蓝底白字 */
+.py-confirm-btn-action {
+  background: #3574f0;
+  border: 1px solid #3574f0;
+  color: #ffffff;
+  font-weight: 500;
+}
+.py-confirm-btn-action:hover {
+  background: #4e88ff;
+  border-color: #4e88ff;
+}
+.py-confirm-btn-action:focus-visible {
+  outline: 2px solid rgba(53, 116, 240, 0.45);
+  outline-offset: 1px;
+}
+
+.py-confirm-btn-action.danger {
+  background: #c94f4f;
+  border-color: #c94f4f;
+}
+.py-confirm-btn-action.danger:hover {
+  background: #d45d5d;
+  border-color: #d45d5d;
+}
+
+.py-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--scrim, rgba(0, 0, 0, 0.45));
+}
+
+.py-dialog-window {
+  background: var(--bg-dialog);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg, 8px);
+  box-shadow: 0 18px 48px var(--scrim-strong, rgba(0, 0, 0, 0.55));
+}
+.py-push-dialog,
+.py-pull-dialog {
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-header);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg, 8px);
+  box-shadow: 0 18px 48px var(--scrim-strong);
+  max-height: min(560px, calc(100vh - 120px));
+  overflow: hidden;
+}
+
+.py-push-dialog { width: min(640px, calc(100vw - 48px)); }
+.py-pull-dialog { width: min(460px, calc(100vw - 48px)); }
+
+.py-dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.py-dialog-title { font-size: 13px; font-weight: 600; }
+.py-dialog-title b { color: var(--accent, var(--accent)); }
+
+.py-dialog-close {
+  width: 22px;
+  height: 22px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-btn);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+}
+.py-dialog-close:hover { background: var(--bg-hover); color: var(--text-bright); }
+
+.py-dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.py-btn {
+  height: 28px;
+  min-width: 68px;
+  padding: 0 14px;
+  background: #393b40;
+  border: 1px solid #4e5157;
+  border-radius: 4px;
+  color: #dfe1e5;
+  font-size: 12.5px;
+  font-weight: 400;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+.py-btn:hover:not(:disabled) {
+  background: #43454a;
+  border-color: #5c616b;
+  color: #ffffff;
+}
+.py-btn.primary {
+  background: #3574f0;
+  border-color: #3574f0;
+  color: #ffffff;
+  font-weight: 500;
+}
+.py-btn.primary:hover:not(:disabled) {
+  background: #4e88ff;
+  border-color: #4e88ff;
+  filter: none;
+}
+.py-btn.danger {
+  background: #c94f4f;
+  border-color: #c94f4f;
+  color: #ffffff;
+}
+.py-btn.danger:hover:not(:disabled) {
+  background: #d45d5d;
+  border-color: #d45d5d;
+}
+.py-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Push 对话框 */
+.push-commits-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 14px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.push-upstream-note { color: var(--git-green, var(--git-green)); font-size: 11px; }
+
+.push-commits-list {
+  flex: 1;
+  min-height: 140px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.push-commit-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 26px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--overlay-faint);
+}
+.push-commit-hash { color: var(--git-green, var(--git-green)); font-family: var(--font-code); flex-shrink: 0; }
+.push-commit-msg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.push-commit-meta { color: var(--text-muted); font-size: 11px; flex-shrink: 0; }
+
+.push-empty { padding: 28px 14px; text-align: center; color: var(--text-muted); }
+
+.push-options-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border-subtle);
+}
+.push-option { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); cursor: pointer; }
+
+.push-remote-select { display: flex; align-items: center; gap: 6px; color: var(--text-secondary); margin-left: auto; }
+.push-remote-select select {
+  height: 24px;
+  background: var(--scrim-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-btn);
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 0 6px;
+}
+
+.push-error {
+  margin: 0 14px 8px;
+  padding: 8px 10px;
+  font-family: var(--font-code);
+  font-size: 11px;
+  white-space: pre-wrap;
+  color: var(--git-del, var(--git-del));
+  background: var(--git-del-faint);
+  border: 1px solid var(--git-del-line);
+  border-radius: var(--radius-btn);
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+/* Update Project 对话框 */
+.pull-strategy-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+}
+.pull-strategy-option { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.pull-strategy-option input { margin-top: 2px; accent-color: var(--accent, var(--accent)); }
+.pull-strategy-option span { display: flex; flex-direction: column; gap: 2px; }
+.pull-strategy-option small { color: var(--text-muted); font-size: 11px; }
+
+/* ==========================================================================
+   分支右键菜单（对齐 PyCharm 分支上下文菜单）
+   ========================================================================== */
+.ctx-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2200;
+}
+
+/* 分支下拉展开期间（body.branch-dropdown-open）：分支操作子菜单的遮罩降到
+   标题栏之下。否则全屏遮罩（z2200）盖住毛玻璃标题栏（z1800），点下拉里的
+   分支行只会命中遮罩：TitleBar 判定「点在 wrapper 外」从而关掉整个下拉，
+   分支行的 click 不到达，用户看到子菜单一闪就没。
+   1700 > 抽屉 1500 / 底部面板 1200：点侧栏、底部仍由遮罩接管正常关菜单。 */
+body.branch-dropdown-open .ctx-overlay--under-titlebar { z-index: 1700; }
+
+.branch-ctx-menu {
+  position: fixed;
+  /* 必须盖过下拉弹窗（z9999）：极窄视口下子菜单被 clamp 到视口边缘时
+     会与弹窗重叠52px，z2201 会让弹窗把子菜单左缘遮掉 */
+  z-index: 10000;
+  /* 定宽：从下拉滑出的子菜单按 260px 计算左右停靠位置 */
+  width: 260px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  /* 菜单底色/模糊统一走 token：variant 只改 token 就能让本体、子菜单、
+     标题栏下拉三者透明度一致（毛玻璃此前只覆盖了本体，子菜单走基座值）。 */
+  background: var(--menu-bg);
+  backdrop-filter: var(--menu-blur);
+  -webkit-backdrop-filter: var(--menu-blur);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: 0 10px 32px var(--scrim-strong);
+}
+
+/* 全部右键菜单统一滑出入场：从锚点（鼠标位置）向右下滑出。
+   side-right / side-left 由组件按锚点所在侧传入，决定水平滑出方向；
+   两者都叠加同一段 Y 轴微位移，合成 45° 滑出观感。
+   CommitDrawer / GitBottomPanel / EditorTabBar 的右键菜单同样命中
+   .branch-ctx-menu，无需各自重复声明。 */
+.branch-ctx-menu {
+  animation: ctx-menu-slide 0.14s ease-out;
+}
+.branch-ctx-menu.side-right { animation-name: ctx-menu-slide-right; }
+.branch-ctx-menu.side-left { animation-name: ctx-menu-slide-left; }
+@keyframes ctx-menu-slide {
+  from { opacity: 0; transform: translateY(-6px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes ctx-menu-slide-right {
+  from { opacity: 0; transform: translate(-8px, -6px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes ctx-menu-slide-left {
+  from { opacity: 0; transform: translate(8px, -6px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .branch-ctx-menu,
+  .branch-ctx-menu.side-right,
+  .branch-ctx-menu.side-left { animation: none; }
+}
+
+.ctx-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-btn);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctx-item:hover:not(:disabled) { background: var(--bg-selected, rgba(255, 255, 255, 0.1)); }
+.ctx-item:disabled { color: var(--text-muted); cursor: default; }
+.ctx-item-check { display: flex; align-items: center; gap: 7px; }
+.ctx-check { display: inline-block; width: 12px; text-align: center; color: var(--text-bright); flex-shrink: 0; }
+.ctx-menu-header {
+  padding: 5px 10px 3px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0.02em;
+}
+.ctx-shortcut { float: right; margin-left: 18px; color: var(--text-muted); font-size: 10px; }
+.f-act-btn.active { background: var(--bg-selected-row); color: var(--text-bright); }
+.ctx-item.ctx-danger { color: var(--git-del, var(--git-del)); }
+
+/* 项目树右键菜单：纯文本行 + 悬停子菜单（与全局右键菜单统一，一律不带图标） */
+.ctx-item.ctx-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px 5px 10px;
+}
+.ctx-row .ctx-label { flex: 1; }
+.ctx-row .ctx-sub-chevron { display: inline-flex; align-items: center; flex-shrink: 0; }
+.ctx-sep { height: 1px; margin: 4px 8px; background: var(--border-color); flex-shrink: 0; }
+.ctx-row.has-sub { position: relative; overflow: visible; }
+.ctx-row .ctx-submenu {
+  display: none;
+  position: absolute;
+  left: calc(100% - 2px);
+  top: -5px;
+  min-width: 216px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 4px;
+  /* 与右键菜单本体共用同一组 token：颜色、透明度、模糊完全一致 */
+  background: var(--menu-bg);
+  backdrop-filter: var(--menu-blur);
+  -webkit-backdrop-filter: var(--menu-blur);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: 0 10px 32px var(--scrim-strong);
+  z-index: 10;
+}
+.ctx-row.has-sub:hover > .ctx-submenu { display: flex; flex-direction: column; }
+.ctx-row.has-sub:hover { background: var(--bg-selected, rgba(255, 255, 255, 0.1)); border-radius: var(--radius-btn); }
+
+/* 目录树定位闪烁：滚动到目标行后短暂点亮再淡出 */
+@keyframes tree-locate-pulse {
+  0%, 55% { background: var(--bg-selected-row); }
+  100% { background: transparent; }
+}
+.tree-locate-flash { animation: tree-locate-pulse 1.5s ease-out; }
+
+/* 项目树 新建/重命名/删除 对话框 */
+.py-name-dialog {
+  width: 440px;
+  max-width: calc(100vw - 48px);
+  background: var(--bg-header);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 48px var(--scrim-strong);
+  overflow: hidden;
+}
+/* 远程管理（RemotesDialog，对齐 PyCharm Git Remotes）：列表比输入框宽一档 */
+.py-remotes-dialog {
+  width: min(560px, calc(100vw - 48px));
+  max-width: calc(100vw - 48px);
+  background: var(--bg-header);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 48px var(--scrim-strong);
+  overflow: hidden;
+}
+.py-squash-dialog {
+  width: min(520px, calc(100vw - 48px));
+  padding: 14px 16px 12px;
+  box-sizing: border-box;
+}
+.py-squash-dialog .py-dialog-header {
+  margin-bottom: 10px;
+  padding: 0;
+}
+.py-squash-summary {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.py-squash-commits-list {
+  max-height: 100px;
+  overflow-y: auto;
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.py-squash-commit-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  line-height: 16px;
+}
+.py-squash-hash {
+  font-family: var(--font-code);
+  color: var(--accent);
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.py-squash-msg {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.py-squash-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+.py-squash-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-app);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-btn);
+  color: var(--text-primary);
+  font-family: var(--font-code);
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 8px;
+  resize: vertical;
+  min-height: 80px;
+  max-height: 220px;
+  outline: none;
+  margin-bottom: 12px;
+}
+.py-squash-textarea:focus {
+  border-color: var(--accent);
+}
+.py-squash-dialog .py-dialog-footer {
+  padding: 0;
+}
+.py-remotes-repo {
+  padding: 6px 16px 0;
+  font-size: 11px;
+  font-family: var(--font-code);
+  color: var(--text-muted);
+  word-break: break-all;
+}
+.py-remotes-list {
+  margin: 10px 16px 0;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-btn);
+  background: var(--bg-editor, var(--bg-body));
+}
+.py-remotes-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 7px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.py-remotes-row:last-child { border-bottom: none; }
+.py-remotes-row:hover { background: var(--bg-hover); }
+.py-remotes-row.selected { background: var(--bg-selected); }
+.py-remotes-name {
+  flex: none;
+  min-width: 88px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.py-remotes-url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-family: var(--font-code);
+  color: var(--text-muted);
+}
+.py-remotes-empty {
+  padding: 14px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.py-remotes-field {
+  display: block;
+  margin: 10px 16px 0;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+.py-remotes-field > span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-muted);
+}
+.py-remotes-field .py-name-input {
+  width: 100%;
+  margin: 0;
+}
+.remotes-error {
+  margin: 10px 16px 0;
+  padding: 8px 10px;
+  font-family: var(--font-code);
+  font-size: 11px;
+  white-space: pre-wrap;
+  color: var(--git-del, var(--git-del));
+  background: var(--git-del-faint);
+  border: 1px solid var(--git-del-line);
+  border-radius: var(--radius-btn);
+  max-height: 120px;
+  overflow-y: auto;
+}
+.py-dialog-footer.remotes-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.remotes-actions {
+  display: flex;
+  gap: 8px;
+}
+.py-name-subtitle {
+  padding: 6px 16px 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+.py-name-message {
+  padding: 12px 16px 4px;
+  font-size: 12px;
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+.py-name-input {
+  display: block;
+  width: calc(100% - 32px);
+  margin: 10px 16px 0;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-editor, var(--bg-body));
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-btn);
+  outline: none;
+}
+.py-name-input:focus { border-color: var(--accent); }
+.py-name-btn {
+  height: 28px;
+  min-width: 68px;
+  padding: 0 14px;
+  font-size: 12.5px;
+  font-weight: 400;
+  border-radius: 4px;
+  border: 1px solid #4e5157;
+  background: #393b40;
+  color: #dfe1e5;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+.py-name-btn:hover:not(:disabled) {
+  background: #43454a;
+  border-color: #5c616b;
+  color: #ffffff;
+}
+.py-name-btn.primary {
+  background: #3574f0;
+  border-color: #3574f0;
+  color: #ffffff;
+  font-weight: 500;
+}
+.py-name-btn.primary:hover:not(:disabled) {
+  background: #4e88ff;
+  border-color: #4e88ff;
+}
+.py-name-btn.danger {
+  background: #c94f4f;
+  border-color: #c94f4f;
+  color: #ffffff;
+}
+.py-name-btn.danger:hover:not(:disabled) {
+  background: #d45d5d;
+  border-color: #d45d5d;
+}
+.py-name-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.menu-item-fav { color: var(--git-tag); font-size: 11px; flex-shrink: 0; }
+
+/* 日志中的标签徽章 */
+.branch-tag.yellow-tag { background: rgba(227, 179, 65, 0.15); color: var(--git-tag); border-color: rgba(227, 179, 65, 0.4); }
+
+/* ==========================================================================
+   分支比较对话框（Compare with Current）
+   ========================================================================== */
+.py-compare-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(680px, calc(100vw - 48px));
+  max-height: min(600px, calc(100vh - 120px));
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-header);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg, 8px);
+  box-shadow: 0 18px 48px var(--scrim-strong);
+  overflow: hidden;
+}
+
+.compare-body { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow-y: auto; }
+
+.compare-section { display: flex; flex-direction: column; }
+.compare-section + .compare-section { border-top: 1px solid var(--border-subtle); }
+
+.compare-section-title {
+  padding: 8px 14px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  background: var(--overlay-faint);
+}
+
+.compare-list { min-height: 60px; max-height: 220px; overflow-y: auto; }
+
+.compare-file-row { gap: 8px; }
+.compare-numstat { flex-shrink: 0; display: flex; gap: 6px; font-family: var(--font-code); font-size: 11px; }
+.compare-numstat .num-add { color: var(--git-green, var(--git-green)); font-style: normal; }
+.compare-numstat .num-del { color: var(--git-del, var(--git-del)); font-style: normal; }
+
+/* 变更状态字母徽章（Git 面板详情列 / Compare 对话框共用） */
+.det-status { width: 14px; flex-shrink: 0; font-weight: 600; text-align: center; }
+.det-status.add { color: var(--git-green); }
+.det-status.mod { color: var(--git-blue); }
+.det-status.del { color: var(--git-del); }
+
+/* Log 过滤栏的分支范围下拉 */
+.filter-select {
+  height: 22px;
+  background: var(--scrim-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-btn);
+  color: var(--text-primary);
+  font-size: 11px;
+  padding: 0 4px;
+  max-width: 140px;
+  cursor: pointer;
+}
+
+/* Reset 对话框 */
+.reset-commit-info {
+  padding: 8px 14px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.reset-hard-warning {
+  margin: 0 14px;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--warn);
+  background: var(--warn-faint);
+  border: 1px solid var(--warn-line);
+  border-radius: var(--radius-btn);
+}
+
+.py-btn.danger { background: var(--git-del-strong); border-color: transparent; color: var(--text-bright); }
+.py-btn.danger:hover:not(:disabled) { filter: brightness(1.1); background: var(--git-del-strong); }
+
+/* ==========================================================================
+   编辑器 Git 工具栏 / Blame 侧列 / 文件历史对话框
+   ========================================================================== */
+.editor-git-btn {
+  height: 18px;
+  padding: 0 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-btn);
+  color: var(--text-muted);
+  font-size: 10px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.editor-git-btn:hover { background: var(--bg-hover); color: var(--text-bright); }
+.editor-git-btn.active { background: rgba(74, 136, 199, 0.25); color: var(--text-blue-mod); border-color: rgba(74, 136, 199, 0.4); }
+
+.blame-gutter {
+  width: 200px;
+  flex-shrink: 0;
+  overflow: hidden;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border-color);
+  font-family: var(--font-code);
+  font-size: 10px;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.blame-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 6px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.blame-row:hover { background: var(--bg-hover); }
+.blame-row.uncommitted { color: var(--text-muted); font-style: italic; }
+.blame-author { flex: 1; overflow: hidden; text-overflow: ellipsis; color: var(--text-secondary); }
+.blame-date { flex-shrink: 0; }
+.blame-hash { flex-shrink: 0; color: var(--git-green, var(--git-green)); }
+
+/* 文件历史对话框 */
+.py-history-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(980px, calc(100vw - 48px));
+  height: min(640px, calc(100vh - 100px));
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-header);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg, 8px);
+  box-shadow: 0 18px 48px var(--scrim-strong);
+  overflow: hidden;
+}
+
+.history-body { display: flex; flex: 1; min-height: 0; }
+
+.history-revision-list {
+  width: 300px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-right: 1px solid var(--border-color);
+  background: var(--bg-sidebar);
+}
+
+.history-mode-toggle { display: flex; padding: 6px; gap: 4px; border-bottom: 1px solid var(--border-subtle); }
+.history-mode-btn {
+  flex: 1;
+  height: 22px;
+  background: transparent;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-btn);
+  color: var(--text-secondary);
+  font-size: 10px;
+  cursor: pointer;
+}
+.history-mode-btn.active { background: var(--bg-selected, rgba(74, 136, 199, 0.3)); color: var(--text-bright); border-color: transparent; }
+
+.history-revision-row { padding: 5px 10px; cursor: pointer; border-bottom: 1px solid var(--overlay-faint); }
+.history-revision-row:hover { background: var(--bg-hover); }
+.history-revision-row.active { background: var(--bg-selected-row); }
+.history-rev-top { display: flex; justify-content: space-between; gap: 8px; }
+.history-rev-hash { color: var(--git-green, var(--git-green)); font-family: var(--font-code); font-size: 10px; }
+.history-rev-date { color: var(--text-muted); font-size: 10px; }
+.history-rev-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.history-rev-author { color: var(--text-muted); font-size: 10px; }
+
+.history-diff-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+.history-empty { padding: 16px 10px; color: var(--text-muted); font-size: 11px; text-align: center; }
+.history-error { margin: 8px; padding: 8px; color: var(--git-del, var(--git-del)); font-size: 11px; white-space: pre-wrap; }
+
+/* ==========================================================================
+   Stash 对话框
+   ========================================================================== */
+.stash-summary {
+  display: flex;
+  gap: 14px;
+  padding: 10px 14px 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.stash-message-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 14px 4px;
+}
+.stash-message-label { color: var(--text-muted); font-size: 11px; }
+.stash-message-input {
+  height: 28px;
+  background: var(--scrim-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-btn);
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 0 8px;
+  outline: none;
+}
+.stash-message-input:focus { border-color: var(--accent, var(--accent)); }
+
+.stash-files-pane {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-bottom);
+}
+.stash-files-list { flex: 1; min-height: 0; overflow-y: auto; }
+
+/* 右键菜单分组分隔线 */
+.ctx-separator { height: 1px; margin: 4px 6px; background: var(--border-subtle); }
+
+/* 编辑器 gutter 变更条与行高亮 */
+.monaco-editor .py-line-added { background: var(--git-add-faint); }
+.monaco-editor .py-line-modified { background: var(--git-blue-faint); }
+.monaco-editor .lines-content .py-stripe-added { background: var(--git-green); width: 3px !important; margin-left: 4px; }
+.monaco-editor .lines-content .py-stripe-modified { background: var(--git-blue); width: 3px !important; margin-left: 4px; }
+.monaco-editor .lines-content .py-stripe-removed { background: var(--git-del); width: 3px !important; margin-left: 4px; }
+
+/* 冲突横幅（git 合并冲突与外部修改共用同一规格） */
+.git-conflict-banner,
+.external-change-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 10px;
+  font-size: 11px;
+  color: var(--warn);
+  background: var(--warn-faint);
+  border-bottom: 1px solid var(--warn-line);
+}
+.external-change-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+/* 编辑器区域包装：外部修改横幅 + 编辑器主体的纵向布局
+   （IdeCenterCanvas 是横向 flex，这里收拢成列让横幅压在编辑器上方） */
+.editor-pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+
+/* 交互式变基 */
+.rebase-hint { padding: 8px 14px; color: var(--text-muted); font-size: 11px; }
+.rebase-rows { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 8px; }
+.rebase-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 26px;
+  padding: 0 4px;
+  border-bottom: 1px solid var(--overlay-faint);
+}
+.rebase-action-select {
+  height: 20px;
+  background: var(--scrim-subtle);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-btn);
+  color: var(--text-primary);
+  font-size: 10px;
+}
+.rebase-hash { color: var(--git-green, var(--git-green)); font-family: var(--font-code); font-size: 10px; flex-shrink: 0; }
+.rebase-msg { flex: 1; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rebase-row .dropped { text-decoration: line-through; opacity: 0.5; }
+.rebase-move-btns { display: flex; gap: 2px; flex-shrink: 0; }
+
+/* macOS 原生弹窗红绿灯 */
+.mac-traffic-lights {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 0 4px;
+}
+.mac-traffic-btn {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  outline: none;
+  background: transparent;
+  transition: filter 0.1s ease, transform 0.05s ease;
+}
+.mac-traffic-btn:active {
+  transform: scale(0.92);
+}
+.mac-traffic-btn.close {
+  background-color: #ff5f57;
+}
+.mac-traffic-btn.close:hover {
+  filter: brightness(1.08);
+}
+.mac-traffic-btn.minimize {
+  background-color: #febc2e;
+}
+.mac-traffic-btn.minimize.disabled {
+  background-color: #52472b;
+  opacity: 0.65;
+  cursor: default;
+}
+.mac-traffic-btn.maximize {
+  background-color: #28c840;
+}
+.mac-traffic-btn.maximize:hover {
+  filter: brightness(1.08);
+}
+.mac-traffic-glyph {
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 1;
+  color: rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  transition: opacity 0.1s ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.mac-traffic-lights:hover .mac-traffic-glyph {
+  opacity: 1;
+}
+.mac-traffic-btn.disabled .mac-traffic-glyph {
+  display: none;
+}
+
+/* 模态弹窗拖拽缩放把手 */
+.modal-resize-handle {
+  position: absolute;
+  z-index: 25;
+}
+.modal-resize-n {
+  top: -4px;
+  left: 8px;
+  right: 8px;
+  height: 8px;
+  cursor: ns-resize;
+}
+.modal-resize-s {
+  bottom: -4px;
+  left: 8px;
+  right: 8px;
+  height: 8px;
+  cursor: ns-resize;
+}
+.modal-resize-e {
+  right: -4px;
+  top: 8px;
+  bottom: 8px;
+  width: 8px;
+  cursor: ew-resize;
+}
+.modal-resize-w {
+  left: -4px;
+  top: 8px;
+  bottom: 8px;
+  width: 8px;
+  cursor: ew-resize;
+}
+.modal-resize-ne {
+  top: -4px;
+  right: -4px;
+  width: 12px;
+  height: 12px;
+  cursor: nesw-resize;
+}
+.modal-resize-nw {
+  top: -4px;
+  left: -4px;
+  width: 12px;
+  height: 12px;
+  cursor: nwse-resize;
+}
+.modal-resize-se {
+  bottom: -4px;
+  right: -4px;
+  width: 12px;
+  height: 12px;
+  cursor: nwse-resize;
+}
+.modal-resize-sw {
+  bottom: -4px;
+  left: -4px;
+  width: 12px;
+  height: 12px;
+  cursor: nesw-resize;
+}
+
+/* 弹窗居中与顶栏样式 */
+.mac-modal-header {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 12px;
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border-color);
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+  flex-shrink: 0;
+}
+.mac-title-centered {
+  position: absolute;
+  left: 0;
+  right: 0;
+  text-align: center;
+  pointer-events: none;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 70px;
+}
+
+/* 冲突解决三窗格 */
+.py-conflict-dialog {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-header);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg, 8px);
+  box-shadow: 0 18px 48px var(--scrim-strong);
+  overflow: hidden;
+  user-select: none;
+}
+.conflict-subtitle {
+  padding: 10px 14px 6px;
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.4;
+  flex-shrink: 0;
+}
+.conflict-subtitle-lead {
+  color: var(--text-primary);
+}
+.conflict-subtitle-subject {
+  color: var(--text-primary);
+  margin-top: 2px;
+}
+.conflict-main { display: flex; flex: 1; min-height: 0; gap: 12px; padding: 6px 14px 10px; }
+.conflict-table-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-btn);
+  overflow: hidden;
+  background: var(--bg-app);
+}
+.conflict-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 25px;
+  padding: 2px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--overlay-faint);
+  user-select: none;
+}
+.conflict-row:hover:not(.conflict-head) {
+  background: var(--bg-hover);
+}
+.conflict-row.active {
+  background: var(--bg-selected-row, #394b63) !important;
+  color: #ffffff;
+}
+.conflict-row.active .conflict-file-name,
+.conflict-row.active .conflict-cell {
+  color: #ffffff;
+  font-weight: 500;
+}
+.conflict-row.active .conflict-file-dir {
+  color: rgba(255, 255, 255, 0.7);
+}
+.conflict-row.conflict-head {
+  cursor: default;
+  color: var(--text-muted);
+  font-size: 12px;
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+  height: 26px;
+  min-height: 26px;
+}
+.conflict-cell { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conflict-cell.name { flex: 1; min-width: 0; display: flex; gap: 6px; align-items: center; }
+.conflict-file-icon { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.conflict-cell.yours-head, .conflict-cell.theirs-head { width: 170px; flex-shrink: 0; }
+.conflict-row .conflict-cell:nth-child(2) { width: 170px; flex-shrink: 0; color: var(--text-secondary); }
+.conflict-row .conflict-cell:nth-child(3) { width: 170px; flex-shrink: 0; color: var(--text-secondary); }
+.conflict-file-name { color: var(--text-primary); }
+.conflict-file-name.is-conflict { color: var(--git-del, #ff7b72); }
+.conflict-file-dir { color: var(--text-muted); font-size: 12px; margin-left: 2px; }
+.conflict-cell.deleted { color: var(--text-primary); font-weight: 500; }
+.conflict-table { flex: 1; min-height: 0; overflow-y: auto; }
+.conflict-group-head { padding: 4px 10px; font-size: 11px; color: var(--text-muted); background: var(--bg-sidebar); border-bottom: 1px solid var(--overlay-faint); }
+.conflict-delete-hint-bar {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-sidebar);
+  flex-shrink: 0;
+}
+.conflict-side-actions { width: 120px; flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+.conflict-select-hint { font-size: 11px; color: var(--text-muted); line-height: 1.5; }
+.conflict-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border-color);
+  flex-shrink: 0;
+  height: 44px;
+  box-sizing: border-box;
+}
+.conflict-group-check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-primary); cursor: pointer; }
+
+/* 合并工具（Merge Revisions）：比列表框更宽的三窗格 */
+.py-merge-tool-dialog {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-header);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg, 8px);
+  box-shadow: 0 18px 48px var(--scrim-strong);
+  overflow: hidden;
+  user-select: none;
+}
+.merge-tool-backdrop { z-index: 2200 !important; }
+
+/* 主窗口在独立冲突窗口开启期间的模态全阻断遮罩 */
+.main-window-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  background: rgba(0, 0, 0, 0.45);
+  cursor: not-allowed;
+  pointer-events: auto;
+}
+
+/* 独立冲突窗口根容器 */
+.conflict-standalone-root {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background-color: var(--bg-app);
+  background-image: linear-gradient(0deg, var(--bg-header), var(--bg-header));
+  user-select: none;
+  -webkit-user-select: none;
+}
+.conflict-standalone-root .py-dialog-backdrop {
+  position: relative !important;
+  inset: 0 !important;
+  background: transparent !important;
+  width: 100vw !important;
+  height: 100vh !important;
+}
+.conflict-standalone-root .py-conflict-dialog,
+.conflict-standalone-root .py-merge-tool-dialog {
+  position: relative !important;
+  left: 0 !important;
+  top: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+}
+.conflict-standalone-root .modal-resize-handle {
+  display: none !important;
+}
+.conflict-panes-header {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  height: 28px;
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border-color, #393b40);
+  flex-shrink: 0;
+}
+.pane-head-col {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  border-right: 1px solid var(--border-color);
+}
+.pane-head-col:last-child {
+  border-right: none;
+}
+/* 对话框实体底色：取消全部透明度，100% 不透明实色底，杜绝透出背后的欢迎页/代码文本 */
+.py-dialog-window,
+.settings-dialog-window,
+.search-modal-dialog,
+.find-in-files-dialog,
+.py-push-dialog,
+.py-pull-dialog,
+.py-name-dialog,
+.py-remotes-dialog,
+.py-compare-dialog,
+.py-history-dialog,
+.py-conflict-dialog,
+.py-merge-tool-dialog,
+.py-confirm-dialog,
+.git-tools-dialog {
+  background-color: var(--bg-dialog) !important;
+  background-image: none !important;
+}
+.merge-tool-toolbar {
+  height: 34px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border-color);
+  user-select: none;
+}
+
+/* 扁平无边框工具栏按钮（24x24） */
+.tb-icon-btn {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: #afb1b7;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: background-color 0.1s ease, color 0.1s ease, border-color 0.1s ease;
+}
+.tb-icon-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  color: #dfe1e5;
+}
+.tb-icon-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+.tb-icon-btn.active {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: transparent;
+  color: #dfe1e5;
+}
+.tb-icon-btn.active:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.18);
+  color: #ffffff;
+}
+body[data-variant="2"] .tb-icon-btn {
+  color: #5a5d63;
+}
+body[data-variant="2"] .tb-icon-btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.06);
+  color: #1e1f22;
+}
+body[data-variant="2"] .tb-icon-btn.active {
+  background: rgba(0, 0, 0, 0.10);
+  border-color: transparent;
+  color: #1e1f22;
+}
+body[data-variant="2"] .tb-icon-btn.active:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.15);
+  color: #000000;
+}
+
+/* 垂直分隔条 */
+.tb-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--border-color, #393b40);
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+
+/* "Apply non-conflicting changes:" 说明文本 */
+.tb-label {
+  font-size: 12px;
+  color: #9da0a8;
+  white-space: nowrap;
+  line-height: 24px;
+  padding: 0 3px 0 1px;
+  user-select: none;
+}
+body[data-variant="2"] .tb-label {
+  color: #606366;
+}
+
+/* 下拉菜单（Do not ignore / Highlight words）高度精准锁定 24px */
+.tb-select {
+  height: 24px;
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 0 20px 0 8px;
+  font-size: 12px;
+  line-height: 22px;
+  color: #dfe1e5;
+  background-color: transparent;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='6' viewBox='0 0 8 6' fill='%239da0a8'><path d='M0 1l4 4 4-4z'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  border: 1px solid #4e5157;
+  border-radius: 4px;
+  outline: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 0.1s ease;
+}
+.tb-select:hover:not(:disabled) {
+  border-color: #5c616b;
+}
+.tb-select:focus {
+  border-color: #3574f0;
+}
+body:not([data-variant="2"]) .tb-select {
+  color-scheme: dark;
+}
+body[data-variant="2"] .tb-select {
+  color: #1e1f22;
+  border-color: #c4c4c4;
+  color-scheme: light;
+}
+
+/* 右侧变更与冲突状态统计文本 */
+.merge-tool-count {
+  margin-left: auto;
+  font-size: 12px;
+  color: #9da0a8;
+  white-space: nowrap;
+  user-select: none;
+}
+body[data-variant="2"] .merge-tool-count {
+  color: #606366;
+}
+.tb-gear-wrap { position: relative; display: inline-flex; }
+.tb-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  min-width: 240px;
+  padding: 4px 0;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-btn);
+  box-shadow: 0 10px 28px var(--scrim-strong);
+}
+.tb-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-primary);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tb-menu-item:hover { background: var(--bg-hover); }
+.merge-tool-panes { margin: 0; border: none; border-radius: 0; overflow: hidden; }
+.merge-tool-footer {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  flex-shrink: 0;
+  background: var(--bg-header);
+  border-top: 1px solid var(--border-color);
+}
+.merge-tool-footer > span { display: flex; gap: 8px; }
+/* 合并工具冲突块（对齐 PyCharm 醒目红底色与字色） */
+.merge-hunk-bg,
+.merge-hunk-bg.conflict,
+.monaco-editor .merge-hunk-bg.conflict {
+  background: #542628 !important;
+}
+.merge-hunk-margin.conflict,
+.monaco-editor .margin-view-overlays .merge-hunk-margin.conflict {
+  background: #542628 !important;
+}
+.merge-wedge.band.conflict {
+  background: #542628 !important;
+}
+/* 更改块的 delta 行：PyCharm 只在首条非空 delta 行画 2px 绿顶线，无填充
+   （实测 screenshot-20261015-105113.png y166-167 = #2c4134） */
+.merge-delta-rule { border-top: 2px solid #2c4134; }
+/* 待应用插入线：非冲突更改未吃入结果时（Result = base），块尾一条 2px 绿线
+   （实测 PyCharm 在最后一行之下 y166-167 横贯结果格） */
+.merge-pending-rule { border-bottom: 2px solid #2c4134; }
+/* 斜切着色带（结果格 overlay，z-index:-1 压在行号/正文下、面板底上）：
+   context 淡紫 #343c46，指向空侧的斜切（clip-path 由 JS 按块高注入） */
+.merge-wedge-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+}
+.merge-wedge {
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+.merge-wedge.band { background: #343c46; }
+/* 侧栏斜切带（外层行容器内，连 gutter 一起盖）：add 绿 #2c4134 / mod 淡紫 / conflict 醒目红 */
+.side-wedge {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+}
+/* 侧栏斜切带：新增墨绿 #2c4134 / 修改淡紫 #343c46 / 删除浅红 #482b2b / 冲突深红 #542628 */
+.side-wedge-band { position: absolute; left: 0; right: 0; }
+.side-wedge-band.add { background: #2c4134; }
+.side-wedge-band.mod { background: #343c46; }
+.side-wedge-band.del,
+.side-wedge-band.deleted { background: #482b2b; }
+.side-wedge-band.conflict { background: #542628; }
+.side-wedge-band.deleted-rule {
+  height: 2px !important;
+  background: #c93c37 !important;
+  border-top: 2px solid #f85149;
+  z-index: 2;
+}
+.side-wedge-band.rule-mod { background: #343c46; height: 2px; }
+.side-wedge-band.rule-conflict { background: #542628; height: 2px; }
+.merge-glyph-take-left::after, .merge-glyph-take-right::after {
+  cursor: pointer;
+  font-weight: 700;
+  color: var(--text-bright);
+}
+.merge-glyph-take-left::after { content: '≫'; }
+.merge-glyph-take-right::after { content: '≪'; }
+/* 顶栏进行中操作（PyCharm 顶栏实测 screenshot-20261015-155800.png）：
+   ⚠ #f2c55c + 文字 #abb2bf 常驻在项目/分支选择器之后；最右绿钮 #599e5e
+   （解决冲突/继续拣选）与红钮 #c94f4f（终止合并/拣选），白字圆角 */
+.titlebar-op {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: 12px;
+  font-size: 12px;
+  color: #abb2bf;
+  white-space: nowrap;
+  flex-shrink: 1;
+  min-width: 0;
+}
+.titlebar-op-warn { color: #f2c55c; font-size: 13px; line-height: 1; flex-shrink: 0; }
+.titlebar-op-label { overflow: hidden; text-overflow: ellipsis; }
+.titlebar-op-actions { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; }
+.titlebar-op-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.12s ease, transform 0.05s ease;
+}
+.titlebar-op-btn:active:not(:disabled) {
+  transform: scale(0.96);
+}
+.titlebar-op-btn.go { background: #499c54; }
+.titlebar-op-btn.go:hover:not(:disabled) { background: #57a763; }
+.titlebar-op-btn.go:active:not(:disabled) { background: #3e8847; }
+.titlebar-op-btn.abort { background: #db5860; }
+.titlebar-op-btn.abort:hover:not(:disabled) { background: #e26a71; }
+.titlebar-op-btn.abort:active:not(:disabled) { background: #c84850; }
+.titlebar-op-btn:disabled { opacity: 0.4; cursor: default; }
+.conflict-panes { display: flex; flex: 1; min-height: 0; gap: 1px; background: var(--border-color); }
+.conflict-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--bg-app); }
+/* 编辑器区底色对齐 PyCharm 实测（深色 #1e1f22，浅色 #ffffff 与 monaco 主题一致） */
+.merge-tool-panes { --merge-editor-bg: #f8f8f9; }
+body:not([data-variant="2"]) .merge-tool-panes { --merge-editor-bg: #282c35; }
+.merge-tool-panes .conflict-pane { background: var(--merge-editor-bg); }
+/* 窗格头：🔒 标题统一 #abb2bf 常规字重 + 右侧蓝色 Show Details（对齐 PyCharm 实测） */
+.pane-head {
+  height: 26px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border-color, #393b40);
+  flex-shrink: 0;
+  user-select: none;
+}
+.conflict-pane-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: #dfe1e5;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.pane-lock { flex-shrink: 0; opacity: 0.85; }
+.result-title { color: #ffffff; font-weight: 600; }
+.pane-filename { margin-left: 8px; font-size: 12px; font-weight: 400; color: #8c8f94; }
+.show-details {
+  margin-left: auto;
+  padding: 0;
+  font-size: 11px;
+  color: #58a6ff;
+  background: none;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.show-details:hover { text-decoration: underline; }
+.pane-details {
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-sidebar);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* 侧栏：镜像 gutter 自绘（左：✕ ≫ 行号 ｜ 右：行号 ≪ ✕）+ 编辑器 + 斜切带。
+   数字/标记不贴分隔线 —— PyCharm 两侧都在数字外侧留 ~27-34px 空档（实测） */
+.side-holder {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  background: var(--merge-editor-bg);
+}
+.side-editor-row { position: relative; z-index: 0; flex: 1; min-width: 0; display: flex; }
+/* overflow:hidden + 强制 inset：monaco 带旧尺寸（inline width）时会溢出
+   wrap 把自家 gutter 盖住（左侧空栏曾整片被盖，色条/行号全不见） */
+.side-editor-wrap { position: relative; flex: 1; min-width: 0; overflow: hidden; }
+.side-editor-wrap .monaco-editor {
+  position: absolute !important;
+  inset: 0 !important;
+  width: auto !important;
+  height: auto !important;
+}
+.side-gutter { position: relative; width: 78px; flex-shrink: 0; overflow: hidden; }
+.side-gutter-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 4px;
+}
+.side-gutter.left .side-gutter-row { justify-content: flex-end; padding-right: 6px; }
+.side-gutter.right .side-gutter-row { justify-content: flex-start; padding-left: 6px; }
+.side-num {
+  font-size: 12px;
+  color: #5a5d63;
+  min-width: 20px;
+  text-align: center;
+  user-select: none;
+}
+.side-num.conflict,
+.side-gutter-row.conflict .side-num {
+  color: #ff6b6b !important;
+  font-weight: 600;
+}
+.side-gutter-row.conflict {
+  background: #542628;
+}
+.side-gutter.left .side-gutter-row.conflict {
+  border-top: 1px solid rgba(248, 81, 73, 0.4);
+  border-bottom: 1px solid rgba(248, 81, 73, 0.4);
+}
+.side-gutter.right .side-gutter-row.conflict {
+  border-top: 1px solid rgba(248, 81, 73, 0.4);
+  border-bottom: 1px solid rgba(248, 81, 73, 0.4);
+}
+.side-gutter-row.conflict .side-mk.apply {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.16);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+.side-gutter-row.conflict .side-mk.apply:hover {
+  background: rgba(255, 255, 255, 0.32);
+  color: #ffffff;
+  transform: scale(1.08);
+}
+.side-gutter-row.conflict .side-mk.ignore {
+  color: #fca5a5;
+  background: rgba(0, 0, 0, 0.18);
+}
+.side-gutter-row.conflict .side-mk.ignore:hover {
+  background: rgba(248, 81, 73, 0.35);
+  color: #ffffff;
+  transform: scale(1.08);
+}
+.conflict-word-hl,
+.monaco-editor .conflict-word-hl {
+  background: #7a3235 !important;
+  border-radius: 2px;
+}
+.side-mk {
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: none;
+  border: none;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 0.12s ease, color 0.12s ease, transform 0.08s ease;
+}
+.side-mk.apply {
+  color: #4cd964;
+}
+.side-mk.apply:hover {
+  background: rgba(76, 217, 100, 0.22);
+  color: #5deb75;
+}
+.side-mk.ignore {
+  color: #9da5b4;
+  font-size: 13px;
+  font-weight: 700;
+}
+.side-mk.ignore:hover {
+  background: rgba(248, 81, 73, 0.22);
+  color: #f85149;
+}
+.side-mk:active {
+  transform: scale(0.92);
+}
+/* 三个编辑器统一：背景交由窗格层（--merge-editor-bg）绘制，monaco 透明 + 自成
+   层叠上下文 —— 斜切 overlay（z-index:-1）才能压在正文下、窗格底色上；
+   行号槽同理透明，让底色透过（对齐 PyCharm：色带盖住行号区）。
+   注意 .monaco-editor-background 也要透明 —— 主题底色默认不透明，会把
+   正文区的色带整个盖掉（只在透明 gutter 漏一条缝）。 */
+.py-merge-tool-dialog .monaco-editor,
+.py-merge-tool-dialog .monaco-editor .overflow-guard,
+.py-merge-tool-dialog .monaco-editor .monaco-scrollable-element,
+.py-merge-tool-dialog .monaco-editor .lines-content,
+.py-merge-tool-dialog .monaco-editor .view-lines,
+.py-merge-tool-dialog .monaco-editor-background,
+.py-merge-tool-dialog .monaco-editor .monaco-editor-background,
+.py-merge-tool-dialog .monaco-editor .margin,
+.py-merge-tool-dialog .monaco-editor .margin-view-overlays {
+  position: relative;
+  z-index: 0;
+  background: transparent !important;
+  background-color: transparent !important;
+}
+.conflict-pane .monaco-editor { flex: 1; }
+.conflict-notice {
+  margin: 10px 14px 0;
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-hover);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-btn);
+}
+.push-commit-row.selected { background: var(--bg-selected-row); }
+
+/* ==========================================================================
+   图标描边统一通道（variant 共用）
+   --icon-stroke 由各 variant 单独定义，取值见 src/styles/variants/variant-N.css；
+   variant 专属的配色令牌与结构签名规则已全部拆到该目录，运行时只注入
+   当前 variant 一个文件，不再让多套主题在样式表里互相覆盖。
+   ========================================================================== */
+
+/* 图标描边统一通道：仅作用于工具栏/菜单/按钮内的图标，不影响 DAG 图等数据图形 */
+.tb-icon-btn svg :is(path, circle, rect, line, polyline),
+.f-act-btn svg :is(path, circle, rect, line, polyline),
+.diff-icon-btn svg :is(path, circle, rect, line, polyline),
+.strip-btn svg :is(path, circle, rect, line, polyline),
+.ctx-item svg :is(path, circle, rect, line, polyline),
+.editor-git-btn svg :is(path, circle, rect, line, polyline),
+.win-action-btn svg :is(path, circle, rect, line, polyline),
+.py-dialog-close svg :is(path, circle, rect, line, polyline),
+.file-rollback-btn svg :is(path, circle, rect, line, polyline),
+.rebase-move-btns svg :is(path, circle, rect, line, polyline),
+.git-file-icon svg :is(path, circle, rect, line, polyline) {
+  stroke-width: var(--icon-stroke, 1.4);
+}
+
+/* 推送等待提示（超过 5 秒出现，让凭据/网络等待可感知） */
+.push-waiting-hint {
+  margin: 0 14px 8px;
+  padding: 7px 10px;
+  font-size: 11px;
+  color: var(--warn);
+  background: var(--warn-faint);
+  border: 1px solid var(--warn-line);
+  border-radius: var(--radius-btn);
+}
+
+/* Push 对话框：专属操作按钮（显式样式，不受历史规则干扰） */
+.push-action-btn {
+  height: 28px;
+  min-width: 78px;
+  padding: 0 14px;
+  background: var(--bg-sidebar-strip);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-btn);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+}
+.push-action-btn:hover:not(:disabled) { background: var(--bg-hover); }
+.push-action-btn:disabled { opacity: 0.5; cursor: default; }
+.push-action-btn.primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--accent-contrast);
+  font-weight: 600;
+}
+.push-action-btn.primary:hover:not(:disabled) { filter: brightness(1.1); background: var(--accent); }
+
+/* 推送状态区：不确定进度条 + 旋转器 + 计时 */
+.push-status-area { padding: 2px 14px 10px; }
+.push-progress-track {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--overlay-faint);
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.push-progress-bar {
+  height: 100%;
+  width: 38%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: push-progress-slide 1.1s ease-in-out infinite;
+}
+@keyframes push-progress-slide {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(380%); }
+}
+.push-status-line { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-secondary); }
+.push-status-line b { color: var(--text-primary); }
+.push-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: push-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes push-spin { to { transform: rotate(360deg); } }
+
+/* ==========================================================================
+   Find in Files / Replace in Files
+   ========================================================================== */
+.find-in-files-backdrop { padding-top: 64px; }
+.find-in-files-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(980px, calc(100vw - 40px));
+  height: min(680px, calc(100vh - 110px));
+  overflow: hidden;
+  background: var(--bg-header);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 48px var(--scrim-strong);
+}
+.find-in-files-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.find-in-files-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.find-in-files-scope {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.find-in-files-search-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.find-in-files-icon { display: inline-flex; width: 16px; justify-content: center; color: var(--text-muted); }
+.find-in-files-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 6px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-sidebar-strip);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+.find-in-files-input:focus { border-color: var(--accent); }
+.find-in-files-opt {
+  min-width: 28px;
+  height: 24px;
+  padding: 0 5px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.find-in-files-opt:hover { background: var(--bg-hover); }
+.find-in-files-opt.active { color: var(--text-bright); background: var(--bg-selected); border-color: var(--accent); }
+.find-in-files-count { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+.find-in-files-error, .find-in-files-notice {
+  padding: 6px 12px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.find-in-files-error { color: var(--git-del); }
+.find-in-files-notice { color: var(--git-green); }
+.find-in-files-results { flex: 1; min-height: 0; overflow: auto; padding: 2px 0; }
+.find-in-files-empty { padding: 24px; font-size: 12px; color: var(--text-muted); text-align: center; }
+.find-in-files-hit {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  padding: 2px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.find-in-files-hit:hover { background: var(--bg-hover); }
+.find-in-files-file-icon { display: inline-flex; width: 16px; flex-shrink: 0; }
+.find-in-files-path {
+  width: 260px;
+  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.find-in-files-line-no {
+  width: 52px;
+  flex-shrink: 0;
+  text-align: right;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.find-in-files-line-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+  font-family: var(--font-code);
+  font-size: 11px;
+}
+.find-in-files-line-text mark {
+  color: var(--text-bright);
+  background: var(--bg-selected-row, #2e436e);
+  border-radius: 2px;
+}
+.find-in-files-footer {
+  padding: 5px 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Terminal find bar（Cmd/Ctrl+F） */
+.single-terminal-view { position: relative; }
+.terminal-find-bar {
+  position: absolute;
+  top: 6px;
+  right: 18px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  background: var(--bg-header);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-btn);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+}
+.terminal-find-input {
+  width: 190px;
+  padding: 2px 4px;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-sidebar-strip);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+.terminal-find-input:focus { border-color: var(--accent); }
+.terminal-find-count {
+  min-width: 42px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.terminal-find-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.terminal-find-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+.settings-project-overrides {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  margin-bottom: 14px;
+  background: var(--bg-selected);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.clone-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  overflow-y: auto;
+}
+.clone-label { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+.clone-dest-row { display: flex; gap: 6px; align-items: center; }
+.clone-dest-row .py-name-input { flex: 1; min-width: 0; }
+
+.git-tools-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(820px, calc(100vw - 48px));
+  height: min(620px, calc(100vh - 120px));
+  overflow: hidden;
+  background: var(--bg-header);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 52px var(--scrim-strong);
+}
+.git-tools-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.git-tools-tab {
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.git-tools-tab:hover { background: var(--bg-hover); }
+.git-tools-tab.active { color: var(--text-bright); background: var(--bg-selected); }
+.git-tools-body { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.git-tools-list { display: flex; flex-direction: column; gap: 2px; }
+.git-tools-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+  padding: 2px 6px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+}
+.git-tools-row:hover { background: var(--bg-hover); }
+.git-tools-status { width: 16px; color: var(--git-mod); font-family: var(--font-code); }
+.git-tools-path { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
+.git-tools-url { min-width: 0; width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); }
+.git-tools-actions { display: flex; gap: 4px; }
+.git-tools-empty { padding: 18px; text-align: center; color: var(--text-muted); font-size: 12px; }
+.git-tools-meta { font-size: 11px; color: var(--text-muted); }
+.git-tools-notice { padding: 6px 8px; font-size: 11px; color: var(--git-green); }
+.git-tools-form { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 6px; border-top: 1px solid var(--border-subtle); }
+.git-tools-form .py-name-input { width: 190px; }
+.git-tools-footer-actions { display: flex; gap: 6px; }
+
+.diff-hunk-btn {
+  height: 20px;
+  padding: 0 8px;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--text-secondary);
+  background: var(--overlay-faint);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-btn);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+.diff-hunk-btn:hover:not(:disabled) { color: var(--text-primary); border-color: var(--accent); background: var(--bg-hover); }
+.diff-hunk-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* ==========================================================================
+   PyCharm 风格更新气泡通知 (Event Balloon)
+   ========================================================================== */
+.py-update-balloon {
+  position: fixed;
+  bottom: 28px;
+  right: 18px;
+  z-index: 2200;
+  width: 290px;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border-color);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  border-radius: 6px;
+  padding: 10px 14px;
+  animation: py-dialog-pop 0.15s cubic-bezier(0, 0, 0.2, 1);
+}
+.py-update-balloon-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-bright);
+}

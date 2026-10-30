@@ -1,0 +1,4 @@
+GhosttyKeyAction (按值排序):
+  RELEASE = 0
+  PRESS = 1
+  REPEAT = 2

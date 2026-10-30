@@ -1,0 +1,46 @@
+node_modules/
+dist/
+src-tauri/target/
+
+# OS / editor
+.DS_Store
+*.log
+.idea/
+.vscode/
+*.swp
+
+# Internal audit reports (not part of the public repo; kept locally/separate)
+.audit/
+
+# Local reference screenshots (not part of the public repo)
+/screenshots/
+
+# The vendored VT static library IS tracked (macOS arm64) so that a fresh
+# clone builds with zero configuration on the verified target. Other targets
+# build their own and point GHOSTTY_VT_LIB_DIR at it — see README "Building".
+# To stop tracking it in your own fork:
+#   git rm --cached src-tauri/vendor/ghostty-vt/lib/libghostty-vt.a
+#   printf '%s\n' 'libghostty-vt.a' >> src-tauri/vendor/ghostty-vt/lib/.gitignore
+
+# Local Tauri build output
+src-tauri/gen/
+
+# Updater private signing keys
+*.key
+src-tauri/*.key
+
+# Local test session fixture dumps
+src-tauri/tests/fixtures/omp_kitty_images.bin
+
+# Signing / credentials
+*.pem
+*.p12
+*.mobileprovision
+*.provisionprofile
+.env
+.env.*
+
+# Build/test caches
+*.tsbuildinfo
+coverage/
+.vitest/

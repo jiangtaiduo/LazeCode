@@ -1,0 +1,67 @@
+name: Bug report
+description: Something behaves unexpectedly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please do not paste secrets, full `~/.ssh` paths, or private repository contents.
+  - type: input
+    id: version
+    attributes:
+      label: LazeCode version
+      description: Settings → About, or the release tag.
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and chip
+      placeholder: "e.g. macOS 27.0.1, Apple M5"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - Built from source
+        - Downloaded release (ad-hoc signed)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open …
+        2. Click …
+        3. See …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or panic.log
+      description: |
+        Optional. Release builds write `panic.log` under
+        `~/Library/Logs/io.github.jiangtaiduo.lazecode` after a crash; debug
+        builds also write desktop logs there. Redact paths and tokens.
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?

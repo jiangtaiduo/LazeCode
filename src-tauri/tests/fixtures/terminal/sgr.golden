@@ -1,0 +1,3 @@
+size=60x2 cursor=33,0 visible=true style=1 pending_wrap=false alt=false scrollback=0 scrollbar=2/0/2
+row=00|plain bold ital inv strike red bg|6:B 7:B 8:B 9:B 11:I 12:I 13:I 14:I 16:V 17:V 18:V 20:S 21:S 22:S 23:S 24:S 25:S 27:f=ff0000 28:f=ff0000 29:f=ff0000 31:b=303030 32:b=303030
+row=01||

@@ -1,0 +1,100 @@
+{
+  "name": "lazecode",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Minimal editor, Git client and terminal for macOS 27; run any coding agent in the terminal",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jiangtaiduo/LazeCode.git"
+  },
+  "homepage": "https://github.com/jiangtaiduo/LazeCode",
+  "bugs": {
+    "url": "https://github.com/jiangtaiduo/LazeCode/issues"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test:ui": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --locked",
+    "fmt:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml",
+    "verify:fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml -- --check",
+    "bench:terminal": "node scripts/bench-terminal.mjs",
+    "bench:pipeline": "node --experimental-strip-types scripts/bench-pipeline.mjs",
+    "tauri": "tauri",
+    "verify:wire": "node --experimental-strip-types src/ghostty-vt/verifyWire.ts",
+    "gen:key-table": "node scripts/gen-key-table.mjs",
+    "verify:key-table": "node scripts/gen-key-table.mjs --check",
+    "verify:menu": "node --experimental-strip-types scripts/verify-menu-parity.mjs",
+    "verify:error-codes": "node --experimental-strip-types scripts/verify-error-codes.mjs",
+    "verify:terminal-attach": "node --experimental-strip-types scripts/verify-terminal-attach.mjs",
+    "verify:settings": "node --experimental-strip-types scripts/verify-settings.mjs",
+    "verify:catalog": "node scripts/verify-command-catalog.mjs",
+    "verify:telemetry": "node --experimental-strip-types scripts/verify-telemetry.mjs",
+    "verify:intern": "node --experimental-strip-types scripts/verify-string-intern.mjs",
+    "verify:no-native-modal": "node scripts/verify-no-native-modal.mjs",
+    "verify:dialog-hooks": "node scripts/verify-dialog-hooks.mjs",
+    "verify:merge-hunks": "node --experimental-strip-types scripts/verify-merge-hunks.mjs",
+    "verify:i18n": "node --experimental-strip-types scripts/verify-i18n.mjs",
+    "build:vt-lib": "bash scripts/build-vt-lib.sh",
+    "check": "npm run verify:wire && npm run verify:key-table && npm run verify:menu && npm run verify:error-codes && npm run verify:terminal-attach && node --experimental-strip-types scripts/verify-log-folding.mjs && node --experimental-strip-types scripts/verify-ipc-log.mjs && npm run verify:settings && npm run verify:catalog && npm run verify:telemetry && npm run verify:intern && npm run verify:no-native-modal && npm run verify:dialog-hooks && npm run verify:merge-hunks && npm run verify:i18n && node scripts/sync-version.mjs && node scripts/verify-tauri-commands.mjs && node scripts/verify-rust-discipline.mjs && tsc --noEmit"
+  },
+  "keywords": [
+    "git",
+    "ide",
+    "git-client",
+    "pycharm",
+    "terminal-emulator",
+    "git-gui",
+    "git-ide",
+    "code-editor",
+    "terminal",
+    "macos",
+    "apple-silicon",
+    "tauri",
+    "monaco",
+    "ghostty",
+    "local-first",
+    "lightweight",
+    "pycharm-inspired",
+    "ai-coding",
+    "developer-tools"
+  ],
+  "author": "LazeCode contributors",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.6.0",
+    "npm": ">=10"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.8",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "@xterm/headless": "^6.0.0",
+    "esbuild": "^0.28.2",
+    "jsdom": "^30.1.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0",
+    "vitest": "^4.1.12"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.3",
+    "@tauri-apps/plugin-updater": "^2.14.0",
+    "monaco-editor": "^0.56.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1"
+  },
+  "overrides": {
+    "dompurify": "^3.4.17"
+  }
+}

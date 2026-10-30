@@ -1,0 +1,343 @@
+/* ==========================================================================
+   Variant 2 · macOS Native 浅色
+
+   与 variant-1（深色）**完全同构**：同一组 token、同一套玻璃材质、同一组
+   选择器，只是语义色取 macOS 浅色系统色板。这样任何 UI 的明暗切换都是
+   一次 `data-variant` 翻转，不需要第二套结构规则。
+
+   macOS 27 浅色的关键差异（不只是把深色值反过来）：
+     · 底色层级反转：浅色里**侧栏是亮的（白）**、编辑区略暗（极浅灰），
+       与深色恰好相反 —— Finder / Notes 就是这样分层的。
+     · 叠加层用黑不用白：hover 是 rgba(0,0,0,.04)，选中是系统蓝 .12。
+     · 遮罩压白不压黑：模态背后叠一层半透明白，与深色的压黑相反。
+     · 阴影更重：浅色里阴影是主要的层次手段（深色靠明暗差，浅色靠投影），
+       y 偏移与模糊都翻倍。
+     · 玻璃饱和度高：浅色玻璃要 saturate(180%) 才不会被白底吃掉色彩。
+   ========================================================================== */
+
+[data-variant="2"] {
+  /* 窗口三层底色（macOS 27 浅色分层）：
+     侧栏亮白玻璃 → 编辑区更亮近白 → 窗口底中灰透出玻璃边缘。
+     浅色里层级靠「亮度差 + 投影」，侧栏还要一条极淡底阴影把边缘压出来。 */
+  --bg-app: #e4e4e8;
+  --bg-sidebar: rgba(255, 255, 255, 0.82);
+  --bg-sidebar-strip: rgba(246, 246, 248, 0.82);
+  --bg-editor: #f7f7f9;
+  --bg-header: rgba(246, 246, 248, 0.78);
+  --bg-bottom: rgba(250, 250, 252, 0.8);
+  --bg-tab-active: #ffffff;
+  --bg-tab-inactive: rgba(255, 255, 255, 0.55);
+  --bg-app-deep: #e2e2e6;
+  /* 模态对话框实体底色（浅色实底，杜绝透出背景文字） */
+  --bg-dialog: #ffffff;
+  --bg-dialog-sidebar: #f7f7f9;
+  --bg-dialog-header: #ffffff;
+  --bg-dialog-footer: #f2f2f4;
+  --bg-dialog-input: #f7f7f9;
+  --bg-dialog-card: #f2f2f5;
+  --term-bg: #1e1e20;          /* 终端保持深色：PTY 语义色假设深色背景 */
+  --term-fg: #e8e8ea;           /* 深色终端背景上的前景色，不跟随浅色 UI 文本 */
+  --bg-hover: rgba(0, 0, 0, 0.045);
+  --bg-selected: rgba(10, 132, 255, 0.14);
+  --bg-selected-row: #cfe4ff;
+  --bg-selected-row-hover: #a9cdff;
+
+  /* 描边：浅色 hairline 用黑而非白 */
+  --border-color: rgba(0, 0, 0, 0.12);
+  --border-subtle: rgba(0, 0, 0, 0.07);
+  --border-strong: rgba(0, 0, 0, 0.26);
+
+  --text-primary: #1d1d1f;      /* macOS label */
+  --text-secondary: #6e6e73;    /* secondaryLabel */
+  --text-muted: #8e8e93;        /* tertiaryLabel */
+  --text-blue-mod: #0066cc;
+  --text-bright: #000000;
+
+  /* 系统强调色：浅色里同一个蓝要更暗一档才够对比 */
+  --accent: #0071e3;
+  --accent-hover: #0077ed;
+  --accent-press: #0068d0;
+  --accent-contrast: #ffffff;
+
+  /* Git 状态：macOS 浅色语义色（同色系加深） */
+  --git-green: #248a3d;
+  --git-mod: #b25000;
+  --git-del: #d70015;
+  --git-del-strong: #a70010;
+  --git-blue: #0071e3;
+  --git-purple: #8944ab;
+  --git-tag: #b25000;
+  --warn: #b25000;
+  --git-del-bg: rgba(215, 0, 21, 0.12);
+  --git-add-bg: rgba(36, 138, 61, 0.12);
+
+  /* 派生色：浅色的淡背景比深色更淡（浅底上高对比叠加会发脏） */
+  --accent-soft: rgba(0, 113, 227, 0.12);
+  --accent-line: rgba(0, 113, 227, 0.4);
+  --accent-glow: rgba(0, 113, 227, 0.22);
+  --git-del-faint: rgba(215, 0, 21, 0.07);
+  --git-del-line: rgba(215, 0, 21, 0.3);
+  --git-add-faint: rgba(36, 138, 61, 0.1);
+  --git-add-line: rgba(36, 138, 61, 0.35);
+  --git-blue-faint: rgba(0, 113, 227, 0.08);
+  --git-tag-line: rgba(178, 80, 0, 0.4);
+  --warn-faint: rgba(178, 80, 0, 0.07);
+  --warn-line: rgba(178, 80, 0, 0.3);
+
+  /* 叠加层：浅色 = 黑色叠加（与深色镜像） */
+  --overlay-hover: rgba(0, 0, 0, 0.06);
+  --overlay-hover-solid: #dcdce0;
+  --overlay-faint: rgba(0, 0, 0, 0.04);
+  --overlay-faint-solid: #f0f0f2;
+  --overlay-ultra: rgba(0, 0, 0, 0.025);
+  --overlay-strong: rgba(0, 0, 0, 0.26);
+
+  /* 遮罩：浅色压白（模态背后更亮、更"退后"） */
+  --scrim-subtle: rgba(255, 255, 255, 0.45);
+  --scrim: rgba(255, 255, 255, 0.55);
+  --scrim-strong: rgba(255, 255, 255, 0.65);
+
+  --scrollbar-thumb: rgba(0, 0, 0, 0.22);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.35);
+
+  /* 浅色里投影是主要层次手段：模糊翻倍、更黑 */
+  --shadow-dialog: 0 28px 90px rgba(0, 0, 0, 0.22);
+  --shadow-menu: 0 16px 48px rgba(0, 0, 0, 0.18);
+  --shadow-popup: 0 10px 30px rgba(0, 0, 0, 0.14);
+  --icon-stroke: 1.6;
+  --win-close: #ff5f57;
+
+  /* 液态玻璃：浅色要更高饱和度，否则白底把色彩吃干净 */
+  --blur-glass: blur(28px) saturate(180%);
+
+  /* 菜单族统一通道：浅色菜单是「亮玻璃」—— 更高白占比、更淡的蓝高亮 */
+  --menu-bg: rgba(250, 250, 252, 0.96);
+  --menu-blur: var(--blur-glass);
+  --menu-border: rgba(0, 0, 0, 0.12);
+  --menu-shadow: var(--shadow-menu);
+  --menu-item-radius: var(--radius-btn);
+  --menu-item-hover: var(--accent);
+  --menu-item-active-text: #ffffff;
+}
+
+/* 窗口底：浅色用极浅的冷灰渐变，给玻璃一点可模糊的内容 */
+body[data-variant="2"] {
+  background: linear-gradient(160deg, #f2f2f5 0%, #e6e6ea 100%) fixed;
+}
+
+/* --------------------------------------------------------------------------
+   玻璃材质统一施加：与 variant-1 同一组选择器，参数来自 --blur-glass
+   -------------------------------------------------------------------------- */
+
+[data-variant="2"] .ide-titlebar,
+[data-variant="2"] .tool-sidebar-strip,
+[data-variant="2"] .pycharm-commit-drawer,
+[data-variant="2"] .project-drawer,
+[data-variant="2"] .ide-bottom-panel-wrapper,
+[data-variant="2"] .ide-statusbar,
+[data-variant="2"] .py-dialog-backdrop .py-push-dialog,
+[data-variant="2"] .py-pull-dialog,
+[data-variant="2"] .py-compare-dialog,
+[data-variant="2"] .py-history-dialog,
+[data-variant="2"] .py-conflict-dialog,
+[data-variant="2"] .search-modal-dialog,
+[data-variant="2"] .py-name-dialog,
+[data-variant="2"] .py-stash-dialog,
+[data-variant="2"] .py-unstash-dialog,
+[data-variant="2"] .py-shelve-dialog,
+[data-variant="2"] .py-rebase-dialog {
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+}
+
+[data-variant="2"] .ide-titlebar { z-index: 1800; }
+[data-variant="2"] .pycharm-commit-drawer { z-index: 1500; }
+[data-variant="2"] .project-drawer { z-index: 1500; }
+[data-variant="2"] .ide-bottom-panel-wrapper { z-index: 1200; }
+
+/* 侧栏右缘：macOS 浅色里玻璃面板的右缘有一条极淡投影，
+   把侧栏与内容区"压"开（深色靠明暗差就够，浅色必须靠投影）。 */
+[data-variant="2"] .project-drawer,
+[data-variant="2"] .pycharm-commit-drawer {
+  box-shadow: 1px 0 0 var(--border-subtle);
+}
+
+/* strip 与文件树之间：macOS 27 的侧栏条纹与内容之间是 hairline，不是实线 */
+[data-variant="2"] .tool-sidebar-strip {
+  border-right: 1px solid var(--border-subtle);
+}
+
+/* --------------------------------------------------------------------------
+   菜单族：本体 / 子菜单 / 标题栏下拉完全同源（与 variant-1 同构）
+   -------------------------------------------------------------------------- */
+
+/* 标题栏下拉（项目 / 分支）+ 日志筛选弹层：与右键菜单同一组 token */
+[data-variant="2"] .pycharm-menu-popup,
+[data-variant="2"] .log-filter-popup {
+  border-radius: var(--radius-lg);
+  border-color: var(--menu-border);
+  box-shadow: var(--menu-shadow);
+}
+
+/* 菜单项高亮：浅色用系统蓝实底 + 白字 */
+[data-variant="2"] .ctx-item:hover:not(:disabled),
+[data-variant="2"] .ctx-row:hover:not(:disabled),
+[data-variant="2"] .ctx-item.highlight {
+  background: var(--menu-item-hover);
+  color: var(--menu-item-active-text);
+  border-radius: var(--menu-item-radius);
+}
+
+[data-variant="2"] .ctx-item.ctx-danger,
+[data-variant="2"] .ctx-item.ctx-row.ctx-danger { color: var(--git-del); }
+
+/* 子菜单与本体共用同一组 token：透明度/模糊完全一致 */
+[data-variant="2"] .ctx-submenu { border-radius: var(--radius-md); }
+
+[data-variant="2"] .ctx-sep,
+[data-variant="2"] .branch-ctx-menu .ctx-sep { background: var(--menu-border); }
+
+/* --------------------------------------------------------------------------
+   控件
+   -------------------------------------------------------------------------- */
+
+[data-variant="2"] .py-btn.primary {
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-btn);
+  color: var(--accent-contrast);
+}
+[data-variant="2"] .py-btn.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  filter: none;
+}
+[data-variant="2"] .py-btn.primary:active:not(:disabled) {
+  background: var(--accent-press);
+}
+
+[data-variant="2"] .py-btn:not(.primary):not(.danger) {
+  background: var(--overlay-hover);
+  border: none;
+  border-radius: var(--radius-btn);
+  color: var(--text-primary);
+}
+
+[data-variant="2"] :is(input[type="text"], input[type="search"], textarea, select) {
+  background: var(--overlay-faint);
+  border: none;
+  border-radius: var(--radius-btn);
+  color: var(--text-primary);
+}
+[data-variant="2"] input::placeholder,
+[data-variant="2"] textarea::placeholder { color: var(--text-muted); }
+[data-variant="2"] input:focus,
+[data-variant="2"] textarea:focus,
+[data-variant="2"] select:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.28);
+}
+
+/* --------------------------------------------------------------------------
+   标题栏 / 状态栏 / 标签栏
+   -------------------------------------------------------------------------- */
+
+[data-variant="2"] .ide-titlebar {
+  background: var(--bg-header);
+  border-bottom: none;
+  height: var(--titlebar-h);
+}
+body[data-variant="2"].platform-mac .ide-titlebar { padding-left: 78px; }
+
+[data-variant="2"] .strip-btn.active {
+  background: rgba(0, 0, 0, 0.08);
+  color: #1e1f22;
+}
+[data-variant="2"] .strip-btn.active::before {
+  content: '';
+  position: absolute;
+  left: -4px;
+  top: 7px;
+  bottom: 7px;
+  width: 3px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
+}
+[data-variant="2"] .pycharm-project-badge { background: var(--accent); }
+
+[data-variant="2"] .editor-tab-bar,
+[data-variant="2"] .ide-tab-bar,
+[data-variant="2"] .terminal-tabs-bar {
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border-color);
+}
+[data-variant="2"] .editor-tab.active,
+[data-variant="2"] .ide-tab.active {
+  background: var(--bg-editor);
+  color: var(--text-bright);
+  border-radius: 0;
+  border-right: 1px solid var(--border-color);
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+
+[data-variant="2"] .ide-statusbar {
+  background: var(--bg-bottom);
+  border-top: none;
+  font-size: var(--text-tiny);
+}
+
+/* 终端在浅色主题下仍走深色：PTY 的 16 色语义板假定深色底。
+   只把外框留白收紧，让深色画布与浅色窗口之间有过渡。 */
+[data-variant="2"] .terminal-canvas-host {
+  background: var(--term-bg);
+  padding: 12px;
+}
+[data-variant="2"] .status-conflict {
+  color: #cf222e !important;
+}
+
+[data-variant="2"] .py-confirm-btn-cancel,
+[data-variant="2"] .py-btn:not(.primary):not(.danger),
+[data-variant="2"] .py-name-btn:not(.primary):not(.danger) {
+  background: #f2f2f2;
+  border-color: #c4c4c4;
+  color: #1e1f22;
+}
+[data-variant="2"] .py-confirm-btn-cancel:hover,
+[data-variant="2"] .py-btn:not(.primary):not(.danger):hover:not(:disabled),
+[data-variant="2"] .py-name-btn:not(.primary):not(.danger):hover:not(:disabled) {
+  background: #e6e6e6;
+  border-color: #ababab;
+}
+
+/* --------------------------------------------------------------------------
+   9 · 合并冲突工具高亮（macOS Native 浅色）
+   -------------------------------------------------------------------------- */
+[data-variant="2"] .merge-hunk-bg.conflict,
+[data-variant="2"] .monaco-editor .merge-hunk-bg.conflict,
+[data-variant="2"] .merge-hunk-margin.conflict,
+[data-variant="2"] .monaco-editor .margin-view-overlays .merge-hunk-margin.conflict,
+[data-variant="2"] .merge-wedge.band.conflict,
+[data-variant="2"] .side-wedge-band.conflict {
+  background: #ffdcdc !important;
+}
+[data-variant="2"] .side-gutter-row.conflict {
+  background: #ffdcdc;
+}
+[data-variant="2"] .side-wedge-band.deleted-rule {
+  background: #cf222e !important;
+  border-top: 2px solid #a40e26;
+}
+[data-variant="2"] .conflict-word-hl,
+[data-variant="2"] .monaco-editor .conflict-word-hl {
+  background: #fbb8b8 !important;
+}
+[data-variant="2"] .side-num.conflict,
+[data-variant="2"] .side-gutter-row.conflict .side-num {
+  color: #cf222e !important;
+}
+[data-variant="2"] .side-gutter-row.conflict .side-mk.apply {
+  color: #cf222e;
+}
+[data-variant="2"] .side-gutter-row.conflict .side-mk.ignore {
+  color: #8c959f;
+}

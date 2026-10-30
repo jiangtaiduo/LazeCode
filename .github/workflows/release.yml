@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.90.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+
+      - name: Build app and updater artifacts
+        env:
+          # Use a Developer ID when configured; otherwise Tauri gets an ad-hoc
+          # identity so the bundle has a valid signature without Apple notarization.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -n "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:--}" \
+              npm run tauri build -- --config src-tauri/tauri.release.conf.json
+          else
+            echo "No TAURI_SIGNING_PRIVATE_KEY secret; building an ad-hoc signed app without updater artifacts."
+            APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:--}" \
+              npm run tauri build
+          fi
+
+      - name: Generate updater manifest
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
+            echo "Updater signing key unavailable; skipping latest.json."
+            exit 0
+          fi
+          SIG_FILE="src-tauri/target/release/bundle/macos/LazeCode.app.tar.gz.sig"
+          if [ ! -f "$SIG_FILE" ]; then
+            echo "Missing $SIG_FILE; skipping latest.json."
+            exit 0
+          fi
+          VERSION="${GITHUB_REF_NAME#v}"
+          SIGNATURE="$(cat "$SIG_FILE")"
+          URL="https://github.com/jiangtaiduo/LazeCode/releases/download/${GITHUB_REF_NAME}/LazeCode.app.tar.gz"
+          printf '{"version":"%s","pub_date":"%s","platforms":{"darwin-aarch64":{"signature":"%s","url":"%s"}}}\n' \
+            "$VERSION" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$SIGNATURE" "$URL" > latest.json
+
+      - name: Collect release artifacts
+        run: |
+          mkdir -p release-artifacts
+          cp src-tauri/target/release/bundle/dmg/*.dmg release-artifacts/ 2>/dev/null || true
+          cp src-tauri/target/release/bundle/macos/*.app.tar.gz release-artifacts/ 2>/dev/null || true
+          if [ -f latest.json ]; then cp latest.json release-artifacts/; fi
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/*
+          generate_release_notes: true

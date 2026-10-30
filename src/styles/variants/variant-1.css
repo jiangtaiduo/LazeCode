@@ -1,0 +1,358 @@
+/* ==========================================================================
+   Variant 1 · macOS Native 深色
+
+   以 macOS 27 原生系统应用（Finder / Xcode / Safari / Terminal）的设计语言
+   为准，而不是任何第三方 IDE：
+     · 材质   「液态玻璃」：面板半透明 + 真 backdrop blur + saturate，
+               同一层级的所有面板共用一套参数，杜绝两处面板透明度不一致。
+     · 层级   窗口 > 侧栏 > 编辑区，靠「底色明度 + 模糊半径」分层，不靠边框堆叠。
+     · 描边   1px hairline（视觉上细到 1 个物理像素），颜色 = 白色 8%~12%。
+     · 强调   系统蓝（dark: #0a84ff），不用第三方 IDE 的高饱和蓝。
+     · 圆角   控件 6 / 面板 8 / 浮层 12（连续圆角视觉）。
+     · 阴影   只给「浮在窗口之上」的层（菜单、弹窗、popover）；贴边面板无阴影。
+
+   在 macOS 27 中，同一窗口内的并列面板不再各自设定材质参数：它们必须
+   共用同一组 token，否则玻璃模糊强度不同会立刻被看出「两块橡皮叠在一起」。
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1 · 语义色
+   -------------------------------------------------------------------------- */
+
+[data-variant="1"] {
+  /* 窗口三层底色（macOS 27 分层）：
+     侧栏最深（半透明深色玻璃，透出背后画布）→ 编辑区最亮（实底）→
+     标题栏/底部介于两者之间。这样三块区域一眼分层，不靠边框堆叠。 */
+  --bg-app: #232326;          /* 窗口底（画布，玻璃要模糊的就是它） */
+  --bg-sidebar: rgba(26, 26, 28, 0.68);
+  --bg-sidebar-strip: rgba(20, 20, 22, 0.85);
+  --bg-editor: #1c1c1e;
+  --bg-header: rgba(40, 40, 43, 0.62);
+  --bg-bottom: rgba(26, 26, 28, 0.72);
+  --bg-tab-active: #2a2a2d;
+  --bg-tab-inactive: rgba(46, 46, 49, 0.6);
+  --bg-app-deep: #191a1c;
+  /* 模态对话框实体底色（100% 不透明实色，杜绝透出背景文字） */
+  --bg-dialog: #28282b;
+  --bg-dialog-sidebar: #202023;
+  --bg-dialog-header: #28282b;
+  --bg-dialog-footer: #222225;
+  --bg-dialog-input: #1c1c1f;
+  --bg-dialog-card: #323236;
+  --term-bg: #1c1c1e;
+  --term-fg: #e8e8ea;
+  --bg-hover: rgba(255, 255, 255, 0.06);
+  --bg-selected: rgba(10, 132, 255, 0.26);
+  --bg-selected-row: #26415f;
+  --bg-selected-row-hover: #4d637c;
+
+  /* 描边：液态玻璃的边缘是把高光画成 hairline */
+  --border-color: rgba(255, 255, 255, 0.1);
+  --border-subtle: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.22);
+
+  --text-primary: #e8e8ea;
+  --text-secondary: #a1a1a6;   /* macOS secondaryLabel */
+  --text-muted: #74747a;       /* macOS tertiaryLabel */
+  --text-blue-mod: #64d2ff;
+  --text-bright: #ffffff;
+
+  /* 系统强调色：iOS/macOS dark 蓝 */
+  --accent: #0a84ff;
+  --accent-hover: #409cff;
+  --accent-press: #0767c4;
+  --accent-contrast: #ffffff;
+
+  /* Git 状态：Xcode Dark 的语义色（新增/修改/删除/忽略） */
+  --git-green: #32d74b;
+  --git-mod: #ffd60a;
+  --git-del: #ff453a;
+  --git-del-strong: #d70015;
+  --git-blue: #64d2ff;
+  --git-purple: #bf5af2;
+  --git-tag: #ff9f0a;
+  --warn: #ff9f0a;
+  --git-del-bg: rgba(255, 69, 58, 0.18);
+  --git-add-bg: rgba(50, 215, 75, 0.18);
+
+  /* 派生色：深色用「实色低透明度」而不是白/黑叠加。
+     macOS 的淡背景是把系统色按 8%~18% 铺在本色上，观感比白叠加更干净。 */
+  --accent-soft: rgba(10, 132, 255, 0.18);
+  --accent-line: rgba(10, 132, 255, 0.45);
+  --accent-glow: rgba(10, 132, 255, 0.35);
+  --git-del-faint: rgba(255, 69, 58, 0.1);
+  --git-del-line: rgba(255, 69, 58, 0.35);
+  --git-add-faint: rgba(50, 215, 75, 0.12);
+  --git-add-line: rgba(50, 215, 75, 0.35);
+  --git-blue-faint: rgba(100, 210, 255, 0.1);
+  --git-tag-line: rgba(255, 159, 10, 0.45);
+  --warn-faint: rgba(255, 159, 10, 0.1);
+  --warn-line: rgba(255, 159, 10, 0.35);
+
+  /* 叠加层：深色 = 白色叠加 */
+  --overlay-hover: rgba(255, 255, 255, 0.08);
+  --overlay-hover-solid: #434347;
+  --overlay-faint: rgba(255, 255, 255, 0.06);
+  --overlay-faint-solid: #2a2a2c;
+  --overlay-ultra: rgba(255, 255, 255, 0.04);
+  --overlay-strong: rgba(255, 255, 255, 0.35);
+
+  /* 遮罩：深色 = 压暗；模态背后压到接近纯黑，菜单背后只压一点 */
+  --scrim-subtle: rgba(0, 0, 0, 0.28);
+  --scrim: rgba(0, 0, 0, 0.42);
+  --scrim-strong: rgba(0, 0, 0, 0.55);
+
+  --scrollbar-thumb: rgba(255, 255, 255, 0.18);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.3);
+
+  --shadow-dialog: 0 24px 80px rgba(0, 0, 0, 0.6);
+  --shadow-menu: 0 12px 40px rgba(0, 0, 0, 0.5);
+  --shadow-popup: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --icon-stroke: 1.7;          /* SF Symbols 线宽 */
+  --win-close: #ff5f57;        /* macOS 交通灯 */
+
+  /* ---------- 液态玻璃 ---------- */
+  --blur-glass: blur(24px) saturate(160%);
+
+  /* ---------- 菜单族统一通道 ----------
+     右键菜单 / 子菜单 / 标题栏下拉 / 分支菜单 / 弹出层全部吃这五个 token。
+     用户报过「右键菜单和子菜单透明度不一致」：根因是只用 .branch-ctx-menu
+     单独覆盖，子菜单仍走基座值。这里把整族收口到一个 token 组。 */
+  --menu-bg: rgba(30, 30, 32, 0.96);
+  --menu-blur: var(--blur-glass);
+  --menu-border: rgba(255, 255, 255, 0.1);
+  --menu-shadow: var(--shadow-menu);
+  --menu-item-radius: var(--radius-btn);
+  --menu-item-hover: rgba(10, 132, 255, 0.9);
+  --menu-item-active-text: #ffffff;
+
+  /* ---------- 结构 ---------- */
+  --radius-btn: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+/* 窗口底色：液态玻璃需要背后有内容可模糊，给 body 一层暗色渐变。
+   固定不滚动，避免玻璃面板后面出现条纹。 */
+body[data-variant="1"] {
+  background: radial-gradient(1200px 600px at 18% -8%, #2b2b3d 0%, #1e1e20 58%) fixed;
+}
+
+/* --------------------------------------------------------------------------
+   2 · 玻璃材质统一施加
+
+   同一窗口内并列的面板必须共用同一组材质参数（--blur-glass + --glass-tint），
+   否则模糊强度不一致立刻可见。这里用一个选择器组一次声明，新增面板时
+   加进这个组即可，不要单独写 backdrop-filter。
+   -------------------------------------------------------------------------- */
+
+[data-variant="1"] .ide-titlebar,
+[data-variant="1"] .tool-sidebar-strip,
+[data-variant="1"] .pycharm-commit-drawer,
+[data-variant="1"] .project-drawer,
+[data-variant="1"] .ide-bottom-panel-wrapper,
+[data-variant="1"] .ide-statusbar,
+[data-variant="1"] .py-dialog-backdrop .py-push-dialog,
+[data-variant="1"] .py-pull-dialog,
+[data-variant="1"] .py-compare-dialog,
+[data-variant="1"] .py-history-dialog,
+[data-variant="1"] .py-conflict-dialog,
+[data-variant="1"] .search-modal-dialog,
+[data-variant="1"] .py-name-dialog,
+[data-variant="1"] .py-stash-dialog,
+[data-variant="1"] .py-unstash-dialog,
+[data-variant="1"] .py-shelve-dialog,
+[data-variant="1"] .py-rebase-dialog {
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+}
+
+/* backdrop-filter ≠ none 会创建层叠上下文（containing block + stacking context），
+   标题栏 / Commit 抽屉里 absolute+高 z-index 的弹层（下拉菜单 z9999、
+   提交历史 z999）会被困在这个上下文内，被后面的兄弟面板整体盖住。
+   给这些容器显式 z-index 让层叠顺序回到文档流之后、低于全屏模态
+   （search backdrop z2000 / dialog backdrop z2100）。
+   标题栏必须高于抽屉：两者 z 相同则按 DOM 顺序由抽屉（在后）绘制上层，
+   会把标题栏里的下拉菜单整块盖住。 */
+[data-variant="1"] .ide-titlebar { z-index: 1800; }
+[data-variant="1"] .pycharm-commit-drawer { z-index: 1500; }
+[data-variant="1"] .project-drawer { z-index: 1500; }
+[data-variant="1"] .ide-bottom-panel-wrapper { z-index: 1200; }
+
+/* --------------------------------------------------------------------------
+   3 · 菜单族：本体 / 子菜单 / 标题栏下拉 / popover 完全同源
+
+   所有弹出面共用 --menu-bg / --menu-blur / --menu-border / --menu-shadow，
+   不再有任何一处单独指定底色。新增菜单类时把它加进这个组。
+   -------------------------------------------------------------------------- */
+
+/* 菜单族统一底色：右键菜单本体、子菜单、标题栏下拉、日志筛选弹层
+   全部命中 .branch-ctx-menu（所有右键菜单的公共基类）或各自的选择器。
+   这里不重复 .branch-ctx-menu —— 它在 theme.css 里已经吃
+   --menu-bg / --menu-blur / --border-color；
+   variant 只需要覆盖「圆角 / 阴影 / 项高亮」这些结构性差异。 */
+
+/* 标题栏下拉（项目 / 分支）：与右键菜单同源 */
+[data-variant="1"] .pycharm-menu-popup,
+[data-variant="1"] .log-filter-popup {
+  border-radius: var(--radius-lg);
+  border-color: var(--menu-border);
+  box-shadow: var(--menu-shadow);
+}
+
+/* 菜单项：macOS 的菜单高亮是系统蓝实底 + 白字，圆角与菜单内边距匹配 */
+[data-variant="1"] .ctx-item:hover:not(:disabled),
+[data-variant="1"] .ctx-row:hover:not(:disabled),
+[data-variant="1"] .ctx-item.highlight {
+  background: var(--menu-item-hover);
+  color: var(--menu-item-active-text);
+  border-radius: var(--menu-item-radius);
+}
+
+[data-variant="1"] .ctx-item.ctx-danger,
+[data-variant="1"] .ctx-item.ctx-row.ctx-danger { color: var(--git-del); }
+
+/* 子菜单与本体共用同一组 token：颜色、透明度、模糊完全一致
+   （这是「右键菜单和子菜单透明度不一致」的修复点，不要在这里另写底色） */
+[data-variant="1"] .ctx-submenu { border-radius: var(--radius-md); }
+
+/* 分组之间的 hairline 分隔（macOS 菜单的分组分隔是 1px，不加粗） */
+[data-variant="1"] .ctx-sep,
+[data-variant="1"] .branch-ctx-menu .ctx-sep { background: var(--menu-border); }
+
+/* --------------------------------------------------------------------------
+   4 · 控件：按钮 / 输入框 / 勾选框 的 macOS 原生观感
+   -------------------------------------------------------------------------- */
+
+/* 主按钮：系统蓝实底、圆角 6、无渐变、无外发光 */
+[data-variant="1"] .py-btn.primary {
+  background: var(--accent);
+  border: none;
+  border-radius: var(--radius-btn);
+  color: var(--accent-contrast);
+}
+[data-variant="1"] .py-btn.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  filter: none;
+}
+[data-variant="1"] .py-btn.primary:active:not(:disabled) {
+  background: var(--accent-press);
+}
+
+/* 次按钮：填充型（macOS 27 的默认按钮是 fill 而非 stroke） */
+[data-variant="1"] .py-btn:not(.primary):not(.danger) {
+  background: var(--overlay-hover);
+  border: none;
+  border-radius: var(--radius-btn);
+  color: var(--text-primary);
+}
+
+/* 搜索框/输入框：无边框、浅填充 —— macOS 27 的 search field 样式 */
+[data-variant="1"] :is(input[type="text"], input[type="search"], textarea, select) {
+  background: var(--overlay-faint);
+  border: none;
+  border-radius: var(--radius-btn);
+  color: var(--text-primary);
+}
+[data-variant="1"] input::placeholder,
+[data-variant="1"] textarea::placeholder { color: var(--text-muted); }
+[data-variant="1"] input:focus,
+[data-variant="1"] textarea:focus,
+[data-variant="1"] select:focus {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.35);
+}
+
+/* --------------------------------------------------------------------------
+   5 · 标题栏 / 交通灯（macOS 原生）
+   -------------------------------------------------------------------------- */
+
+[data-variant="1"] .ide-titlebar {
+  background: var(--bg-header);
+  border-bottom: none;         /* 玻璃面板自带 hairline，不再叠实线 */
+  height: var(--titlebar-h);
+}
+/* 交通灯：只在本主题 + macos caption 下显示真彩三点 */
+body[data-variant="1"].platform-mac .ide-titlebar { padding-left: 78px; }
+
+[data-variant="1"] .strip-btn.active {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+[data-variant="1"] .strip-btn.active::before {
+  content: '';
+  position: absolute;
+  left: -4px;
+  top: 7px;
+  bottom: 7px;
+  width: 3px;
+  background: var(--accent);
+  border-radius: 0 2px 2px 0;
+}
+
+/* strip 与文件树之间：hairline 而非实线（深色下用白色低透明） */
+[data-variant="1"] .tool-sidebar-strip {
+  border-right: 1px solid var(--border-subtle);
+}
+[data-variant="1"] .pycharm-project-badge { background: var(--accent); }
+
+/* --------------------------------------------------------------------------
+   6 · 标签栏（macOS 26+ Safari / Finder 的分页样式）
+   -------------------------------------------------------------------------- */
+
+[data-variant="1"] .editor-tab-bar,
+[data-variant="1"] .ide-tab-bar,
+[data-variant="1"] .terminal-tabs-bar {
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border-color);
+}
+[data-variant="1"] .editor-tab.active,
+[data-variant="1"] .ide-tab.active {
+  background: var(--bg-editor);
+  color: var(--text-bright);
+  border-radius: 0;
+  border-right: 1px solid var(--border-color);
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+
+/* --------------------------------------------------------------------------
+   7 · 状态栏：macOS 窗口底部不画分隔线，直接贴窗口圆角
+   -------------------------------------------------------------------------- */
+
+[data-variant="1"] .ide-statusbar {
+  background: var(--bg-bottom);
+  border-top: none;
+  font-size: var(--text-tiny);
+}
+
+/* --------------------------------------------------------------------------
+   8 · 终端：与窗口底色同一族，行高与字号按 macOS Terminal 比例
+   -------------------------------------------------------------------------- */
+
+[data-variant="1"] .terminal-canvas-host {
+  background: var(--term-bg);
+  padding: 12px;
+}
+
+/* --------------------------------------------------------------------------
+   9 · 合并冲突工具高亮（macOS Native 深色）
+   -------------------------------------------------------------------------- */
+[data-variant="1"] .merge-hunk-bg.conflict,
+[data-variant="1"] .monaco-editor .merge-hunk-bg.conflict,
+[data-variant="1"] .merge-hunk-margin.conflict,
+[data-variant="1"] .monaco-editor .margin-view-overlays .merge-hunk-margin.conflict,
+[data-variant="1"] .merge-wedge.band.conflict,
+[data-variant="1"] .side-wedge-band.conflict {
+  background: #542628 !important;
+}
+[data-variant="1"] .side-gutter-row.conflict {
+  background: #542628;
+}
+[data-variant="1"] .conflict-word-hl,
+[data-variant="1"] .monaco-editor .conflict-word-hl {
+  background: #7a3235 !important;
+}
+[data-variant="1"] .side-num.conflict,
+[data-variant="1"] .side-gutter-row.conflict .side-num {
+  color: #e55353 !important;
+}

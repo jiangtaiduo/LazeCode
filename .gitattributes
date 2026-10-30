@@ -1,0 +1,17 @@
+# Normalize text files; keep binary artifacts byte-for-byte.
+* text=auto eol=lf
+
+*.a binary
+*.bin binary
+*.icns binary
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
+
+*.golden text eol=lf
+*.sh text eol=lf
+*.plist text eol=lf

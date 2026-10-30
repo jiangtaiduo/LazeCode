@@ -1,0 +1,6 @@
+size=10x5 cursor=0,3 visible=true style=1 pending_wrap=false alt=false scrollback=0 scrollbar=5/0/5
+row=00|one|
+row=01|three|
+row=02|four|
+row=03||
+row=04|five|

@@ -1,0 +1,67 @@
+[package]
+name = "lazecode"
+version = "0.1.0"
+description = "Minimal editor, Git client and terminal for macOS 27; run any coding agent in the terminal"
+keywords = ["git", "ide", "terminal", "macos", "tauri"]
+authors = ["LazeCode contributors"]
+license = "MIT"
+repository = "https://github.com/jiangtaiduo/LazeCode"
+homepage = "https://github.com/jiangtaiduo/LazeCode"
+edition = "2021"
+rust-version = "1.90"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "lazecode_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+# 图片预览统一走 read_image_bytes（data URL），不再启用 asset:// 协议。
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+portable-pty = "0.9"
+# 删除文件移入系统废纸篓（项目树 Delete，对齐 PyCharm Safe Delete）
+trash = "5"
+# 窗口几何持久化的配置目录（~/Library/Application Support/<id> 等），
+# tauri 的 path() 只能在 setup 之后使用，而窗口创建（读盘恢复）早于 setup
+dirs = "6"
+# 打开文件的外部修改监听（fs_watch_files → fs://external-change 事件）
+notify = "8"
+# 终端内联图片：Kitty 图形协议里 f=100 传 PNG，引擎要求嵌入方提供解码器
+png = "0.17"
+ignore = "0.4.30"
+nucleo-matcher = "0.3.1"
+toml = "1.0.7"
+# 非 UTF-8 源文件（GBK/Shift_JIS/UTF-16 等）：检测 + 解码/回写。
+encoding_rs = "0.8"
+chardetng = "0.1"
+# Find in Files / Replace in Files 的正则、whole-word、大小写匹配
+regex = "1"
+globset = "0.4"
+tauri-plugin-updater = "2.12.0"
+
+# macOS 原生剪贴板 / 文件选择面板；其他平台走 cfg 回退，不拉 objc2。
+[target.'cfg(target_os = "macos")'.dependencies]
+# 提升 RLIMIT_NOFILE：GUI 进程从 launchd 继承的软上限只有 256，见 lib.rs
+libc = "0.2"
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", features = ["NSPasteboard", "NSOpenPanel", "NSPanel", "NSSavePanel", "NSDocumentController"] }
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSDictionary", "NSURL", "NSError"] }
+
+# 发布构建。默认 release profile 不切 LTO，跨 crate 的边界调用
+# （这里是 tauri -> lazecode_lib -> ghostty FFI）拿不到内联。
+# lto = "thin" 收益大而编译时间可控；codegen-units = 1 进一步收紧，
+# 换来的启动与终端吞吐提升值得这几分钟。
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

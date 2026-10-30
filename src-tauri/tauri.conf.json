@@ -1,0 +1,74 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "LazeCode",
+  "version": "0.1.0",
+  "identifier": "io.github.jiangtaiduo.lazecode",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "LazeCode",
+        "width": 1440,
+        "height": 920,
+        "minWidth": 1024,
+        "minHeight": 700,
+        "fullscreen": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'none'",
+      "devCsp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "createUpdaterArtifacts": false,
+    "category": "DeveloperTool",
+    "copyright": "Copyright © 2026 jiangtaiduo and LazeCode contributors",
+    "shortDescription": "Minimal editor, Git client and terminal for macOS 27.",
+    "longDescription": "LazeCode is a minimal macOS 27 editor, Git client and terminal. Run any coding agent in the terminal; the editor and Git remain for manual inspection and edits. No account, no crash reporting, only version checks.",
+    "homepage": "https://github.com/jiangtaiduo/LazeCode",
+    "publisher": "jiangtaiduo",
+    "licenseFile": "../LICENSE",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../LICENSE": "LICENSE",
+      "../NOTICE": "NOTICE",
+      "../NOTICE.zh-CN.md": "NOTICE.zh-CN.md",
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "../THIRD_PARTY_NOTICES.zh-CN.md": "THIRD_PARTY_NOTICES.zh-CN.md",
+      "resources/Monaco-ThirdPartyNotices.txt": "Monaco-ThirdPartyNotices.txt",
+      "vendor/ghostty-vt/LICENSE": "ghostty-vt-LICENSE"
+    },
+    "macOS": {
+      "minimumSystemVersion": "27.0",
+      "hardenedRuntime": true,
+      "infoPlist": "Info.plist"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY5RkUyNzQ2QUE1Mzg0RTAKUldUZ2hGT3FSaWYrYVFzUXJ4b3IyVnVOVFNCOEFEdHJzc2lrdlJ6bWQ2OE9MdllLQ3hYN0pTM0EK",
+      "endpoints": [
+        "https://github.com/jiangtaiduo/LazeCode/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}

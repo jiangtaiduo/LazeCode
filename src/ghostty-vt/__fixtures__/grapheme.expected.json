@@ -1,0 +1,160 @@
+{
+  "cells": [
+    {
+      "clusterIndex": 0,
+      "codepoint": 36,
+      "hasText": true,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 32,
+      "hasText": true,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 1,
+      "codepoint": 101,
+      "hasText": true,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 2,
+      "codepoint": 128104,
+      "hasText": true,
+      "wide": 1
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 2
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    },
+    {
+      "clusterIndex": 0,
+      "codepoint": 0,
+      "hasText": false,
+      "wide": 0
+    }
+  ],
+  "clusters": [
+    "é",
+    "👨‍👩‍👧‍👦"
+  ],
+  "cols": 8,
+  "diffLength": 332,
+  "rowFlags": [
+    1,
+    0,
+    0
+  ],
+  "rows": 3
+}

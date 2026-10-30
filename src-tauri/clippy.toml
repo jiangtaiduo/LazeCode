@@ -1,0 +1,18 @@
+# 进程 / 解析禁令（对齐 Zed `clippy.toml` 的思路）。
+#
+# 能全局 deny 的才放这里：`serde_json::from_reader` 全仓库零使用，
+# 直接禁掉防后人引入 —— from_reader 解析失败时吞掉已读字节数，
+# 错误定位困难；一律用 `from_str` / `from_slice` / `to_value`。
+#
+# 位置敏感的禁令 clippy 区分不了测试 / 生产上下文，不放这里，
+# 进 `scripts/verify-rust-discipline.mjs` 做白名单门禁：
+# - `Command::output()` 无超时调用（生产代码零容忍，ghostty.rs 已全量改走
+#   `run_with_timeout_spawn`；测试脚手架的用法不受影响）
+# - `Command::status()` 只允许 `kill_process_group`
+# - 生产代码 `unwrap()` / `expect()` 零容忍（`?` + `error_proto::coded`）
+# - `let _ =` 只允许 emit / kill / wait / join / best-effort 清理等已注释类别
+# 注：本机 clippy 要求 sequence 写法（`[[disallowed-methods]]` + path/reason），
+# 新版 clippy 才支持 map 写法；升级工具链后可改回 map 形式，语义不变。
+[[disallowed-methods]]
+path = "serde_json::from_reader"
+reason = "用 serde_json::from_str / from_slice：from_reader 失败时吞掉已读字节数，定位困难"

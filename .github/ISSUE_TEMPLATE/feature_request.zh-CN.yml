@@ -1,0 +1,27 @@
+name: 功能请求
+description: 建议一项能力或工作流改进
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题？
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议的方案
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的替代方案
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: 范围确认
+      options:
+        - label: 这是面向 macOS/Apple Silicon 的请求（目前唯一支持的目标平台）。
+        - label: 我理解 LazeCode 是本地优先的，不会增加遥测上传。

@@ -1,0 +1,67 @@
+name: 缺陷报告
+description: 出现了不符合预期的行为
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请不要粘贴密钥、完整的 `~/.ssh` 路径或私有仓库内容。
+  - type: input
+    id: version
+    attributes:
+      label: LazeCode 版本
+      description: 设置 → 关于，或发布标签。
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS 版本与芯片
+      placeholder: "例如 macOS 27.0.1，Apple M5"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: 安装方式
+      options:
+        - 从源码构建
+        - 下载发布版本（ad-hoc 签名）
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开……
+        2. 点击……
+        3. 看到……
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志或 panic.log
+      description: |
+        可选。发布构建崩溃后会把 `panic.log` 写到
+        `~/Library/Logs/io.github.jiangtaiduo.lazecode`；调试构建还会写入桌面
+        日志。请先隐去路径和令牌。
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: 其他信息

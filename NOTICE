@@ -1,0 +1,55 @@
+# Third-party notices
+
+[English](NOTICE) | [Simplified Chinese](NOTICE.zh-CN.md)
+
+LazeCode is MIT-licensed. It depends on the following projects.
+
+## Runtime dependencies (bundled with the app)
+
+| Project | License |
+| :--- | :--- |
+| [React](https://github.com/facebook/react) | MIT |
+| [React DOM](https://github.com/facebook/react) | MIT |
+| [Monaco Editor](https://github.com/microsoft/monaco-editor) | MIT |
+| [@monaco-editor/react](https://github.com/suren-atoyan/monaco-react) | MIT |
+| [Tauri API](https://github.com/tauri-apps/tauri) | Apache-2.0 OR MIT |
+| [@tauri-apps/plugin-dialog](https://github.com/tauri-apps/plugins-workspace) | MIT OR Apache-2.0 |
+| [@tauri-apps/plugin-updater](https://github.com/tauri-apps/plugins-workspace) | MIT OR Apache-2.0 |
+| [tauri-plugin-log](https://github.com/tauri-apps/plugins-workspace) | Apache-2.0 OR MIT |
+| [react-markdown](https://github.com/remarkjs/react-markdown) | MIT |
+| [remark-gfm](https://github.com/remarkjs/remark-gfm) | MIT |
+| [rehype-highlight](https://github.com/rehypejs/rehype-highlight) | MIT |
+| [Ghostty](https://github.com/ghostty-org/ghostty) | MIT |
+| [nucleo-matcher](https://github.com/helix-editor/nucleo) | MPL-2.0 |
+| [notify](https://github.com/notify-rs/notify) | CC0-1.0 |
+
+Ghostty is © 2024 Mitchell Hashimoto and Ghostty contributors. The
+`libghostty-vt` static library is built from unmodified Ghostty sources; the
+vendored headers under `src-tauri/vendor/ghostty-vt/include/` are copied
+verbatim from that repository. See `THIRD_PARTY_NOTICES.md` for the complete
+summary and for the Monaco/React attribution.
+
+## Build tooling (not bundled)
+
+| Project | License |
+| :--- | :--- |
+| [Vite](https://github.com/vitejs/vite) | MIT |
+| [TypeScript](https://github.com/microsoft/TypeScript) | Apache-2.0 |
+| [Tauri CLI](https://github.com/tauri-apps/tauri) | Apache-2.0 OR MIT |
+| [@vitejs/plugin-react](https://github.com/vitejs/vite) | MIT |
+
+## Legal notes
+
+- LazeCode's UI is inspired by PyCharm and implemented in its own code. The
+  project does **not** ship JetBrains source code, icons, or other binary
+  assets.
+- PyCharm and JetBrains are trademarks of JetBrains s.r.o. The names are used
+  only to describe design inspiration and compatibility, not as trademarks or
+  to suggest affiliation. LazeCode is not affiliated with or endorsed by
+  JetBrains.
+- No telemetry is uploaded, and there is no account system or crash-reporting
+  service. A small local-only diagnostics buffer can be enabled in Settings;
+  it never leaves the machine. The only automatic network request is the
+  optional update check (on by default, at most once a day, against this
+  repository's GitHub Releases; it can be disabled in Settings). Git remotes
+  and any language servers you configure may make their own network requests.

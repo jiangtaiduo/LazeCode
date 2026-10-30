@@ -14,16 +14,16 @@ LazeCode 是一个只保留编辑器、Git 和控制台等核心功能的 macOS 
 无账号系统，无崩溃上报。唯一的自动后台请求是版本检查；其他可能联网的操作见
 [隐私与网络](#隐私与网络)。
 
-> **状态：基于 macOS 27 开发和测试，目前仅适配 macOS 27（Apple Silicon）；
-> 仍处于 alpha 阶段。**
-> 更早的 macOS 版本未适配，也不在支持范围内。发布构建为 **ad-hoc 签名但未公证**
+> **状态：基于 macOS 27 开发和测试。声明的最低版本为 macOS 13
+> （Apple Silicon），但 macOS 13–26 尚未测试。仍处于 alpha 阶段。**
+> 发布构建为 **ad-hoc 签名但未公证**
 > （未配置 Developer ID 证书），本地使用请从源码构建；版本检查每天最多一次，
 > 安装前需要用户确认（`设置 → 更新`）。
 
 | | |
 | :--- | :--- |
-| 状态 | `0.1.0`，alpha |
-| 平台 | macOS 27，Apple Silicon（arm64） |
+| 状态 | `0.1.2`，alpha |
+| 平台 | macOS 13+，Apple Silicon（arm64）；已在 macOS 27 测试 |
 | 技术栈 | Tauri 2、Rust 1.90+、React 19、Monaco、Ghostty VT |
 | 许可证 | MIT |
 | 账号 / 遥测 | 无账号；本地诊断默认关闭 |
@@ -61,8 +61,8 @@ macOS、Apple Silicon、Tauri、Monaco、Ghostty、Rust、本地优先、轻量�
 
 ## 快速开始
 
-LazeCode 需要 Apple Silicon 上的 macOS 27、Xcode Command Line Tools、Node.js 22.6
-或更高版本，以及 Rust 1.90 或更高版本。
+LazeCode 需要 Apple Silicon 上的 macOS 13 或更高版本、Xcode Command Line Tools、
+Node.js 22.6 或更高版本，以及 Rust 1.90 或更高版本。
 
 ```bash
 npm ci

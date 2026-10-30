@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "LazeCode",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "identifier": "io.github.jiangtaiduo.lazecode",
   "build": {
     "frontendDist": "../dist",
@@ -58,7 +58,7 @@
       "vendor/ghostty-vt/LICENSE": "ghostty-vt-LICENSE"
     },
     "macOS": {
-      "minimumSystemVersion": "27.0",
+      "minimumSystemVersion": "13.0",
       "hardenedRuntime": true,
       "infoPlist": "Info.plist"
     }

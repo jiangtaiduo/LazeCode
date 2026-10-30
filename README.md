@@ -16,17 +16,17 @@ No account system, no crash reporting. The only automatic background request is
 the version check; see [Privacy and network](#privacy-and-network) for the
 operations that can reach the network.
 
-> **Status: developed and tested on macOS 27, currently adapted only to
-> macOS 27 (Apple Silicon); still alpha.**
-> Earlier macOS versions are not adapted or supported. Release builds are
-> **ad-hoc signed but not notarized** because no Developer ID certificate is
-> configured. Build from source for local use; version checks run at most once a
-> day, and installation requires user confirmation (`Settings → Updates`).
+> **Status: developed and tested on macOS 27. The declared minimum is macOS 13
+> on Apple Silicon; macOS 13 through 26 are not tested yet. Still alpha.**
+> Release builds are **ad-hoc signed but not notarized** because no Developer ID
+> certificate is configured. Build from source for local use; version checks run
+> at most once a day, and installation requires user confirmation
+> (`Settings → Updates`).
 
 | | |
 | :--- | :--- |
-| Status | `0.1.0`, alpha |
-| Platform | macOS 27, Apple Silicon (arm64) |
+| Status | `0.1.2`, alpha |
+| Platform | macOS 13+, Apple Silicon (arm64); tested on macOS 27 |
 | Stack | Tauri 2, Rust 1.90+, React 19, Monaco, Ghostty VT |
 | License | MIT |
 | Accounts / telemetry | None; local diagnostics are opt-in |
@@ -69,8 +69,8 @@ s.r.o.; no JetBrains code, icons, or other assets are used.
 
 ## Quick start
 
-LazeCode requires macOS 27 on Apple Silicon, Xcode Command Line Tools, Node.js
-22.6 or newer and Rust 1.90 or newer.
+LazeCode requires macOS 13 or later on Apple Silicon, Xcode Command Line Tools,
+Node.js 22.6 or newer and Rust 1.90 or newer.
 
 ```bash
 npm ci

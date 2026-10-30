@@ -33,6 +33,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Automatic update checks are enabled by default (at most once a day). Installing
   an update still requires explicit user confirmation.
 
+## [0.1.2] - 2026-10-30
+
+### Changed
+
+- The declared minimum macOS version is now 13.0 instead of 27.0. Tauri writes
+  this value into both `LSMinimumSystemVersion` and the Mach-O deployment
+  target, so macOS 13 through 26 can launch the app; only macOS 27 has been
+  tested so far.
+
 ## [0.1.1] - 2026-10-30
 
 ### Added

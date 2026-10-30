@@ -71,7 +71,7 @@ jobs:
           cp src-tauri/target/release/bundle/macos/*.app.tar.gz release-artifacts/ 2>/dev/null || true
           if [ -f latest.json ]; then cp latest.json release-artifacts/; fi
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: release-artifacts/*
           generate_release_notes: true

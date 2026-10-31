@@ -561,6 +561,14 @@ export const App: React.FC = () => {
   const onLiveProjectsChangeStable = useStableCallback((projects: string[]) => {
     liveTerminalProjectsRef.current = new Set(projects);
   });
+  /** 控制台进程占用变化：只存命令名列表（空数组 = 无进程在跑），驱动工具条角标 */
+  const onTerminalBusyChangeStable = useStableCallback((busy: boolean, commands: string[]) => {
+    setTerminalRunning(busy ? commands : []);
+  });
+  /** 控制台活动会话 cwd 变化：并入全局状态栏 */
+  const onTerminalCwdChangeStable = useStableCallback((pwd: string | null) => {
+    setTerminalCwd(pwd);
+  });
   /** 本窗口打开（可切换）的项目；当前项目始终在列 */
   const [sessionProjects, setSessionProjects] = useState<{ path: string; name: string }[]>([]);
   /** 其它窗口打开的项目（点击聚焦对应窗口） */
@@ -1759,6 +1767,10 @@ export const App: React.FC = () => {
   const [terminalSnapTarget, setTerminalSnapTarget] = useState<'right' | 'bottom' | null>(null);
   /** 拖拽开始时记录的主区几何信息，用于定位吸附预览层 */
   const terminalSnapZoneRef = useRef<{ left: number; top: number; width: number; height: number } | null>(null);
+  /** 当前项目控制台正在运行的命令名（去重）：LeftStrip Terminal 图标角标 + tooltip */
+  const [terminalRunning, setTerminalRunning] = useState<string[]>([]);
+  /** 控制台活动会话的 shell cwd：并入全局状态栏（终端面板自带的专用状态栏已移除） */
+  const [terminalCwd, setTerminalCwd] = useState<string | null>(null);
 
   /** 切换控制台停靠位置并持久化（下次打开 app 恢复同样的位置） */
   const applyTerminalPlacement = (placement: 'bottom' | 'right') => {
@@ -5666,6 +5678,7 @@ export const App: React.FC = () => {
           isGitRepo={isRepo}
           hasCompareSession={!!compareSession}
           compareTooltip={compareSession ? `Changes Between ${compareSession.fromCommit.shortHash || compareSession.fromCommit.hash.slice(0, 8)} and ${compareSession.toCommit.shortHash || compareSession.toCommit.hash.slice(0, 8)}` : undefined}
+          terminalRunning={terminalRunning}
         />
         {/* 2.2. Left Drawer (Commit or Project)。CommitDrawer 关闭时只隐藏不卸载：
             提交信息、勾选文件是组件本地草稿，PyCharm 关闭 Commit 工具窗口后仍保留。 */}
@@ -6073,6 +6086,8 @@ export const App: React.FC = () => {
               openProjects={sessionProjects.map(p => p.path)}
               onNotice={showStatus}
               onLiveProjectsChange={onLiveProjectsChangeStable}
+              onBusyChange={onTerminalBusyChangeStable}
+              onActivePwdChange={onTerminalCwdChangeStable}
               fontSize={settings.terminalFontSize}
               themeKey={`${settings.uiVariant}:${settings.themeId}`}
               visible={activeBottomTool === 'terminal'}
@@ -6110,6 +6125,11 @@ export const App: React.FC = () => {
           {/* Status Bar */}
           <footer className="ide-statusbar">
             <div className="statusbar-left">
+              {activeBottomTool === 'terminal' && terminalCwd && (
+                <span className="statusbar-terminal-cwd" title={terminalCwd}>
+                  {terminalCwd}
+                </span>
+              )}
               {statusCrumbs.map((part, i, arr) => (
                 <span key={i} className="statusbar-crumb-wrap">
                   <span className={`statusbar-crumb ${i === arr.length - 1 ? 'active' : ''}`}>

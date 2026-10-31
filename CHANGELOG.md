@@ -6,9 +6,28 @@ All notable changes to LazeCode are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.3] - 2026-10-31
 
 ### Added
+
+- While commands are still running in the console, the Terminal icon in the left
+  tool strip now shows an orange dot in its top-right corner; hovering lists the
+  running command names. Detection keeps running while the panel is collapsed
+  (probed every 2 seconds).
+
+### Fixed
+
+- When the console is docked at the bottom, the terminal's own status bar and
+  the global status bar stacked into two rows and squeezed the terminal view.
+  The dedicated status bar is removed; the active session's cwd now merges into
+  the left side of the global status bar (shown only while the console is
+  open), returning the reclaimed height to the terminal.
+- Double-clicking a file in the changes list to switch diffs briefly flashed
+  the previous file at its last scroll position. A loading veil now covers the
+  content area during loads (the diff editor stays mounted, no rebuild), and
+  the new file lands directly on its first difference block.
+
+### Changed
 
 - When a background update check finds a new release, the title bar now shows a
   green `vX.Y.Z available` badge next to Search; clicking it opens the existing

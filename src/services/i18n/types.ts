@@ -1392,6 +1392,7 @@ export interface LocaleDict {
     commitTooltipWithChanges: LocaleFn<[number]>;
     gitLogTooltip: string;
     terminalTooltip: string;
+    terminalTooltipRunning: LocaleFn<[string]>;
     settingsTooltip: string;
   };
   /** 分支右键 / 分支下拉操作子菜单（BranchContextMenu）。 */

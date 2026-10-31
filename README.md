@@ -25,7 +25,7 @@ operations that can reach the network.
 
 | | |
 | :--- | :--- |
-| Status | `0.1.2`, alpha |
+| Status | `0.1.3`, alpha |
 | Platform | macOS 13+, Apple Silicon (arm64); tested on macOS 27 |
 | Stack | Tauri 2, Rust 1.90+, React 19, Monaco, Ghostty VT |
 | License | MIT |
@@ -331,7 +331,7 @@ changed file by hand.
 
 ### Rust and UI tests
 
-**378 Rust tests passed, 7 ignored** and **98 UI tests passed** on the reference
+**378 Rust tests passed, 7 ignored** and **104 UI tests passed** on the reference
 Apple M5 / macOS 27 host. The Rust integration tests build real throwaway
 repositories and run real Git:
 

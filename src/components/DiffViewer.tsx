@@ -281,21 +281,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   const resolvedFontSize = fontSize ?? settings.editorFontSize ?? 13;
 
   const disposedRef = useRef(false);
-  /** 内容/模式变化后恢复该 diff 的记忆位置；没有记忆才回顶部。
-   *  用 layout effect 在绘制前认领新 key：DOM 内容替换本身也会触发 scroll 事件，
-   *  晚了会把新内容的顶部位写进旧文件。旧位置已由 onScroll 持续记入 Map。 */
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = 0;
-    setScrollTop(0);
-    if (el) setViewportH(el.clientHeight || 600);
-    edgePendingRef.current = 0;
-    setEdgeHint(null);
-    if (edgeHintTimerRef.current != null) {
-      window.clearTimeout(edgeHintTimerRef.current);
-      edgeHintTimerRef.current = null;
-    }
-  }, [diff, mode]);
+  /** 占位：真正的滚动/边界重置见下方按 targetPath 触发的 layout effect。 */
 
   useEffect(() => {
     let cancelled = false;
@@ -529,6 +515,45 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   }, [fsFiles, showCommit, againstRef, compareCommits?.from, compareCommits?.to, selectedCommits, repoPath, staged, refreshKey]);
   /** 语言/原文取此路径：fsFiles 新侧 → 单文件 filePath → patch 唯一 section */
   const targetPath = fsFiles?.newPath || filePath || sectionPaths[0] || '';
+
+  /** 切换 diff 目标（文件 / 暂存态 / 模式）后回顶部并清边界提示。
+   *  按 targetPath 而不是 diff 对象触发：逐块 Stage/Unstage 会换新的 diff
+   *  对象，按对象比较会把用户停好的位置摁回顶部。layout effect 在绘制前
+   *  认领新 key：DOM 内容替换本身也会触发 scroll 事件，晚了会把新内容的
+   *  顶部位写进旧文件。 */
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = 0;
+    setScrollTop(0);
+    if (el) setViewportH(el.clientHeight || 600);
+    edgePendingRef.current = 0;
+    setEdgeHint(null);
+    if (edgeHintTimerRef.current != null) {
+      window.clearTimeout(edgeHintTimerRef.current);
+      edgeHintTimerRef.current = null;
+    }
+  }, [targetPath, staged, mode]);
+
+  /** 切文件后把 Monaco 两侧编辑器滚回顶部。loading 遮罩抬起与
+   *  onDidUpdateDiff 定位首处差异之间有几十毫秒间隙，DiffEditor 原地
+   *  setValue 会保留上一个文件的滚动偏移——不重置就会闪现上次的位置。 */
+  const navKeyRef = useRef('');
+  useLayoutEffect(() => {
+    const key = `${targetPath}\u0000${staged ? 'staged' : 'worktree'}`;
+    const switched = navKeyRef.current !== key;
+    navKeyRef.current = key;
+    if (!switched) return;
+    const ed = diffEditorRef.current;
+    if (ed && diffPaneLiveRef.current) {
+      try {
+        ed.getModifiedEditor().setScrollTop(0);
+        ed.getOriginalEditor().setScrollTop(0);
+      } catch {
+        // 编辑器正在销毁：无处可滚，忽略
+      }
+    }
+  }, [contents, targetPath, staged]);
+
   /** 整个提交的多文件 patch 混多语言，无法定语言 → 回退按行渲染 */
   const isMultiFile = sectionPaths.length > 1;
   const isBinaryDiff =
@@ -1447,7 +1472,10 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
         )}
       </div>
 
-      {/* 内容 */}
+      {/* 内容。外层 host 承担 flex 与定位：loading 期间盖一层不透明遮罩，
+          隔离「切文件时上一个文件残留在上次滚动位置」的闪现；编辑器保持
+          挂载，不回退到销毁重建 model 的白闪方案。 */}
+      <div className="diff-content-host">
       {isBinaryDiff ? (
         <div className="diff-unknown-file-type">
           {t().diff.binaryNoText}
@@ -1565,6 +1593,12 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
           ))}
       </div>
       )}
+      {loading && (
+        <div className="diff-loading-veil" role="status">
+          <MonacoBusy label={t().common.loading} />
+        </div>
+      )}
+      </div>
     </div>
   );
 };

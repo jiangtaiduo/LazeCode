@@ -950,6 +950,11 @@ body.platform-mac .tool-sidebar-strip {
   border: 1.5px solid var(--bg-sidebar-strip);
   pointer-events: none;
 }
+/* 控制台进程运行指示：与 changes 蓝点同位同形，橙色（--git-mod）区分语义
+   —— 蓝点已表示「有未提交更改」，避免混淆。 */
+.strip-btn .strip-dot.strip-dot-running {
+  background: var(--git-mod);
+}
 
 /* Project Drawer (Screenshot 1) */
 .project-drawer {
@@ -2334,6 +2339,10 @@ input[type="checkbox"]:focus-visible {
 }
 /* Diff Viewer */
 .diff-view-pane { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; background-color: var(--bg-app); }
+/* 内容区（Monaco / 按行渲染 / 二进制空态的公共宿主）：relative 供 loading 遮罩定位 */
+.diff-content-host { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; overflow: hidden; }
+/* 切 diff 文件的加载遮罩：盖住残留的上一个文件内容（编辑器保持挂载不重建） */
+.diff-loading-veil { position: absolute; inset: 0; z-index: 6; display: flex; align-items: center; justify-content: center; background: var(--bg-app); }
 .pycharm-diff-toolbar { height: 28px; background-color: var(--bg-sidebar); border-bottom: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between; padding: 0 8px; font-size: 11px; flex-shrink: 0; white-space: nowrap; overflow: hidden; }
 .diff-tb-left { display: flex; align-items: center; gap: 6px; flex-shrink: 0; white-space: nowrap; }
 .diff-icon-btn { width: 20px; height: 20px; background: transparent; border: none; color: var(--text-secondary); border-radius: var(--radius-btn); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; font-size: 12px; flex-shrink: 0; }
@@ -4154,28 +4163,20 @@ body[data-variant="2"] .empty-app-title {
   -webkit-user-select: none;
 }
 
-.terminal-statusbar {
-  height: 20px;
-  background-color: var(--bg-app-deep);
-  border-top: 1px solid var(--bg-hover);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 10px;
-  font-size: 10px;
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
-.terminal-status-cwd {
+/* 控制台活动会话 cwd：并入全局状态栏（终端面板自带的专用状态栏已移除，
+   底部停靠时省出的 20px 还给终端 canvas）。仅控制台开启时由 App 渲染。 */
+.statusbar-terminal-cwd {
   min-width: 0;
+  max-width: 380px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.terminal-status-shell {
-  flex-shrink: 0;
+  flex: 0 1 auto;
   font-family: var(--font-code);
+  font-size: 10px;
+  color: var(--text-muted);
+  padding: 2px 6px;
+  border-right: 1px solid var(--border-color);
 }
 
 /* 状态栏视口指示器：滚入历史时出现，点击回到最新输出 */

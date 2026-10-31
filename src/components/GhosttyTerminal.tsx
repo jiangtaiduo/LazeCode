@@ -123,6 +123,14 @@ interface GhosttyTerminalProps {
   onNotice?: (message: string) => void;
   /** 有常驻终端的项目变化：父组件据此 pin 住这些项目的快照，避免被淘汰。 */
   onLiveProjectsChange?: (projects: string[]) => void;
+  /**
+   * 当前项目控制台的进程占用变化：busy=true 表示还有 shell 之外的进程在跑
+   * （后端 `ps -t <tty>` 探测），commands 是去重后的命令名。父组件据此在
+   * 左侧工具条的 Terminal 图标上亮运行角标。
+   */
+  onBusyChange?: (busy: boolean, commands: string[]) => void;
+  /** 活动会话的 shell cwd（OSC 7/9/1337 上报）：父组件并入全局状态栏显示 */
+  onActivePwdChange?: (pwd: string | null) => void;
 }
 
 /** 父组件（关闭项目）在销毁 PTY 前调用：有命令在跑时弹确认。 */
@@ -358,7 +366,7 @@ const confirmCloseSessions = async (sessionIds: string[]): Promise<boolean> => {
   });
 };
 
-export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTerminalProps>(function GhosttyTerminal({ cwd, shell, onClose, fontSize = DEFAULT_FONT_SIZE, themeKey, visible = true, projectKey = '', openProjects = [], placement = 'bottom', snapTarget = null, onGripPointerDown, onTogglePlacement, maximized = false, onToggleMaximize, spawnCwd, onNotice, onLiveProjectsChange }, ref) {
+export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTerminalProps>(function GhosttyTerminal({ cwd, shell, onClose, fontSize = DEFAULT_FONT_SIZE, themeKey, visible = true, projectKey = '', openProjects = [], placement = 'bottom', snapTarget = null, onGripPointerDown, onTogglePlacement, maximized = false, onToggleMaximize, spawnCwd, onNotice, onLiveProjectsChange, onBusyChange, onActivePwdChange }, ref) {
   // 多会话管理：每个会话与窗口都拥有唯一的 session_id，避免跨窗口/跨实例会话冲突与卡死
   // 会话编号持续递增：关闭「控制台 1」后新开的会话不会重名
   // 会话按 projectKey（工作区路径）分组：窗口内切换项目时其它项目的会话
@@ -399,6 +407,64 @@ export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTe
     lastLiveProjectsSig.current = liveProjectsSig;
     onLiveProjectsChange?.(liveProjectsSig ? liveProjectsSig.split('\0') : []);
   }, [liveProjectsSig, onLiveProjectsChange]);
+
+  // ---- 进程占用轮询（控制台角标数据源）----
+  // 与关闭确认共用后端探测 `pty_session_busy`（ps -t <tty>，shell 之外的进程都算）。
+  // 面板收起不会卸载本组件、会话继续跑，所以轮询不看 visible——角标的意义
+  // 正在于面板看不见时也能提示；页面隐藏时暂停，回前台立即补一次。
+  // 探测失败（会话刚退出等）按不忙计，与 confirmCloseSessions 同一取向。
+  const [busyInfo, setBusyInfo] = useState<{ busy: boolean; commands: string[] }>({
+    busy: false,
+    commands: []
+  });
+  const busyPaneKey = projectTabs.flatMap(t => t.panes).join('\0');
+  useEffect(() => {
+    if (!busyPaneKey) {
+      setBusyInfo(prev => (prev.busy || prev.commands.length ? { busy: false, commands: [] } : prev));
+      return;
+    }
+    let cancelled = false;
+    const probe = async () => {
+      const perSession = await Promise.all(
+        busyPaneKey.split('\0').map(async sessionId => {
+          try {
+            const info = await invokeCommand<{ busy: boolean; commands: string[] }>('pty_session_busy', {
+              sessionId
+            });
+            return info?.busy ? (info.commands ?? []) : [];
+          } catch {
+            // 会话已不在（shell 自己退出过）：按不忙计
+            return [];
+          }
+        })
+      );
+      if (cancelled) return;
+      const commands = [...new Set(perSession.flat())].sort();
+      // 命令集合没变就不更新 state，避免每 2s 一次的无谓渲染
+      setBusyInfo(prev =>
+        prev.busy === (commands.length > 0) && prev.commands.join('\0') === commands.join('\0')
+          ? prev
+          : { busy: commands.length > 0, commands }
+      );
+    };
+    void probe();
+    const timer = window.setInterval(() => {
+      if (!document.hidden) void probe();
+    }, 2000);
+    const onVisibility = () => {
+      if (!document.hidden) void probe();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [busyPaneKey]);
+  useEffect(() => {
+    onBusyChange?.(busyInfo.busy, busyInfo.commands);
+  }, [busyInfo, onBusyChange]);
+
   /**
    * 当前活动标签 id，带自愈：
    * activeTabByProject 里可能存着一个已不存在 tab 的 id —— 会话自己退出
@@ -413,6 +479,31 @@ export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTe
   const activeTabId = storedActiveExists ? storedActiveId : (projectTabs[0]?.id ?? '');
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
+
+  // ---- 活动会话 cwd 上提（并入全局状态栏）----
+  // 每个会话上报自己的 pwd，父组件只消费当前项目活动分屏的那一份；
+  // 关掉的会话条目随之清理，避免无界增长。
+  const [pwdByPane, setPwdByPane] = useState<Record<string, string | null>>({});
+  const handlePwdChange = useCallback((sessionId: string, pwd: string | null) => {
+    setPwdByPane(prev => (prev[sessionId] === pwd ? prev : { ...prev, [sessionId]: pwd }));
+  }, []);
+  useEffect(() => {
+    const live = new Set(tabs.flatMap(t => t.panes));
+    setPwdByPane(prev => {
+      const keys = Object.keys(prev);
+      if (keys.every(k => live.has(k))) return prev;
+      const next: Record<string, string | null> = {};
+      for (const k of keys) if (live.has(k)) next[k] = prev[k];
+      return next;
+    });
+  }, [tabs]);
+  const activeTab = tabs.find(t => t.id === activeTabId && t.projectKey === projectKey);
+  const activePwd = activeTab
+    ? (pwdByPane[activeTab.activePaneId] ?? pwdByPane[activeTab.panes[activeTab.panes.length - 1]] ?? null)
+    : null;
+  useEffect(() => {
+    onActivePwdChange?.(activePwd);
+  }, [activePwd, onActivePwdChange]);
 
   useEffect(() => {
     if (!visible) return;
@@ -872,6 +963,7 @@ export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTe
                       placement={placement}
                       onExited={() => removeExitedPane(tab.id, paneId)}
                       onActivate={() => setActivePane(tab.id, paneId)}
+                      onPwdChange={handlePwdChange}
                     />
                   </div>
                 ) : null
@@ -935,9 +1027,11 @@ interface SingleGhosttySessionProps {
   onExited?: () => void;
   /** 用户点进该分屏：父组件把它设为标签内的活动分屏 */
   onActivate?: () => void;
+  /** shell cwd 变化（OSC 7/9/1337）上报：父组件取活动分屏的值并入全局状态栏 */
+  onPwdChange?: (sessionId: string, pwd: string | null) => void;
 }
 
-const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, cwd, shell, fontSize = DEFAULT_FONT_SIZE, themeKey, active = false, onScreen = active, placement = 'bottom', onExited, onActivate }) => {
+const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, cwd, shell, fontSize = DEFAULT_FONT_SIZE, themeKey, active = false, onScreen = active, placement = 'bottom', onExited, onActivate, onPwdChange }) => {
   // 字体规格由字号推导，改动后重新度量单元格网格
   const fontSpec = `${fontSize}px ${FONT_FAMILY}`;
   const hostRef = useRef<HTMLDivElement>(null);
@@ -1108,6 +1202,10 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
   // shell integration 报告的 cwd；未启用时回退到 spawn 的 cwd。
   const [pwd, setPwd] = useState<string | undefined>(cwd);
   useEffect(() => setPwd(cwd), [cwd]);
+  // cwd 变化即上报（父组件只消费当前项目活动分屏的那一份，并入全局状态栏）
+  useEffect(() => {
+    onPwdChange?.(sessionId, pwd ?? null);
+  }, [sessionId, pwd, onPwdChange]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchOutcome, setSearchOutcome] = useState<SearchOutcome | null>(null);
@@ -2719,12 +2817,6 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
           style={{ outline: 'none', display: 'block', cursor: 'text' }}
         />
         <TerminalA11yMirror text={a11yText} label={t().terminal.a11yLabel} />
-      </div>
-      <div className="terminal-statusbar">
-        <span className="terminal-status-cwd" title={pwd || cwd || ''}>
-          {pwd || cwd || ''}
-        </span>
-        <span className="terminal-status-shell">{shell ?? ''}</span>
       </div>
     </div>
   );

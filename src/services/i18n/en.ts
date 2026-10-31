@@ -1342,6 +1342,7 @@ export const en: LocaleDict = {
     commitTooltipWithChanges: n => `Commit tool window — ${n} uncommitted change${n === 1 ? '' : 's'} (Alt+0 / ⌘K)`,
     gitLogTooltip: 'Git Log tool window (Alt+9 / ⌘9)',
     terminalTooltip: 'Terminal console (Alt+F12 / ⌥F12 / ⌘`)',
+    terminalTooltipRunning: names => `Terminal console — running: ${names} (Alt+F12 / ⌥F12 / ⌘\`)`,
     settingsTooltip: 'Settings (⌘, / Ctrl+,)',
   },
   /** 分支右键 / 分支下拉操作子菜单（BranchContextMenu）的界面文案。 */

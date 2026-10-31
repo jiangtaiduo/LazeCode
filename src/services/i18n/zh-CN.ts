@@ -1307,6 +1307,7 @@ export const zhCN: LocaleDict = {
     commitTooltipWithChanges: n => `Commit 提交与代码更改（${n} 个未提交更改）(Alt+0 / ⌘K)`,
     gitLogTooltip: 'Git Log 分支提交图谱 (Alt+9 / ⌘9)',
     terminalTooltip: 'Terminal 多标签控制台 (Alt+F12 / ⌥F12 / ⌘`)',
+    terminalTooltipRunning: names => `Terminal 多标签控制台 — 正在运行：${names} (Alt+F12 / ⌥F12 / ⌘\`)`,
     settingsTooltip: '偏好设置 (⌘, / Ctrl+,)',
   },
   /** 分支右键 / 分支下拉操作子菜单（BranchContextMenu）的界面文案。 */

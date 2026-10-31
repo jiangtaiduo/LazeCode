@@ -26,6 +26,8 @@ interface LeftStripProps {
   /** 是否有活跃的提交版本比较会话 */
   hasCompareSession?: boolean;
   compareTooltip?: string;
+  /** 当前项目控制台正在运行的命令名（去重）：非空时在 Terminal 图标上亮运行角标 */
+  terminalRunning?: string[];
 }
 export const LeftStrip: React.FC<LeftStripProps> = ({
   activeDrawer,
@@ -37,7 +39,8 @@ export const LeftStrip: React.FC<LeftStripProps> = ({
   changeCount = 0,
   isGitRepo = false,
   hasCompareSession = false,
-  compareTooltip = 'Compare Versions'
+  compareTooltip = 'Compare Versions',
+  terminalRunning = []
 }) => {
   return (
     <nav className="tool-sidebar-strip" id="leftStrip" data-tauri-drag-region="false">
@@ -91,9 +94,10 @@ export const LeftStrip: React.FC<LeftStripProps> = ({
         <button
           className={`strip-btn ${activeBottomTool === 'terminal' ? 'active' : ''}`}
           onClick={() => onToggleBottomTool(activeBottomTool === 'terminal' ? null : 'terminal')}
-          title={t().leftStrip.terminalTooltip}
+          title={terminalRunning.length > 0 ? t().leftStrip.terminalTooltipRunning(terminalRunning.slice(0, 3).join('、')) : t().leftStrip.terminalTooltip}
         >
           <TerminalStripeIcon size={17} color='currentColor' />
+          {terminalRunning.length > 0 && <span className="strip-dot strip-dot-running" aria-hidden="true" />}
         </button>
 
         {/* 7. Settings */}

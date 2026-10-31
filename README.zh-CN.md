@@ -22,7 +22,7 @@ LazeCode 是一个只保留编辑器、Git 和控制台等核心功能的 macOS 
 
 | | |
 | :--- | :--- |
-| 状态 | `0.1.2`，alpha |
+| 状态 | `0.1.3`，alpha |
 | 平台 | macOS 13+，Apple Silicon（arm64）；已在 macOS 27 测试 |
 | 技术栈 | Tauri 2、Rust 1.90+、React 19、Monaco、Ghostty VT |
 | 许可证 | MIT |
@@ -290,7 +290,7 @@ cd src-tauri && cargo test --test terminal_conformance
 ### Rust 与界面测试
 
 在参考环境（Apple M5 / macOS 27）上：**Rust 378 个测试通过，7 个忽略**；
-**界面 98 个测试通过**。Rust 集成测试会创建真实的临时仓库并运行真实 Git：
+**界面 104 个测试通过**。Rust 集成测试会创建真实的临时仓库并运行真实 Git：
 
 ```bash
 cd src-tauri && cargo test --locked

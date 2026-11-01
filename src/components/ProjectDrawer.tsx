@@ -130,13 +130,16 @@ export const ProjectDrawer = React.memo(function ProjectDrawer({
     });
   }, [onSetExpandedPaths]);
 
-  // 展开 / 折叠文件夹，按需懒加载子节点。
+  // 展开 / 折叠文件夹。展开时**总是现读**：children 非空只说明「曾经读过」，
+  // 不代表现在 —— 目录在折叠期间发生的外部变更（watcher 未覆盖的窗口、
+  // 上一次读取之后的任何写入）只有现读才能看见。深度上限 2 使单次读取
+  // 有界，展开点击付一次浅层 IPC 换掉一整类「展开了看到旧内容」的 staleness。
   // useCallback：TreeNodeItem 加了 memo，内联函数会让整棵树每次渲染都失效。
   const toggleFolder = useCallback(async (node: FileNode) => {
     const isExpanded = expandedPaths.has(node.path);
     toggleInSet(node.path);
 
-    if (!isExpanded && (!node.children || !Array.isArray(node.children) || node.children.length === 0)) {
+    if (!isExpanded) {
       setLoadingPaths(prev => new Set(prev).add(node.path));
       try {
         const res = await invokeCommand<FileNode>('read_directory', { path: node.path, maxDepth: 2, ignored: ignoredPatterns });

@@ -101,6 +101,9 @@ fn spawn_lsp_server(
     args: &[String],
     root: &str,
 ) -> Result<(Child, ChildStdin, ChildStdout, std::process::ChildStderr), String> {
+    // PATH 富集未完成时先等：LSP server 命令来自用户配置，几乎都不在
+    // launchd 的最小 PATH 里（见 start_shell_path_enrichment 的说明）。
+    crate::ensure_shell_path_ready();
     let mut cmd = std::process::Command::new(command);
     cmd.args(args)
         .stdin(Stdio::piped())

@@ -103,12 +103,16 @@ export async function spawnPty(options: {
     async write(data: string | Uint8Array) {
       const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
       if (bytes.length === 0) return;
-      // 分片下发：一次粘贴几 MB 文本时，`Array.from` 会先造出等量的 JS
-      // 数字数组（1MB → ~8MB）再序列化成 JSON（~3-4MB），Rust 侧还要逐字节
-      // 解析。分片把峰值内存钉在单片上，字节顺序由顺序 await 保证。
+      // 原始字节 IPC：body 即字节（application/octet-stream），会话标识走
+      // header。旧路径 `Array.from(chunk)` + JSON 数字数组把 64KB 写成
+      // ~256KB 文本、Rust 侧再逐元素反序列化；与快照路径（ipc::Response
+      // 原始字节）对称。仍分片：单次请求的瞬时内存钉在单片上，字节顺序
+      // 由顺序 await 保证。
       for (let off = 0; off < bytes.length; off += PTY_WRITE_CHUNK) {
         const chunk = bytes.subarray(off, Math.min(off + PTY_WRITE_CHUNK, bytes.length));
-        await invokeCommand<void>('pty_write', { sessionId, data: Array.from(chunk) });
+        await invokeCommand<void>('pty_write', chunk, {
+          headers: { 'x-lazecode-session': sessionId }
+        });
       }
     },
     async resize(nextCols: number, nextRows: number, cellWidthPx?: number, cellHeightPx?: number) {

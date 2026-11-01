@@ -35,6 +35,7 @@
 //! 看到一个打不开的窗口（macOS 上窗口会整个不可见，只能重启）。
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// 磁盘上的窗口几何（逻辑像素 + 当时的 scale factor）。
@@ -167,6 +168,113 @@ pub fn save_state(app_config_dir: &Path, label: &str, state: &WindowState) -> Re
         return Err(format!("写入窗口状态 {} 失败: {}", path.display(), e));
     }
     Ok(())
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 尾随防抖落盘
+//
+// Moved/Resized 以显示器刷新率连发（拖动窗口 ≈ 60Hz），而 `save_state` 是
+// 「序列化 + 临时文件写 + rename」的同步 I/O，且 on_window_event 跑在主线程
+// event loop 上。逐事件落盘 = 拖一次窗口上百次文件写（实测过的审计结论）：
+// 本地 SSD 单次 <1ms 勉强无感，网络家目录 / 被备份软件盯上时直接卡拖动。
+//
+// 这里改成「内存暂存 + 尾随防抖」：事件路径只更新内存（O(1)），最后一次
+// 事件后 [`WINDOW_STATE_SAVE_DELAY_MS`] 才由后台线程落盘。窗口 Destroyed
+// 走 [`save_now`] 立即写（拖完即关的场景由它兜住），不丢最终几何。
+// ───────────────────────────────────────────────────────────────────────────
+
+const WINDOW_STATE_SAVE_DELAY_MS: u64 = 300;
+
+static PENDING_SAVES: std::sync::Mutex<Option<HashMap<String, (PathBuf, WindowState)>>> =
+    std::sync::Mutex::new(None);
+static SAVE_SCHEDULED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 事件路径：只更新内存暂存，由防抖线程统一落盘。
+pub fn schedule_save(label: &str, app_config_dir: PathBuf, state: WindowState) {
+    {
+        let Ok(mut guard) = PENDING_SAVES.lock() else {
+            return;
+        };
+        guard
+            .get_or_insert_with(HashMap::new)
+            .insert(label.to_string(), (app_config_dir, state));
+    }
+    if SAVE_SCHEDULED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("window-state-saver".to_string())
+        .spawn(|| {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(WINDOW_STATE_SAVE_DELAY_MS));
+                let batch: Vec<(String, PathBuf, WindowState)> = {
+                    let Ok(mut guard) = PENDING_SAVES.lock() else {
+                        break;
+                    };
+                    match guard.take() {
+                        Some(map) => map
+                            .into_iter()
+                            .map(|(label, (dir, state))| (label, dir, state))
+                            .collect(),
+                        None => Vec::new(),
+                    }
+                };
+                for (label, dir, state) in batch {
+                    if let Err(e) = save_state(&dir, &label, &state) {
+                        log::warn!("保存窗口 {label} 状态失败: {e}");
+                    }
+                }
+                SAVE_SCHEDULED.store(false, std::sync::atomic::Ordering::SeqCst);
+                // 双检防丢：swap(false) 与新事件的 swap(true) 交错时，
+                // 这里再查一次 pending，非空就继续下一轮。
+                let pending_nonempty = PENDING_SAVES
+                    .lock()
+                    .map(|g| g.as_ref().map(|m| !m.is_empty()).unwrap_or(false))
+                    .unwrap_or(false);
+                if !pending_nonempty {
+                    break;
+                }
+                SAVE_SCHEDULED.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        });
+    if spawned.is_err() {
+        // 线程起不来：退化为立即写，保住「几何不丢」的下限
+        SAVE_SCHEDULED.store(false, std::sync::atomic::Ordering::SeqCst);
+        flush_pending_saves();
+    }
+}
+
+/// 关闭路径：立即写盘并清掉对应 pending（防抖批次里再写一遍也无妨，幂等）。
+pub fn save_now(label: &str, app_config_dir: &Path, state: &WindowState) {
+    if let Ok(mut guard) = PENDING_SAVES.lock() {
+        if let Some(map) = guard.as_mut() {
+            map.remove(label);
+        }
+    }
+    if let Err(e) = save_state(app_config_dir, label, state) {
+        log::warn!("保存窗口 {label} 状态失败: {e}");
+    }
+}
+
+/// 立即落盘全部 pending（线程起不来时的降级路径）。
+fn flush_pending_saves() {
+    let batch: Vec<(String, PathBuf, WindowState)> = {
+        let Ok(mut guard) = PENDING_SAVES.lock() else {
+            return;
+        };
+        match guard.take() {
+            Some(map) => map
+                .into_iter()
+                .map(|(label, (dir, state))| (label, dir, state))
+                .collect(),
+            None => Vec::new(),
+        }
+    };
+    for (label, dir, state) in batch {
+        if let Err(e) = save_state(&dir, &label, &state) {
+            log::warn!("保存窗口 {label} 状态失败: {e}");
+        }
+    }
 }
 
 /// 一个可见的矩形区域（逻辑像素），来自某个 monitor 的 work area。

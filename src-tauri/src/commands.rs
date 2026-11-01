@@ -31,6 +31,10 @@ pub const GIT_LOCAL_TIMEOUT: Duration = Duration::from_secs(300);
 /// 弹出的终端不属于 IDE 进程，用户看到的是一个无人看管的阻塞窗口。
 /// 相关变量一并清零，避免用户 shell 里的 GIT_ASKPASS/SSH_ASKPASS 继承进来。
 pub fn git_cmd() -> Command {
+    // PATH 富集未完成时先等：launchd 的最小 PATH 里只有系统 git，
+    // 用户工具链（homebrew/rustup）的 git 可能 miss。上界 1.5s，且与
+    // 前端加载并行（见 start_shell_path_enrichment）。
+    crate::ensure_shell_path_ready();
     let mut cmd = Command::new("git");
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     cmd.env("GIT_ASKPASS", "");
@@ -2353,37 +2357,50 @@ async fn fs_diff_files_impl(old_path: String, new_path: String) -> Result<FileDi
 }
 
 #[tauri::command]
-pub async fn git_status(repo_path: Option<String>) -> Result<Vec<GitChangedFileDto>, String> {
+pub async fn git_status(
+    repo_path: Option<String>,
+    include_ignored: Option<bool>,
+) -> Result<Vec<GitChangedFileDto>, String> {
     // git_status 一次调用要起两个 git 子进程（status + diff --numstat HEAD），
     // 大仓上轻松几十毫秒。同步命令占住 ipc:// worker 线程，期间 refreshGit
     // 里 Promise.all 并行发出的 git_log/git_branches 全部排在后面。
     // 丢到 blocking 池，让 worker 线程立刻脱身去接其它命令。
-    tauri::async_runtime::spawn_blocking(move || git_status_impl(repo_path))
-        .await
-        .map_err(|e| format!("git_status 任务失败: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        git_status_impl(repo_path, include_ignored.unwrap_or(true))
+    })
+    .await
+    .map_err(|e| format!("git_status 任务失败: {e}"))?
 }
 
 /// git_status 的同步实现。抽出供测试直接调用（命令本体是 async，测试里
 /// 逐个 await 只会把用例变成状态机，读起来反而更难验证行为）。
-pub fn git_status_impl(repo_path: Option<String>) -> Result<Vec<GitChangedFileDto>, String> {
+///
+/// `include_ignored=false` 是「轻刷新」路径：`--ignored=matching` 要求 git
+/// 枚举每一个被忽略的文件（node_modules/target 全量 lstat，目录折叠快路径
+/// 全部失效），是 status 里最贵的一段。编辑触发的刷新不可能改变 Ignored
+/// 集合的内容语义（构建产物不进版本控制），前端在轻刷新时传 false、用
+/// 上一份 Ignored 条目补齐展示，窗口聚焦 / git 操作 / 显式刷新才传 true。
+pub fn git_status_impl(
+    repo_path: Option<String>,
+    include_ignored: bool,
+) -> Result<Vec<GitChangedFileDto>, String> {
     let dir = repo_path.unwrap_or_else(|| ".".to_string());
-    let output = git_output(
-        git_cmd()
-            .arg("-C")
-            .arg(&dir)
-            // -uall：把整个未跟踪目录展开为具体文件列表。默认的折叠形式
-            // 「?? dir/」以斜杠结尾，前端树按「/」分段后末段为空，
-            // 变更清单里会渲染出一行没有文件名的条目
-            .args([
-                "-c",
-                "core.quotepath=false",
-                "status",
-                "--porcelain=v1",
-                "--untracked-files=all",
-                "--ignored=matching",
-            ]),
-    )
-    .map_err(|e| format!("git command failed: {}", e))?;
+    let mut cmd = git_cmd();
+    cmd.arg("-C").arg(&dir);
+    // -uall：把整个未跟踪目录展开为具体文件列表。默认的折叠形式
+    // 「?? dir/」以斜杠结尾，前端树按「/」分段后末段为空，
+    // 变更清单里会渲染出一行没有文件名的条目
+    cmd.args([
+        "-c",
+        "core.quotepath=false",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    ]);
+    if include_ignored {
+        cmd.arg("--ignored=matching");
+    }
+    let output = git_output(&mut cmd).map_err(|e| format!("git command failed: {}", e))?;
 
     if !output.status.success() {
         log::warn!(
@@ -2777,25 +2794,138 @@ fn git_log_impl_filtered(
 
     // HEAD 祖先集合：--all 日志里标出「不在当前历史」的提交（面板背景置灰，对齐 PyCharm）。
     // rev-list 失败（空仓库等）保持 None，前端视为在历史内，不置灰。
-    match git_output(git_cmd().arg("-C").arg(&dir).args(["rev-list", "HEAD"])) {
-        Ok(rev) if rev.status.success() => {
-            let reachable: std::collections::HashSet<String> = String::from_utf8_lossy(&rev.stdout)
-                .lines()
-                .map(|s| s.to_string())
-                .collect();
-            for c in &mut commits {
-                c.in_head = Some(reachable.contains(&c.hash));
-            }
+    if let Some(reachable) = head_ancestors(&dir) {
+        for c in &mut commits {
+            c.in_head = Some(reachable.contains(&c.hash));
         }
-        // 空仓库（无 HEAD）走到这里属正常；其它失败也要留痕，否则「全在历史内」
-        // 与「rev-list 挂了」看起来一样
-        Ok(rev) => log::warn!(
-            "git rev-list HEAD 失败: {}（提交不置灰）",
-            String::from_utf8_lossy(&rev.stderr).trim()
-        ),
-        Err(e) => log::warn!("git rev-list HEAD 调用失败: {}", e),
     }
     Ok(commits)
+}
+
+/// HEAD 祖先集合的缓存：键 =（仓库路径, HEAD sha）。
+///
+/// `git rev-list HEAD` 输出**整个** HEAD 历史，大仓上是大几 MB 的 stdout
+/// 加十万级 String 分配；而它的结果只在 HEAD 移动时才变化。git_log 却在
+/// 每次刷新（打字停顿 2.5s / 窗口聚焦 / git 操作）与每翻一页日志时都被
+/// 调用 —— 无缓存时这笔全量成本每次重付。
+///
+/// 现在每次先 `rev-parse HEAD`（毫秒级 spawn）拿 sha：sha 未变直接命中缓存；
+/// 变了才重跑 rev-list。缓存条目按打开仓库数增长，超过上限整表清空
+/// （数量级 = 打开的仓库数，重建成本可接受），不做精细淘汰。
+///
+/// 拿不到 HEAD sha（空仓库 / 裸仓库无 HEAD）返回 None，与旧版 rev-list
+/// 失败的行为一致（前端视为全在历史内，不置灰）。
+fn head_ancestors(dir: &str) -> Option<std::sync::Arc<std::collections::HashSet<String>>> {
+    use std::collections::HashMap;
+    use std::collections::HashSet;
+    use std::sync::{Arc, Mutex};
+    /// type 别名只为压 clippy::type_complexity:static 声明内联泛型太深。
+    type AncestorCache = HashMap<(String, String), Arc<HashSet<String>>>;
+    static CACHE: Mutex<Option<AncestorCache>> = Mutex::new(None);
+    const CACHE_MAX_ENTRIES: usize = 32;
+
+    let head = git_output(git_cmd().arg("-C").arg(dir).args(["rev-parse", "HEAD"]))
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|h| !h.is_empty())?;
+
+    let cache_key = (dir.to_string(), head);
+    if let Some(hit) = CACHE
+        .lock()
+        .ok()
+        .and_then(|guard| guard.as_ref().and_then(|m| m.get(&cache_key).cloned()))
+    {
+        return Some(hit);
+    }
+
+    let rev = git_output(git_cmd().arg("-C").arg(dir).args(["rev-list", "HEAD"])).ok()?;
+    if !rev.status.success() {
+        log::warn!(
+            "git rev-list HEAD 失败: {}（提交不置灰）",
+            String::from_utf8_lossy(&rev.stderr).trim()
+        );
+        return None;
+    }
+    let set: HashSet<String> = String::from_utf8_lossy(&rev.stdout)
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+    let arc = Arc::new(set);
+    if let Ok(mut guard) = CACHE.lock() {
+        let map = guard.get_or_insert_with(HashMap::new);
+        if map.len() >= CACHE_MAX_ENTRIES {
+            map.clear();
+        }
+        map.insert(cache_key, Arc::clone(&arc));
+    }
+    Some(arc)
+}
+
+#[cfg(test)]
+mod head_ancestors_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// 缓存命中路径：同一 HEAD 下第二次调用不再 spawn rev-list（结果集相同）。
+    /// 用真实临时仓库验证端到端（rev-parse → rev-list → 缓存）。
+    #[test]
+    fn caches_within_same_head_and_refreshes_after_commit() {
+        let dir =
+            std::env::temp_dir().join(format!("lazecode_head_ancestors_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .expect("git 可执行")
+        };
+        assert!(git(&["init", "-q"]).status.success());
+        std::fs::write(dir.join("a.txt"), "1").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "one"
+        ])
+        .status
+        .success());
+
+        let first = head_ancestors(dir.to_str().unwrap()).expect("应产出祖先集合");
+        let second = head_ancestors(dir.to_str().unwrap()).expect("应命中缓存");
+        assert_eq!(first.len(), second.len());
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "同一 HEAD 下必须命中同一缓存条目"
+        );
+
+        // 新提交（HEAD 移动）→ 缓存失效，重新计算
+        std::fs::write(dir.join("a.txt"), "2").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "two"
+        ])
+        .status
+        .success());
+        let third = head_ancestors(dir.to_str().unwrap()).expect("HEAD 移动后应重算");
+        assert_eq!(third.len(), 2, "新历史应有两个提交");
+        assert!(!Arc::ptr_eq(&first, &third));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Push 对话框数据：HEAD 上尚未推送到上游的提交。
@@ -10525,8 +10655,8 @@ mod async_command_wrapper_tests {
         let dir = seed_repo("status");
         let repo = Some(dir.to_string_lossy().to_string());
 
-        let sync = git_status_impl(repo.clone()).unwrap();
-        let via_async = tauri::async_runtime::block_on(git_status(repo)).unwrap();
+        let sync = git_status_impl(repo.clone(), true).unwrap();
+        let via_async = tauri::async_runtime::block_on(git_status(repo, None)).unwrap();
 
         assert_changed_eq(&via_async, &sync, "git_status");
 
@@ -11852,13 +11982,13 @@ mod add_and_decoration_tests {
         let repo_arg = Some(repo.to_string_lossy().to_string());
 
         fs::write(repo.join("new.txt"), "1\n").unwrap();
-        let status = git_status_impl(repo_arg.clone()).unwrap();
+        let status = git_status_impl(repo_arg.clone(), true).unwrap();
         assert!(status
             .iter()
             .any(|f| f.status == "U" && f.path == "new.txt"));
 
         git_add(repo_arg, vec!["new.txt".to_string()]).unwrap();
-        let status = git_status_impl(Some(repo.to_string_lossy().to_string())).unwrap();
+        let status = git_status_impl(Some(repo.to_string_lossy().to_string()), true).unwrap();
         let added = status
             .iter()
             .find(|f| f.path == "new.txt")
@@ -11938,7 +12068,7 @@ mod commit_flow_tests {
         // 整目录都是新的：fixtures/ 下放一个未跟踪文件
         write(&repo.join("tests/fixtures/data.bin"), "x\n");
 
-        let status = git_status_impl(Some(repo.to_string_lossy().to_string())).unwrap();
+        let status = git_status_impl(Some(repo.to_string_lossy().to_string()), true).unwrap();
         let entry = status
             .iter()
             .find(|f| f.path.contains("data.bin"))
@@ -12020,7 +12150,7 @@ mod commit_flow_tests {
             "1 modified\n"
         );
         assert_eq!(
-            git_status_impl(repo_path.clone()).unwrap().len(),
+            git_status_impl(repo_path.clone(), true).unwrap().len(),
             1,
             "文件修改应保留"
         );
@@ -12166,7 +12296,7 @@ mod commit_flow_tests {
         assert!(!repo.join("new.txt").exists(), "未跟踪文件应删除");
         assert!(!repo.join("undir").exists(), "未跟踪目录应整体清理");
         assert!(
-            git_status_impl(repo_path.clone()).unwrap().is_empty(),
+            git_status_impl(repo_path.clone(), true).unwrap().is_empty(),
             "回滚后工作区应干净"
         );
 
@@ -12204,7 +12334,7 @@ mod commit_flow_tests {
 
         git_commit(repo_arg.clone(), "优化".to_string(), false, None).unwrap();
 
-        let status = git_status_impl(repo_arg).unwrap();
+        let status = git_status_impl(repo_arg, true).unwrap();
         assert!(status.is_empty(), "全部提交后工作区应干净，剩 {:?}", status);
 
         let _ = fs::remove_dir_all(&base);
@@ -12249,7 +12379,7 @@ mod commit_flow_tests {
         )
         .unwrap();
 
-        let status = git_status_impl(repo_arg).unwrap();
+        let status = git_status_impl(repo_arg, true).unwrap();
         let b_status = status
             .iter()
             .find(|f| f.path == "b.txt")
@@ -12815,7 +12945,7 @@ mod final_feature_tests {
         let merge = git_merge(repo_arg.clone(), "feat".to_string());
         assert!(merge.is_err(), "同文件不同改动应冲突");
 
-        let status = git_status_impl(repo_arg.clone()).unwrap();
+        let status = git_status_impl(repo_arg.clone(), true).unwrap();
         let conflicted = status.iter().find(|f| f.path == "a.txt").unwrap();
         assert_eq!(conflicted.status, "C", "冲突文件应归一化为 C");
 
@@ -12836,7 +12966,7 @@ mod final_feature_tests {
             "ours".to_string(),
         ))
         .unwrap();
-        let status = git_status_impl(repo_arg).unwrap();
+        let status = git_status_impl(repo_arg, true).unwrap();
         assert!(
             !status.iter().any(|f| f.status == "C"),
             "采用一方后不应再有冲突"

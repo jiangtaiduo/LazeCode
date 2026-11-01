@@ -7,12 +7,26 @@
 //! 为什么监听父目录而不是文件本身：git、部分编辑器用「写临时文件 + rename
 //! 覆盖」保存，文件级监听挂在被换掉的旧 inode 上会静默失效，之后再也收不到
 //! 事件。目录级监听天然覆盖原地写入与 rename 两种落盘方式。
+//!
+//! # 目录监听（`fs_watch_dirs`）必须是递归的
+//!
+//! 文件树要在外部程序（构建工具、agent CLI、Finder）新建文件时自动刷新，
+//! 而这些文件可以出现在**任意深度**的子目录里。notify 的 FSEvents 后端在
+//! NonRecursive 模式下只放行「根本身 + 根的直接子项」两类事件路径
+//! （fsevent.rs 回调里的 `parent_path == p` 过滤），`project/src/new.ts`
+//! 这类深度 2 的路径会被 Rust 侧直接丢弃 —— 前端根本收不到事件，文件树
+//! 就停在旧内容上（实测过的 bug）。因此目录监听必须 `RecursiveMode::Recursive`。
+//!
+//! 递归的代价是事件量：一次 `npm install` 亚秒内产生成百上千个文件事件。
+//! [`DirChangeCoalescer`] 按「变更目录」合并（250ms 窗口，每目录至多一条），
+//! 超过容量上限时退化为「整根一条」让前端整树刷新。
 
 use crate::commands::{authorize_workspace_path, WorkspaceRegistry};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
 
@@ -98,7 +112,160 @@ fn lookup_registered(event_path: &Path, index: &FileIndex) -> Option<PathBuf> {
 
 type SharedFiles = Arc<Mutex<FileIndex>>;
 
-/// 创建监听器并注册 `dirs`（各打开文件的父目录，非递归）。
+/// 目录变更的合并发送器：按「变更目录」去重，窗口期内每目录至多发一条。
+///
+/// 递归监听后事件量与子树规模成正比（构建期间 node_modules 每秒成百事件），
+/// 逐事件 emit 会把 WKWebView 事件队列灌满 —— 与终端脏信号洪水同病，且前端
+/// 的 250ms 防抖只能压制刷新频率，压不住事件本身的 IPC 分发。这里在 Rust 侧
+/// 先合并：pending 集合去重，flusher 线程每 [`DIR_CHANGE_FLUSH_MS`] 发一批。
+///
+/// 容量上限：pending 超过 [`DIR_CHANGE_PENDING_CAP`]（构建风暴）时整批丢弃、
+/// 只保留 fallback（被监听的根），前端收到根路径就整树重读 —— 语义保守但正确。
+struct DirChangeCoalescer {
+    pending: Mutex<HashSet<PathBuf>>,
+    scheduled: AtomicBool,
+    /// 风暴退化哨兵：pending 超限时整批丢弃、只保留这个路径（被监听的根），
+    /// 前端对根做整树刷新，覆盖所有被淹没的子目录变更。
+    fallback: PathBuf,
+    emit: Box<dyn Fn(PathBuf) + Send + Sync>,
+}
+
+/// 合并窗口。250ms 与前端 `debounceDirectoryChanges` 的默认值同量级：
+/// Rust 侧负责「事件 → 每目录一条」，前端再按目录防抖收敛刷新。
+const DIR_CHANGE_FLUSH_MS: u64 = 250;
+/// pending 目录数上限：超过即退化为整根一条。
+const DIR_CHANGE_PENDING_CAP: usize = 500;
+
+impl DirChangeCoalescer {
+    fn new(fallback: PathBuf, emit: Box<dyn Fn(PathBuf) + Send + Sync>) -> Self {
+        Self {
+            pending: Mutex::new(HashSet::new()),
+            scheduled: AtomicBool::new(false),
+            fallback,
+            emit,
+        }
+    }
+
+    fn hit(self: &Arc<Self>, dir: PathBuf) {
+        {
+            let mut guard = match self.pending.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            if guard.len() >= DIR_CHANGE_PENDING_CAP {
+                // 风暴退化：明细全部淹没时逐目录刷新已无意义，整批丢弃、
+                // 只留根哨兵让前端整树重读。
+                guard.clear();
+                guard.insert(self.fallback.clone());
+            } else {
+                guard.insert(dir);
+            }
+        }
+        self.schedule();
+    }
+
+    /// 有丢唤醒风险的双检调度：`scheduled` 置 false 前后各查一次 pending。
+    /// 极端交错下可能多起一个 flusher 重复发同一条 —— 前端按目录防抖幂等，
+    /// 重复无害；丢发才是真 bug（树停在旧内容）。
+    fn schedule(self: &Arc<Self>) {
+        if self.scheduled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // 无句柄可存 thread handle：flusher 自退出（pending 清空），watcher
+        // 被 drop 时线程最多再活一个窗口期。线程失败时的兜底直发仍要用
+        // 句柄，闭包与外层各持一份。
+        let this = Arc::clone(self);
+        let this_for_thread = Arc::clone(&this);
+        let spawned = std::thread::Builder::new()
+            .name("dir-change-coalescer".to_string())
+            .spawn(move || {
+                let this = this_for_thread;
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(DIR_CHANGE_FLUSH_MS));
+                    let batch: Vec<PathBuf> = match this.pending.lock() {
+                        Ok(mut g) => g.drain().collect(),
+                        Err(_) => return,
+                    };
+                    for dir in batch {
+                        (this.emit)(dir);
+                    }
+                    this.scheduled.store(false, Ordering::SeqCst);
+                    if this.pending.lock().map(|g| g.is_empty()).unwrap_or(true) {
+                        return;
+                    }
+                    this.scheduled.store(true, Ordering::SeqCst);
+                }
+            });
+        if spawned.is_err() {
+            // 线程起不来：退化为逐条直发，宁可事件多也不能丢变更
+            this.scheduled.store(false, Ordering::SeqCst);
+            let batch: Vec<PathBuf> = match this.pending.lock() {
+                Ok(mut g) => g.drain().collect(),
+                Err(_) => return,
+            };
+            for dir in batch {
+                (this.emit)(dir);
+            }
+        }
+    }
+}
+
+/// 把 FSEvents 事件路径换算成「内容变化的目录」（原始根前缀形态）。
+///
+/// 事件路径是监听根的 canonical 形态下的绝对路径；树节点路径来自
+/// `read_directory`（以注册时的原文为基）。直接回传 canonical 形态会与
+/// 树节点对不上（/tmp → /private/tmp），因此前缀 Surgery 回注册原文：
+/// 事件 == 根 → 根原文；事件在根下 → 根原文 + 相对部分的父目录。
+/// 返回 None = 不在任何根下（不该发生，防御）。
+fn changed_dir_of(event_path: &Path, root_norm: &Path, root_orig: &str) -> Option<PathBuf> {
+    let rel = event_path.strip_prefix(root_norm).ok()?;
+    match rel.parent().filter(|p| !p.as_os_str().is_empty()) {
+        Some(parent) => Some(PathBuf::from(root_orig).join(parent)),
+        None => Some(PathBuf::from(root_orig)),
+    }
+}
+
+/// 事件是否落在 `<root>/.git` 子树内（只看根下第一层；子模块的 `sub/.git`
+/// 不在此列，其事件到前端后无害——树里没有该节点，刷新是引用级 no-op）。
+///
+/// **必须过滤**：应用自己的 git 刷新（status/diff 的 opportunistic index
+/// 更新、index.lock 的建删）每次都会写 `.git`，实测一轮刷新命令组产生
+/// `index.lock` rename + `index` rename 事件。不过滤就是自激循环：
+/// 刷新 → 写 `.git` → dir-change → 再刷新（"变更列表一直在刷新"的实测
+/// 回归）。旧版非递归监听恰好把 `.git/*` 事件全部丢弃，顺带掩盖了它；
+/// 改递归后暴露。`.git` 永远不出现在文件树里（read_directory 的忽略规则），
+/// 过滤不损失任何树刷新语义；外部 git 操作改工作区文件时事件照常触发。
+fn event_under_git_dir(event_path: &Path, root_norm: &Path) -> bool {
+    event_path
+        .strip_prefix(root_norm)
+        .ok()
+        .and_then(|rel| rel.components().next().map(|c| c.as_os_str() == ".git"))
+        .unwrap_or(false)
+}
+
+/// `fs_watch_dirs` 的事件处理核心：`.git` 过滤 → 变更目录提取 → 合并入队。
+///
+/// 抽成独立函数是为了端到端测试能走**生产同款组合**（spawn_watcher 直通
+/// 回调 + 本函数），而不是复刻一遍闭包逻辑让「测试只测了一半」。
+fn process_dir_watch_event(
+    event_path: &Path,
+    roots: &[(PathBuf, String)],
+    coalescer: &Arc<DirChangeCoalescer>,
+) {
+    for (root_norm, root_orig) in roots {
+        if event_under_git_dir(event_path, root_norm) {
+            continue;
+        }
+        if let Some(changed) = changed_dir_of(event_path, root_norm, root_orig) {
+            coalescer.hit(changed);
+        }
+    }
+}
+
+/// 创建监听器并注册 `dirs`。
+///
+/// `mode` 决定递归语义：`fs_watch_files` 用 NonRecursive（父目录内命中即回调），
+/// `fs_watch_dirs` 必须用 Recursive（见模块文档「目录监听必须是递归的」）。
 ///
 /// 两种模式，由 `files` 是否为空决定：
 /// - **非空**：事件路径命中注册文件时回调其注册原文（`fs_watch_files`）。
@@ -111,6 +278,7 @@ type SharedFiles = Arc<Mutex<FileIndex>>;
 fn spawn_watcher(
     files: SharedFiles,
     dirs: impl IntoIterator<Item = PathBuf>,
+    mode: RecursiveMode,
     on_change: impl Fn(PathBuf) + Send + 'static,
 ) -> Result<RecommendedWatcher, String> {
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
@@ -119,7 +287,7 @@ fn spawn_watcher(
         let hits: Vec<PathBuf> = {
             let Ok(guard) = files.lock() else { return };
             // 空索引 = 直通模式（fs_watch_dirs 用）：目录内一切变更都上报。
-            // 检出要放在持锁内：并发下「读长度为 0」与「逐个 lookup」之间
+            // 检查要放在持锁内：并发下「读长度为 0」与「逐个 lookup」之间
             // 若有人插入了条目，直通判定就失效了。
             if guard.is_empty() {
                 event.paths.clone()
@@ -139,7 +307,7 @@ fn spawn_watcher(
     for dir in dirs {
         // 单个目录监听失败（已被删除等）不整体报错：那些文件只是收不到事件，
         // 让整个注册失败会连带正常文件也失去监听。
-        let _ = watcher.watch(&dir, RecursiveMode::NonRecursive);
+        let _ = watcher.watch(&dir, mode);
     }
     Ok(watcher)
 }
@@ -195,13 +363,14 @@ pub fn fs_watch_files(
 
     let shared: SharedFiles = Arc::new(Mutex::new(index));
     let emit_window = window.clone();
-    let watcher = spawn_watcher(shared, dirs, move |path| {
+    let emit_label = label.clone();
+    let watcher = spawn_watcher(shared, dirs, RecursiveMode::NonRecursive, move |path| {
         let payload = ExternalChangePayload {
             path: path.to_string_lossy().into_owned(),
         };
         // 只发给注册了这份文件集合的窗口：负载里的路径是该窗口的缓冲键，
-        // 广播给别的窗口只会让它们查不到缓冲、白跑一遍处理。
-        let _ = emit_window.emit(EXTERNAL_CHANGE_EVENT, payload);
+        // 定向发送（emit 是全窗口广播，多窗口下会让无关窗口白跑处理）。
+        let _ = emit_window.emit_to(emit_label.as_str(), EXTERNAL_CHANGE_EVENT, payload);
     });
 
     let watcher = match watcher {
@@ -229,21 +398,28 @@ pub fn fs_watch_files(
     Ok(())
 }
 
-/// 监听**目录**（项目根与追加的外部根），把目录内发生的任何文件系统变更
-/// 上报为 `fs://dir-change`。
+/// 监听**目录**（项目根与追加的外部根），把目录子树内发生的文件系统变更
+/// 以「变更目录」为粒度上报为 `fs://dir-change`。
 ///
 /// 与 `fs_watch_files` 的分工：
 /// - `fs_watch_files` 监听「打开中的文件」的父目录，事件精确到文件，前端据此
 ///   做外部修改判定（有脏缓冲时提示冲突）；
-/// - 本命令只关心「目录里多了/少了/改名了什么」，不关心谁的内容变了。它回答
-///   的问题是「Finder 或别处动了这个项目吗」，前端据此刷新文件树。
+/// - 本命令关心「哪个目录的内容集合变了」，前端据此刷新文件树对应子树。
 ///
 /// 为什么单独一条命令而不是把目录混进 `fs_watch_files`：两者的负载语义不同
 /// （一个要给缓冲键、一个要给目录路径），前端处理路径也不同。混用会让前端
 /// 无法判断该走外部修改判定还是树刷新。
 ///
-/// 非递归：只监听根目录自身。子目录的变更由前端在展开目录时按需补监听
-/// （当前实现为惰性：展开了才重新调用本命令包含它）。
+/// **递归监听**：外部程序（构建工具、agent CLI）写入的文件可以出现在任意
+/// 深度的子目录。notify 的 FSEvents 后端在 NonRecursive 下只放行根的直接
+/// 子项事件（fsevent.rs 的 `parent_path == p` 过滤），`project/src/new.ts`
+/// 会被 Rust 侧静默丢弃 —— 文件树就停在旧内容上（实测过的 bug），因此必须
+/// Recursive。事件量由 [`DirChangeCoalescer`] 在 Rust 侧按目录合并。
+///
+/// 负载 `path` = 变更发生的目录（注册原文前缀形态，可能是根本身）：
+/// - 根或外部根 → 前端整树/整根刷新（保持既有语义）；
+/// - 根下子目录 → 前端只重读该目录并合并进树（节点未加载时忽略，
+///   展开时会现读）。
 #[tauri::command]
 pub fn fs_watch_dirs(
     window: tauri::WebviewWindow,
@@ -262,6 +438,10 @@ pub fn fs_watch_dirs(
     let label = window.label().to_string();
     let stale = state.dirs.lock().map_err(|e| e.to_string())?.remove(&label);
 
+    // (规范化形态, 注册原文)：规范化形态用于事件前缀匹配（FSEvents 报的是
+    // canonical 路径），原文用于拼负载（前端拿它与 workspacePath / 树节点比较，
+    // 规范化后的形态如 /private/tmp 会匹配不上）。
+    let mut roots: Vec<(PathBuf, String)> = Vec::new();
     let mut dirs: HashSet<PathBuf> = HashSet::new();
     for p in &paths {
         if p.trim().is_empty() {
@@ -269,7 +449,10 @@ pub fn fs_watch_dirs(
         }
         // norm：软链（/tmp → /private/tmp）与尾斜杠归一成同一形态，
         // 否则同一目录的重复形态会被当成两个 watcher。
-        dirs.insert(norm(Path::new(p)));
+        let normalized = norm(Path::new(p));
+        if dirs.insert(normalized.clone()) {
+            roots.push((normalized, p.clone()));
+        }
     }
     if dirs.is_empty() {
         // 无目录可听（未打开项目）：旧监听已停，直接返回。
@@ -277,26 +460,29 @@ pub fn fs_watch_dirs(
     }
 
     let emit_window = window.clone();
-    // 上报的路径用注册时的原文：前端拿它与 workspacePath / 外部根直接比较，
-    // 规范化后的形态（如 /private/tmp）会匹配不上。
-    let originals: Vec<PathBuf> = paths
-        .iter()
-        .filter(|p| !p.trim().is_empty())
-        .map(PathBuf::from)
-        .collect();
+    let emit_label = label.clone();
+    // 风暴退化哨兵：pending 超限时只留「第一个根」，前端整树刷新兜底。
+    let fallback_root = roots[0].1.clone();
+    let coalescer = Arc::new(DirChangeCoalescer::new(
+        PathBuf::from(&fallback_root),
+        Box::new(move |dir| {
+            let payload = ExternalChangePayload {
+                path: dir.to_string_lossy().into_owned(),
+            };
+            // 定向发送：emit 是全窗口广播，多窗口下会让无关窗口白跑树刷新。
+            let _ = emit_window.emit_to(emit_label.as_str(), DIR_CHANGE_EVENT, payload);
+        }),
+    ));
+    let coalescer_for_cb = Arc::clone(&coalescer);
     let watcher = spawn_watcher(
         Arc::new(Mutex::new(FileIndex::new())),
-        dirs,
-        move |_event_path| {
-            // 事件落在哪个目录上不重要：前端只需要「这个项目的文件系统变了」。
-            // 逐个根各发一条，让前端自己判断要不要刷（外部根与项目根的刷新
-            // 代价不同，由前端决定）。
-            for original in &originals {
-                let payload = ExternalChangePayload {
-                    path: original.to_string_lossy().into_owned(),
-                };
-                let _ = emit_window.emit(DIR_CHANGE_EVENT, payload);
-            }
+        dirs.iter().cloned().collect::<Vec<PathBuf>>(),
+        RecursiveMode::Recursive,
+        move |event_path| {
+            // `.git` 先过滤、再按「变更目录」入队合并（见
+            // process_dir_watch_event：刷新 → 写 .git → 事件 → 再刷新的
+            // 自激循环防线，与嵌套根的多根匹配都在其中）。
+            process_dir_watch_event(&event_path, &roots, &coalescer_for_cb);
         },
     );
 
@@ -348,6 +534,7 @@ mod tests {
                 spawn_watcher(
                     Arc::new(Mutex::new(FileIndex::new())),
                     std::iter::empty::<PathBuf>(),
+                    RecursiveMode::NonRecursive,
                     |_| {},
                 )
                 .unwrap(),
@@ -359,6 +546,7 @@ mod tests {
                 spawn_watcher(
                     Arc::new(Mutex::new(FileIndex::new())),
                     std::iter::empty::<PathBuf>(),
+                    RecursiveMode::NonRecursive,
                     |_| {},
                 )
                 .unwrap(),
@@ -396,9 +584,14 @@ mod tests {
         // 空 FileIndex = 不做任何路径过滤：目录内的一切变更都上报
         // （fs_watch_dirs 的语义就是不关心具体是哪个文件）。
         let shared: SharedFiles = Arc::new(Mutex::new(FileIndex::new()));
-        let watcher = spawn_watcher(shared, std::iter::once(dir.clone()), move |p| {
-            let _ = tx.send(p);
-        })
+        let watcher = spawn_watcher(
+            shared,
+            std::iter::once(dir.clone()),
+            RecursiveMode::NonRecursive,
+            move |p| {
+                let _ = tx.send(p);
+            },
+        )
         .expect("创建目录监听器");
         std::thread::sleep(std::time::Duration::from_millis(200));
 
@@ -496,9 +689,14 @@ mod tests {
         register(&mut index, file.clone());
         let shared: SharedFiles = Arc::new(Mutex::new(index));
         let (tx, rx) = std::sync::mpsc::channel();
-        let watcher = spawn_watcher(shared, std::iter::once(dir.clone()), move |p| {
-            let _ = tx.send(p);
-        })
+        let watcher = spawn_watcher(
+            shared,
+            std::iter::once(dir.clone()),
+            RecursiveMode::NonRecursive,
+            move |p| {
+                let _ = tx.send(p);
+            },
+        )
         .expect("创建监听器并注册目录");
 
         // FSEvents 打包事件有延迟，先让监听生效再写
@@ -527,9 +725,14 @@ mod tests {
         register(&mut index, watched.clone());
         let shared: SharedFiles = Arc::new(Mutex::new(index));
         let (tx, rx) = std::sync::mpsc::channel();
-        let watcher = spawn_watcher(shared, std::iter::once(dir.clone()), move |p| {
-            let _ = tx.send(p);
-        })
+        let watcher = spawn_watcher(
+            shared,
+            std::iter::once(dir.clone()),
+            RecursiveMode::NonRecursive,
+            move |p| {
+                let _ = tx.send(p);
+            },
+        )
         .expect("创建监听器并注册目录");
 
         // FSEvents 可能在监听建立后补发 watched.txt 的初始事件；这属于
@@ -555,5 +758,263 @@ mod tests {
 
         drop(watcher);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- 递归目录监听（外部写入子目录文件的根因修复） ----
+
+    /// 递归模式必须放行**深层**事件：外部程序往 `root/src/` 写新文件时，
+    /// 事件路径是 `root/src/new.txt`（深度 2）。NonRecursive 的 FSEvents
+    /// 过滤会把它丢掉（parent 是 `root/src` 不是 root）—— 这正是「文件树
+    /// 不自动刷新」的根因。Recursive 模式下该事件必须到达回调。
+    #[test]
+    fn dir_watch_recursive_fires_for_nested_file() {
+        let dir = temp_dir("recursive");
+        let sub = dir.join("src");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        let shared: SharedFiles = Arc::new(Mutex::new(FileIndex::new()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let watcher = spawn_watcher(
+            shared,
+            std::iter::once(dir.clone()),
+            RecursiveMode::Recursive,
+            move |p| {
+                let _ = tx.send(p);
+            },
+        )
+        .expect("创建递归监听器");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let created = sub.join("new.txt");
+        std::fs::write(&created, "x").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut got = false;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+                Ok(p) if p.starts_with(norm(&dir)) => {
+                    got = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                Err(e) => panic!("等待期间通道异常：{e}"),
+            }
+        }
+        assert!(got, "深度 2 的新建文件必须触发事件（树自动刷新的根基）");
+
+        drop(watcher);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 变更目录提取：事件路径 → 「内容变化的目录」（父目录语义，注册原文前缀）。
+    #[test]
+    fn changed_dir_maps_event_to_parent_dir() {
+        let root_norm = Path::new("/tmp/proj");
+        let root_orig = "/tmp/proj";
+        // 深度 2 的文件 → 其父目录
+        assert_eq!(
+            changed_dir_of(Path::new("/tmp/proj/src/new.txt"), root_norm, root_orig),
+            Some(PathBuf::from("/tmp/proj/src"))
+        );
+        // 深度 1 的文件 → 根本身
+        assert_eq!(
+            changed_dir_of(Path::new("/tmp/proj/top.txt"), root_norm, root_orig),
+            Some(PathBuf::from("/tmp/proj"))
+        );
+        // 事件就是根（FSEvents 的目录级合并上报）→ 根本身
+        assert_eq!(
+            changed_dir_of(Path::new("/tmp/proj"), root_norm, root_orig),
+            Some(PathBuf::from("/tmp/proj"))
+        );
+        // 不在根下：None
+        assert_eq!(
+            changed_dir_of(Path::new("/etc/hosts"), root_norm, root_orig),
+            None
+        );
+        // 原文与 canonical 不同形（/var → /private/var）：负载必须回到原文形态
+        assert_eq!(
+            changed_dir_of(
+                Path::new("/private/var/folders/proj/src/a.txt"),
+                Path::new("/private/var/folders/proj"),
+                "/var/folders/proj"
+            ),
+            Some(PathBuf::from("/var/folders/proj/src"))
+        );
+    }
+
+    /// `.git` 子树事件必须被过滤（刷新自激循环的回归测试）。
+    ///
+    /// 应用自己的 git 刷新每次都写 `.git/index` / `.git/index.lock`；这些
+    /// 事件对文件树毫无意义，放行就是「刷新 → 写 .git → 事件 → 再刷新」
+    /// 的死循环（实测）。`.git` 永远不出现在文件树里，过滤零损失。
+    #[test]
+    fn git_dir_events_are_filtered() {
+        let root_norm = Path::new("/tmp/proj");
+        // .git 下任意深度都过滤
+        assert!(event_under_git_dir(
+            Path::new("/tmp/proj/.git/index"),
+            root_norm
+        ));
+        assert!(event_under_git_dir(Path::new("/tmp/proj/.git"), root_norm));
+        assert!(event_under_git_dir(
+            Path::new("/tmp/proj/.git/refs/heads/main"),
+            root_norm
+        ));
+        // 正常路径不过滤
+        assert!(!event_under_git_dir(
+            Path::new("/tmp/proj/src/new.txt"),
+            root_norm
+        ));
+        assert!(!event_under_git_dir(
+            Path::new("/tmp/proj/.github/ci.yml"),
+            root_norm
+        ));
+        // 不在根下：false
+        assert!(!event_under_git_dir(
+            Path::new("/other/.git/index"),
+            root_norm
+        ));
+        // 根本身：false（变更目录是根，照常上报）
+        assert!(!event_under_git_dir(Path::new("/tmp/proj"), root_norm));
+    }
+
+    /// 端到端：递归监听下向 `<root>/.git/index` 写文件不得触发回调；
+    /// 同期向正常子目录写文件必须触发（证明过滤器没有误伤）。
+    #[test]
+    fn dir_watch_ignores_git_dir_writes() {
+        let dir = temp_dir("gitfilter");
+        let git_dir = dir.join(".git");
+        let src = dir.join("src");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::create_dir_all(&src).unwrap();
+
+        let shared: SharedFiles = Arc::new(Mutex::new(FileIndex::new()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        // 走生产同款组合：spawn_watcher 直通回调 + process_dir_watch_event
+        // （.git 过滤 + 变更目录提取 + 合并），而不是复刻闭包逻辑。
+        let roots = vec![(norm(&dir), dir.to_string_lossy().into_owned())];
+        let coalescer = Arc::new(DirChangeCoalescer::new(
+            dir.clone(),
+            Box::new(move |p| {
+                let _ = tx.send(p);
+            }),
+        ));
+        let coalescer_for_cb = Arc::clone(&coalescer);
+        let roots_for_cb = roots.clone();
+        let watcher = spawn_watcher(
+            shared,
+            std::iter::once(dir.clone()),
+            RecursiveMode::Recursive,
+            move |p| process_dir_watch_event(&p, &roots_for_cb, &coalescer_for_cb),
+        )
+        .expect("创建递归监听器");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // 先写 .git（模拟 git 刷新的 index 更新）：时限内不得有任何事件
+        std::fs::write(git_dir.join("index"), "x").unwrap();
+        std::fs::write(git_dir.join("index.lock"), "x").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        let mut git_leaked = false;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+                Ok(p) if p.starts_with(&git_dir) => {
+                    git_leaked = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                Err(e) => panic!("通道异常：{e}"),
+            }
+        }
+        assert!(!git_leaked, ".git 子树的写盘事件必须被过滤");
+
+        // 再写正常子目录：必须触发（过滤器没有连坐）。负载是「变更目录」
+        // （事件路径的父目录、注册原文形态）。
+        std::fs::write(src.join("new.txt"), "x").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut got_src = false;
+        while std::time::Instant::now() < deadline {
+            match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+                Ok(p) if p == src => {
+                    got_src = true;
+                    break;
+                }
+                Ok(_) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                Err(e) => panic!("通道异常：{e}"),
+            }
+        }
+        assert!(got_src, "非 .git 的写盘必须照常触发且负载为变更目录");
+
+        drop(watcher);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 合并发送：同目录多次变更窗口期内只发一条；flush 后可再次触发。
+    #[test]
+    fn coalescer_dedups_within_window_and_recovers() {
+        let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
+        let c = Arc::new(DirChangeCoalescer::new(
+            PathBuf::from("/root"),
+            Box::new(move |p| {
+                let _ = tx.send(p);
+            }),
+        ));
+        // 同一目录 hit 三次：只应发出一条
+        c.hit(PathBuf::from("/root/src"));
+        c.hit(PathBuf::from("/root/src"));
+        c.hit(PathBuf::from("/root/src"));
+        // 不同目录各发一条
+        c.hit(PathBuf::from("/root/lib"));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut got: Vec<PathBuf> = Vec::new();
+        while std::time::Instant::now() < deadline && got.len() < 2 {
+            match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+                Ok(p) => got.push(p),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                Err(e) => panic!("通道异常：{e}"),
+            }
+        }
+        let mut sorted = got.clone();
+        sorted.sort();
+        assert_eq!(
+            sorted,
+            vec![PathBuf::from("/root/lib"), PathBuf::from("/root/src")],
+            "同目录多次变更必须合并为一条，实际: {got:?}"
+        );
+
+        // flush 完成后再次 hit 仍要能发出（flusher 退出后的再调度）
+        std::thread::sleep(std::time::Duration::from_millis(DIR_CHANGE_FLUSH_MS + 100));
+        c.hit(PathBuf::from("/root/docs"));
+        let again = rx.recv_timeout(std::time::Duration::from_secs(5));
+        assert_eq!(
+            again.ok(),
+            Some(PathBuf::from("/root/docs")),
+            "flusher 退出后的新变更必须重新调度发出"
+        );
+    }
+
+    /// 容量退化：pending 超限时明细被丢弃、只留根哨兵。
+    #[test]
+    fn coalescer_falls_back_to_root_on_overflow() {
+        let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
+        let c = Arc::new(DirChangeCoalescer::new(
+            PathBuf::from("/root"),
+            Box::new(move |p| {
+                let _ = tx.send(p);
+            }),
+        ));
+        for i in 0..=DIR_CHANGE_PENDING_CAP {
+            c.hit(PathBuf::from(format!("/root/dir{i}")));
+        }
+        let batch = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("应有 flush");
+        assert_eq!(batch, PathBuf::from("/root"), "超限后必须退化为根哨兵");
+        // 排空：不应还有第二条
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(DIR_CHANGE_FLUSH_MS + 200))
+            .is_err());
     }
 }

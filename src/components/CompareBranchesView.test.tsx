@@ -70,17 +70,20 @@ const commitFiles: Record<string, GitCommitFile[]> = {
 };
 
 beforeEach(() => {
-  invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
-    if (command === 'git_compare_branches') return data as never;
-    if (command === 'git_commit_files') {
-      const hash = String(args?.commit ?? '');
-      return (commitFiles[hash] ?? []) as never;
+  invoke.mockImplementation(
+    async (command: string, args?: Record<string, unknown> | number[] | ArrayBuffer | Uint8Array) => {
+      const a = args as Record<string, unknown> | undefined;
+      if (command === 'git_compare_branches') return data as never;
+      if (command === 'git_commit_files') {
+        const hash = String(a?.commit ?? '');
+        return (commitFiles[hash] ?? []) as never;
+      }
+      if (command === 'git_compare_commits') {
+        return [file('src/left.ts'), file('src/older.ts')] as never;
+      }
+      return [] as never;
     }
-    if (command === 'git_compare_commits') {
-      return [file('src/left.ts'), file('src/older.ts')] as never;
-    }
-    return [] as never;
-  });
+  );
 });
 
 describe('CompareBranchesView', () => {

@@ -29,7 +29,10 @@ interface LeftStripProps {
   /** 当前项目控制台正在运行的命令名（去重）：非空时在 Terminal 图标上亮运行角标 */
   terminalRunning?: string[];
 }
-export const LeftStrip: React.FC<LeftStripProps> = ({
+// React.memo：LeftStrip 的 props 在 App 每次击键重渲染时几乎全部不变
+// （回调已 useStableCallback 稳定化，其余是原始值与稳定 state）。不 memo
+// 的话每次击键都重渲染整条工具条。
+export const LeftStrip = React.memo(function LeftStrip({
   activeDrawer,
   activeBottomTool,
   onToggleDrawer,
@@ -41,7 +44,7 @@ export const LeftStrip: React.FC<LeftStripProps> = ({
   hasCompareSession = false,
   compareTooltip = 'Compare Versions',
   terminalRunning = []
-}) => {
+}: LeftStripProps) {
   return (
     <nav className="tool-sidebar-strip" id="leftStrip" data-tauri-drag-region="false">
       {/* Top Tool Windows */}
@@ -111,4 +114,4 @@ export const LeftStrip: React.FC<LeftStripProps> = ({
       </div>
     </nav>
   );
-};
+});

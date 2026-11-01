@@ -2116,7 +2116,11 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
       }
       // 面板隐藏时暂停快照拉取；保持 dirty 标记，重新可见后下一帧立即补一帧
       const host = hostRef.current;
-      const panelHidden = !host || host.offsetWidth === 0 || host.offsetHeight === 0;
+      // 每帧只读一次布局（此前 panelHidden 与签名各读一次 = 每帧 4 次布局读）；
+      // 与 paint 里「只在变化时写 CSS 尺寸」配合，稳态下不触发布局失效。
+      const hostW = host ? host.offsetWidth : 0;
+      const hostH = host ? host.offsetHeight : 0;
+      const panelHidden = !host || hostW === 0 || hostH === 0;
       if (panelHidden) {
         // 后台/隐藏会话不按 60Hz 空转：降频到 1Hz 轮询，重新可见后立即恢复 rAF 节奏。
         // 多项目 × 多标签时 4Hz 的 IPC 总量仍然可观，1Hz 足够维持后台输出。
@@ -2131,7 +2135,7 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
       // 网格尺寸自愈：宿主尺寸变了但 ResizeObserver 没给回调（面板从 display:none
       // 恢复、左右抽屉开关改变主区宽度、最大化切换高度，都存在这种窗口）时，
       // 这里按尺寸签名兜底重算。签名只在真的变化时才写，稳态下不读布局。
-      const hostSig = `${host.offsetWidth}x${host.offsetHeight}`;
+      const hostSig = `${hostW}x${hostH}`;
       if (hostSig !== lastHostSig.current) {
         lastHostSig.current = hostSig;
         applyHostSize();
@@ -2399,6 +2403,11 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
   /** 粘贴：textarea 的原生粘贴路径把文本写入 PTY（换行规整为 \r）。
    *  之前没有 onPaste，Cmd+V / 右键粘贴被整个丢弃。
    *
+   *  图片增强：剪贴板里是截图 / 浏览器「复制图片」时（无文本、files 可能为
+   *  空 —— WKWebView 不一定把图片暴露成 File），同样调 Rust 取路径：Rust 把
+   *  public.png / public.tiff 数据落成临时文件，路径经 bracketed paste 进
+   *  PTY，omp 认得图片路径，自己画 [Image #N] 缩略图 chip。
+   *
    *  文件增强：剪贴板里是 Finder 复制的文件/文件夹时（files 非空），
    *  绝对路径不在 clipboardData 里 —— `File` 只有 name/type/size。所以
    *  先同步判定「是不是文件粘贴」（files 非空即 true，不付 IPC 往返），
@@ -2413,8 +2422,6 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
   const onTextareaPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const text = e.clipboardData.getData('text/plain');
     const hasFiles = pasteHasFiles(e.clipboardData);
-    // 既没文本也不是文件：什么都不做（不 preventDefault，让浏览器自行处理）
-    if (!text && !hasFiles) return;
     e.preventDefault();
     const pty = ptyRef.current;
     if (!pty) return;
@@ -2445,7 +2452,20 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
     };
 
     if (!hasFiles) {
-      writeTextToPty(text);
+      if (text) {
+        writeTextToPty(text);
+        return;
+      }
+      // 无文本无 files：图片专用剪贴板 —— 截图（Ctrl+⌘⇧+4 → public.tiff）、
+      // 浏览器「复制图片」（public.png）。WKWebView 不一定把它暴露成
+      // clipboardData.files，所以不能只看 files；问一次 Rust，有图片 flavor
+      // 就落盘临时文件返回路径，走同一条附件链路。真·空剪贴板返回空数组，
+      // 什么都不发生 —— 只多一次轻量 IPC。
+      void invokeCommand<string[]>('clipboard_file_paths')
+        .then(paths => writeAttachToPty(toAttachFiles(paths)))
+        .catch(err => {
+          console.error('[terminal] 图片粘贴探测失败:', err instanceof Error ? err.message : String(err));
+        });
       return;
     }
 

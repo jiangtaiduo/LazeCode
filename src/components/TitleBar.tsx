@@ -524,6 +524,10 @@ export const TitleBar = React.memo(function TitleBar({
                 )}
               </div>
 
+              {/* 列表区单滚动容器（与分支下拉同构）：弹层高度被视口钳制后，
+                  打开的项目 + 最近项目在同一个滚动区里滚动，搜索框与操作按钮
+                  保持钉在顶部 */}
+              <div className="project-menu-scroll">
               {/* 打开的项目：本窗口可切换（保留各自会话状态）+ 其它窗口（点击聚焦） */}
               {(openSessionList.length > 0 || otherWindowList.length > 0) && (
                 <>
@@ -650,6 +654,7 @@ export const TitleBar = React.memo(function TitleBar({
                     );
                   })
                 )}
+              </div>
               </div>
             </div>
           )}

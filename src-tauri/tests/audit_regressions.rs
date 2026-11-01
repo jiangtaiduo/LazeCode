@@ -116,7 +116,7 @@ fn git_status_parses_chinese_paths_without_panic() {
     // 未跟踪的中文路径文件 → ??（status 用 -uall 展开成具体文件）
     std::fs::write(dir.join("未跟踪.txt"), "new\n").unwrap();
 
-    let files = git_status_impl(Some(dir.to_string_lossy().to_string())).unwrap();
+    let files = git_status_impl(Some(dir.to_string_lossy().to_string()), true).unwrap();
 
     let modified = files
         .iter()
@@ -145,7 +145,7 @@ fn git_status_parses_rename_arrow_line() {
     // git mv 的 rename 落在暂存区，porcelain 行形如 "R  old -> new"
     git(&dir, &["mv", "old.txt", "new.txt"]);
 
-    let files = git_status_impl(Some(dir.to_string_lossy().to_string())).unwrap();
+    let files = git_status_impl(Some(dir.to_string_lossy().to_string()), true).unwrap();
 
     let renamed = files
         .iter()
@@ -170,7 +170,7 @@ fn git_status_skips_malformed_lines() {
     // 直接种一个格式异常的行没有低成本入口（解析器吃 git 真实输出），
     // 这里验证解析对「短行」的健壮性：空仓库只产生空输出，不 panic。
     let dir = temp_repo("empty");
-    let files = git_status_impl(Some(dir.to_string_lossy().to_string())).unwrap();
+    let files = git_status_impl(Some(dir.to_string_lossy().to_string()), true).unwrap();
     assert!(files.is_empty(), "空仓库不应有变更条目");
     let _ = std::fs::remove_dir_all(&dir);
 }

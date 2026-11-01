@@ -41,6 +41,11 @@ export function isValidEventName(name: string): boolean {
 
 const OPT_OUT_KEY = 'lazecode.telemetry.enabled';
 
+// isTelemetryEnabled 在每条 IPC 的 trackCommand 里调用（每键 pty_write 命中）。
+// 曾试过模块级缓存，被 verify-telemetry 的「两次全新运行」场景正确拦下：
+// 开关必须跟踪当前 store（外部清空 localStorage 后应立即生效）。保持诚实读取
+// —— WKWebView 的 getItem 是键级 O(1)，每键一次的边界 crossing 可忽略。
+
 export function isTelemetryEnabled(): boolean {
   try {
     if (typeof localStorage === 'undefined') return false;

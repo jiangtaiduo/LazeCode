@@ -477,6 +477,10 @@ pub fn pty_spawn(
     // 会同时决定内核 PTY 缓冲与引擎初始网格两个分配。
     let (cols, rows) = clamp_grid(cols, rows);
 
+    // PATH 富集未完成时先等：shell 解析（resolve_shell 只认名字）与登录
+    // shell 的 .zprofile 都依赖富集后的环境（见 start_shell_path_enrichment）。
+    crate::ensure_shell_path_ready();
+
     let pty_system = native_pty_system();
 
     let pair = pty_system
@@ -518,7 +522,7 @@ pub fn pty_spawn(
     cmd.env("COLORTERM", "truecolor");
     // 告知 shell 运行在 IDE 内，便于配置区分
     cmd.env("TERM_PROGRAM", "lazecode");
-    cmd.env("TERM_PROGRAM_VERSION", "0.1.0");
+    cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
     // 剔除凭据类环境变量。
     //
     // 背景：portable-pty 的 `CommandBuilder::as_command()` 会先 `env_clear()`
@@ -610,6 +614,10 @@ pub fn pty_spawn(
     let dirty_channel = format!("pty://dirty/{session_id}");
     let pwd_channel = format!("pty://pwd/{session_id}");
     let reader_app = app.clone();
+    // 终端事件定向发给创建该会话的窗口：emit() 是全窗口广播，洪水输出下
+    // 每秒几十条脏信号 × 窗口数会全部灌进无关窗口的 WKWebView 事件队列。
+    // 会话本来就按窗口隔离（close_for_window 语义），定向不改变可达性。
+    let reader_window_label = window_label.clone();
     let reader_term = Arc::clone(&terminal);
     let reader_writer = Arc::clone(&writer);
     let reader_child = Arc::clone(&child);
@@ -656,7 +664,7 @@ pub fn pty_spawn(
                     Ok(None) => {
                         // 收尾顺带补发一次脏信号：尾块可能落在节流窗口里，
                         // 直接 break 会让最后一屏停在上一帧
-                        let _ = reader_app.emit(&dirty_channel, ());
+                        let _ = reader_app.emit_to(&reader_window_label, &dirty_channel, ());
                         break;
                     }
                     Ok(Some((n, responses, pwd))) => {
@@ -666,7 +674,7 @@ pub fn pty_spawn(
                         // （只在 cd 时触发），不需要节流；旧会话被顶替后不再发。
                         if let Some(pwd) = pwd {
                             if !reader_retired.load(Ordering::Relaxed) {
-                                let _ = reader_app.emit(&pwd_channel, pwd);
+                                let _ = reader_app.emit_to(&reader_window_label, &pwd_channel, pwd);
                             }
                         }
                         // 脏信号节流：前端 rAF 本来就按帧合并（未消费的标脏只保留
@@ -681,7 +689,10 @@ pub fn pty_spawn(
                         });
                         if due || n < buf.len() {
                             last_emit = Some(now);
-                            if reader_app.emit(&dirty_channel, ()).is_err() {
+                            if reader_app
+                                .emit_to(&reader_window_label, &dirty_channel, ())
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -702,7 +713,7 @@ pub fn pty_spawn(
             // 被同 id 新会话顶替的旧读线程到此闭嘴：发出去的旧退出码
             // 会让前端误判新会话已退出。
             if !reader_retired.load(Ordering::Relaxed) {
-                let _ = reader_app.emit(&exit_channel, code);
+                let _ = reader_app.emit_to(&reader_window_label, &exit_channel, code);
             }
         })
         // 读线程起不来（线程数上限 / 沙箱限制）不能 panic：release 是
@@ -753,11 +764,20 @@ pub fn pty_spawn(
     })
 }
 
+/// `pty_write` 的会话标识 header：原始字节 IPC 下 body 就是字节本身，
+/// 元数据（会话 id）走 header（前端 `InvokeOptions.headers`）。
+const PTY_WRITE_SESSION_HEADER: &str = "x-lazecode-session";
+
 #[tauri::command]
 /// 写入 PTY。
 ///
 /// 收原始字节而非字符串：按键编码产出的是控制字节（ESC 序列等），
 /// 走字符串会在两侧各做一次编解码，既多余又对非 UTF-8 字节有损。
+///
+/// 请求体走**原始字节**（`InvokeBody::Raw`，`application/octet-stream`）：
+/// 旧的 JSON 数字数组路径把 64KB 写成 ~256KB 文本、Rust 侧再逐元素解析，
+/// 大粘贴的开销是字节数的 4 倍还多。快照路径（`ipc::Response`）早已是
+/// 原始字节，这条写入路径与它对称。仍兼容 JSON 数组载荷（一次转换）。
 ///
 /// async + `spawn_blocking`：`write_all` 在对端不读 stdin（PTY 缓冲满）时会
 /// 长时间阻塞。同步命令会把一个 ipc worker 线程按在那儿，大量粘贴或某个
@@ -765,9 +785,19 @@ pub fn pty_spawn(
 /// 只有该会话的写入在等（同会话字节的串行化仍由 writer 锁保证）。
 pub async fn pty_write(
     manager: State<'_, PtyManager>,
-    session_id: String,
-    data: Vec<u8>,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
+    let session_id = request
+        .headers()
+        .get(PTY_WRITE_SESSION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| format!("缺少会话标识 header（{PTY_WRITE_SESSION_HEADER}）"))?
+        .to_string();
+    let data: Vec<u8> = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes.clone(),
+        tauri::ipc::InvokeBody::Json(value) => serde_json::from_value(value.clone())
+            .map_err(|e| format!("pty_write 载荷类型错误: {e}"))?,
+    };
     let writer = session_writer(&manager, &session_id)?;
     tauri::async_runtime::spawn_blocking(move || write_session(&writer, &data))
         .await
@@ -1981,18 +2011,21 @@ pub fn vt_encode_key(
     session_id: String,
     input: KeyInput,
 ) -> Result<Vec<u8>, String> {
-    let sessions = manager
-        .sessions
-        .lock()
-        .map_err(|_| "PTY 状态锁失效".to_string())?;
-    let session = sessions
-        .get(&session_id)
-        .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+    // 表锁内只做 lookup + Arc::clone,终端操作在表锁外进行(与 vt_snapshot /
+    // vt_scroll 同一约定:持表锁进终端锁会让一个慢操作把全部会话的
+    // spawn / close / resize 排在后面)。
+    let terminal = {
+        let sessions = manager
+            .sessions
+            .lock()
+            .map_err(|_| "PTY 状态锁失效".to_string())?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+        Arc::clone(&session.terminal)
+    };
 
-    let mut term = session
-        .terminal
-        .lock()
-        .map_err(|_| "终端状态锁失效".to_string())?;
+    let mut term = terminal.lock().map_err(|_| "终端状态锁失效".to_string())?;
     term.encode_key(&input)
 }
 
@@ -2007,18 +2040,21 @@ pub fn vt_set_selection(
     end_y: u16,
     rectangle: Option<bool>,
 ) -> Result<(), String> {
-    let sessions = manager
-        .sessions
-        .lock()
-        .map_err(|_| "PTY 状态锁失效".to_string())?;
-    let session = sessions
-        .get(&session_id)
-        .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+    // 表锁内只做 lookup + Arc::clone,终端操作在表锁外进行(与 vt_snapshot /
+    // vt_scroll 同一约定:持表锁进终端锁会让一个慢操作把全部会话的
+    // spawn / close / resize 排在后面)。
+    let terminal = {
+        let sessions = manager
+            .sessions
+            .lock()
+            .map_err(|_| "PTY 状态锁失效".to_string())?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+        Arc::clone(&session.terminal)
+    };
 
-    let mut term = session
-        .terminal
-        .lock()
-        .map_err(|_| "终端状态锁失效".to_string())?;
+    let mut term = terminal.lock().map_err(|_| "终端状态锁失效".to_string())?;
     term.set_selection(start_x, start_y, end_x, end_y, rectangle.unwrap_or(false))
 }
 
@@ -2031,18 +2067,21 @@ pub fn vt_select_word(
     x: u16,
     y: u16,
 ) -> Result<Option<(u16, u16, u16, u16)>, String> {
-    let sessions = manager
-        .sessions
-        .lock()
-        .map_err(|_| "PTY 状态锁失效".to_string())?;
-    let session = sessions
-        .get(&session_id)
-        .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+    // 表锁内只做 lookup + Arc::clone,终端操作在表锁外进行(与 vt_snapshot /
+    // vt_scroll 同一约定:持表锁进终端锁会让一个慢操作把全部会话的
+    // spawn / close / resize 排在后面)。
+    let terminal = {
+        let sessions = manager
+            .sessions
+            .lock()
+            .map_err(|_| "PTY 状态锁失效".to_string())?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+        Arc::clone(&session.terminal)
+    };
 
-    let mut term = session
-        .terminal
-        .lock()
-        .map_err(|_| "终端状态锁失效".to_string())?;
+    let mut term = terminal.lock().map_err(|_| "终端状态锁失效".to_string())?;
     term.select_word(x, y)
 }
 
@@ -2052,18 +2091,21 @@ pub fn vt_select_line(
     session_id: String,
     y: u16,
 ) -> Result<Option<(u16, u16, u16, u16)>, String> {
-    let sessions = manager
-        .sessions
-        .lock()
-        .map_err(|_| "PTY 状态锁失效".to_string())?;
-    let session = sessions
-        .get(&session_id)
-        .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+    // 表锁内只做 lookup + Arc::clone,终端操作在表锁外进行(与 vt_snapshot /
+    // vt_scroll 同一约定:持表锁进终端锁会让一个慢操作把全部会话的
+    // spawn / close / resize 排在后面)。
+    let terminal = {
+        let sessions = manager
+            .sessions
+            .lock()
+            .map_err(|_| "PTY 状态锁失效".to_string())?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+        Arc::clone(&session.terminal)
+    };
 
-    let mut term = session
-        .terminal
-        .lock()
-        .map_err(|_| "终端状态锁失效".to_string())?;
+    let mut term = terminal.lock().map_err(|_| "终端状态锁失效".to_string())?;
     term.select_line(y)
 }
 
@@ -2072,18 +2114,21 @@ pub fn vt_clear_selection(
     manager: State<'_, PtyManager>,
     session_id: String,
 ) -> Result<(), String> {
-    let sessions = manager
-        .sessions
-        .lock()
-        .map_err(|_| "PTY 状态锁失效".to_string())?;
-    let session = sessions
-        .get(&session_id)
-        .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+    // 表锁内只做 lookup + Arc::clone,终端操作在表锁外进行(与 vt_snapshot /
+    // vt_scroll 同一约定:持表锁进终端锁会让一个慢操作把全部会话的
+    // spawn / close / resize 排在后面)。
+    let terminal = {
+        let sessions = manager
+            .sessions
+            .lock()
+            .map_err(|_| "PTY 状态锁失效".to_string())?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+        Arc::clone(&session.terminal)
+    };
 
-    let mut term = session
-        .terminal
-        .lock()
-        .map_err(|_| "终端状态锁失效".to_string())?;
+    let mut term = terminal.lock().map_err(|_| "终端状态锁失效".to_string())?;
     term.clear_selection()
 }
 
@@ -2093,18 +2138,21 @@ pub fn vt_selected_text(
     manager: State<'_, PtyManager>,
     session_id: String,
 ) -> Result<String, String> {
-    let sessions = manager
-        .sessions
-        .lock()
-        .map_err(|_| "PTY 状态锁失效".to_string())?;
-    let session = sessions
-        .get(&session_id)
-        .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+    // 表锁内只做 lookup + Arc::clone,终端操作在表锁外进行(与 vt_snapshot /
+    // vt_scroll 同一约定:持表锁进终端锁会让一个慢操作把全部会话的
+    // spawn / close / resize 排在后面)。
+    let terminal = {
+        let sessions = manager
+            .sessions
+            .lock()
+            .map_err(|_| "PTY 状态锁失效".to_string())?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+        Arc::clone(&session.terminal)
+    };
 
-    let mut term = session
-        .terminal
-        .lock()
-        .map_err(|_| "终端状态锁失效".to_string())?;
+    let mut term = terminal.lock().map_err(|_| "终端状态锁失效".to_string())?;
     term.selected_text()
 }
 
@@ -2117,6 +2165,11 @@ pub fn vt_selected_text(
 ///
 /// 这里在会话表锁内只 Arc::clone 出终端句柄就放锁，把搜索丢进 blocking 池，
 /// ipc worker 立即脱身；全局锁不再持有，其它会话照常工作。
+///
+/// **已知边界**：搜索运行期间持有的是**该会话的终端锁** —— PTY 读线程写
+/// 终端要同一把锁，首次在大 scrollback 上搜索时该会话的实时输出会停摆到
+/// 搜索追平为止（引擎侧 feed+tick 是阻塞语义）。其它会话与 ipc 不受影响。
+/// 若产品上需要「边输出边搜」，需要引擎支持增量追平，当前按可接受语义留痕。
 #[tauri::command]
 pub async fn vt_search(
     manager: State<'_, PtyManager>,

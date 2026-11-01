@@ -535,12 +535,17 @@ pub fn build_menu_with<R: Runtime>(
     )
 }
 
-/// 把菜单点击事件转发给该窗口的前端。
+/// 把菜单点击事件转发给指定窗口的前端。
 ///
 /// 转发成 `app-menu://<id>` 而不是复用 `menu` 事件：前端只 listen 自己关心的
 /// id，且字符串比 `tauri::menu::MenuEvent` 更易与既有回调对接。
-pub fn emit_menu_event<R: Runtime, E: Emitter<R>>(emitter: &E, id: &str) {
-    let _ = emitter.emit(&format!("{}{}", EVENT_PREFIX, id), ());
+///
+/// `label` 必须由调用方显式传入并用 `emit_to` 定向：`emit()` 是全窗口广播，
+/// 而「未聚焦窗口的 React state 独立、不被菜单事件驱动」这一不变量
+/// （见 lib.rs on_menu_event 的注释）必须落在发送侧，不能依赖每个前端
+/// 实例自觉过滤。
+pub fn emit_menu_event<R: Runtime, E: Emitter<R>>(emitter: &E, label: &str, id: &str) {
+    let _ = emitter.emit_to(label, &format!("{}{}", EVENT_PREFIX, id), ());
 }
 
 #[cfg(test)]

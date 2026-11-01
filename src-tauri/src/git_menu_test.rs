@@ -112,7 +112,7 @@ fn head_hash(d: &Path) -> String {
 }
 
 fn status_of(d: &Path, rel: &str) -> Option<GitChangedFileDto> {
-    block_on(git_status(repo(d)))
+    block_on(git_status(repo(d), None))
         .expect("git_status")
         .into_iter()
         .find(|f| f.path == rel)
@@ -416,7 +416,9 @@ fn branch_merge_conflict_then_dialog_cmds_resolve() {
     assert_eq!(r(&d, "a.txt"), "line1\nA-SIDE\nline3\n");
     block_on(git_stage_file(repo(&d), "a.txt".to_string())).expect("stage resolved");
     git(&d, &["commit", "-m", "resolve with ours"]);
-    assert!(block_on(git_status(repo(&d))).expect("status").is_empty());
+    assert!(block_on(git_status(repo(&d), None))
+        .expect("status")
+        .is_empty());
 }
 
 #[test]
@@ -542,14 +544,14 @@ fn commit_reset_modes_and_undo_pattern() {
     git(&d, &["commit", "-m", "to undo"]);
     git_reset(repo(&d), "HEAD~1".to_string(), Some("soft".to_string())).expect("undo");
     assert!(!git(&d, &["log", "--oneline"]).contains("to undo"));
-    let st = block_on(git_status(repo(&d))).expect("status");
+    let st = block_on(git_status(repo(&d), None)).expect("status");
     assert!(
         st.iter().any(|f| f.path == "u.txt" && f.is_staged),
         "soft 后应留暂存"
     );
     // mixed：落回工作区；hard：丢弃
     git_reset(repo(&d), "HEAD".to_string(), Some("mixed".to_string())).expect("mixed");
-    let st = block_on(git_status(repo(&d))).expect("status2");
+    let st = block_on(git_status(repo(&d), None)).expect("status2");
     assert!(st.iter().any(|f| f.path == "u.txt" && !f.is_staged));
     // hard：已跟踪修改被丢弃；未跟踪文件按 git 语义保留（PyCharm 的 Hard 同此行为）
     w(&d, "a.txt", "HARD-TAMPER\n");
@@ -652,7 +654,9 @@ fn stash_push_list_files_apply_drop() {
     w(&d, "untracked-s.txt", "u\n");
     // Stash Dialog：含未跟踪
     git_stash_push(repo(&d), Some("test stash".to_string()), Some(true)).expect("stash push");
-    assert!(block_on(git_status(repo(&d))).expect("clean").is_empty());
+    assert!(block_on(git_status(repo(&d), None))
+        .expect("clean")
+        .is_empty());
     let list = git_stash_list(repo(&d)).expect("list");
     assert_eq!(list.len(), 1);
     assert!(list[0].message.contains("test stash"));
@@ -722,7 +726,9 @@ fn panels_init_repo_on_empty_dir() {
     let d = fresh_dir("initrepo");
     git_init(repo(&d)).expect("init");
     assert!(d.join(".git").is_dir());
-    assert!(block_on(git_status(repo(&d))).expect("status").is_empty());
+    assert!(block_on(git_status(repo(&d), None))
+        .expect("status")
+        .is_empty());
 }
 
 // ── 远程管理（RemotesDialog.tsx → Git 菜单 Manage Remotes） ────────────────

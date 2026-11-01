@@ -83,7 +83,8 @@ import {
   debounceDirectoryChanges
 } from './services/fileWatch';
 import type { FileProbe } from './services/fileWatch';
-import { internFileTree } from './services/stringIntern';
+import { internFileTree } from './services/stringIntern'
+import { preserveExpandedChildren } from './services/fileTreeMerge';
 import { PagedFileViewer } from './components/PagedFileViewer';
 import type { FileRangeDto } from './components/PagedFileViewer';
 import { logIpc } from './services/ipcLog';
@@ -324,6 +325,21 @@ function findTreeNode(nodes: FileNode[], path: string): FileNode | null {
   return null;
 }
 
+/** 状态栏光标位置指示器。
+ *  刻意做成独立订阅的叶子组件:cursor 是编辑器里最高频的事件(每次方向键、
+ *  每次输入都触发 onDidChangeCursorPosition),订阅若发生在 App 顶层,
+ *  6000 行的 App 函数体每次都全量重跑 —— cursorStore 注释里的代价分析
+ *  只有在「订阅者是叶子」时才成立。visible 变化(切标签)频率低,作 prop。 */
+const CursorIndicator = React.memo(function CursorIndicator({ visible }: { visible: boolean }) {
+  const cursor = useCursorIndicator();
+  if (!cursor || !visible) return null;
+  return (
+    <span className="statusbar-item">
+      {cursor.line}:{cursor.column}
+    </span>
+  );
+});
+
 export const App: React.FC = () => {
   // State
   const [activeDrawer, setActiveDrawer] = useState<ActiveDrawer>('project');
@@ -401,6 +417,8 @@ export const App: React.FC = () => {
   const [logFirstParent, setLogFirstParent] = useState(false);
   const [logNoMerges, setLogNoMerges] = useState(false);
   const [changedFiles, setChangedFiles] = useState<GitChangedFile[]>([]);
+  // 轻刷新路径要沿用上一份 Ignored 条目,渲染期镜像(见 refreshGit 的说明)。
+  const changedFilesRef = useRef<GitChangedFile[]>([]);
   /** sequencer 状态（合并/拣选/变基在途）：随 refreshGit 更新，失败为 null */
   const [sequencer, setSequencer] = useState<SequencerState | null>(null);
   /**
@@ -491,6 +509,9 @@ export const App: React.FC = () => {
   const [externalRoots, setExternalRoots] = useState<FileNode[]>([]);
   /** 文件树展开的目录集合（提升到 App：定位 / 展开全部 / 折叠全部都要操作） */
   const [treeExpanded, setTreeExpanded] = useState<Set<string>>(new Set());
+  // 渲染期镜像:目录事件回调与树更新(refs 模式)需要读当前展开集合,
+  // 不把它拉进 useCallback 依赖(树刷新回调的身份保持稳定)。
+  const treeExpandedRef = useRef<Set<string>>(new Set());
   /** 文件树/展开集合的渲染期镜像：定位时判断链上目录是否已加载，避免重复读盘与整树重建 */
   const fileTreeRef = useRef(fileTree);
   fileTreeRef.current = fileTree;
@@ -595,7 +616,9 @@ export const App: React.FC = () => {
   const gitInFlightRef = useRef(false);
   const gitPendingRef = useRef(false);
   /** 始终指向最近一次创建的 refreshGit：在途 finally 补跑时不能用旧闭包 */
-  const refreshGitRef = useRef<(() => void) | null>(null);
+  const refreshGitRef = useRef<((light?: boolean) => void) | null>(null);
+  /** 等待补跑的请求里「全部为轻刷新」时补跑走轻路径;混有全量(含 undefined)则全量 */
+  const gitPendingLightRef = useRef<boolean | undefined>(undefined);
   /** refreshGit 在途（读操作）：与 gitBusy（写操作）分开，避免刷新时禁用 Commit 按钮 */
   const [gitRefreshing, setGitRefreshing] = useState(false);
   /** 切换/重开项目时递增：即使 workspacePath 未变也要强制重跑 refreshGit effect */
@@ -720,8 +743,11 @@ export const App: React.FC = () => {
    * filteredCommits、CommitDrawer 的目录树）都会跟着重跑 —— 光标移动是
    * 编辑器里最高频的事件之一，这个代价不可接受。改成外部 store 后只有
    * 订阅了它的 `<CursorIndicator>` 会重渲染。
+   *
+   * 落实处的教训：这里曾直接 `useCursorIndicator()` —— 在 App 顶层订阅,
+   * 注释承诺的「只有 CursorIndicator 重渲染」完全没有发生(每次方向键
+   * App 6000 行函数体全跑)。真正兑现它的是下方独立订阅的叶子组件。
    */
-  const cursor = useCursorIndicator();
   const [tabSize, setTabSize] = useState<number | null>(null);
   /** 提交信息历史（hook 化：hooks/useCommitMessageHistory，含持久化与清空入口） */
   const { commitMessages, setCommitMessages, rememberCommitMessage, clearCommitMessages } = useCommitMessageHistory();
@@ -854,6 +880,8 @@ export const App: React.FC = () => {
    * 见 1792 行的赋值），这里只补 refreshTreeDir 这一半。
    */
   const refreshTreeDirRef = useRef<(dir: string) => Promise<void>>(async () => {});
+  /** 子目录精确刷新(递归目录监听按「变更目录」上报):声明时序同 refreshTreeDirRef */
+  const refreshTreeSubdirRef = useRef<(dir: string) => Promise<void>>(async () => {});
 
   /**
    * 处理一次外部变更检测：watcher 事件、重开标签校验、横幅「重载」共用。
@@ -1282,13 +1310,22 @@ export const App: React.FC = () => {
     // 而回调闭包持有 refreshGitRef / refreshTreeDirRef 与本次的
     // watchedDirRoots —— 与下面 onExternalChange 的效果同样处理。
     const cancel = debounceDirectoryChanges(dirPath => {
-      // 项目根：换掉一级子树。外部根：只刷那一条。
+      // 防御闸：`.git` 子树永不进文件树，而 git 刷新本身每次都写 `.git`
+      // （opportunistic index 更新）—— 放行就是「刷新 → 写 .git → 事件 →
+      // 再刷新」的自激循环（实测过的回归）。Rust 侧已过滤（event_under_git_dir），
+      // 这里挡住其它事件源与嵌套仓库的 `.git`。
+      if (/(^|[/\\])\.git([/\\]|$)/.test(dirPath)) return;
+      // 递归目录监听后事件按「变更目录」上报（file_watch.rs）：根 / 外部根
+      // 整根重读；根下子目录只重读该目录并合并进树（未加载时是引用级
+      // no-op，展开时现读兜底）。
       if (watchedDirRoots.includes(dirPath)) {
         void refreshTreeDirRef.current(dirPath);
+      } else {
+        void refreshTreeSubdirRef.current(dirPath);
       }
-      // 目录内容变了，Git 工作区状态大概率也变了 —— 一起刷，
-      // 否则文件树的着色会停在变更前的状态。
-      refreshGitRef.current?.();
+      // 目录内容变了，Git 工作区状态大概率也变了 —— 一起刷（轻刷新：只有
+      // status 可能变，log/branches/tags 交给聚焦与操作后的全刷新）。
+      refreshGitRef.current?.(true);
     });
     void onDirectoryChange(cancel.emit).then(unlisten => {
       if (tornDown) unlisten();
@@ -2159,17 +2196,37 @@ export const App: React.FC = () => {
     [resetGitUiForWorkspaceSwitch, showStatus, autoSaveAll, refreshProjectLayer, openFile]
   );
 
-  /** 动态更新树节点子目录（支持懒加载） */
+  /** 动态更新树节点子目录（支持懒加载 / 目录事件的精确刷新） */
   const updateFileTreeNode = useCallback((parentPath: string, newChildren: FileNode[]) => {
     // 入口统一驻留：所有 read_directory 的 children 都经这里进树（懒加载/
     // 刷新/展开/定位），路径串只保留一份 canonical 拷贝（见 stringIntern）。
     const safeChildren = internFileTree(Array.isArray(newChildren) ? newChildren : []);
     setFileTree(prevTree => {
+      // 节点不在树里（目录未加载 / 已折叠出加载深度）：保持原树引用。
+      // 一次无谓的全树 map 会新建所有节点对象，让 memo 化的树视图整体
+      // 重渲染 —— 目录事件风暴下这是纯浪费。
+      const contains = (list: FileNode[]): boolean =>
+        Array.isArray(list) &&
+        list.some(
+          item =>
+            item.path === parentPath ||
+            (item.isDirectory && Array.isArray(item.children) && contains(item.children))
+        );
+      if (!contains(prevTree)) return prevTree;
       const updateRecursive = (list: FileNode[]): FileNode[] => {
         if (!Array.isArray(list)) return [];
         return list.map(item => {
           if (item.path === parentPath) {
-            return { ...item, children: safeChildren };
+            // 深度合并：read_directory 的 maxDepth 截断处不能把展开中且
+            // 已加载的更深子树抹掉（否则一次刷新就折叠用户的展开状态）。
+            return {
+              ...item,
+              children: preserveExpandedChildren(
+                safeChildren,
+                item.children,
+                treeExpandedRef.current
+              )
+            };
           }
           if (item.isDirectory && Array.isArray(item.children)) {
             return { ...item, children: updateRecursive(item.children) };
@@ -2510,7 +2567,16 @@ export const App: React.FC = () => {
   const updateExternalTreeNode = useCallback((parentPath: string, children: FileNode[]) => {
     const safeChildren = Array.isArray(children) ? children : [];
     const walk = (node: FileNode): FileNode => {
-      if (node.path === parentPath) return { ...node, children: safeChildren };
+      if (node.path === parentPath) {
+        // 与 updateFileTreeNode 同一口径:maxDepth 截断处不能抹掉展开中且
+        // 已加载的更深子树(外部根的目录事件走精确刷新,同样要保展开)。
+        return {
+          ...node,
+          children: internFileTree(
+            preserveExpandedChildren(safeChildren, node.children, treeExpandedRef.current)
+          )
+        };
+      }
       if (node.isDirectory && Array.isArray(node.children)) {
         return { ...node, children: node.children.map(walk) };
       }
@@ -2602,7 +2668,7 @@ export const App: React.FC = () => {
     clearTimeout(gitToastTimerRef.current ?? undefined);
   }, []);
 
-  const refreshGit = useCallback(async () => {
+  const refreshGit = useCallback(async (opts?: { light?: boolean }) => {
     if (!workspacePath) {
       setGitRefreshing(false);
       return;
@@ -2610,12 +2676,37 @@ export const App: React.FC = () => {
     const seq = ++gitSeqRef.current;
     if (gitInFlightRef.current) {
       gitPendingRef.current = true;
+      // 补跑口径取「在途与等待中较重的一档」:风暴下轻刷新在途时新轻请求
+      // 不断进来,补跑若一律升全量,git_log/branches/tags 会被反复重跑。
+      const pendingLight = gitPendingLightRef.current;
+      gitPendingLightRef.current = pendingLight === undefined ? !!opts?.light : pendingLight && !!opts?.light;
       setGitRefreshing(true);
       return;
     }
     gitInFlightRef.current = true;
     setGitRefreshing(true);
     try {
+      // 轻刷新：编辑停顿 / 文件树目录事件的触发源只能改变**工作区状态**，
+      // 不可能改变 log / branches / tags —— 那三条命令（大仓上还有 rev-list
+      // 全历史）重跑是纯浪费。只跑 git_status（不带 --ignored=matching：
+      // 它要求枚举全部忽略文件，是 status 最贵的一段），Ignored 分组沿用
+      // 上一份条目，下次全刷新（聚焦 / git 操作 / 显式刷新）校准。
+      if (opts?.light && isRepo && gitRepoRootRef.current) {
+        const status = await invokeCommand<GitChangedFile[]>('git_status', {
+          repoPath: gitRepoRootRef.current,
+          includeIgnored: false
+        });
+        if (seq !== gitSeqRef.current) return;
+        // 沿用上一份 Ignored 时按路径去重:.gitignore 被删等场景下,同一文件
+        // 会以 'U' 出现在本次 status 里,陈旧的 'I' 条目必须让位。
+        const statusPaths = new Set(status.map(f => f.path));
+        const prevIgnored = changedFilesRef.current.filter(
+          f => f.status === 'I' && !statusPaths.has(f.path)
+        );
+        setChangedFiles([...status, ...prevIgnored]);
+        logIpc(`git 轻刷新：${status.length} changed files（+${prevIgnored.length} ignored 沿用）`);
+        return;
+      }
       // 先识别是否为 git 仓库：非仓库时清空数据，面板提示并提供 git init
       const info = await invokeCommand<GitRepoInfo>('git_repo_info', { repoPath: workspacePath });
       if (seq !== gitSeqRef.current) return;
@@ -2658,7 +2749,7 @@ export const App: React.FC = () => {
           noMerges: logNoMerges
         }),
         invokeCommand<GitBranch[]>('git_branches', { repoPath: root }),
-        invokeCommand<GitChangedFile[]>('git_status', { repoPath: root }),
+        invokeCommand<GitChangedFile[]>('git_status', { repoPath: root, includeIgnored: true }),
         // sequencer 状态（MERGE_HEAD/CHERRY_PICK_HEAD）：本地 rev-parse + 三次
         // stat，约毫秒级。冲突横幅/对话框的 Abort/Continue 全靠它亮灭。
         invokeCommand<SequencerState>('git_sequencer_state', { repoPath: root }).catch(() => null),
@@ -2702,16 +2793,17 @@ export const App: React.FC = () => {
         gitPendingRef.current = false;
         const rerun = refreshGitRef.current;
         if (rerun) {
-          rerun();
+          rerun(gitPendingLightRef.current);
         } else {
           setGitRefreshing(false);
         }
       } else {
         setGitRefreshing(false);
       }
+      gitPendingLightRef.current = undefined;
     }
-  }, [workspacePath, logBranch, logPath, logUser, logDate, logSortMode, logFirstParent, logNoMerges]);
-  refreshGitRef.current = () => void refreshGit();
+  }, [workspacePath, isRepo, logBranch, logPath, logUser, logDate, logSortMode, logFirstParent, logNoMerges]);
+  refreshGitRef.current = (light?: boolean) => void refreshGit(light ? { light: true } : undefined);
 
   /** 递增 diff 刷新键：提交/回滚/贮藏等操作改写工作区后，已打开的 diff 需重算 */
   const bumpDiff = useCallback(() => setDiffRefreshKey(k => k + 1), []);
@@ -2878,7 +2970,9 @@ export const App: React.FC = () => {
   useEffect(() => {
     if (!workspacePath || !isRepo) return;
     const timer = setTimeout(() => {
-      void refreshGit();
+      // 编辑触发的刷新走轻路径（见 refreshGit 的说明）：git_status 之外
+      // 的命令在这个触发源下不可能有变化。
+      void refreshGit({ light: true });
     }, 2500);
     return () => clearTimeout(timer);
   }, [codeContent, workspacePath, isRepo, refreshGit]);
@@ -4266,9 +4360,13 @@ export const App: React.FC = () => {
           return;
         }
         if (dirPath === workspacePath) setWorkspaceIsFile(false);
-        const children = internFileTree(Array.isArray(node.children) ? node.children : []);
+        const children = Array.isArray(node.children) ? node.children : [];
         if (dirPath === workspacePath) {
-          setFileTree(children);
+          // 整根重读也要保展开：maxDepth 截断处沿用已加载的更深子树
+          // （见 fileTreeMerge），否则一次根级变更就折叠深层展开。
+          setFileTree(prev =>
+            internFileTree(preserveExpandedChildren(children, prev, treeExpandedRef.current))
+          );
         } else {
           updateFileTreeNode(dirPath, children);
         }
@@ -4279,8 +4377,45 @@ export const App: React.FC = () => {
     [workspacePath, updateFileTreeNode]
   );
 
+  /**
+   * 子目录精确刷新（递归目录监听按「变更目录」上报，见 file_watch.rs）：
+   * 只重读事件目录并合并进树，其余子树保持原引用。目录未加载（折叠在
+   * 加载深度之外）时 updateFileTreeNode 是引用级 no-op —— 展开时现读兜底。
+   * 外部根下的子目录走平行的 updateExternalTreeNode。
+   */
+  const refreshTreeSubdir = useCallback(
+    async (dirPath: string) => {
+      if (!workspacePath || !dirPath) return;
+      const seq = workspaceSeqRef.current;
+      try {
+        const node = await invokeCommand<FileNode>('read_directory', {
+          path: dirPath,
+          maxDepth: 2,
+          ignored: settings.ignoredPatterns
+        });
+        if (seq !== workspaceSeqRef.current) return;
+        if (!node.isDirectory) return;
+        const children = Array.isArray(node.children) ? node.children : [];
+        const external = externalRoots.find(
+          r => dirPath.startsWith(`${r.path}/`) || dirPath.startsWith(`${r.path}\\`)
+        );
+        if (external) {
+          updateExternalTreeNode(dirPath, children);
+        } else {
+          updateFileTreeNode(dirPath, children);
+        }
+      } catch {
+        // 目录可能已被删除/移动：忽略（树里留着旧内容，下次事件或展开校准）
+      }
+    },
+    [workspacePath, updateFileTreeNode, updateExternalTreeNode, externalRoots, settings.ignoredPatterns]
+  );
+
   // 接到前向 ref：目录 watcher 的 effect 在几百行前就要用它，见
   // refreshTreeDirRef 的说明。
+  treeExpandedRef.current = treeExpanded;
+  changedFilesRef.current = changedFiles;
+  refreshTreeSubdirRef.current = refreshTreeSubdir;
   refreshTreeDirRef.current = refreshTreeDir;
   // 忽略规则（.idea、.git 等）变更时重新读取当前项目树
   const prevIgnoredRef = useRef(settings.ignoredPatterns);
@@ -5007,6 +5142,24 @@ export const App: React.FC = () => {
       clearInterval(interval);
     };
   }, [isConflictModalActive, refreshGit]);
+  // 分支/标签操作回调的稳定化:TitleBar / GitBottomPanel 都是 React.memo,
+  // 内联箭头每次渲染都是新引用, memo 会整体失效 —— 每次击键( buffers 状态
+  // 更新)都会连带重渲染标题栏与提交图列表。
+  const checkoutTagStable = useStableCallback((name: string) => void handleCheckoutTag(name));
+  const deleteTagStable = useStableCallback((tag: GitTag) => void handleDeleteTag(tag));
+  const deleteTagNameStable = useStableCallback((name: string) => {
+    const tag = tags.find(tg => tg.name === name);
+    if (tag) void handleDeleteTag(tag);
+  });
+  const checkoutRefStable = useStableCallback(() => void handleCheckoutRefPrompt());
+  const compareBeforeLocalStable = useStableCallback((path: string) =>
+    openCompareWithLocal('HEAD', path)
+  );
+  const fileHistoryStable = useStableCallback((path: string) => setHistoryFile(path));
+  const toggleBottomToolStable = useStableCallback((tool: BottomTool) =>
+    setActiveBottomTool(activeBottomTool === tool ? null : tool)
+  );
+  const openSettingsStable = useStableCallback(() => setSettingsOpen(true));
   const initRepoStable = useStableCallback(() => void handleInitRepo());
   const pushStable = useStableCallback(() => {
     if (!currentBranch) {
@@ -5634,9 +5787,9 @@ export const App: React.FC = () => {
         branches={branches}
         tags={tags}
         onSelectBranch={selectBranchStable}
-        onCheckoutTag={name => void handleCheckoutTag(name)}
-        onDeleteTag={tag => void handleDeleteTag(tag)}
-        onCheckoutRef={() => void handleCheckoutRefPrompt()}
+        onCheckoutTag={checkoutTagStable}
+        onDeleteTag={deleteTagStable}
+        onCheckoutRef={checkoutRefStable}
         onCreateBranch={handleCreateBranch}
         favorites={favoriteBranches}
         onBranchContext={titleBarBranchContextStable}
@@ -5669,10 +5822,8 @@ export const App: React.FC = () => {
           activeDrawer={activeDrawer}
           activeBottomTool={activeBottomTool}
           onToggleDrawer={setActiveDrawer}
-          onToggleBottomTool={tool =>
-            setActiveBottomTool(activeBottomTool === tool ? null : tool)
-          }
-          onOpenSettings={() => setSettingsOpen(true)}
+          onToggleBottomTool={toggleBottomToolStable}
+          onOpenSettings={openSettingsStable}
           settingsOpen={settingsOpen}
           changeCount={changedFiles.filter(f => f.status !== 'I').length}
           isGitRepo={isRepo}
@@ -5706,8 +5857,8 @@ export const App: React.FC = () => {
               onCommitFile={commitFileStable}
               onCommitPaths={commitPathsStable}
               onJumpToSource={jumpToSourceStable}
-              onCompareBeforeLocal={path => openCompareWithLocal('HEAD', path)}
-              onFileHistory={path => setHistoryFile(path)}
+              onCompareBeforeLocal={compareBeforeLocalStable}
+              onFileHistory={fileHistoryStable}
               onCopyLocalPatch={copyLocalPatchStable}
               onCreateLocalPatch={createLocalPatchStable}
               conflictCount={conflictCount}
@@ -5809,7 +5960,7 @@ export const App: React.FC = () => {
               recentProjects={recentWorkspaces}
               onSearchClick={() => setIsSearchOpen(true)}
               onOpenTerminal={() => setActiveBottomTool('terminal')}
-              onOpenSettings={() => setSettingsOpen(true)}
+              onOpenSettings={openSettingsStable}
               onNewWindow={handleNewWindow}
             />
           ) : (
@@ -5983,14 +6134,11 @@ export const App: React.FC = () => {
                 tags={tags}
                 currentBranch={currentBranch}
                 onSelectBranch={selectBranchStable}
-                onCheckoutTag={name => void handleCheckoutTag(name)}
+                onCheckoutTag={checkoutTagStable}
                 onCompareBranches={handleCompareBranches}
                 onUpdateSelected={handleUpdateSelected}
                 onDeleteSelected={handleDeleteSelected}
-                onDeleteTag={name => {
-                  const tag = tags.find(tg => tg.name === name);
-                  if (tag) void handleDeleteTag(tag);
-                }}
+                onDeleteTag={deleteTagNameStable}
                 onCreateBranch={handleCreateBranchPrompt}
                 onToggleFavorite={toggleFavoriteBranch}
                 sortMode={logSortMode}
@@ -6144,9 +6292,7 @@ export const App: React.FC = () => {
               {dirtyPaths.length > 0 && (
                 <span className="statusbar-item statusbar-dirty">{t().git.dirtyFilesHint(dirtyPaths.length)}</span>
               )}
-              {cursor && activeTab === 'editor' && activeFilePath && (
-                <span className="statusbar-item">{cursor.line}:{cursor.column}</span>
-              )}
+              <CursorIndicator visible={activeTab === 'editor' && !!activeFilePath} />
               <span className="statusbar-item">{openFilePaths.length > 0 ? t().git.tabCount(openFilePaths.length) : t().git.ready}</span>
               <span className="statusbar-item">{activeBuffer?.encoding ?? 'UTF-8'}</span>
               <span className="statusbar-item">{tabSize ? t().git.spacesCount(tabSize) : t().git.indentFollowsFile}</span>
@@ -6268,12 +6414,9 @@ export const App: React.FC = () => {
         onShowFilesDiff={handleShowFilesDiff}
         onUpdateSelected={refs => void handleUpdateSelected(refs)}
         onDeleteSelected={refs => void handleDeleteSelected(refs)}
-        onCheckoutTag={name => void handleCheckoutTag(name)}
+        onCheckoutTag={checkoutTagStable}
         onPushTag={name => void handlePushTag(name)}
-        onDeleteTag={name => {
-          const tag = tags.find(tg => tg.name === name);
-          if (tag) void handleDeleteTag(tag);
-        }}
+        onDeleteTag={deleteTagNameStable}
       />
 
       {/* 分支比较对话框（Compare with Current） */}

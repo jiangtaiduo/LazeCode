@@ -46,6 +46,9 @@ class MonacoLspBridge {
   private serverStatus = new Map<string, 'unstarted' | 'starting' | 'ready' | 'failed'>();
   private openDocs = new Map<string, { version: number; language: string }>();
   private registeredLangs = new Set<string>();
+  /** didChange 防抖的暂存与定时器（按文件）。 */
+  private pendingChanges = new Map<string, { language: string; text: string }>();
+  private pendingTimers = new Map<string, number>();
   private monacoInstance: typeof monacoNs | null = null;
   private unlistener: UnlistenFn | null = null;
   private currentWorkspaceRoot = '';
@@ -84,8 +87,21 @@ class MonacoLspBridge {
     if (!payload?.message) return;
     try {
       const parsed = JSON.parse(payload.message);
-      // 处理带 id 的请求响应
-      if (typeof parsed.id === 'number') {
+      const hasId = parsed.id !== undefined && parsed.id !== null;
+
+      // 服务端→客户端的**请求**（id + method 同时存在，如
+      // workspace/configuration、window/workDoneProgress/create——pylsp /
+      // rust-analyzer / tsserver 都会发）必须先于响应匹配处理：客户端与
+      // 服务端的 id 空间各自独立且天然重叠，先按 id 匹配会把在途请求错误
+      // resolve 成服务端请求的 undefined；服务端请求本身若无人应答，
+      // 部分实现会挂起等 configuration。
+      if (hasId && typeof parsed.method === 'string') {
+        this.respondToServerRequest(payload.language, parsed);
+        return;
+      }
+
+      // 客户端请求的响应（有 id、无 method）
+      if (hasId) {
         const handler = this.pending.get(parsed.id);
         if (handler) {
           clearTimeout(handler.timer);
@@ -99,13 +115,29 @@ class MonacoLspBridge {
         return;
       }
 
-      // 处理服务端主动推送的通知（如 diagnostics 诊断信息）
+      // 服务端主动推送的通知（如 diagnostics 诊断信息）
       if (parsed.method === 'textDocument/publishDiagnostics' && this.monacoInstance) {
         this.applyDiagnostics(parsed.params);
       }
     } catch {
       // 非法 JSON 丢弃
     }
+  }
+
+  /** 应答服务端→客户端的请求：已知能力给最小合法结果，未知请求回 null。
+   *  丢包只影响服务端的可选功能（进度显示等），不能让它挂死。 */
+  private respondToServerRequest(language: string, parsed: any): void {
+    let result: unknown = null;
+    if (parsed.method === 'workspace/configuration') {
+      result = (parsed.params?.items ?? []).map(() => null);
+    } else if (parsed.method === 'workspace/applyEdit') {
+      result = { applied: false };
+    }
+    // window/workDoneProgress/create、client/registerCapability 等取默认 null
+    const msg = JSON.stringify({ jsonrpc: '2.0', id: parsed.id, result });
+    void invokeCommand('lsp_server_send', { language, message: msg }).catch(() => {
+      // 服务端可能刚退出：应答丢失无补救动作
+    });
   }
 
   private applyDiagnostics(params: any): void {
@@ -217,6 +249,17 @@ class MonacoLspBridge {
   }
 
   public pathToUri(filePath: string): string {
+    // 必须与 model 的创建形态严格一致：@monaco-editor/react 用
+    // `Uri.parse(path)` 建 model，providers 发 `model.uri.toString()` ——
+    // didOpen/didChange 用别的推导（不做百分号编码的裸拼接）时，含
+    // `#`/`?`/`%` 的路径会被服务端当成两个不同文档，诊断与补全全失效。
+    if (this.monacoInstance) {
+      try {
+        return this.monacoInstance.Uri.parse(filePath).toString();
+      } catch {
+        /* 非法路径退回纯字符串拼接 */
+      }
+    }
     const norm = filePath.replace(/\\/g, '/');
     return norm.startsWith('/') ? `file://${norm}` : `file:///${norm}`;
   }
@@ -244,13 +287,42 @@ class MonacoLspBridge {
       await this.notifyDocOpen(filePath, language, text);
       return;
     }
+    // 全文同步（TextDocumentSyncKind.Full）下每个键都是一整篇文档的
+    // JSON.stringify + IPC + 服务端整篇 re-parse。按文件尾随防抖：连续输入
+    // 合并成一次 didChange（LSP 允许 version 跳变，只要单调），诊断延迟
+    // 200ms 不可感知。close 时 flush（见 notifyDocClose），格式化/重命名
+    // 读到的服务端缓冲不会落后于最后一次击键。
+    const latest = { language, text };
+    this.pendingChanges.set(filePath, latest);
+    if (this.pendingTimers.has(filePath)) return;
+    this.pendingTimers.set(
+      filePath,
+      window.setTimeout(() => {
+        this.pendingTimers.delete(filePath);
+        void this.flushDocChange(filePath);
+      }, 200)
+    );
+  }
+
+  /** 立即发送该文件暂存的 didChange（防抖出口与 close 前的 flush 共用）。 */
+  private async flushDocChange(filePath: string): Promise<void> {
+    const pending = this.pendingChanges.get(filePath);
+    const timer = this.pendingTimers.get(filePath);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      this.pendingTimers.delete(filePath);
+    }
+    if (!pending) return;
+    this.pendingChanges.delete(filePath);
+    const doc = this.openDocs.get(filePath);
+    if (!doc) return; // 已 close：丢弃（服务端马上也会收到 didClose）
     const nextVer = doc.version + 1;
-    this.openDocs.set(filePath, { version: nextVer, language });
+    this.openDocs.set(filePath, { version: nextVer, language: doc.language });
     const uri = this.pathToUri(filePath);
     try {
-      await this.sendNotification(language, 'textDocument/didChange', {
+      await this.sendNotification(doc.language, 'textDocument/didChange', {
         textDocument: { uri, version: nextVer },
-        contentChanges: [{ text }],
+        contentChanges: [{ text: pending.text }],
       });
     } catch {
       // 失败静默
@@ -259,7 +331,18 @@ class MonacoLspBridge {
 
   public async notifyDocClose(filePath: string): Promise<void> {
     const doc = this.openDocs.get(filePath);
-    if (!doc) return;
+    if (!doc) {
+      // 没打开过也可能有挂着的防抖（open 后立刻 close）：清掉即可
+      this.pendingChanges.delete(filePath);
+      const t = this.pendingTimers.get(filePath);
+      if (t !== undefined) {
+        window.clearTimeout(t);
+        this.pendingTimers.delete(filePath);
+      }
+      return;
+    }
+    // 先把防抖中的最后一次编辑发出去再 close：服务端缓冲不落后于最后一次击键
+    await this.flushDocChange(filePath);
     this.openDocs.delete(filePath);
     const uri = this.pathToUri(filePath);
     try {

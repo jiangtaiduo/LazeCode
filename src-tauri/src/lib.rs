@@ -35,7 +35,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::menu::MenuEvent;
 use tauri::Manager;
-use window_state::{load_state, save_state, to_logical, WindowState};
+use window_state::{load_state, to_logical, WindowState};
 
 /// 当前聚焦的窗口 label（`""` = 没有窗口聚焦，例如整个应用被 Cmd+Tab 切走）。
 ///
@@ -156,13 +156,18 @@ fn restore_window_state() -> Option<WindowState> {
 /// 每个窗口各写一份（label 来自 `window.label()`）：共用单文件会让多窗口
 /// 互相覆盖，见 `state_file_path` 的说明。
 ///
+/// Moved/Resized 走 [`window_state::schedule_save`] 尾随防抖（拖动窗口时
+/// 事件以 ~60Hz 连发，逐事件同步写盘是主线程 event loop 上的纯浪费）；
+/// [`window_state::save_now`] 留给 Destroyed（拖完即关的最终几何）。
 /// 写盘失败只记日志：持久化是增强，不能让它中断窗口的正常移动/缩放/关闭。
-fn persist_window_state_for(label: &str, state: &WindowState) {
+fn persist_window_state_for(label: &str, state: &WindowState, immediate: bool) {
     let Some(dir) = app_config_dir() else {
         return;
     };
-    if let Err(e) = save_state(&dir, label, state) {
-        log::warn!("保存窗口 {label} 状态失败: {e}");
+    if immediate {
+        window_state::save_now(label, &dir, state);
+    } else {
+        window_state::schedule_save(label, dir, state.clone());
     }
 }
 
@@ -315,8 +320,62 @@ fn collect_monitor_rects<R: tauri::Runtime>(
     rects
 }
 
+/// PATH 后台富集的完成信号 + 启动标记。
+///
+/// 富集完成后经 `std::env::set_var` 应用到进程环境：Darwin libc 的
+/// getenv/setenv 自带内部锁（线程安全，Apple 文档明示），晚于其它线程
+/// 起跑的 set_var 在 macOS 上是安全的；Linux/Windows 上后台 set_var
+/// 有理论竞态，因此富集线程本身只在 macOS 启动（本模块全部 cfg macos）。
+static SHELL_PATH_ENRICHED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+static SHELL_PATH_ENRICHMENT_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 启动后台 PATH 富集（macOS，进程入口调用一次）。
+///
+/// 原实现同步跑用户登录 shell 取 PATH：`-l` 会执行 `.zprofile` 等，装了
+/// nvm/rbenv 的机器典型 200-800ms、超时上限 1.5s，**直接加进首帧时间**
+/// （发生在 Builder 之前）。改为后台线程：窗口立即创建，首个 git / PTY /
+/// LSP 调用经 [`ensure_shell_path_ready`] 等待富集完成（与旧语义一致，
+/// 只是等待与前端加载并行，用户看见的是窗口先出来）。
 #[cfg(target_os = "macos")]
-fn ensure_macos_gui_environment() {
+pub fn start_shell_path_enrichment() {
+    SHELL_PATH_ENRICHMENT_STARTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    let spawned = std::thread::Builder::new()
+        .name("shell-path-enricher".to_string())
+        .spawn(|| {
+            let merged = compute_shell_path();
+            std::env::set_var("PATH", &merged);
+            let _ = SHELL_PATH_ENRICHED.set(());
+        });
+    if spawned.is_err() {
+        // 后台线程起不来：同步兜底，保住「git/lsp 能找到用户工具链」的语义
+        let merged = compute_shell_path();
+        std::env::set_var("PATH", &merged);
+        let _ = SHELL_PATH_ENRICHED.set(());
+    }
+}
+
+/// 阻塞等待后台 PATH 富集完成（未启动后台富集时立即返回，测试路径）。
+///
+/// 消费者是「spawn 子进程前」的调用点（git_cmd / pty_spawn / lsp start）：
+/// 富集未完成时 spawn 会用到 launchd 的最小 PATH —— git 在 /usr/bin 仍可用，
+/// 但用户工具链（homebrew/rustup 的 git、自定义 LSP）可能 miss。等待上界
+/// 即富集自身的 1.5s 超时，不会无限挂。
+pub fn ensure_shell_path_ready() {
+    #[cfg(target_os = "macos")]
+    {
+        if !SHELL_PATH_ENRICHMENT_STARTED.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        while SHELL_PATH_ENRICHED.get().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+}
+
+/// 计算富集后的 PATH：用户登录 shell 的真实 PATH + 常见开发者目录兜底。
+#[cfg(target_os = "macos")]
+fn compute_shell_path() -> String {
     let current_path = std::env::var("PATH").unwrap_or_default();
     let mut parts: Vec<String> = current_path
         .split(':')
@@ -375,8 +434,7 @@ fn ensure_macos_gui_environment() {
         }
     }
 
-    let merged_path = parts.join(":");
-    std::env::set_var("PATH", merged_path);
+    parts.join(":")
 }
 
 /// 把进程 fd 软上限抬到 [`FD_SOFT_TARGET`]。
@@ -443,8 +501,10 @@ pub fn ensure_fd_limit() {}
 pub fn run() {
     // 先抬 fd 上限：PTY 会话、文件监听、LSP 都按这个额度分配（见函数注释）。
     ensure_fd_limit();
+    // PATH 富集后台化：登录 shell 探测(装 nvm/rbenv 时 200-800ms、上界 1.5s)
+    // 不再阻塞首帧；首个 git/PTY/LSP 调用经 ensure_shell_path_ready 等待。
     #[cfg(target_os = "macos")]
-    ensure_macos_gui_environment();
+    start_shell_path_enrichment();
     // 第一件事：release 是 panic = "abort"，崩溃时进程直接没，装 hook 才能留下现场。
     install_panic_hook();
     let saved_window_state = restore_window_state();
@@ -532,7 +592,8 @@ pub fn run() {
                 // 最小化 / 原生全屏的跳过判定已内置于 capture
                 if let Ok(scale) = window.scale_factor() {
                     if let Some(state) = window_state::capture(window, scale) {
-                        persist_window_state_for(&window_label, &state);
+                        let immediate = matches!(event, tauri::WindowEvent::Destroyed);
+                        persist_window_state_for(&window_label, &state, immediate);
                     }
                 }
             }
@@ -655,7 +716,7 @@ pub fn run() {
                 };
 
                 if let Some(win) = window {
-                    emit_menu_event(&win, event.id().as_ref());
+                    emit_menu_event(&win, win.label(), event.id().as_ref());
                 } else {
                     // 完全没有可见窗口时的 macOS 菜单兜底：
                     // 点击 File -> New Window 或 Open Project 时直接新起一个窗口

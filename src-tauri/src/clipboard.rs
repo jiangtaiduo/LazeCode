@@ -16,7 +16,17 @@
 //! 也只有一个带 `dyn.*` 类型的 item —— **标准 flavor 全部读不到**。
 //! 好消息是那只是 AppleScript 的写法：Finder 真实 Cmd+C 多选时会为每个
 //! 文件写一个 `NSPasteboardTypeFileURL` item，`readObjects(forClasses:)`
-//! 一次就能拿全。三条路都试，任一路成功即返回。
+//! 一次就能拿全。四条路都试，任一路成功即返回。
+//!
+//! # 图片（截图 / 浏览器「复制图片」）
+//!
+//! 截图（Ctrl+Cmd+Shift+4）给 `public.tiff`，浏览器「复制图片」给
+//! `public.png` —— 两者都**没有** file URL flavor，前三路全空。这里把图片
+//! 数据原样落成一个临时文件（`$TMPDIR/lazecode-paste-<纳秒>.png|.tiff`），
+//! 返回路径交给前端走同一条附件链路：omp 认得图片路径（扩展名白名单含
+//! `.png`/`.tiff`，omp 18.8.3 二进制 strings 实测），会自己画缩略图 chip。
+//! 临时文件不主动删：omp 读图发生在粘贴后的几分钟内，早于 macOS 对临时
+//! 目录的任何回收周期。
 //!
 //! # 边界
 //!
@@ -28,7 +38,9 @@
 #[cfg(target_os = "macos")]
 use objc2::ClassType;
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSPasteboard, NSPasteboardTypeFileURL};
+use objc2_app_kit::{
+    NSPasteboard, NSPasteboardTypeFileURL, NSPasteboardTypePNG, NSPasteboardTypeTIFF,
+};
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSArray, NSString, NSURL};
 use std::path::PathBuf;
@@ -68,12 +80,26 @@ fn path_from_nsurl(url: &NSURL) -> Option<PathBuf> {
     normalize_path_string(&s.to_string())
 }
 
+/// 临时落盘路径：系统临时目录 + 纳秒时间戳，同一次剪贴板内绝不重名。
+#[cfg(target_os = "macos")]
+fn image_temp_path(ext: &str) -> Option<PathBuf> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    let mut path = std::env::temp_dir();
+    path.push(format!("lazecode-paste-{nanos}.{ext}"));
+    Some(path)
+}
+
 /// 读系统剪贴板，返回其中的**文件绝对路径**（按剪贴板顺序去重）。
 ///
 /// 剪贴板没有文件时返回空 `Vec`（不是 Err）—— 普通文本粘贴是常态。
+/// 剪贴板是图片（截图 / 浏览器复制图片）时把图片数据落成临时文件、
+/// 返回该临时路径 —— 见模块文档「图片」一节。
 ///
-/// 三条路径的取舍见模块文档；顺序是「URL flavor → 文件名 flavor →
-/// 逐 item 兜底」，任一路成功即返回。
+/// 四条路径的取舍见模块文档；顺序是「URL flavor → 文件名 flavor →
+/// 逐 item 兜底 → 图片落盘」，任一路成功即返回。
 #[cfg(target_os = "macos")]
 pub fn clipboard_file_paths() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
@@ -130,6 +156,26 @@ pub fn clipboard_file_paths() -> Vec<PathBuf> {
                 }
             }
         }
+        if !out.is_empty() {
+            return out;
+        }
+
+        // 路 4：图片 flavor（PNG 优先 —— 浏览器「复制图片」；TIFF 兜底 ——
+        // 系统截图）。图片数据写临时文件后返回路径，前端照常走 bracketed
+        // paste；写盘失败就静默放弃，不阻塞普通文本粘贴。
+        for (ty, ext) in [(NSPasteboardTypePNG, "png"), (NSPasteboardTypeTIFF, "tiff")] {
+            let Some(data) = pb.dataForType(ty) else {
+                continue;
+            };
+            let Some(path) = image_temp_path(ext) else {
+                continue;
+            };
+            let ns_path = NSString::from_str(&path.to_string_lossy());
+            if data.writeToFile_atomically(&ns_path, true) {
+                out.push(path);
+                break;
+            }
+        }
     }
     out
 }
@@ -166,6 +212,7 @@ pub fn clipboard_file_paths() -> Vec<PathBuf> {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+    use objc2_foundation::NSData;
 
     #[test]
     fn normalize_accepts_plain_absolute_path() {
@@ -227,5 +274,74 @@ mod tests {
         for p in clipboard_file_paths() {
             assert!(p.is_absolute(), "返回的必须是绝对路径: {p:?}");
         }
+    }
+
+    /// 路 4 回归：剪贴板里是一张 PNG（浏览器「复制图片」的等价写入）时，
+    /// `clipboard_file_paths` 必须把图片落成 `$TMPDIR/lazecode-paste-*.png`
+    /// 并返回该路径 —— 这是「终端粘贴截图」功能的根基。真实触发（截图 /
+    /// 浏览器复制图片）走的是 public.tiff / public.png flavor，本测试写
+    /// public.png 覆盖其一。
+    ///
+    /// **会覆盖用户剪贴板**（与 `clipboard_file_paths_roundtrip` 同理），
+    /// 手动跑：
+    /// `cargo test clipboard_image_paste_roundtrip -- --ignored --test-threads=1`
+    #[test]
+    #[ignore = "会覆盖用户剪贴板"]
+    fn clipboard_image_paste_roundtrip() {
+        // 1×1 PNG（合法 PNG 头，内容无关紧要：路由只透传字节）
+        let png: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        unsafe {
+            let pb = NSPasteboard::generalPasteboard();
+            pb.clearContents();
+            let data = NSData::with_bytes(png);
+            assert!(
+                pb.setData_forType(Some(&data), NSPasteboardTypePNG),
+                "写 PNG flavor 失败"
+            );
+        }
+        let paths = clipboard_file_paths();
+        assert_eq!(
+            paths.len(),
+            1,
+            "图片剪贴板应返回恰好一个临时路径: {paths:?}"
+        );
+        let p = &paths[0];
+        assert!(p.is_absolute());
+        assert_eq!(p.extension().and_then(|e| e.to_str()), Some("png"));
+        assert!(
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .starts_with("lazecode-paste-"),
+            "落盘文件应带 lazecode-paste- 前缀: {p:?}"
+        );
+        assert_eq!(
+            std::fs::read(p).unwrap_or_default(),
+            png,
+            "落盘字节必须与剪贴板一致"
+        );
+        let _ = std::fs::remove_file(p);
+    }
+
+    /// 图片临时落盘路径：系统临时目录内、带给定扩展名、两次调用不重名。
+    #[test]
+    fn image_temp_path_is_unique_and_in_temp_dir() {
+        let a = image_temp_path("png").expect("临时目录可用");
+        let b = image_temp_path("tiff").expect("临时目录可用");
+        assert_eq!(a.extension().and_then(|e| e.to_str()), Some("png"));
+        assert_eq!(b.extension().and_then(|e| e.to_str()), Some("tiff"));
+        assert_ne!(a, b, "两次调用不得重名");
+        assert!(a.starts_with(std::env::temp_dir()));
+        assert!(a
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .starts_with("lazecode-paste-"));
     }
 }

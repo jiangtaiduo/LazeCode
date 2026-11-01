@@ -60,11 +60,13 @@ const APPROVED_SPAWNERS = new Set([
   'probe_session_busy', // ps 探测终端占用，3s 有界
   'process_rss_kb', // ps -o rss= 采样 LSP 内存归因，3s 有界（run_with_timeout_spawn）
   'spawn_lsp_server', // 语言服务器长命进程：只 spawn 不 wait，句柄入注册表，stop/退出时 kill+reaper
-  'ensure_macos_gui_environment', // macOS GUI 启动时从 login shell 获取真实 PATH，1.5s 有界
+  'compute_shell_path', // macOS PATH 富集：login shell 探测 1.5s 有界（后台线程调用，见 start_shell_path_enrichment）
 ]);
 
 // R4：`let _ =` 允许的类别（行内必须出现其中之一）。
 const LET_UNDERSCORE_ALLOW = [
+  /\.emit_to\(/, // 定向事件发不出去只能罢休（file_watch/pty/menu，与 emit 同类别）
+  /OnceLock.set|ENRICHED\.set\(/, // 幂等单次初始化：已设过即丢弃（重复 set 本就是 no-op）
   /\.emit\(/, // 事件发不出去只能罢休（各处注释）
   /\.kill\(\)/, // 收尾杀进程
   /\.wait\(\)/, // reaper 线程收尸

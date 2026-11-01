@@ -186,11 +186,13 @@ function shellQuote(p: string): string {
 }
 
 /**
- * 粘贴事件里「有文件」的判定。
+ * 粘贴事件里「有 Finder 文件」的判定。
  *
- * `clipboardData.files` 在有文件时非空（哪怕拿不到路径），是**唯一可靠的
- * 同步信号** —— 不能反过来调 Rust 探测，那会让每次普通文本粘贴都付一次
- * IPC 往返。files 空 ⇒ 一定不是文件粘贴（Finder 复制一定带 files）。
+ * `clipboardData.files` 在有文件时非空（哪怕拿不到路径），是**最可靠的
+ * 同步信号** —— 不能对每次普通文本粘贴都调 Rust 探测，那会平付一次 IPC。
+ * files 空 ⇒ 不是 Finder 文件粘贴；但图片专用剪贴板（截图 / 浏览器「复制
+ * 图片」）files 也可能为空 —— 调用方在「无文本无 files」时再向 Rust 探测
+ * 一次（`clipboard_file_paths` 会把图片 flavor 落成临时文件返回路径）。
  */
 export function pasteHasFiles(data: DataTransfer | null): boolean {
   if (!data) return false;

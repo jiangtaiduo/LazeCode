@@ -18,13 +18,19 @@ export const isTauriEnvironment = (): boolean =>
  * 否则界面会静默显示空数据或示意数据，把真实故障伪装成“正常工作”。
  * 浏览器预览（npm run dev）没有原生后端，才退回 simulateCommand 的示意数据。
  */
-export async function invokeCommand<T>(cmd: TauriCommand, args?: Record<string, unknown>): Promise<T> {
-  const label = formatCommand(cmd, args);
+export async function invokeCommand<T>(
+  cmd: TauriCommand,
+  args?: Record<string, unknown> | number[] | ArrayBuffer | Uint8Array,
+  options?: { headers: HeadersInit }
+): Promise<T> {
+  const label = formatCommand(cmd, typeof args === 'object' && !Array.isArray(args) && !(args instanceof Uint8Array) && !(args instanceof ArrayBuffer) ? args : undefined);
 
   if (isTauriEnvironment()) {
     const started = performance.now();
     try {
-      const result = await invoke<T>(cmd, args);
+      // options 透传 InvokeOptions（headers 等）：pty_write 的原始字节载荷
+      // 靠 header 带会话标识，与 Rust 侧 `Request::headers` 对应。
+      const result = await invoke<T>(cmd, args, options);
       // 全命令埋点（遥测）：分类来自命令目录，高频轮询由 trackCommand 跳过。
       // 与下面的 git/write 抽样日志是两回事 —— 那是给人看的 Console，
       // 这是给聚合看的耗时/成败（只存本机）。
@@ -43,7 +49,7 @@ export async function invokeCommand<T>(cmd: TauriCommand, args?: Record<string, 
   }
 
   logIpc(`${label} → 浏览器预览模式（示意数据）`);
-  return simulateCommand<T>(cmd, args);
+  return simulateCommand<T>(cmd, typeof args === 'object' && !Array.isArray(args) && !(args instanceof Uint8Array) && !(args instanceof ArrayBuffer) ? args : undefined);
 }
 
 interface SimCommitFile {

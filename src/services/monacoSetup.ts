@@ -393,5 +393,14 @@ export function ensureMonacoReady(themeId: number = 1): Promise<void> {
 export function disposeModelForPath(path: string): void {
   const instance = monacoInstance;
   if (!instance || !path) return;
+  // model 由 @monaco-editor/react 用 `Uri.parse(path)` 创建；普通路径下
+  // Uri.parse 与 Uri.file 等价，但含 `#`/`?`/`%` 的路径两者分叉
+  // （`#` 会被 parse 当 fragment）——只查 file 形态会让这类 model 永远
+  // 无法 dispose（正文 + undo 栈泄漏）。两种形态都试。
+  const parsed = instance.editor.getModel(instance.Uri.parse(path));
+  if (parsed) {
+    parsed.dispose();
+    return;
+  }
   instance.editor.getModel(instance.Uri.file(path))?.dispose();
 }

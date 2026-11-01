@@ -142,8 +142,32 @@ export const EditorView: React.FC<EditorViewProps> = ({
   const decoRef = useRef<monacoEditorNs.IEditorDecorationsCollection | null>(null);
   const monacoRef = useRef<typeof monacoNs | null>(null);
   const editorRef = useRef<monacoEditorNs.IStandaloneCodeEditor | null>(null);
+  /** LSP 已为哪个文件做过 onMount 侧注册/didOpen（effect 用它跳过首文件重复） */
+  const lastLspDocRef = useRef<string>('');
+  /** didOpen 需要当前正文：effect 闭包不能依赖会过期的 code prop */
+  const codeRef = useRef(code);
+  codeRef.current = code;
   /** onDid* 注册的监听统一收在这里：wrapper 不调用 onMount 的返回值，只能自建卸载清理 */
   const disposablesRef = useRef<IDisposable[]>([]);
+
+  /**
+   * LSP 注册与 didOpen 必须跟随文件切换。
+   *
+   * `@monaco-editor/react` 对 `path` 变化只做 `editor.setModel()`，
+   * `onMount` 仅在编辑器创建时执行一次 —— 把 LSP 注册放在 onMount 里
+   * 意味着同一工作区内从第二个文件起：registerLanguageProviders 停在
+   * 首文件的语言（首文件若是 markdown，本会话内 python/ts/go 的
+   * hover/补全/定义/格式化全部静默失效），didOpen 也不发（诊断要等
+   * 第一次编辑才补发）。registerLanguageProviders 幂等，无条件重调。
+   */
+  useEffect(() => {
+    const monaco = monacoRef.current;
+    if (!monaco) return;
+    if (lastLspDocRef.current === filePath) return; // onMount 已处理当前文件
+    lastLspDocRef.current = filePath;
+    monacoLspBridge.registerLanguageProviders(monaco as any, language);
+    void monacoLspBridge.notifyDocOpen(filePath, language, codeRef.current);
+  }, [filePath, language]);
   const scrollChangeRef = useRef(onScrollChange);
   scrollChangeRef.current = onScrollChange;
   /** 保存回调同样只在这里读最新值：onMount 只跑一次，闭包会永远停在首帧 */
@@ -570,6 +594,7 @@ export const EditorView: React.FC<EditorViewProps> = ({
                 monacoRef.current = monaco;
                 decoRef.current = editor.createDecorationsCollection();
                 monacoLspBridge.registerLanguageProviders(monaco as any, language);
+                lastLspDocRef.current = filePath;
                 void monacoLspBridge.notifyDocOpen(filePath, language, code);
                 // 滚动 / 布局 / 换模型都要重算 blame 窗口：blame 数据异步到达，
                 // 打开文件后可能先滚动再拿到 blame，不监听就停在上次的位置

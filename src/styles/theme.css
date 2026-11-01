@@ -422,6 +422,23 @@ body.platform-mac .ide-titlebar {
 .project-menu-popup {
   width: 350px;
   padding: 6px 4px;
+  /* 高度钳制在视口内：固定 480px 在页面 zoom（界面字号）放大后会越过窗口
+     底边。列表区（打开的项目 + 最近项目）在 .project-menu-scroll 里滚动。 */
+  max-height: min(480px, calc(100vh - var(--titlebar-h) - 12px));
+}
+/* 列表区单滚动容器（与 .branch-menu-scroll 同构）：flex 子项必须显式
+   min-height: 0 才能在钳制高度的弹层里收缩出滚动条。 */
+.project-menu-popup .project-menu-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+/* 分区列表改为自然高度：滚动收口到 .project-menu-scroll 一处，
+   不再出现「每个分区各自 280px 内滚动」的嵌套滚动条。 */
+.project-menu-popup .pycharm-menu-list {
+  flex: none;
+  max-height: none;
+  overflow: visible;
 }
 .menu-item-window-hint { display: inline-flex; align-items: center; flex-shrink: 0; margin-left: auto; }
 .pycharm-menu-empty {

@@ -8,6 +8,7 @@ src-tauri/target/
 .idea/
 .vscode/
 *.swp
+.zcode/
 
 # Internal audit reports (not part of the public repo; kept locally/separate)
 .audit/

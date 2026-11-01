@@ -30,6 +30,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Switching between files in the diff viewer briefly flashed the previous
+  file's page before the new diff appeared. The 0.1.3 loading veil missed both
+  ends of the switch: it was raised one frame late (the loading flag is only
+  set inside the data effect, so the first paint went out uncovered), and —
+  the main offender — it lifted as soon as the patch data arrived, while the
+  mounted Monaco diff editor still had the previous file's text in its models
+  (@monaco-editor/react writes the new values asynchronously and the diff
+  re-computation only finishes after that; this window is exactly the flash).
+  The veil is now derived at render time from which request the on-screen data
+  belongs to: it covers from the same frame the target changes and lifts only
+  once the editor has confirmed the new text is in and its diff is computed
+  (`onDidUpdateDiff`). Identical-content reloads are exempted via a content
+  fingerprint (no model change, no event), and a failsafe timer keeps a lost
+  event from pinning the veil shut.
 - Project-tab close buttons are now always visible: they used to appear only
   on hover, so every tab changed width as the pointer moved across the bar.
   They sit dimmed by default and light up on hover instead.

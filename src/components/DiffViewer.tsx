@@ -191,6 +191,37 @@ const MonacoBusy: React.FC<{ label: string }> = ({ label }) => (
   </div>
 );
 
+interface DiffRequestIdentity {
+  filePath: string;
+  repoPath?: string;
+  staged: boolean;
+  showCommit?: string | null;
+  againstRef?: string | null;
+  compareCommits?: { from: string; to: string } | null;
+  selectedCommits?: string[] | null;
+  fsFiles?: { oldPath: string; newPath: string } | null;
+  refreshKey: number;
+}
+
+/** 一次 diff 请求的指纹，与加载 effect 的依赖一一对应。
+ *  内容遮罩用它判定「屏上的内容属于哪个请求」：目标一变立即判定过期
+ *  （渲染期推导，不等 effect 里置 loading —— 那会晚一帧、裸奔出旧文件），
+ *  数据真正生效后才掀开。 */
+function diffRequestKey(p: DiffRequestIdentity): string {
+  return [
+    p.filePath,
+    p.repoPath ?? '',
+    p.staged ? 's' : 'w',
+    p.showCommit ?? '',
+    p.againstRef ?? '',
+    p.compareCommits?.from ?? '',
+    p.compareCommits?.to ?? '',
+    p.selectedCommits ? p.selectedCommits.join('\u0001') : '',
+    p.fsFiles ? `${p.fsFiles.oldPath}\u0001${p.fsFiles.newPath}` : '',
+    p.refreshKey
+  ].join('\u0000');
+}
+
 const ADD_STYLE: React.CSSProperties = {
   background: 'var(--git-add-bg)',
   borderLeft: '3px solid #3fb950'
@@ -275,6 +306,30 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   const [edgeHint, setEdgeHint] = useState<string | null>(null);
   const edgePendingRef = useRef<1 | -1 | 0>(0);
   const edgeHintTimerRef = useRef<number | null>(null);
+  /** 屏上数据所属请求（diff/contents 全部到齐时登记）。与当前请求不符 =
+   *  内容过期，遮罩必须盖着。 */
+  const [dataKey, setDataKey] = useState('');
+  /** Monaco 已确认生效的两侧原文：onDidUpdateDiff（新文本已写入且 diff
+   *  算完）后登记，编辑器卸载时清空。用内容比对而不是请求比对——同请求
+   *  重拉到不同内容（如 Compare With… 后文件已改）也要重新遮。 */
+  const [settledContents, setSettledContents] = useState<{ original: string; modified: string } | null>(null);
+  /** settledContents 的实时镜像，供加载回调 / 兜底计时器读取（state 闭包会过期） */
+  const monacoAppliedRef = useRef<{ original: string; modified: string } | null>(null);
+  const monacoPendingKeyRef = useRef<string | null>(null);
+  const monacoPendingContentsRef = useRef<{ original: string; modified: string } | null>(null);
+  const monacoFailsafeRef = useRef<number | null>(null);
+  /** 当前请求指纹 */
+  const requestKey = diffRequestKey({
+    filePath,
+    repoPath,
+    staged,
+    showCommit,
+    againstRef,
+    compareCommits,
+    selectedCommits,
+    fsFiles,
+    refreshKey
+  });
 
   const settings = useSyncExternalStore(subscribeSettings, settingsSnapshotNow);
   const resolvedThemeId = themeId ?? (settings.themeId === 0 ? settings.uiVariant : settings.themeId);
@@ -283,8 +338,44 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
   const disposedRef = useRef(false);
   /** 占位：真正的滚动/边界重置见下方按 targetPath 触发的 layout effect。 */
 
+  /** onDidUpdateDiff 迟迟不来时的兜底（窗口被遮挡、worker 排队等极端场景），
+   *  防止遮罩永远抬不起来。只在编辑器文本已确认是目标内容时才掀 —— 绝不
+   *  把遮罩掀给旧内容。 */
+  const armMonacoFailsafe = useCallback((key: string) => {
+    if (monacoFailsafeRef.current != null) window.clearTimeout(monacoFailsafeRef.current);
+    monacoFailsafeRef.current = window.setTimeout(() => {
+      monacoFailsafeRef.current = null;
+      const pending = monacoPendingKeyRef.current;
+      const want = monacoPendingContentsRef.current;
+      if (pending !== key || !want) return;
+      try {
+        const ed = diffEditorRef.current;
+        if (!ed) return;
+        if (ed.getOriginalEditor().getValue() !== want.original) return;
+        if (ed.getModifiedEditor().getValue() !== want.modified) return;
+      } catch {
+        return;
+      }
+      monacoPendingKeyRef.current = null;
+      monacoPendingContentsRef.current = null;
+      monacoAppliedRef.current = want;
+      setSettledContents(want);
+    }, 3000);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
+    const key = diffRequestKey({
+      filePath,
+      repoPath,
+      staged,
+      showCommit,
+      againstRef,
+      compareCommits,
+      selectedCommits,
+      fsFiles,
+      refreshKey
+    });
 
     const safeRead = async (p: string) => {
       if (!p) return '';
@@ -361,8 +452,8 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
       // 刻意不清空 contents：切文件时保留内容区与已挂载的 DiffEditor，新内容到达后
       // 由 @monaco-editor/react 就地写进同一对 model（它按 original/modified prop
       // 变化 setValue，不会重建编辑器）。卸载再挂载会销毁/重建两个 model 与 diff
-      // 组件，大文件下切换白闪明显。加载反馈仍由工具栏的 loading 标志（"读取中…"）
-      // 承担：等待期间内容区短暂显示上一个文件的内容。
+      // 组件，大文件下切换白闪明显。加载反馈由工具栏的 loading 标志和内容遮罩
+      // （contentStale）承担：遮罩从请求变更的那一帧盖到新内容真正生效。
       try {
         const result = fsFiles
           ? await invokeCommand<FileDiff>('fs_diff_files', {
@@ -411,15 +502,40 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
           target
         ) {
           const pair = await loadBothSides(target, !!result.isNew);
-          if (!cancelled) setContents(pair);
+          if (!cancelled) {
+            setContents(pair);
+            // 数据到齐 ≠ 生效：Monaco 是在自己的 effect 里异步写入 model、
+            // 再等 diff 计算，期间屏上还是旧文件。dataKey 标记数据层，
+            // 生效层等 onDidUpdateDiff 确认（见 onMount 的 settle 监听）。
+            setDataKey(key);
+            if (
+              monacoAppliedRef.current &&
+              monacoAppliedRef.current.original === pair.original &&
+              monacoAppliedRef.current.modified === pair.modified
+            ) {
+              // 编辑器里本来就是这份内容（同文件 refreshKey 重拉等）：库侧
+              // 不会动 model，也就不会有事件 —— 直接视为已生效。
+              monacoPendingKeyRef.current = null;
+              monacoPendingContentsRef.current = null;
+            } else {
+              monacoPendingKeyRef.current = key;
+              monacoPendingContentsRef.current = pair;
+              armMonacoFailsafe(key);
+            }
+          }
         } else {
-          // 二进制或无文本差异：清空旧文件原文，避免残存文本引发 Monaco 错位
-          if (!cancelled) setContents(null);
+          // 二进制或无文本差异：清空旧文件原文，避免残存文本引发 Monaco 错位。
+          // 非 Monaco 路径的行渲染与 dataKey 同批提交，掀遮罩即新内容。
+          if (!cancelled) {
+            setContents(null);
+            setDataKey(key);
+          }
         }
       } catch (err) {
         if (!cancelled) {
           setDiff(null);
           setError(err instanceof Error ? err.message : String(err));
+          setDataKey(key);
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -570,6 +686,19 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
     !!targetPath &&
     (!contents || contents.original.length > 0 || contents.modified.length > 0);
   const useMonaco = readyForMonaco && monacoReady && !!contents;
+  /** Monaco 内容是否已确认生效：挂载中的编辑器必须确认过当前 contents
+   *  （onDidUpdateDiff 或内容指纹豁免）才算数 —— 库在 effect 里异步写
+   *  model + 等 diff 计算，数据到齐到屏上可见之间屏上仍是旧文件。 */
+  const contentsSettled =
+    !useMonaco ||
+    !contents ||
+    (settledContents !== null &&
+      settledContents.original === contents.original &&
+      settledContents.modified === contents.modified);
+  /** 内容遮罩条件（渲染期推导）：请求指纹不符（数据没到/还在路上）或
+   *  Monaco 还没把当前内容写上屏。头一帧即盖上，不依赖 effect 里置的
+   *  loading —— 那会晚一帧，裸奔出上一个文件。 */
+  const contentStale = dataKey !== requestKey || !contentsSettled;
   const canHunkAction =
     !isBinaryDiff &&
     !hunkBusy &&
@@ -636,13 +765,27 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
 
   useLayoutEffect(() => {
     if (!useMonaco || !contents) {
-      diffEditorRef.current = null;
+      // 只在「编辑器曾生效、现在退出屏上」的边沿作废：挂载前的常态
+      // （Monaco 未 ready / 数据未到）不能清 —— 那会把数据到达时刚武装的
+      // pending 清掉，首个 onDidUpdateDiff 就无事可做，遮罩永远抬不起来。
+      if (diffEditorRef.current || monacoAppliedRef.current) {
+        diffEditorRef.current = null;
+        monacoAppliedRef.current = null;
+        monacoPendingKeyRef.current = null;
+        monacoPendingContentsRef.current = null;
+        if (monacoFailsafeRef.current != null) {
+          window.clearTimeout(monacoFailsafeRef.current);
+          monacoFailsafeRef.current = null;
+        }
+        setSettledContents(null);
+      }
     }
   }, [contents, useMonaco]);
 
   useEffect(() => () => {
     disposedRef.current = true;
     diffEditorRef.current = null;
+    if (monacoFailsafeRef.current != null) window.clearTimeout(monacoFailsafeRef.current);
   }, []);
 
   // 仅在会用到 DiffEditor 时预热 monaco（未 ready 就挂载会回退 CDN）
@@ -1416,7 +1559,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
           )}
           {!isBinaryDiff && (
             <span className="diff-stat-text" style={{ marginLeft: '8px' }}>
-              {loading
+              {loading || contentStale
                 ? t().common.loading
                 : diff
                   ? t().diff.stats(diff.additions, diff.deletions, hunkOffsets.length)
@@ -1503,6 +1646,27 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
                 options={diffOptions}
                 onMount={ed => {
                   diffEditorRef.current = ed;
+                  // 遮罩解锁信号：Monaco 真正写入目标两侧原文且 diff 算完
+                  // （onDidUpdateDiff）才掀遮罩。事件早于目标内容写入（上一
+                  // 个文件的计算结果滞后到达）时按内容指纹排除，遮罩继续等。
+                  ed.onDidUpdateDiff(() => {
+                    const pending = monacoPendingKeyRef.current;
+                    const want = monacoPendingContentsRef.current;
+                    if (pending == null || !want) return;
+                    let original = '';
+                    let modified = '';
+                    try {
+                      original = ed.getOriginalEditor().getValue();
+                      modified = ed.getModifiedEditor().getValue();
+                    } catch {
+                      return;
+                    }
+                    if (original !== want.original || modified !== want.modified) return;
+                    monacoPendingKeyRef.current = null;
+                    monacoPendingContentsRef.current = null;
+                    monacoAppliedRef.current = want;
+                    setSettledContents(want);
+                  });
                   const updateHunks = () => {
                     if (disposedRef.current || !diffPaneLiveRef.current) return;
                     const changes = ed.getLineChanges();
@@ -1593,7 +1757,7 @@ export const DiffViewer: React.FC<DiffViewerProps> = ({
           ))}
       </div>
       )}
-      {loading && (
+      {(contentStale || loading) && (
         <div className="diff-loading-veil" role="status">
           <MonacoBusy label={t().common.loading} />
         </div>

@@ -75,6 +75,10 @@
   --accent-soft: rgba(0, 113, 227, 0.12);
   --accent-line: rgba(0, 113, 227, 0.4);
   --accent-glow: rgba(0, 113, 227, 0.22);
+  /* 项目 tab：浅色上淡背景更淡（同 --accent-soft 的比例），状态环基于
+     本 variant 的深橙 --git-mod #b25000 减淡 */
+  --tab-current-bg: rgba(0, 113, 227, 0.2);
+  --tab-state-ring: rgba(178, 80, 0, 0.6);
   --git-del-faint: rgba(215, 0, 21, 0.07);
   --git-del-line: rgba(215, 0, 21, 0.3);
   --git-add-faint: rgba(36, 138, 61, 0.1);

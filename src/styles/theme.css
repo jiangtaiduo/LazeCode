@@ -150,6 +150,11 @@
      这些不是独立语义，而是由上面的主语义派生的「淡背景 / 描边」：
      深色 = 白系叠加，浅色 variant 覆盖为黑系。 */
   --accent-soft: rgba(53, 116, 240, 0.18);
+  /* 项目 tab 专用：当前项目 tab 的选中底色（比 --accent-soft 深一档，
+     选中信号必须压过状态环）；状态环 = --git-mod 减淡（55% 透明度），
+     避免后台项目橙环比当前 tab 还抢眼。variant 自行覆盖这两个 token。 */
+  --tab-current-bg: rgba(53, 116, 240, 0.3);
+  --tab-state-ring: rgba(229, 192, 123, 0.55);
   --accent-line: rgba(53, 116, 240, 0.45);
   --accent-glow: rgba(53, 116, 240, 0.35);
   --git-del-faint: rgba(72, 43, 43, 0.45);
@@ -290,9 +295,11 @@ body.platform-mac .ide-titlebar {
 }
 
 /* ---- 顶栏项目 tab 条（浏览器式）----
-   三态边框外化控制台进程状态：
+   选中态：current = --tab-current-bg 深底色 + 底边 2px accent 下划线。
+   三态边框外化控制台进程状态（用减淡后的 --tab-state-ring，避免盖过
+   当前 tab 的选中信号）：
    tab-idle 灰细框（无控制台或无进程）；
-   tab-busy 静态橙细框（有进程在跑，与工具条运行圆点同色 --git-mod）；
+   tab-busy 静态橙细框（有进程在跑，与工具条运行圆点同色系 --git-mod）；
    tab-active-output 橙框跑马灯（进程正在输出，2s 内有输出判定）。
    WKWebView < Safari 16.4 不支持 @property 时跑马灯优雅降级为静态橙框。 */
 @property --tab-marquee-angle {
@@ -352,10 +359,22 @@ body.platform-mac .ide-titlebar {
   color: var(--text-primary);
 }
 .project-tab.current {
-  /* 当前项目 tab：accent 底色明显区分（--accent-soft 按 variant 自适配），
-     文字提到最亮；控制台状态边框（灰/橙/跑马灯）不受影响 */
-  background: var(--accent-soft);
+  /* 当前项目 tab：深一档的 accent 底色 + 底边 2px 下划线（::before）。
+     选中感来自「深底 + 底边线」，状态感来自「四周细环」——两个信号
+     位置分离，当前 tab 挂着状态环时也能一眼分清谁是当前。 */
+  background: var(--tab-current-bg);
   color: var(--text-bright);
+}
+.project-tab.current::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  bottom: 1px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
 }
 
 .project-tab-name {
@@ -405,17 +424,18 @@ body.platform-mac .ide-titlebar {
   color: var(--text-primary);
 }
 
-/* 状态一：有进程在跑 → 静态橙细框（与 strip-dot-running 同色同语义） */
+/* 状态一：有进程在跑 → 静态橙细框（与 strip-dot-running 同色系，减淡以免
+   盖过当前 tab 的选中信号） */
 .project-tab.tab-busy {
-  box-shadow: inset 0 0 0 1px var(--git-mod);
+  box-shadow: inset 0 0 0 1px var(--tab-state-ring);
 }
 .project-tab-overflow-item.tab-busy .project-tab-badge {
-  outline: 1px solid var(--git-mod);
+  outline: 1px solid var(--tab-state-ring);
 }
 
 /* 状态二：进程正在输出 → 橙框跑马灯（旋转高亮沿边框转圈） */
 .project-tab.tab-active-output {
-  box-shadow: inset 0 0 0 1px var(--git-mod);
+  box-shadow: inset 0 0 0 1px var(--tab-state-ring);
 }
 .project-tab.tab-active-output::after {
   content: '';
@@ -427,8 +447,8 @@ body.platform-mac .ide-titlebar {
     from var(--tab-marquee-angle),
     transparent 0deg,
     transparent 240deg,
-    var(--git-mod) 300deg,
-    #ffffff 330deg,
+    var(--tab-state-ring) 300deg,
+    rgba(255, 255, 255, 0.65) 330deg,
     transparent 360deg
   );
   -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
@@ -445,7 +465,7 @@ body.platform-mac .ide-titlebar {
 }
 /* @property 不生效的环境（WKWebView < 16.4）：退化为静态橙框（box-shadow 已在） */
 .project-tab-overflow-item.tab-active-output .project-tab-badge {
-  outline: 1px solid var(--git-mod);
+  outline: 1px solid var(--tab-state-ring);
   outline-style: dashed;
 }
 
@@ -511,7 +531,7 @@ body.platform-mac .ide-titlebar {
 }
 .project-tab-overflow-item.current {
   color: var(--text-bright);
-  background: var(--accent-soft);
+  background: var(--tab-current-bg);
 }
 
 /* tab 之后到操作按钮之间的空白：保留窗口拖拽 */

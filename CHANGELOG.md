@@ -15,11 +15,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   selector follows, and every project opened in the window gets a tab for
   one-click switching. Tabs support drag-to-reorder (hover shows a close
   button, middle-click closes), and overflow collapses into a "≫" menu. The
-  active project's tab is highlighted with the theme's accent background so
-  it stands out at a glance. Each
+  active project's tab is highlighted with a deep accent background plus a
+  2px accent underline along its bottom edge, so the selection reads from the
+  fill and the bottom line while the console state reads from the ring around
+  the tab. Each
   tab's border mirrors that project's console state: gray when no process is
-  running, solid orange while a process runs (same color as the existing
-  running dot), and an animated orange marquee while that process is actively
+  running, a softened orange while a process runs (same hue as the running
+  dot, dimmed so it cannot outweigh the selection), and a softened animated
+  marquee while that process is actively
   producing output (within 2 s of the last output). Background projects are
   polled through a new batched `pty_sessions_busy` command that also reports
   per-session output freshness, so state for non-active projects needs no

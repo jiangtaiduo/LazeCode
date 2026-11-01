@@ -310,6 +310,9 @@ interface ProjectSessionSnapshot {
   diffStaged: boolean;
   diffFilePath: string;
   fsCompareFiles: { oldPath: string; newPath: string } | null;
+  /** 底部面板开着哪个工具（控制台/变更列表/vt）或关着 —— 按项目隔离：
+   *  项目 A 开着控制台、项目 B 没开，互相应回各自的会话。 */
+  activeBottomTool: BottomTool;
 }
 
 /** toWorkspaceAbsPath 已抽到 services/pathUtils —— App 只保留编排，行为不变。 */
@@ -2357,6 +2360,7 @@ export const App: React.FC = () => {
           diffStaged,
           diffFilePath,
           fsCompareFiles,
+          activeBottomTool,
         };
       }
       // 2) 恢复目标项目
@@ -2381,6 +2385,8 @@ export const App: React.FC = () => {
         setDiffStaged(snap.diffStaged);
         setDiffFilePath(snap.diffFilePath || '');
         setFsCompareFiles(snap.fsCompareFiles);
+        // 底部面板可见性按项目回各自的会话（无快照的新项目继承当前状态）
+        setActiveBottomTool(snap.activeBottomTool ?? null);
         setWorkspacePath(target);
         saveRecentWorkspace(target);
         // Git 状态已清空；随 workspacePath 变化的 refreshGit effect 立即拉新项目数据
@@ -2407,6 +2413,7 @@ export const App: React.FC = () => {
       diffStaged,
       diffFilePath,
       fsCompareFiles,
+      activeBottomTool,
       loadWorkspace,
       resetGitUiForWorkspaceSwitch
     ]
@@ -5439,9 +5446,14 @@ export const App: React.FC = () => {
       setDiffOpen(prevSnap.diffOpen);
       setDiffCommit(prevSnap.diffCommit);
       setDiffAgainstRef(prevSnap.diffAgainstRef);
+      // 这两项若不恢复，被关项目的比较来源会残留进来，污染切回项目的 diff 页
+      setDiffCompareCommits(prevSnap.diffCompareCommits);
+      setDiffSelectedCommits(prevSnap.diffSelectedCommits ?? null);
       setDiffStaged(prevSnap.diffStaged);
       setDiffFilePath(prevSnap.diffFilePath || '');
       setFsCompareFiles(prevSnap.fsCompareFiles);
+      // 被关项目的面板已收（上面 setActiveBottomTool(null)），切回的项目回自己的
+      setActiveBottomTool(prevSnap.activeBottomTool ?? null);
       setWorkspacePath(prevPath);
       saveRecentWorkspace(prevPath);
       // 切回的项目也可能有自己的项目层：重读（门：期间又切走则丢弃）

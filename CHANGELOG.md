@@ -30,6 +30,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Bottom-panel visibility (console / changes / closed) was shared by every
+  project open in a window: opening the console in project B and switching
+  back to project A — which had it closed — popped the console open there too.
+  Terminal sessions, per-project active terminal tabs, running-command probes
+  and PTY budgets were already isolated per project; the panel toggle was the
+  one piece of state left outside the project session snapshot. It now
+  travels with the snapshot on both the project-switch path and the
+  close-project-return-to-previous path (which also failed to restore the
+  previous project's compare-versions / multi-commit diff sources, leaking
+  the closed project's comparison targets into it). A project opened for the
+  first time inherits whatever the panel currently shows until it has been
+  switched away from once and holds its own memory.
 - Switching between files in the diff viewer briefly flashed the previous
   file's page before the new diff appeared. The 0.1.3 loading veil missed both
   ends of the switch: it was raised one frame late (the loading flag is only

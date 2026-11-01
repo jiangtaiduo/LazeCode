@@ -91,6 +91,7 @@
 
   /* 叠加层：深色 = 白色叠加 */
   --overlay-hover: rgba(255, 255, 255, 0.08);
+  --overlay-active: rgba(255, 255, 255, 0.14);
   --overlay-hover-solid: #434347;
   --overlay-faint: rgba(255, 255, 255, 0.06);
   --overlay-faint-solid: #2a2a2c;

@@ -86,6 +86,7 @@
 
   /* 叠加层：浅色 = 黑色叠加（与深色镜像） */
   --overlay-hover: rgba(0, 0, 0, 0.06);
+  --overlay-active: rgba(0, 0, 0, 0.12);
   --overlay-hover-solid: #dcdce0;
   --overlay-faint: rgba(0, 0, 0, 0.04);
   --overlay-faint-solid: #f0f0f2;

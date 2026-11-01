@@ -14,7 +14,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   hosts the project menu (formerly on the project-name pill), the branch
   selector follows, and every project opened in the window gets a tab for
   one-click switching. Tabs support drag-to-reorder (hover shows a close
-  button, middle-click closes), and overflow collapses into a "≫" menu. Each
+  button, middle-click closes), and overflow collapses into a "≫" menu. The
+  active project's tab is highlighted with the theme's accent background so
+  it stands out at a glance. Each
   tab's border mirrors that project's console state: gray when no process is
   running, solid orange while a process runs (same color as the existing
   running dot), and an animated orange marquee while that process is actively

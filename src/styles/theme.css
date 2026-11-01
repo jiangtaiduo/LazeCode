@@ -124,6 +124,8 @@
 
   /* 叠加层：深色主题=白色叠加，浅色主题覆盖为黑色叠加 */
   --overlay-hover: rgba(255, 255, 255, 0.12);
+  /* 选中/激活态（比 hover 更进一步）；各 variant 覆盖为自己的叠加色 */
+  --overlay-active: rgba(255, 255, 255, 0.18);
   --overlay-hover-solid: #43454a;
   --overlay-faint: rgba(255, 255, 255, 0.06);
   --overlay-faint-solid: #26282c;
@@ -350,8 +352,10 @@ body.platform-mac .ide-titlebar {
   color: var(--text-primary);
 }
 .project-tab.current {
-  background: var(--bg-header);
-  color: var(--text-primary);
+  /* 当前项目 tab：accent 底色明显区分（--accent-soft 按 variant 自适配），
+     文字提到最亮；控制台状态边框（灰/橙/跑马灯）不受影响 */
+  background: var(--accent-soft);
+  color: var(--text-bright);
 }
 
 .project-tab-name {
@@ -506,8 +510,8 @@ body.platform-mac .ide-titlebar {
   color: var(--text-primary);
 }
 .project-tab-overflow-item.current {
-  color: var(--text-primary);
-  background: var(--overlay-active, var(--overlay-hover));
+  color: var(--text-bright);
+  background: var(--accent-soft);
 }
 
 /* tab 之后到操作按钮之间的空白：保留窗口拖拽 */

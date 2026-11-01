@@ -175,6 +175,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   single region while the search box and action buttons stay pinned (matching
   the branch dropdown).
 
+- The project file tree is now windowed: only the rows around the viewport are
+  mounted, so expanding a directory with tens of thousands of entries no longer
+  creates a DOM row (and an inline SVG icon) per file. Expand/collapse,
+  multi-select, context menus and locate-in-tree keep their existing behavior;
+  locate now scrolls by flattened index instead of `querySelector`.
+- Hidden terminal canvases are released after the page has been hidden for five
+  minutes. Active panes and foreground tab switches are never touched — the
+  first frame after switching back from another app is still the last painted
+  screen — while background tabs stop holding their Retina backing stores. A
+  released pane takes one full snapshot + repaint when it is next opened.
+
 ## [0.1.3] - 2026-10-31
 
 ### Added

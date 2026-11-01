@@ -1,13 +1,16 @@
-import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect, useImperativeHandle } from 'react';
 import { t } from '../services/i18n';
 import { useLanguageRefresh } from '../hooks/useLanguageRefresh';
 import type { FileNode, GitChangedFile } from '../types';
 import { renderFileIcon, FolderIcon, ProjectStripeIcon, IconCollapseAll, IconChevronDown, IconChevronRight, IconLocate, IconAutoLocate } from './FileIcons';
 import { invokeCommand } from '../services/tauriBridge';
+import { buildTreeOffsets, computeTreeWindow } from './treeWindow';
 
 /** 外部目录节点不给 git 状态：共享的空值常量，避免每次渲染新建空对象/空 Set 击穿 TreeNodeItem 的 memo */
 const EMPTY_STATUS_BY_PATH: Record<string, string> = {};
 const EMPTY_PATH_SET: Set<string> = new Set();
+const EMPTY_ROOTS: FileNode[] = [];
+const EMPTY_CHANGED_FILES: GitChangedFile[] = [];
 const CHEVRON_DOWN_11 = Object.freeze(<IconChevronDown size={11} color="var(--text-muted)" />);
 const CHEVRON_RIGHT_11 = Object.freeze(<IconChevronRight size={11} color="var(--text-muted)" />);
 
@@ -74,20 +77,52 @@ interface ProjectDrawerProps {
   onSelectionChange?: (paths: string[]) => void;
 }
 
+/** 行高与 CSS 保持同步：.tree-node-row 22 / .tree-root-item 24 / .tree-external-root 24+margin 4 */
+const TREE_NODE_H = 22;
+const TREE_ROOT_H = 24;
+const TREE_EXTERNAL_H = 28;
+/** .project-tree-container 的 padding-top：scrollTop 坐标系从这里开始 */
+const TREE_PADDING_TOP = 4;
+/** 两屏余量，避免快速滚动时合成线程先看到空白 */
+const TREE_OVERSCAN = 8;
+
+export interface ProjectDrawerHandle {
+  /**
+   * 滚动到指定路径。返回 false 表示该路径当前不在可见树里（未展开/不是文件）。
+   *
+   * 只负责滚动：目标行会在随后的 React 提交里挂载；调用方要闪烁高亮时
+   * 在下一帧再查 `[data-tree-path]`（App 的定位逻辑保持原样）。
+   */
+  revealPath(path: string, align?: 'nearest' | 'center'): boolean;
+}
+
+type VisibleRow =
+  | { kind: 'project-root'; key: string; height: number }
+  | { kind: 'external-root'; key: string; ext: FileNode; height: number }
+  | {
+      kind: 'node';
+      key: string;
+      node: FileNode;
+      depth: number;
+      /** 外部追加目录只读：不接右键、不显示 git 状态 */
+      allowContext: boolean;
+      height: number;
+    };
+
 /**
  * memo：整个已展开的树会在 App 每次击键/终端输出时 reconcile，隔离掉与树无关的重渲染。
  * 生效前提：App 侧回调（onSelectFile 等）与 expandedPaths/changedFiles 保持稳定引用。
  */
-export const ProjectDrawer = React.memo(function ProjectDrawer({
+const ProjectDrawerImpl = React.forwardRef<ProjectDrawerHandle, ProjectDrawerProps>(function ProjectDrawer({
   rootName,
   rootPath,
   repoRoot,
   files,
   singleFile,
-  externalRoots = [],
+  externalRoots = EMPTY_ROOTS,
   activeFile,
   width,
-  changedFiles = [],
+  changedFiles = EMPTY_CHANGED_FILES,
   expandedPaths,
   onSetExpandedPaths,
   onSelectFile,
@@ -101,7 +136,7 @@ export const ProjectDrawer = React.memo(function ProjectDrawer({
   onUpdateFileNode,
   onNodeContext,
   onSelectionChange
-}: ProjectDrawerProps) {
+}: ProjectDrawerProps, ref) {
   useLanguageRefresh();
   const [loadingPaths, setLoadingPaths] = useState<Set<string>>(new Set());
   /**
@@ -204,27 +239,143 @@ export const ProjectDrawer = React.memo(function ProjectDrawer({
   const projectRootExpanded = !!rootPath && expandedPaths.has(rootPath);
 
   /**
-   * 当前可见行的扁平有序列表（只含文件，不含目录行）。
+   * 可见行扁平化：窗口化的唯一数据源。
    *
-   * Shift 范围选择需要「屏幕上从上到下」的顺序，而树是递归结构。这里按
-   * visibleFiles → 已展开目录的子节点 的顺序摊平，与视觉顺序一致。
-   * 只在 projects 根展开时收集（折叠根时没有可选项）。
+   * 与原先递归渲染的视觉顺序严格一致：项目根 → 已展开子节点 → 外部根
+   * （同样只展开时收子节点）。行高来自 CSS 常量，窗口边界用前缀和二分，
+   * 不再依赖每一行都挂载。
    */
-  const flatFileRows = useMemo(() => {
-    if (!projectRootExpanded) return [];
-    const rows: string[] = [];
-    const walk = (nodes: FileNode[]) => {
-      for (const n of nodes) {
-        if (n.isDirectory) {
-          if (expandedPaths.has(n.path) && Array.isArray(n.children)) walk(n.children);
-        } else {
-          rows.push(n.path);
+  const rows = useMemo<VisibleRow[]>(() => {
+    const out: VisibleRow[] = [];
+    const walk = (nodes: FileNode[], depth: number, allowContext: boolean) => {
+      for (const node of nodes) {
+        out.push({
+          kind: 'node',
+          // allowContext 参与 key：同一个路径理论上不会同时出现在项目和外部根，
+          // 但项目根自身也有一行（kind 不同），用前缀彻底避免 key 冲突。
+          key: `${allowContext ? 'p' : 'e'}:${node.path}`,
+          node,
+          depth,
+          allowContext,
+          height: TREE_NODE_H
+        });
+        if (node.isDirectory && expandedPaths.has(node.path) && Array.isArray(node.children)) {
+          walk(node.children, depth + 1, allowContext);
         }
       }
     };
-    walk(visibleFiles);
-    return rows;
-  }, [projectRootExpanded, visibleFiles, expandedPaths]);
+
+    if (singleFile) {
+      walk(visibleFiles, 0, true);
+    } else if (rootPath) {
+      out.push({ kind: 'project-root', key: `root:${rootPath}`, height: TREE_ROOT_H });
+      if (projectRootExpanded) walk(visibleFiles, 1, true);
+    }
+
+    for (const ext of visibleExternalRoots) {
+      out.push({ kind: 'external-root', key: `ext:${ext.path}`, ext, height: TREE_EXTERNAL_H });
+      if (expandedPaths.has(ext.path)) walk(ext.children ?? [], 1, false);
+    }
+    return out;
+  }, [singleFile, rootPath, projectRootExpanded, visibleFiles, visibleExternalRoots, expandedPaths]);
+
+  const offsets = useMemo(() => buildTreeOffsets(rows.map(row => row.height)), [rows]);
+  const totalHeight = offsets[rows.length] ?? 0;
+
+  /** 路径 → 扁平行下标：定位不需要先挂载目标行，直接按前缀和滚动。 */
+  const pathIndex = useMemo(() => {
+    const map = new Map<string, number>();
+    rows.forEach((row, index) => {
+      if (row.kind === 'node') map.set(row.node.path, index);
+    });
+    return map;
+  }, [rows]);
+
+  /**
+   * 当前可见文件的扁平有序列表（只含文件，不含目录行）。
+   *
+   * Shift 范围选择需要「屏幕上从上到下」的顺序，而树是递归结构。这里按
+   * visibleFiles → 已展开目录的子节点 的顺序摊平，与视觉顺序一致。
+   * 外部根不参与（与原先 renderRootChildren(..., false) 一致）。
+   */
+  const flatFileRows = useMemo(() => {
+    const out: string[] = [];
+    for (const row of rows) {
+      if (row.kind === 'node' && row.allowContext && !row.node.isDirectory) out.push(row.node.path);
+    }
+    return out;
+  }, [rows]);
+
+  const treeScrollRef = useRef<HTMLDivElement>(null);
+  const [treeScrollTop, setTreeScrollTop] = useState(0);
+  const [treeViewportH, setTreeViewportH] = useState(0);
+
+  useEffect(() => {
+    const el = treeScrollRef.current;
+    if (!el) return;
+    const update = () => setTreeViewportH(el.clientHeight);
+    update();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  // 折叠根/批量折叠后内容变短：原生 DOM 会自动把 scrollTop 夹回合法区间，
+  // 窗口化后 totalHeight 变了但 state 可能还停在旧位置 —— 自己补一次夹取，
+  // 否则窗口会算出「最后一行」而屏幕看起来是空的。
+  useEffect(() => {
+    const el = treeScrollRef.current;
+    if (!el) return;
+    const max = Math.max(0, totalHeight - el.clientHeight + TREE_PADDING_TOP * 2);
+    if (el.scrollTop > max) {
+      el.scrollTop = max;
+      setTreeScrollTop(max);
+    }
+  }, [totalHeight]);
+
+  const treeWindow = useMemo(
+    () =>
+      computeTreeWindow(
+        offsets,
+        totalHeight,
+        Math.max(0, treeScrollTop - TREE_PADDING_TOP),
+        treeViewportH || 400,
+        TREE_OVERSCAN
+      ),
+    [offsets, totalHeight, treeScrollTop, treeViewportH]
+  );
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      revealPath(path, align = 'nearest') {
+        const index = pathIndex.get(path);
+        const el = treeScrollRef.current;
+        if (index === undefined || !el) return false;
+        const rowTop = TREE_PADDING_TOP + offsets[index];
+        const rowHeight = rows[index]?.height ?? TREE_NODE_H;
+        const viewport = el.clientHeight || 400;
+        const current = el.scrollTop;
+        let next = current;
+        if (align === 'center') {
+          next = Math.max(0, rowTop - Math.max(0, (viewport - rowHeight) / 2));
+        } else if (rowTop < current) {
+          next = rowTop;
+        } else if (rowTop + rowHeight > current + viewport) {
+          next = rowTop + rowHeight - viewport;
+        }
+        // jsdom 的 scrollHeight 为 0；只有真实内容高于视口时才需要夹取上界。
+        if (el.scrollHeight > viewport) next = Math.min(next, el.scrollHeight - viewport);
+        if (Math.abs(next - current) > 0.5) {
+          el.scrollTop = next;
+          setTreeScrollTop(next);
+        }
+        return true;
+      }
+    }),
+    [pathIndex, offsets, rows]
+  );
 
   /**
    * 行点击的多选手势分发。
@@ -297,27 +448,83 @@ export const ProjectDrawer = React.memo(function ProjectDrawer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectionKey]);
 
-  const renderRootChildren = (children: FileNode[], allowContext: boolean, rootDepth: number = 1) => (
-    <div className="tree-root-children">
-      {children.map(node => (
-        <TreeNodeItem
-          key={node.path}
-          node={node}
-          depth={rootDepth}
-          activeFile={activeFile}
-          selectedPaths={selectedPaths}
-          expandedPaths={expandedPaths}
-          loadingPaths={loadingPaths}
-          gitStatusByPath={allowContext ? gitStatusByPath : EMPTY_STATUS_BY_PATH}
-          directoryHasChanges={allowContext ? directoryHasChanges : EMPTY_PATH_SET}
-          onToggleFolder={toggleFolder}
-          onSelectFile={onSelectFile}
-          onRowPointer={handleRowPointer}
-          onNodeContext={allowContext ? onNodeContext : undefined}
-        />
-      ))}
-    </div>
-  );
+  /** 渲染单行：项目根 / 外部根 / 普通节点。递归已由 rows 摊平，组件只画一行。 */
+  const renderRow = (row: VisibleRow) => {
+    if (row.kind === 'project-root') {
+      return (
+        <div
+          className="tree-root-item"
+          data-tree-path={rootPath}
+          onClick={() => toggleInSet(rootPath)}
+          onContextMenu={e => {
+            if (!onNodeContext || !rootPath) return;
+            e.preventDefault();
+            onNodeContext(
+              { name: rootName || 'Project', path: rootPath, isDirectory: true, children: files },
+              e.clientX,
+              e.clientY
+            );
+          }}
+          title={rootPath}
+        >
+          <span className={`tree-chevron ${projectRootExpanded ? 'expanded' : 'collapsed'}`}>
+            {projectRootExpanded ? CHEVRON_DOWN_11 : CHEVRON_RIGHT_11}
+          </span>
+          <FolderIcon size={15} isOpen={projectRootExpanded} />
+          <span className="tree-root-name">{rootName || 'Project'}</span>
+          <span className="tree-root-path">{displayPath}</span>
+        </div>
+      );
+    }
+
+    if (row.kind === 'external-root') {
+      const ext = row.ext;
+      const extExpanded = expandedPaths.has(ext.path);
+      return (
+        <div
+          className="tree-root-item tree-external-root"
+          data-tree-path={ext.path}
+          onClick={() => toggleInSet(ext.path)}
+          title={t().drawer.externalDirTooltip(ext.path)}
+        >
+          <span className={`tree-chevron ${extExpanded ? 'expanded' : 'collapsed'}`}>
+            {extExpanded ? CHEVRON_DOWN_11 : CHEVRON_RIGHT_11}
+          </span>
+          <FolderIcon size={15} isOpen={extExpanded} />
+          <span className="tree-root-name">{ext.name}</span>
+          <span className="external-root-badge">{t().drawer.externalBadge}</span>
+          <span className="tree-root-path">{abbreviatePath(ext.path)}</span>
+          <button
+            className="external-root-close"
+            title={t().drawer.removeExternalDir}
+            onClick={e => {
+              e.stopPropagation();
+              onCloseExternalDirectory?.(ext.path);
+            }}
+          >
+            ×
+          </button>
+        </div>
+      );
+    }
+
+    return (
+      <TreeNodeItem
+        node={row.node}
+        depth={row.depth}
+        activeFile={activeFile}
+        selectedPaths={selectedPaths}
+        expandedPaths={expandedPaths}
+        loadingPaths={loadingPaths}
+        gitStatusByPath={row.allowContext ? gitStatusByPath : EMPTY_STATUS_BY_PATH}
+        directoryHasChanges={row.allowContext ? directoryHasChanges : EMPTY_PATH_SET}
+        onToggleFolder={toggleFolder}
+        onSelectFile={onSelectFile}
+        onRowPointer={handleRowPointer}
+        onNodeContext={row.allowContext ? onNodeContext : undefined}
+      />
+    );
+  };
 
   return (
     <aside className="project-drawer" id="projectDrawer" style={width ? { width: `${width}px`, flexShrink: '0' } : undefined}>
@@ -363,7 +570,11 @@ export const ProjectDrawer = React.memo(function ProjectDrawer({
       </div>
 
       {/* 2. File Tree Content */}
-      <div className="project-tree-container">
+      <div
+        className="project-tree-container"
+        ref={treeScrollRef}
+        onScroll={e => setTreeScrollTop(e.currentTarget.scrollTop)}
+      >
         {!rootPath ? (
           <div className="empty-project-prompt">
             <div style={{ color: 'var(--text-secondary)', marginBottom: '8px' }}>{t().drawer.noProjectOpen}</div>
@@ -373,80 +584,25 @@ export const ProjectDrawer = React.memo(function ProjectDrawer({
           </div>
         ) : (
           <div className="tree-list" onClick={handleTreeBackgroundClick}>
-            {singleFile ? (
-              renderRootChildren(visibleFiles, true, 0)
-            ) : (
-              <>
-                {/* Root Project Node — 可折叠 */}
-                <div
-                  className="tree-root-item"
-                  data-tree-path={rootPath}
-                  onClick={() => toggleInSet(rootPath)}
-                  onContextMenu={e => {
-                    if (!onNodeContext || !rootPath) return;
-                    e.preventDefault();
-                    onNodeContext(
-                      { name: rootName || 'Project', path: rootPath, isDirectory: true, children: files },
-                      e.clientX,
-                      e.clientY
-                    );
-                  }}
-                  title={rootPath}
-                >
-                  <span className={`tree-chevron ${projectRootExpanded ? 'expanded' : 'collapsed'}`}>
-                    {projectRootExpanded ? CHEVRON_DOWN_11 : CHEVRON_RIGHT_11}
-                  </span>
-                  <FolderIcon size={15} isOpen={projectRootExpanded} />
-                  <span className="tree-root-name">{rootName || 'Project'}</span>
-                  <span className="tree-root-path">{displayPath}</span>
-                </div>
-
-                {projectRootExpanded && renderRootChildren(visibleFiles, true, 1)}
-              </>
-            )}
-
-            {/* 追加的外部目录：只读查看、视觉区分、可关闭、无右键菜单 */}
-            {visibleExternalRoots.map(ext => {
-              const extExpanded = expandedPaths.has(ext.path);
-              return (
-                <React.Fragment key={ext.path}>
-                  <div
-                    className="tree-root-item tree-external-root"
-                    data-tree-path={ext.path}
-                    onClick={() => toggleInSet(ext.path)}
-                    title={t().drawer.externalDirTooltip(ext.path)}
-                  >
-                    <span className={`tree-chevron ${extExpanded ? 'expanded' : 'collapsed'}`}>
-                      {extExpanded ? CHEVRON_DOWN_11 : CHEVRON_RIGHT_11}
-                    </span>
-                    <FolderIcon size={15} isOpen={extExpanded} />
-                    <span className="tree-root-name">{ext.name}</span>
-                    <span className="external-root-badge">{t().drawer.externalBadge}</span>
-                    <span className="tree-root-path">{abbreviatePath(ext.path)}</span>
-                    <button
-                      className="external-root-close"
-                      title={t().drawer.removeExternalDir}
-                      onClick={e => {
-                        e.stopPropagation();
-                        onCloseExternalDirectory?.(ext.path);
-                      }}
-                    >
-                      ×
-                    </button>
-                  </div>
-                  {extExpanded && renderRootChildren(
-                    ext.children ?? [],
-                    false
-                  )}
-                </React.Fragment>
-              );
-            })}
+            {treeWindow.topPad > 0 && <div aria-hidden="true" style={{ height: treeWindow.topPad }} />}
+            {rows.slice(treeWindow.start, treeWindow.end).map(row => (
+              <div
+                key={row.key}
+                className="tree-row-slot"
+                style={{ height: row.height, display: 'flow-root' }}
+              >
+                {renderRow(row)}
+              </div>
+            ))}
+            {treeWindow.bottomPad > 0 && <div aria-hidden="true" style={{ height: treeWindow.bottomPad }} />}
           </div>
         )}
       </div>
     </aside>
   );
 });
+
+export const ProjectDrawer = React.memo(ProjectDrawerImpl);
 
 interface TreeNodeItemProps {
   node: FileNode;
@@ -465,8 +621,9 @@ interface TreeNodeItemProps {
   onNodeContext?: (node: FileNode, x: number, y: number, selected?: string[]) => void;
 }
 
-// memo：递归树里每一层 node 都会随父级重渲染；props 都是原始值或上层稳定引用
+// memo：窗口每次滚动都会重渲染可见行；props 都是原始值或上层稳定引用
 // （Set/记录由 ProjectDrawer 的 useMemo 提供），未展开、未选中且 git 状态未变的节点可直接跳过。
+// 本组件只画一行：展开后的子节点由父组件的扁平 rows 负责，不再递归挂载。
 const TreeNodeItem: React.FC<TreeNodeItemProps> = React.memo(function TreeNodeItem({
   node,
   depth,
@@ -517,60 +674,36 @@ const TreeNodeItem: React.FC<TreeNodeItemProps> = React.memo(function TreeNodeIt
   };
 
   return (
-    <div className="tree-node-wrapper">
-      <div
-        className={`tree-node-row ${isMultiSelected ? 'selected' : ''} ${isSelected ? 'opened' : ''} ${node.isDirectory ? 'is-dir' : 'is-file'}`}
-        style={{ paddingLeft: `${depth * 14 + 6}px` }}
-        data-tree-path={node.path}
-        onClick={handleClick}
-        onDoubleClick={() => {
-          if (!node.isDirectory) onSelectFile(node.path);
-        }}
-        onContextMenu={handleContext}
-        title={node.isDirectory ? node.path : `${node.path}${onNodeContext ? `\n${t().drawer.nodeContextHint}` : ''}`}
-      >
-        {node.isDirectory ? (
-          <span className={`tree-chevron ${isExpanded ? 'expanded' : 'collapsed'}`}>
-            {isLoading ? '⋯' : isExpanded ? CHEVRON_DOWN_11 : CHEVRON_RIGHT_11}
-          </span>
-        ) : (
-          <span className="tree-chevron-placeholder" />
-        )}
-
-        <span className="tree-icon-box">
-          {renderFileIcon(node.name, node.isDirectory, isExpanded)}
+    <div
+      className={`tree-node-row ${isMultiSelected ? 'selected' : ''} ${isSelected ? 'opened' : ''} ${node.isDirectory ? 'is-dir' : 'is-file'}`}
+      style={{ paddingLeft: `${depth * 14 + 6}px` }}
+      data-tree-path={node.path}
+      onClick={handleClick}
+      onDoubleClick={() => {
+        if (!node.isDirectory) onSelectFile(node.path);
+      }}
+      onContextMenu={handleContext}
+      title={node.isDirectory ? node.path : `${node.path}${onNodeContext ? `\n${t().drawer.nodeContextHint}` : ''}`}
+    >
+      {node.isDirectory ? (
+        <span className={`tree-chevron ${isExpanded ? 'expanded' : 'collapsed'}`}>
+          {isLoading ? '⋯' : isExpanded ? CHEVRON_DOWN_11 : CHEVRON_RIGHT_11}
         </span>
-
-        <span className={`tree-label ${isSelected ? 'selected-label' : ''} ${statusClassOf(gitStatus)}`}>{node.name}</span>
-        {gitStatus && gitStatus !== 'I' && (
-           <span className={`tree-git-badge git-status-${gitStatus.toLowerCase()}`} title={`Git: ${gitStatus}`}>
-             {gitStatus}
-           </span>
-         )}
-        {showDirectoryMark && <span className="tree-git-dot" title={t().drawer.containsUncommitted} />}
-      </div>
-
-      {node.isDirectory && isExpanded && Array.isArray(node.children) && (
-        <div className="tree-children-block">
-          {node.children.map(child => (
-            <TreeNodeItem
-              key={child.path}
-              node={child}
-              depth={depth + 1}
-              activeFile={activeFile}
-              selectedPaths={selectedPaths}
-              expandedPaths={expandedPaths}
-              loadingPaths={loadingPaths}
-              gitStatusByPath={gitStatusByPath}
-              directoryHasChanges={directoryHasChanges}
-              onToggleFolder={onToggleFolder}
-              onSelectFile={onSelectFile}
-              onRowPointer={onRowPointer}
-              onNodeContext={onNodeContext}
-            />
-          ))}
-        </div>
+      ) : (
+        <span className="tree-chevron-placeholder" />
       )}
+
+      <span className="tree-icon-box">
+        {renderFileIcon(node.name, node.isDirectory, isExpanded)}
+      </span>
+
+      <span className={`tree-label ${isSelected ? 'selected-label' : ''} ${statusClassOf(gitStatus)}`}>{node.name}</span>
+      {gitStatus && gitStatus !== 'I' && (
+        <span className={`tree-git-badge git-status-${gitStatus.toLowerCase()}`} title={`Git: ${gitStatus}`}>
+          {gitStatus}
+        </span>
+      )}
+      {showDirectoryMark && <span className="tree-git-dot" title={t().drawer.containsUncommitted} />}
     </div>
   );
 });

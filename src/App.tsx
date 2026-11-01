@@ -9,6 +9,7 @@ import { LeftStrip, type ActiveDrawer, type BottomTool } from './components/Left
 import { GhosttyTerminal, type GhosttyTerminalHandle, type ProjectActivityInfo } from './components/GhosttyTerminal';
 import { CommitDrawer } from './components/CommitDrawer';
 import { ProjectDrawer } from './components/ProjectDrawer';
+import type { ProjectDrawerHandle } from './components/ProjectDrawer';
 import { CompareDrawer } from './components/CompareDrawer';
 import { CompareBranchesView } from './components/CompareBranchesView';
 import { EditorTabBar } from './components/EditorTabBar';
@@ -4761,6 +4762,11 @@ export const App: React.FC = () => {
   /** 定位闪烁定时器句柄：连续点击「定位」时先取消上一个，避免旧节点被延迟移除高亮 */
   const locateFlashTimersRef = useRef<number[]>([]);
   /**
+   * 文件树窗口化后的定位入口：目标行不一定已挂载，不能再用
+   * `querySelector + scrollIntoView`。由 ProjectDrawer 按扁平行下标滚动。
+   */
+  const projectDrawerRef = useRef<ProjectDrawerHandle>(null);
+  /**
    * 定位代次：关开关 / 切文件时 +1，在途的异步定位（读盘 + 定时器）发现代次
    * 对不上就地作废 —— 否则关了开关，已在飞的定位照样落地，看起来"关不掉"。
    */
@@ -4818,31 +4824,31 @@ export const App: React.FC = () => {
     // 等渲染完成后滚动到目标行。quiet（自动定位）时不闪烁：`opened` 高亮本就常驻，
     // 闪烁动画只留给手动定位按钮，避免每次切标签都闪一下。
     clearLocateFlashTimers();
-    const scrollToRow = () => {
-      const el = document.querySelector(`[data-tree-path="${CSS.escape(activeFilePath)}"]`);
-      if (!el) return null;
-      // nearest：目标行已在视口内时完全不滚动，避免每次切标签都跳一下
-      el.scrollIntoView({ block: 'nearest' });
-      return el;
-    };
+    const reveal = (align: 'nearest' | 'center') =>
+      projectDrawerRef.current?.revealPath(activeFilePath, align) ?? false;
     if (quiet) {
       const outer = window.setTimeout(() => {
         if (epoch !== locateEpochRef.current) return;
-        scrollToRow();
+        reveal('nearest');
       }, 60);
       locateFlashTimersRef.current.push(outer);
       return;
     }
     const outer = window.setTimeout(() => {
       if (epoch !== locateEpochRef.current) return;
-      const el = document.querySelector(`[data-tree-path="${CSS.escape(activeFilePath)}"]`);
-      if (!el) return;
-      el.scrollIntoView({ block: 'center' });
-      el.classList.remove('tree-locate-flash');
-      void (el as HTMLElement).offsetWidth; // 强制重排以重启动画
-      el.classList.add('tree-locate-flash');
-      const inner = window.setTimeout(() => el.classList.remove('tree-locate-flash'), 1500);
-      locateFlashTimersRef.current.push(inner);
+      if (!reveal('center')) return;
+      // revealPath 只改 scrollTop 并触发一次 React 提交；目标行要等提交后才挂载。
+      // 两帧后再查 DOM 做闪烁，避免在旧窗口范围里找不到行。
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        if (epoch !== locateEpochRef.current) return;
+        const el = document.querySelector(`[data-tree-path="${CSS.escape(activeFilePath)}"]`);
+        if (!el) return;
+        el.classList.remove('tree-locate-flash');
+        void (el as HTMLElement).offsetWidth; // 强制重排以重启动画
+        el.classList.add('tree-locate-flash');
+        const inner = window.setTimeout(() => el.classList.remove('tree-locate-flash'), 1500);
+        locateFlashTimersRef.current.push(inner);
+      }));
     }, 60);
     locateFlashTimersRef.current.push(outer);
   }, [activeFilePath, workspacePath, updateFileTreeNode, clearLocateFlashTimers]);
@@ -5993,6 +5999,7 @@ export const App: React.FC = () => {
         {activeDrawer === 'project' && (
           <>
             <ProjectDrawer
+              ref={projectDrawerRef}
               rootName={workspaceName}
               rootPath={workspacePath}
               repoRoot={isRepo ? (gitRepoRoot || workspacePath) : undefined}

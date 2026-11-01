@@ -33,6 +33,7 @@ import { TerminalSource, type SearchOutcome } from '../services/terminalSource';
 import { CellDiffCache } from '../ghostty-vt/cellFrame';
 import { domKeyToInput, KEY_ACTION } from '../ghostty-vt/domKeys';
 import { TerminalTabContextMenu } from './TerminalTabContextMenu';
+import { HIDDEN_CANVAS_RELEASE_MS, shouldReleaseCanvas } from './terminalCanvasRelease';
 import { TerminalA11yMirror } from './TerminalA11yMirror';
 import { frameToA11yText } from '../ghostty-vt/a11y';
 import type { TerminalTabMenuState } from './TerminalTabContextMenu';
@@ -1223,6 +1224,67 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
    * 钉在光标格上；用键比对避免光标未动时反复写 style 触发布局。
    */
   const imeAnchorKey = useRef('');
+
+  /**
+   * 隐藏分屏的画布是否已释放。
+   *
+   * 只释放「非活动分屏 + 页面已隐藏」的画布：前台切 tab 零重绘，活动分屏
+   * 永不释放（切回应用第一帧仍是离开前的画面）。释放后下一次显示由
+   * `frameCache.invalidate()` 强制走全量快照 + 整屏绘制。
+   */
+  const canvasReleased = useRef(false);
+  const onScreenRef = useRef(onScreen);
+  onScreenRef.current = onScreen;
+
+  const releaseCanvas = useCallback(() => {
+    if (!shouldReleaseCanvas(onScreenRef.current, document.hidden)) return;
+    const canvas = canvasRef.current;
+    if (!canvas || (canvas.width === 0 && canvas.height === 0)) return;
+    canvasReleased.current = true;
+    canvas.width = 0;
+    canvas.height = 0;
+    paintBaseline.current = null;
+    paintRowFlags.current = null;
+    prevCellSize.current = { w: 0, h: 0 };
+    canvasCssSize.current = { w: -1, h: -1 };
+    frameCache.current.invalidate();
+    lastFrame.current = null;
+    // 位图可从 Rust 重新取；隐藏期间没必要一直占着。
+    kittyImages.current.forEach(image => image.bitmap.close());
+    kittyImages.current.clear();
+    kittyPlacements.current = [];
+    // 下次显示的第一帧就重新探测图片，不等 10 帧的空会话节流。
+    kittyProbeFrames.current = 10;
+    kittyDirty.current = true;
+  }, []);
+
+  useEffect(() => {
+    if (onScreen) {
+      if (!canvasReleased.current) return;
+      canvasReleased.current = false;
+      dirty.current = true;
+      wakeLoop.current?.();
+      return;
+    }
+    let timer = 0;
+    const schedule = () => {
+      if (timer !== 0) {
+        window.clearTimeout(timer);
+        timer = 0;
+      }
+      if (!shouldReleaseCanvas(onScreenRef.current, document.hidden)) return;
+      timer = window.setTimeout(() => {
+        timer = 0;
+        releaseCanvas();
+      }, HIDDEN_CANVAS_RELEASE_MS);
+    };
+    schedule();
+    document.addEventListener('visibilitychange', schedule);
+    return () => {
+      if (timer !== 0) window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', schedule);
+    };
+  }, [onScreen, releaseCanvas]);
 
   const [cols, setCols] = useState(100);
   const [rows, setRows] = useState(24);

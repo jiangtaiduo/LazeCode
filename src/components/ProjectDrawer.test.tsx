@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render } from '@testing-library/react';
+import { createRef, type Ref } from 'react';
+import { act, fireEvent, render, waitFor } from '@testing-library/react';
 import { ProjectDrawer } from './ProjectDrawer';
+import type { ProjectDrawerHandle } from './ProjectDrawer';
 import type { FileNode } from '../types';
 
 function fileNode(path: string, name: string): FileNode {
@@ -13,9 +15,11 @@ function renderDrawer(options: {
   singleFile: boolean;
   expandedPaths?: Set<string>;
   onSelectFile?: (path: string) => void;
+  drawerRef?: Ref<ProjectDrawerHandle>;
 }) {
   return render(
     <ProjectDrawer
+      ref={options.drawerRef}
       rootName={options.rootPath.split('/').filter(Boolean).pop() ?? options.rootPath}
       rootPath={options.rootPath}
       files={options.files}
@@ -85,5 +89,45 @@ describe('ProjectDrawer single-file workspace', () => {
 
     fireEvent.doubleClick(row);
     expect(onSelectFile).toHaveBeenCalledWith(path);
+  });
+});
+
+describe('ProjectDrawer virtualization', () => {
+  const manyFiles = (count: number) =>
+    Array.from({ length: count }, (_, index) => fileNode(`/repo/f${index}.ts`, `f${index}.ts`));
+
+  it('mounts only a window of rows for a large expanded tree', () => {
+    const { container } = renderDrawer({
+      rootPath: '/repo',
+      files: manyFiles(500),
+      singleFile: false,
+      expandedPaths: new Set(['/repo'])
+    });
+
+    const rendered = container.querySelectorAll('.tree-node-row');
+    expect(rendered.length).toBeGreaterThan(0);
+    expect(rendered.length).toBeLessThan(100);
+    expect(container.querySelector('[data-tree-path="/repo/f0.ts"]')).not.toBeNull();
+    expect(container.querySelector('[data-tree-path="/repo/f499.ts"]')).toBeNull();
+  });
+
+  it('reveals a far row without requiring it to be mounted first', async () => {
+    const drawerRef = createRef<ProjectDrawerHandle>();
+    const { container } = renderDrawer({
+      rootPath: '/repo',
+      files: manyFiles(500),
+      singleFile: false,
+      expandedPaths: new Set(['/repo']),
+      drawerRef
+    });
+
+    act(() => {
+      expect(drawerRef.current?.revealPath('/repo/f400.ts', 'center')).toBe(true);
+    });
+
+    await waitFor(() => {
+      expect(container.querySelector('[data-tree-path="/repo/f400.ts"]')).not.toBeNull();
+    });
+    expect(container.querySelector('[data-tree-path="/repo/f0.ts"]')).toBeNull();
   });
 });

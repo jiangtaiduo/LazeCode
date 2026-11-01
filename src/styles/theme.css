@@ -241,12 +241,276 @@ body.platform-mac .ide-titlebar {
   -webkit-backdrop-filter: blur(20px);
 }
 
-/* Titlebar Left Cluster (Project & Git Branch Dropdowns) */
+/* Titlebar Left Cluster (LC Menu & Git Branch Dropdown & Project Tabs) */
 .titlebar-left-cluster {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* tab 条要吃掉剩余宽度：簇本身可收缩，pills 自身保持不缩 */
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.titlebar-left-cluster > .pycharm-dropdown-wrapper {
   flex-shrink: 0;
+}
+
+/* LC 应用菜单按钮：替代原项目名 pill 成为项目菜单入口。
+   22×22 圆角方块 + accent 渐变底 + LC 字样，一眼可辨是应用级入口 */
+.lc-logo {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--git-green, #4ec9b0) 100%);
+  color: #ffffff;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  flex-shrink: 0;
+  transition: filter 0.15s ease, transform 0.1s ease;
+}
+.lc-logo:hover {
+  filter: brightness(1.12);
+}
+.lc-logo:active {
+  transform: scale(0.94);
+}
+.lc-logo.active {
+  filter: brightness(1.2);
+  outline: 1px solid var(--overlay-hover);
+}
+
+/* ---- 顶栏项目 tab 条（浏览器式）----
+   三态边框外化控制台进程状态：
+   tab-idle 灰细框（无控制台或无进程）；
+   tab-busy 静态橙细框（有进程在跑，与工具条运行圆点同色 --git-mod）；
+   tab-active-output 橙框跑马灯（进程正在输出，2s 内有输出判定）。
+   WKWebView < Safari 16.4 不支持 @property 时跑马灯优雅降级为静态橙框。 */
+@property --tab-marquee-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+.project-tabbar {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  height: 100%;
+  overflow: hidden;
+}
+.project-tabbar-empty {
+  /* 无项目：整条留给窗口拖拽 */
+  display: block;
+}
+
+.project-tab-strip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.project-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 6px;
+  border-radius: var(--radius-btn);
+  background: var(--overlay-hover);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  position: relative;
+  flex: 0 1 auto;
+  min-width: 28px;
+  overflow: hidden;
+  white-space: nowrap;
+  /* 三态边框的底色：默认灰细框 */
+  box-shadow: inset 0 0 0 1px var(--border-color);
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+.project-tab:hover {
+  background: var(--overlay-active, var(--overlay-hover));
+  color: var(--text-primary);
+}
+.project-tab.current {
+  background: var(--bg-header);
+  color: var(--text-primary);
+}
+
+.project-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.project-tab-badge {
+  width: 14px;
+  height: 14px;
+  border-radius: 4px;
+  color: var(--text-bright);
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+/* 悬停出现的关闭按钮：不悬停时零占位 */
+.project-tab-close {
+  display: none;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 3px;
+  line-height: 0;
+  flex-shrink: 0;
+}
+.project-tab:hover .project-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.project-tab-close:hover {
+  background: var(--overlay-hover);
+  color: var(--text-primary);
+}
+
+/* 状态一：有进程在跑 → 静态橙细框（与 strip-dot-running 同色同语义） */
+.project-tab.tab-busy {
+  box-shadow: inset 0 0 0 1px var(--git-mod);
+}
+.project-tab-overflow-item.tab-busy .project-tab-badge {
+  outline: 1px solid var(--git-mod);
+}
+
+/* 状态二：进程正在输出 → 橙框跑马灯（旋转高亮沿边框转圈） */
+.project-tab.tab-active-output {
+  box-shadow: inset 0 0 0 1px var(--git-mod);
+}
+.project-tab.tab-active-output::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: conic-gradient(
+    from var(--tab-marquee-angle),
+    transparent 0deg,
+    transparent 240deg,
+    var(--git-mod) 300deg,
+    #ffffff 330deg,
+    transparent 360deg
+  );
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  animation: project-tab-marquee 1.2s linear infinite;
+  pointer-events: none;
+}
+@keyframes project-tab-marquee {
+  to {
+    --tab-marquee-angle: 360deg;
+  }
+}
+/* @property 不生效的环境（WKWebView < 16.4）：退化为静态橙框（box-shadow 已在） */
+.project-tab-overflow-item.tab-active-output .project-tab-badge {
+  outline: 1px solid var(--git-mod);
+  outline-style: dashed;
+}
+
+/* 拖拽重排中的 tab */
+.project-tab.dragging {
+  opacity: 0.55;
+  transform: scale(0.97);
+}
+
+/* 溢出「≫」按钮：悬停展开剩余项目列表 */
+.project-tab-overflow {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 26px;
+  border-radius: var(--radius-btn);
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  background: var(--overlay-hover);
+}
+.project-tab-overflow:hover {
+  color: var(--text-primary);
+}
+.project-tab-overflow.overflow-active {
+  color: var(--text-primary);
+  box-shadow: inset 0 0 0 1px var(--git-mod);
+}
+.project-tab-overflow-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 200px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--bg-elevated, var(--bg-header));
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-btn);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  padding: 4px;
+  z-index: 1850;
+}
+.project-tab-overflow:hover .project-tab-overflow-menu {
+  display: block;
+}
+.project-tab-overflow-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.project-tab-overflow-item:hover {
+  background: var(--overlay-hover);
+  color: var(--text-primary);
+}
+.project-tab-overflow-item.current {
+  color: var(--text-primary);
+  background: var(--overlay-active, var(--overlay-hover));
+}
+
+/* tab 之后到操作按钮之间的空白：保留窗口拖拽 */
+.project-tab-fill {
+  flex: 1 1 auto;
+  min-width: 8px;
+  height: 100%;
 }
 
 .pycharm-dropdown-wrapper {

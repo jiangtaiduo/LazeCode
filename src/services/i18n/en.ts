@@ -1223,6 +1223,8 @@ export const en: LocaleDict = {
   /** 标题栏（TitleBar）的界面文案。 */
   titleBar: {
     projectPillTooltip: 'Click to switch or open a project',
+    tabRunningTooltip: commands => (commands ? `Console running: ${commands}` : 'A process is running in the console'),
+    closeProjectTab: name => `Close project ${name}`,
     searchProjectsPlaceholder: 'Search projects...',
     searchBranchesPlaceholder: 'Search for branches and actions',
     openNewProject: 'Open...',

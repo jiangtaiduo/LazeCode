@@ -154,6 +154,10 @@ struct PtySession {
     /// 置位后读线程不再补发退出事件。同 session_id 重复 spawn 会顶掉旧会话：
     /// 旧 shell 的退出码若照发到 pty://exit/<id>，前端会误判**新**会话已退出。
     retired: Arc<AtomicBool>,
+    /// 最近一次终端输出的时刻。reader 线程每读到一块就更新（`pty_sessions_busy`
+    /// 据此判定「进程正在输出」，驱动顶栏项目 tab 的跑马灯）。 Arc 让读线程
+    /// 在会话表条目建成之前就能持句柄写。
+    last_output: Arc<Mutex<Option<std::time::Instant>>>,
     /// 读线程句柄：丢弃即 detach，不再 join —— 取舍见 close_session 注释。
     reader: Option<std::thread::JoinHandle<()>>,
 }
@@ -622,6 +626,9 @@ pub fn pty_spawn(
     let reader_writer = Arc::clone(&writer);
     let reader_child = Arc::clone(&child);
     let reader_retired = Arc::clone(&retired);
+    // 输出新鲜度：读线程独写，pty_sessions_busy 只读，Mutex 串行化
+    let last_output: Arc<Mutex<Option<std::time::Instant>>> = Arc::new(Mutex::new(None));
+    let reader_last_output = Arc::clone(&last_output);
     // 线程闭包需要一份 session_id 做日志与线程名，原值后面还要用于会话表
     let reader_session_id = session_id.clone();
     let reader = std::thread::Builder::new()
@@ -684,6 +691,11 @@ pub fn pty_spawn(
                         // 前端光标闪烁定时器每 530ms 兜底标脏一次，所以合并
                         // 只降事件量，不丢任何一帧可见更新。
                         let now = std::time::Instant::now();
+                        // 节流只合并**事件**，不掩盖「有输出」这个事实：
+                        // 跑马灯判定看的是最后输出时刻，节流窗口里的块也要记
+                        if let Ok(mut t) = reader_last_output.lock() {
+                            *t = Some(now);
+                        }
                         let due = last_emit.is_none_or(|t: std::time::Instant| {
                             now.duration_since(t).as_millis() >= 16
                         });
@@ -736,6 +748,7 @@ pub fn pty_spawn(
         cwd: cwd_key,
         window_label,
         retired,
+        last_output,
         reader: Some(reader),
     };
 
@@ -1298,6 +1311,112 @@ pub fn pty_session_busy(
     Ok(probe_session_busy(&master, shell_pid))
 }
 
+/// 批量占用探测的单会话结果（顶栏项目 tab 状态条的数据源）
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PtySessionBusyDto {
+    pub session_id: String,
+    /// 终端上是否还有 shell 之外的进程在跑
+    pub busy: bool,
+    /// 这些进程的名字（去重、最多 3 个），供 tooltip 展示
+    pub commands: Vec<String>,
+    /// 距最近一次输出的毫秒数；`None` = 该会话从未有过输出。
+    /// 前端判定：busy 且 2 秒内有输出 → 跑马灯；busy 但更久没输出 → 静态橙框。
+    pub last_output_ms: Option<u64>,
+}
+
+/// 批量探测多个会话的占用与输出新鲜度。
+///
+/// 顶栏项目 tab 每 2 秒要轮询本窗口**全部**项目的会话（不在前台的项目
+/// 也要显示「有进程在跑/正在输出」），逐条 `pty_session_busy` 是 N 次
+/// IPC 往返；合并成一条把往返压平。会话已消失的（正常退出/被顶替）
+/// 直接跳过——前端按「缺席 = 不忙」处理。
+///
+/// 各会话的 ps 探测互相独立，按批 8 个并发：批内并行压最坏耗时，
+/// 批间串行避免几十个会话每 2 秒同时起几十个 ps 的惊群。
+#[tauri::command]
+pub fn pty_sessions_busy(
+    manager: State<'_, PtyManager>,
+    session_ids: Vec<String>,
+) -> Result<Vec<PtySessionBusyDto>, String> {
+    sessions_busy(&manager, session_ids)
+}
+
+/// `pty_sessions_busy` 的实现体：与 `State` 解耦，测试可直接传 `PtyManager`。
+fn sessions_busy(
+    manager: &PtyManager,
+    session_ids: Vec<String>,
+) -> Result<Vec<PtySessionBusyDto>, String> {
+    struct Probe {
+        session_id: String,
+        master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+        child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+        last_output: Arc<Mutex<Option<std::time::Instant>>>,
+    }
+    // 锁纪律（与 pty_session_busy 相同）：锁内只查表 clone 句柄，
+    // 起子进程的探测在会话表锁外做
+    let probes: Vec<Probe> = {
+        let sessions = manager
+            .sessions
+            .lock()
+            .map_err(|_| "PTY 状态锁失效".to_string())?;
+        session_ids
+            .iter()
+            .filter_map(|id| {
+                sessions.get(id).map(|s| Probe {
+                    session_id: id.clone(),
+                    master: Arc::clone(&s.master),
+                    child: Arc::clone(&s.child),
+                    last_output: Arc::clone(&s.last_output),
+                })
+            })
+            .collect()
+    };
+    // 探测过程中的统一时刻：并发批里各会话的 last_output_ms 基于同一
+    // 基准计算，前端拿到的整批数据自洽（不会出现后面会话比前面「更新」）
+    let now = std::time::Instant::now();
+    let mut results: Vec<PtySessionBusyDto> = Vec::with_capacity(probes.len());
+    for chunk in probes.chunks(8) {
+        let outs: Vec<Option<PtySessionBusyDto>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = chunk
+                .iter()
+                .map(|p| {
+                    let Probe {
+                        session_id,
+                        master,
+                        child,
+                        last_output,
+                    } = p;
+                    let session_id = session_id.clone();
+                    let master = Arc::clone(master);
+                    let child = Arc::clone(child);
+                    let last_output = Arc::clone(last_output);
+                    scope.spawn(move || {
+                        let shell_pid = child.lock().ok().and_then(|c| c.process_id());
+                        let busy = probe_session_busy(&master, shell_pid);
+                        let last_output_ms = last_output
+                            .lock()
+                            .ok()
+                            .and_then(|t| *t)
+                            .map(|t| now.duration_since(t).as_millis() as u64);
+                        PtySessionBusyDto {
+                            session_id,
+                            busy: busy.busy,
+                            commands: busy.commands,
+                            last_output_ms,
+                        }
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().ok()).collect()
+        });
+        // 单个探测线程 panic（不应发生：probe_session_busy 全路径无 panic）
+        // 只丢该会话这一条，不拖垮整批
+        results.extend(outs.into_iter().flatten());
+    }
+    Ok(results)
+}
+
 /// 当前终端里的内联图片（Kitty 图形协议）：放置几何 + 图片元数据。
 ///
 /// 每帧都可能被前端调用，因此只回元数据（几十字节/项）；像素数据另走
@@ -1423,6 +1542,7 @@ mod tests {
             cwd: cwd.to_string(),
             window_label: window_label.to_string(),
             retired: Arc::new(AtomicBool::new(false)),
+            last_output: Arc::new(Mutex::new(None)),
             reader: None,
         }
     }
@@ -1448,6 +1568,50 @@ mod tests {
         assert_eq!(left.len(), 2, "其它窗口 / 其它 cwd 的会话必须保留");
         assert!(left.contains(&"other-window".to_string()));
         assert!(left.contains(&"other-cwd".to_string()));
+        manager.close_all();
+    }
+
+    /// 批量探测：已消失的会话跳过（缺席=不忙），存在的新会话报空闲。
+    #[test]
+    fn sessions_busy_skips_missing_sessions() {
+        let manager = PtyManager::new();
+        {
+            let mut sessions = manager.sessions.lock().unwrap();
+            sessions.insert("s1".into(), test_session("/tmp", "main"));
+        }
+        let results = sessions_busy(&manager, vec!["s1".into(), "ghost".into()]).unwrap();
+        assert_eq!(results.len(), 1, "不存在的会话直接跳过，不占结果位");
+        assert_eq!(results[0].session_id, "s1");
+        assert!(!results[0].busy, "刚起的新 shell 没跑命令，必须报空闲");
+        assert!(results[0].commands.is_empty());
+        assert_eq!(results[0].last_output_ms, None, "从未输出过的会话是 None");
+        manager.close_all();
+    }
+
+    /// last_output_ms：有输出时刻的会话按统一基准折算毫秒，未输出的保持 None。
+    #[test]
+    fn sessions_busy_reports_last_output_age() {
+        let manager = PtyManager::new();
+        {
+            let mut sessions = manager.sessions.lock().unwrap();
+            let s1 = test_session("/tmp", "main");
+            let s2 = test_session("/tmp", "main");
+            if let Ok(mut t) = s1.last_output.lock() {
+                *t = Some(Instant::now() - Duration::from_millis(3000));
+            }
+            // s2 保持 None（从未输出）
+            sessions.insert("s1".into(), s1);
+            sessions.insert("s2".into(), s2);
+        }
+        let results = sessions_busy(&manager, vec!["s1".into(), "s2".into()]).unwrap();
+        let s1 = results.iter().find(|r| r.session_id == "s1").unwrap();
+        let s2 = results.iter().find(|r| r.session_id == "s2").unwrap();
+        let age = s1.last_output_ms.expect("s1 记录过输出，必须有毫秒数");
+        assert!(
+            age >= 2500,
+            "3 秒前输出的会话，折算毫秒应 ≥2500，实际 {age}"
+        );
+        assert_eq!(s2.last_output_ms, None);
         manager.close_all();
     }
 
@@ -1782,6 +1946,7 @@ mod tests {
                     Box::new(std::io::sink()) as Box<dyn Write + Send>
                 )),
                 child: Arc::new(Mutex::new(child)),
+                last_output: Arc::new(Mutex::new(None)),
                 reader: None,
             };
             let arc = Arc::clone(&session.terminal);
@@ -2566,6 +2731,7 @@ mod busy_probe_tests {
             cwd: "/tmp".to_string(),
             window_label: "test".to_string(),
             retired: Arc::new(AtomicBool::new(false)),
+            last_output: Arc::new(Mutex::new(None)),
             reader: Some(reader_thread),
         };
 

@@ -143,6 +143,7 @@ export type TauriCommand =
   | 'pty_close_by_cwd'
   | 'pty_resize'
   | 'pty_session_busy'
+  | 'pty_sessions_busy'
   | 'pty_spawn'
   | 'pty_write'
   | 'read_directory'

@@ -1188,6 +1188,8 @@ export const zhCN: LocaleDict = {
   /** 标题栏（TitleBar）的界面文案。 */
   titleBar: {
     projectPillTooltip: '点击切换或打开项目',
+    tabRunningTooltip: commands => (commands ? `控制台运行中：${commands}` : '控制台有进程在运行'),
+    closeProjectTab: name => `关闭项目 ${name}`,
     searchProjectsPlaceholder: '搜索项目 (Search Projects)...',
     searchBranchesPlaceholder: '搜索分支和操作',
     openNewProject: '打开...',

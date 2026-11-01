@@ -6,7 +6,7 @@ import { appConfirm } from './services/confirmDialog';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { TitleBar } from './components/TitleBar';
 import { LeftStrip, type ActiveDrawer, type BottomTool } from './components/LeftStrip';
-import { GhosttyTerminal, type GhosttyTerminalHandle } from './components/GhosttyTerminal';
+import { GhosttyTerminal, type GhosttyTerminalHandle, type ProjectActivityInfo } from './components/GhosttyTerminal';
 import { CommitDrawer } from './components/CommitDrawer';
 import { ProjectDrawer } from './components/ProjectDrawer';
 import { CompareDrawer } from './components/CompareDrawer';
@@ -71,6 +71,7 @@ import { detectGhostty } from './services/ghostty';
 import { ensureLspForLanguage, resetLsp } from './services/lsp';
 import { shouldAutoSave } from './services/autoSavePolicy';
 import { planProjectPrune } from './services/projectPrune';
+import { applyTabReorder, orderProjectTabs } from './services/tabOrder';
 import { planExitFlush } from './services/exitFlush';
 import { isImageFile, isMarkdownFile, languageOf } from './services/fileTypes';
 import { startPanelDrag, startPointerDrag } from './services/panelDrag';
@@ -592,6 +593,34 @@ export const App: React.FC = () => {
   });
   /** 本窗口打开（可切换）的项目；当前项目始终在列 */
   const [sessionProjects, setSessionProjects] = useState<{ path: string; name: string }[]>([]);
+  /**
+   * 项目 tab 的用户排列顺序（拖拽调整）：仅内存，与会话快照同生命周期。
+   * 快照/打开顺序不代表用户心意，tab 条必须按用户排的顺序展示。
+   * 独立 state：打开/关闭/拖拽各处用函数式更新，避免再开一个重算 tick。
+   */
+  const [tabOrder, setTabOrder] = useState<string[]>([]);
+  /**
+   * 各项目的控制台活动状态（顶栏项目 tab 状态条）：busy=有进程在跑，
+   * outputting=2 秒内有过输出。GhosttyTerminal 侧已做签名去重，这里
+   * 只再守一层桶比较；命令名全量走 ref 供 tooltip 读取而不触发渲染。
+   */
+  const [projectActivity, setProjectActivity] = useState<Record<string, { busy: boolean; outputting: boolean }>>({});
+  const projectActivityCommandsRef = useRef<Record<string, string[]>>({});
+  const onProjectActivityStable = useStableCallback((map: Record<string, ProjectActivityInfo>) => {
+    const commands: Record<string, string[]> = {};
+    for (const [p, a] of Object.entries(map)) commands[p] = a.commands;
+    projectActivityCommandsRef.current = commands;
+    const buckets: Record<string, { busy: boolean; outputting: boolean }> = {};
+    for (const [p, a] of Object.entries(map)) buckets[p] = { busy: a.busy, outputting: a.outputting };
+    setProjectActivity(prev => {
+      const prevKeys = Object.keys(prev);
+      const nextKeys = Object.keys(buckets);
+      const same =
+        prevKeys.length === nextKeys.length &&
+        nextKeys.every(k => prev[k] && prev[k].busy === buckets[k].busy && prev[k].outputting === buckets[k].outputting);
+      return same ? prev : buckets;
+    });
+  });
   /** 其它窗口打开的项目（点击聚焦对应窗口） */
   const [otherWindows, setOtherWindows] = useState<{ label: string; title: string; path: string }[]>([]);
   const [gotoLine, setGotoLine] = useState<number | null>(null);
@@ -2122,6 +2151,8 @@ export const App: React.FC = () => {
       }
       const seq = ++workspaceSeqRef.current;
       openOrderRef.current = [root, ...openOrderRef.current.filter(p => p !== root)];
+      // tab 条：新项目追加到尾部（用户拖拽过的话保持已有位置）
+      setTabOrder(order => (order.includes(root) ? order : [...order, root]));
       setExternalRoots([]);
       // 向后端登记工作区根：read/write/delete/paste 只允许落在已登记根之内。
       // 后端原本对这些命令零路径校验，等于「打开项目即授予任意文件读写」。
@@ -2145,6 +2176,7 @@ export const App: React.FC = () => {
         workspaceSeqRef.current = seq + 1;
         showStatus(t().status.openProjectFailedAuth(errText(err)));
         openOrderRef.current = openOrderRef.current.filter(p => p !== root);
+        setTabOrder(order => order.filter(p => p !== root));
         setExternalRoots([]);
         return;
       }
@@ -2280,6 +2312,7 @@ export const App: React.FC = () => {
       // 有改动没落盘就整份保留，宁可暂时超出上限也不能丢数据
       if (!failed) {
         delete sessions[projectPath];
+        setTabOrder(order => order.filter(p => p !== projectPath));
         // 该项目的缓冲就此丢弃（不属于当前项目，无编辑器持有）：连带释放 model
         Object.keys(snap.buffers).forEach(disposeModelForPath);
         pruned = true;
@@ -2303,6 +2336,8 @@ export const App: React.FC = () => {
         ...(workspacePath && workspacePath !== target ? [workspacePath] : []),
         ...openOrderRef.current.filter(p => p !== target && p !== workspacePath),
       ];
+      // tab 条：目标项目已在表内（用户排过序）就保持原位
+      setTabOrder(order => (order.includes(target) ? order : [...order, target]));
       if (workspacePath) {
         projectSessionsRef.current[workspacePath] = {
           openFilePaths,
@@ -2992,11 +3027,24 @@ export const App: React.FC = () => {
    * 'compare-branches'，其余入口默认回编辑器。
    */
   const diffReturnTabRef = useRef<'editor' | 'compare-branches'>('editor');
-  const enterDiff = useCallback((returnTo: 'editor' | 'compare-branches' = 'editor') => {
-    diffReturnTabRef.current = returnTo;
-    setDiffOpen(true);
-    setActiveTab('diff');
+  /**
+   * 双击查看差异/双击打开文件时收起控制台：主区即将展示差异或文件内容，
+   * 控制台一次性隐藏（不自动恢复，想看再点开）。bottom / right 两种停靠
+   * 形态都由 activeBottomTool 控制，一处覆盖；git 面板（变更列表）不动。
+   */
+  const hideConsoleForFocus = useCallback(() => {
+    setActiveBottomTool(prev => (prev === 'terminal' ? null : prev));
   }, []);
+
+  const enterDiff = useCallback(
+    (returnTo: 'editor' | 'compare-branches' = 'editor') => {
+      diffReturnTabRef.current = returnTo;
+      setDiffOpen(true);
+      setActiveTab('diff');
+      hideConsoleForFocus();
+    },
+    [hideConsoleForFocus]
+  );
 
   /**
    * 所有进入 Diff 的入口先清空互斥的差异来源。
@@ -3036,6 +3084,8 @@ export const App: React.FC = () => {
     // 且无条件切回代码编辑器（对齐 PyCharm：绝不在 Diff 视口中用文件树篡改比对目标）
     tabActivationRef.current = null;
     setActiveTab('editor');
+    // 双击打开文件：控制台让位给文件内容（一次性隐藏）
+    hideConsoleForFocus();
     void openFile(path);
   };
 
@@ -5247,9 +5297,41 @@ export const App: React.FC = () => {
   }, [clearDiffSource, compareSession, enterDiff]);
   const closeGitPanelStable = useStableCallback(() => setActiveBottomTool(null));
 
-  /** 关闭当前项目：优先切回上一个仍打开的项目；若已无其他打开项目则回到欢迎页 */
-  const closeWorkspace = useCallback(async () => {
-    // 有未保存改动时先确认：closeWorkspace 直接清空缓冲，静默丢弃即数据丢失
+  /** 关闭项目（省略参数=当前项目）：优先切回上一个仍打开的项目；若已无其他打开项目则回到欢迎页 */
+  const closeWorkspace = useCallback(async (targetPath?: string) => {
+    const closing = targetPath || workspacePath;
+    if (!closing) return;
+    if (closing !== workspacePath) {
+      // ── 关闭后台项目（tab 条的 ×）：不触碰当前项目的任何 UI 状态 ──
+      // 确认语义与关闭当前项目一致：脏缓冲先确认、终端有命令在跑先确认
+      const snap = projectSessionsRef.current[closing];
+      const dirtyCount = snap ? Object.values(snap.buffers).filter(b => b.dirty).length : 0;
+      if (dirtyCount > 0 && !(await appConfirm(t().dialog.unsavedOnClose(dirtyCount), { title: t().dialog.unsavedOnOpenTitle, kind: 'warning', okLabel: t().dialog.discard }))) {
+        return;
+      }
+      if (isTauriEnvironment()) {
+        const proceed = (await terminalRef.current?.confirmProjectClose(closing)) ?? true;
+        if (!proceed) return;
+      }
+      delete projectSessionsRef.current[closing];
+      if (snap) {
+        // 后台项目的缓冲无编辑器持有，连带释放各自的 monaco model
+        Object.keys(snap.buffers).forEach(disposeModelForPath);
+      }
+      if (isTauriEnvironment()) {
+        // 注销工作区授权：关闭后该目录下的文件不再可读写
+        void invokeCommand('unregister_workspace', { path: closing }).catch(() => {});
+        // 单文件工作区的终端 cwd 是文件所在目录（见 GhosttyTerminal spawnCwd）
+        const terminalCwd = snap?.workspaceIsFile ? parentOfPath(closing) : closing;
+        void invokeCommand('pty_close_by_cwd', { cwd: terminalCwd }).catch(() => {});
+      }
+      openOrderRef.current = openOrderRef.current.filter(p => p !== closing);
+      setTabOrder(order => order.filter(p => p !== closing));
+      // 触发 sessionProjects 列表重算（快照在 ref 里，不进依赖比较）
+      setSessionPruneTick(t => t + 1);
+      return;
+    }
+    // ── 关闭当前项目：有未保存改动时先确认：closeWorkspace 直接清空缓冲，静默丢弃即数据丢失 ──
     const dirtyCount = Object.values(buffersRef.current).filter(b => b.dirty).length;
     if (dirtyCount > 0 && !(await appConfirm(t().dialog.unsavedOnClose(dirtyCount), { title: t().dialog.unsavedOnOpenTitle, kind: 'warning', okLabel: t().dialog.discard }))) {
       return;
@@ -5280,6 +5362,7 @@ export const App: React.FC = () => {
     // 新项目继续使用已关闭项目的 LSP root。
     void resetLsp();
     openOrderRef.current = openOrderRef.current.filter(p => p !== closedPath);
+    setTabOrder(order => order.filter(p => p !== closedPath));
     const prevPath = openOrderRef.current.find(p => projectSessionsRef.current[p]);
     const prevSnap = prevPath ? projectSessionsRef.current[prevPath] : undefined;
     setWorkspacePath('');
@@ -5392,6 +5475,14 @@ export const App: React.FC = () => {
   const searchClickStable = useStableCallback(() => setIsSearchOpen(true));
   // 无工作区时 TitleBar 不显示关闭入口：条件留在 JSX，函数体与原来一致
   const closeProjectStable = useStableCallback(() => closeWorkspace());
+  // tab 条：点击切换（switchToProject）、× / 中键关闭指定项目、拖拽重排
+  const closeProjectTabStable = useStableCallback((path: string) => void closeWorkspace(path));
+  const reorderProjectTabsStable = useStableCallback((from: number, to: number) => {
+    const ordered = orderProjectTabs(sessionProjects, tabOrder).map(p => p.path);
+    setTabOrder(applyTabReorder(ordered, from, to));
+  });
+  /** tab 条展示序：用户拖拽顺序优先，未排过的按打开先后补尾 */
+  const projectTabs = useMemo(() => orderProjectTabs(sessionProjects, tabOrder), [sessionProjects, tabOrder]);
 
   /**
    * 跳转到行（原生菜单 Navigate › 跳转到行…，加速键 Cmd+L）。
@@ -5773,7 +5864,6 @@ export const App: React.FC = () => {
     <div style={{ height: '100vh', width: '100vw', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* 1. Titlebar */}
       <TitleBar
-        projectName={workspacePath ? workspaceName : ''}
         workspacePath={workspacePath}
         recentWorkspaces={recentWorkspaces}
         onOpenProject={pickWorkspace}
@@ -5783,6 +5873,12 @@ export const App: React.FC = () => {
         onFocusWindow={focusWindow}
         onProjectMenuOpen={refreshOtherWindows}
         onCloseProject={workspacePath ? closeProjectStable : undefined}
+        projectTabs={projectTabs}
+        projectActivity={projectActivity}
+        projectActivityCommandsRef={projectActivityCommandsRef}
+        onSelectProjectTab={switchWorkspaceStable}
+        onCloseProjectTab={closeProjectTabStable}
+        onReorderProjectTabs={reorderProjectTabsStable}
         currentBranch={currentBranch}
         branches={branches}
         tags={tags}
@@ -6235,6 +6331,7 @@ export const App: React.FC = () => {
               onNotice={showStatus}
               onLiveProjectsChange={onLiveProjectsChangeStable}
               onBusyChange={onTerminalBusyChangeStable}
+              onProjectActivity={onProjectActivityStable}
               onActivePwdChange={onTerminalCwdChangeStable}
               fontSize={settings.terminalFontSize}
               themeKey={`${settings.uiVariant}:${settings.themeId}`}

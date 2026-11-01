@@ -8,6 +8,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Browser-style project tabs in the title bar: the leftmost LC logo button now
+  hosts the project menu (formerly on the project-name pill), the branch
+  selector follows, and every project opened in the window gets a tab for
+  one-click switching. Tabs support drag-to-reorder (hover shows a close
+  button, middle-click closes), and overflow collapses into a "≫" menu. Each
+  tab's border mirrors that project's console state: gray when no process is
+  running, solid orange while a process runs (same color as the existing
+  running dot), and an animated orange marquee while that process is actively
+  producing output (within 2 s of the last output). Background projects are
+  polled through a new batched `pty_sessions_busy` command that also reports
+  per-session output freshness, so state for non-active projects needs no
+  extra IPC round trips.
+- Double-clicking a file in the changelist (diff) or in the project tree (open
+  file) now auto-hides the console panel so the diff/file content takes over
+  the main area. The hide is one-way; reopen the console from the tool strip.
+
 ### Fixed
 
 - The language-server chain was effectively dead after the first file in a

@@ -29,9 +29,9 @@ import { formatTildePath, getBadgeInitials, getProjectBadgeColor } from '../serv
 import type { GitBranch, GitRepoInfo, GitTag } from '../types';
 import { t } from '../services/i18n';
 import { useLanguageRefresh } from '../hooks/useLanguageRefresh';
+import { ProjectTabBar, type ProjectTab, type ProjectTabActivity } from './ProjectTabBar';
 
 interface TitleBarProps {
-  projectName: string;
   workspacePath: string;
   recentWorkspaces: string[];
   onOpenProject: () => void;
@@ -45,6 +45,14 @@ interface TitleBarProps {
   onProjectMenuOpen?: () => void;
   /** 关闭当前项目（回到欢迎页）；未打开项目时不传 */
   onCloseProject?: () => void;
+  /** 顶栏项目 tab 条：本窗口打开的项目（用户拖拽序）与各自的控制台活动状态 */
+  projectTabs?: ProjectTab[];
+  projectActivity?: Record<string, ProjectTabActivity>;
+  /** 命令名走 ref：tooltip 数据不参与 memo 比较 */
+  projectActivityCommandsRef?: React.MutableRefObject<Record<string, string[]>>;
+  onSelectProjectTab?: (path: string) => void;
+  onCloseProjectTab?: (path: string) => void;
+  onReorderProjectTabs?: (from: number, to: number) => void;
   currentBranch: string;
   branches: GitBranch[];
   tags?: GitTag[];
@@ -96,7 +104,6 @@ interface TitleBarProps {
  * 隔离掉与标题栏无关的重渲染。生效前提：App 侧回调与 branches 数组保持稳定引用。
  */
 export const TitleBar = React.memo(function TitleBar({
-  projectName,
   workspacePath,
   recentWorkspaces,
   onOpenProject,
@@ -106,6 +113,12 @@ export const TitleBar = React.memo(function TitleBar({
   onFocusWindow,
   onProjectMenuOpen,
   onCloseProject,
+  projectTabs = [],
+  projectActivity = {},
+  projectActivityCommandsRef,
+  onSelectProjectTab,
+  onCloseProjectTab,
+  onReorderProjectTabs,
   currentBranch,
   branches,
   tags = [],
@@ -212,8 +225,6 @@ export const TitleBar = React.memo(function TitleBar({
       void getCurrentWindow().close();
     }
   };
-
-  const projectInitial = getBadgeInitials(projectName);
 
   // 打开中项目的 git 分支缓存（path -> branch，对齐 Image #2）
   const [projectBranches, setProjectBranches] = useState<Record<string, string>>({});
@@ -446,12 +457,12 @@ export const TitleBar = React.memo(function TitleBar({
 
   return (
     <header className="ide-titlebar" data-tauri-drag-region="deep">
-      {/* Left: Project Selector + Git Branch Selector (PyCharm New UI Style) */}
+      {/* Left: LC App Menu + Git Branch Selector + Project Tabs (browser-style) */}
       <div className="titlebar-left-cluster" data-tauri-drag-region="deep">
-        {/* 1. Project Dropdown Trigger */}
+        {/* 1. LC Logo — 项目菜单入口（原项目名 pill 的菜单整体挂到 LC 上） */}
         <div className="pycharm-dropdown-wrapper" ref={projectMenuRef} data-tauri-drag-region="false">
           <button
-            className={`pycharm-project-pill ${isProjectMenuOpen ? 'active' : ''}`}
+            className={`lc-logo ${isProjectMenuOpen ? 'active' : ''}`}
             onClick={() => {
               setIsProjectMenuOpen(prev => {
                 if (!prev) onProjectMenuOpen?.();
@@ -461,15 +472,9 @@ export const TitleBar = React.memo(function TitleBar({
               setProjectFilter('');
             }}
             title={t().titleBar.projectPillTooltip}
+            aria-label="LazeCode"
           >
-            <span
-              className="pycharm-project-badge"
-              style={{ background: getProjectBadgeColor(projectName || 'Welcome') }}
-            >
-              {projectInitial}
-            </span>
-            <span className="pycharm-project-name">{projectName || 'Welcome'}</span>
-            <span className="pycharm-dropdown-arrow"><IconChevronDown size={10} /></span>
+            LC
           </button>
 
           {/* Project Dropdown Menu */}
@@ -1015,6 +1020,18 @@ export const TitleBar = React.memo(function TitleBar({
           )}
         </div>
       )}
+
+        {/* 3. Project Tabs（浏览器式：点击切换 / 悬停×与中键关闭 / 拖拽重排，
+            边框颜色外化各项目控制台的进程状态；无项目时整条让位窗口拖拽） */}
+        <ProjectTabBar
+          tabs={projectTabs}
+          activePath={workspacePath}
+          activity={projectActivity}
+          activityCommandsRef={projectActivityCommandsRef}
+          onSelect={onSelectProjectTab}
+          onClose={onCloseProjectTab}
+          onReorder={onReorderProjectTabs}
+        />
       </div>
 
 

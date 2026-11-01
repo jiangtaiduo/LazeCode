@@ -181,6 +181,7 @@ export const COMMAND_CATALOG: Record<TauriCommand, CommandMeta> = {
   pty_close_by_cwd: { title: 'Close terminals by directory', titleZh: '按目录关闭终端', category: 'terminal', risk: 'write' },
   pty_resize: { title: 'Resize terminal', titleZh: '调整终端尺寸', category: 'terminal', risk: 'write' },
   pty_session_busy: { title: 'Terminal busy probe', titleZh: '终端占用探测', category: 'terminal', risk: 'read' },
+  pty_sessions_busy: { title: 'Batch terminal busy probe', titleZh: '批量终端占用探测', category: 'terminal', risk: 'read' },
   pty_spawn: { title: 'Spawn terminal', titleZh: '启动终端', category: 'terminal', risk: 'write' },
   pty_write: { title: 'Write to terminal', titleZh: '向终端写入', category: 'terminal', risk: 'write' },
   pick_path: { title: 'Pick file or directory', titleZh: '选择文件或目录', category: 'files', risk: 'read' },

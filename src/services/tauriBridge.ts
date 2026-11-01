@@ -545,6 +545,10 @@ async function simulateCommand<T>(cmd: TauriCommand, args?: Record<string, unkno
     case 'pty_session_busy':
       return { busy: false, commands: [] } as unknown as T;
 
+    case 'pty_sessions_busy':
+      // 浏览器环境模拟：无会话即无活动
+      return [] as unknown as T;
+
     case 'git_sequencer_state':
       return { merging: false, cherryPicking: false, rebasing: false, mergeHead: null, cherryPickHead: null, cherryPickAuthor: null, cherryPickSubject: null } as unknown as T;
 

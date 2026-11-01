@@ -785,6 +785,7 @@ pub fn run() {
             pty_close,
             pty_close_by_cwd,
             pty_session_busy,
+            pty_sessions_busy,
             vt_images,
             vt_image_data,
             vt_snapshot,

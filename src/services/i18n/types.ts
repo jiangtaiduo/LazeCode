@@ -1273,6 +1273,10 @@ export interface LocaleDict {
   /** 标题栏（TitleBar）：项目下拉、分支下拉、窗口动作按钮。 */
   titleBar: {
     projectPillTooltip: string;
+    /** 项目 tab tooltip 的运行中提示（参数为去重命令名，可能为空串） */
+    tabRunningTooltip: LocaleFn<[string]>;
+    /** 项目 tab × / 中键关闭的提示（参数为项目名） */
+    closeProjectTab: LocaleFn<[string]>;
     searchProjectsPlaceholder: string;
     searchBranchesPlaceholder: string;
     openNewProject: string;

@@ -129,6 +129,12 @@ interface GhosttyTerminalProps {
    * 左侧工具条的 Terminal 图标上亮运行角标。
    */
   onBusyChange?: (busy: boolean, commands: string[]) => void;
+  /**
+   * 全部项目的控制台活动变化（顶栏项目 tab 状态条的数据源），key 为项目路径。
+   * busy=有 shell 之外的进程在跑；outputting=2 秒内有过输出（跑马灯动画）。
+   * 仅在项目状态桶或命令集变化时回调——2s 一次的例行轮询不得打扰父组件渲染。
+   */
+  onProjectActivity?: (map: Record<string, ProjectActivityInfo>) => void;
   /** 活动会话的 shell cwd（OSC 7/9/1337 上报）：父组件并入全局状态栏显示 */
   onActivePwdChange?: (pwd: string | null) => void;
 }
@@ -137,6 +143,19 @@ interface GhosttyTerminalProps {
 export interface GhosttyTerminalHandle {
   confirmProjectClose: (projectKey: string) => Promise<boolean>;
 }
+
+/** 单个项目的控制台活动快照（顶栏项目 tab 状态条数据源）。 */
+export interface ProjectActivityInfo {
+  /** 有 shell 之外的进程在跑 */
+  busy: boolean;
+  /** 2 秒内有过输出（跑马灯动画判定） */
+  outputting: boolean;
+  /** 运行中的命令名（去重，供 tooltip 展示） */
+  commands: string[];
+}
+
+/** 「正在输出」的新鲜度阈值：最后输出 2s 内算活跃，超过回落静态橙框。 */
+const OUTPUT_ACTIVE_MS = 2000;
 
 interface Rgb {
   r: number;
@@ -366,7 +385,7 @@ const confirmCloseSessions = async (sessionIds: string[]): Promise<boolean> => {
   });
 };
 
-export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTerminalProps>(function GhosttyTerminal({ cwd, shell, onClose, fontSize = DEFAULT_FONT_SIZE, themeKey, visible = true, projectKey = '', openProjects = [], placement = 'bottom', snapTarget = null, onGripPointerDown, onTogglePlacement, maximized = false, onToggleMaximize, spawnCwd, onNotice, onLiveProjectsChange, onBusyChange, onActivePwdChange }, ref) {
+export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTerminalProps>(function GhosttyTerminal({ cwd, shell, onClose, fontSize = DEFAULT_FONT_SIZE, themeKey, visible = true, projectKey = '', openProjects = [], placement = 'bottom', snapTarget = null, onGripPointerDown, onTogglePlacement, maximized = false, onToggleMaximize, spawnCwd, onNotice, onLiveProjectsChange, onBusyChange, onProjectActivity, onActivePwdChange }, ref) {
   // 多会话管理：每个会话与窗口都拥有唯一的 session_id，避免跨窗口/跨实例会话冲突与卡死
   // 会话编号持续递增：关闭「控制台 1」后新开的会话不会重名
   // 会话按 projectKey（工作区路径）分组：窗口内切换项目时其它项目的会话
@@ -408,43 +427,84 @@ export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTe
     onLiveProjectsChange?.(liveProjectsSig ? liveProjectsSig.split('\0') : []);
   }, [liveProjectsSig, onLiveProjectsChange]);
 
-  // ---- 进程占用轮询（控制台角标数据源）----
-  // 与关闭确认共用后端探测 `pty_session_busy`（ps -t <tty>，shell 之外的进程都算）。
-  // 面板收起不会卸载本组件、会话继续跑，所以轮询不看 visible——角标的意义
-  // 正在于面板看不见时也能提示；页面隐藏时暂停，回前台立即补一次。
-  // 探测失败（会话刚退出等）按不忙计，与 confirmCloseSessions 同一取向。
+  // ---- 进程占用轮询（控制台角标 + 顶栏项目 tab 状态条的数据源）----
+  // 后端 `pty_sessions_busy` 一次批量探测本窗口**全部**项目的会话：顶栏 tab
+  // 要为不在前台的项目显示「有进程在跑/正在输出」，逐条 `pty_session_busy`
+  // 是 N 次 IPC 往返，批量压平。判定语义与关闭确认一致（ps -t <tty>，
+  // shell 之外的进程都算）。面板收起不会卸载本组件、会话继续跑，所以
+  // 轮询不看 visible；页面隐藏时暂停，回前台立即补一次。
+  // 探测失败（批量调用层出错）维持现状下轮重试；单会话级失败已在后端按不忙计。
   const [busyInfo, setBusyInfo] = useState<{ busy: boolean; commands: string[] }>({
     busy: false,
     commands: []
   });
-  const busyPaneKey = projectTabs.flatMap(t => t.panes).join('\0');
+  /** 全部会话及其项目归属的稳定签名：成员或分组变了才重建探测映射。 */
+  const allPaneSig = useMemo(
+    () => tabs.map(t => `${t.projectKey}\u0000${t.panes.join('\u0000')}`).sort().join('\u0001'),
+    [tabs]
+  );
+  const lastActivitySig = useRef('');
   useEffect(() => {
-    if (!busyPaneKey) {
+    if (!allPaneSig) {
       setBusyInfo(prev => (prev.busy || prev.commands.length ? { busy: false, commands: [] } : prev));
+      if (lastActivitySig.current !== '') {
+        lastActivitySig.current = '';
+        onProjectActivity?.({});
+      }
       return;
     }
     let cancelled = false;
     const probe = async () => {
-      const perSession = await Promise.all(
-        busyPaneKey.split('\0').map(async sessionId => {
-          try {
-            const info = await invokeCommand<{ busy: boolean; commands: string[] }>('pty_session_busy', {
-              sessionId
-            });
-            return info?.busy ? (info.commands ?? []) : [];
-          } catch {
-            // 会话已不在（shell 自己退出过）：按不忙计
-            return [];
-          }
-        })
-      );
+      // session -> 项目归属（探测结果按项目归组；项目集合来自签名，保证
+      // 探测失败/会话消失的项目也以「不忙」出现在结果里）
+      const owner = new Map<string, string>();
+      for (const sig of allPaneSig.split('\u0001')) {
+        const parts = sig.split('\u0000');
+        const project = parts[0];
+        for (const pane of parts.slice(1)) owner.set(pane, project);
+      }
+      const acc = new Map<string, { busy: boolean; commands: Set<string>; outputting: boolean }>();
+      for (const project of new Set(owner.values())) {
+        acc.set(project, { busy: false, commands: new Set(), outputting: false });
+      }
+      let rows: Array<{ sessionId: string; busy: boolean; commands?: string[]; lastOutputMs?: number | null }> | null = null;
+      try {
+        rows = await invokeCommand<
+          Array<{ sessionId: string; busy: boolean; commands?: string[]; lastOutputMs?: number | null }>
+        >('pty_sessions_busy', { sessionIds: [...owner.keys()] });
+      } catch {
+        // 批量探测不可用（旧后端 / IPC 抖动）：本轮放弃，下轮重试
+        return;
+      }
       if (cancelled) return;
-      const commands = [...new Set(perSession.flat())].sort();
-      // 命令集合没变就不更新 state，避免每 2s 一次的无谓渲染
+      for (const row of rows ?? []) {
+        const project = owner.get(row.sessionId);
+        const bucket = project ? acc.get(project) : undefined;
+        if (!bucket || !row.busy) continue;
+        bucket.busy = true;
+        for (const c of row.commands ?? []) bucket.commands.add(c);
+        if (row.lastOutputMs != null && row.lastOutputMs < OUTPUT_ACTIVE_MS) bucket.outputting = true;
+      }
+      // 项目状态桶 + 命令集都不变才跳过：2s 例行轮询不许每次都重渲染父组件
+      const sig = [...acc.entries()]
+        .sort(([a], [b]) => (a < b ? -1 : 1))
+        .map(([p, a]) => `${p}:${a.busy ? 1 : 0}${a.outputting ? 1 : 0}:${[...a.commands].sort().join(',')}`)
+        .join('|');
+      if (sig === lastActivitySig.current) return;
+      lastActivitySig.current = sig;
+      const map: Record<string, ProjectActivityInfo> = {};
+      for (const [p, a] of acc) {
+        map[p] = { busy: a.busy, outputting: a.outputting, commands: [...a.commands].sort() };
+      }
+      onProjectActivity?.(map);
+      // 当前项目的角标沿用既有 onBusyChange 语义（LeftStrip tooltip 用命令名）
+      const cur = map[projectKeyRef.current];
+      const busy = cur?.busy ?? false;
+      const commands = cur?.commands ?? [];
       setBusyInfo(prev =>
-        prev.busy === (commands.length > 0) && prev.commands.join('\0') === commands.join('\0')
+        prev.busy === busy && prev.commands.join('\0') === commands.join('\0')
           ? prev
-          : { busy: commands.length > 0, commands }
+          : { busy, commands }
       );
     };
     void probe();
@@ -460,7 +520,7 @@ export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTe
       window.clearInterval(timer);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, [busyPaneKey]);
+  }, [allPaneSig, onProjectActivity]);
   useEffect(() => {
     onBusyChange?.(busyInfo.busy, busyInfo.commands);
   }, [busyInfo, onBusyChange]);

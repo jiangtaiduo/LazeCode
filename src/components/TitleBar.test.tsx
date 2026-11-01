@@ -51,3 +51,29 @@ describe('TitleBar update badge', () => {
     expect(badge).not.toHaveTextContent('available');
   });
 });
+
+describe('TitleBar branch pill stability', () => {
+  beforeEach(() => setLanguage('en', false));
+  afterEach(() => setLanguage('en', false));
+
+  it('keeps the branch pill mounted (skeleton) while branch info reloads after a project switch', () => {
+    // 切项目时 currentBranch 先被清空再重拉：pill 若整块卸载，后面的
+    // 项目 tab 会被左右推来推去 —— 加载中必须是骨架占位而不是消失
+    const { container } = render(<TitleBar {...baseProps} currentBranch="" />);
+    expect(container.querySelector('.branch-skeleton-bar')).not.toBeNull();
+    // 占位不可点：不该出现分支下拉按钮
+    expect(container.querySelector('.branch-pill-loading')).not.toBeNull();
+    expect(screen.queryByTitle('Click to switch or create a Git branch')).toBeNull();
+  });
+
+  it('shows the real branch name once loaded', () => {
+    render(<TitleBar {...baseProps} currentBranch="main" />);
+    expect(document.querySelector('.branch-skeleton-bar')).toBeNull();
+    expect(screen.getByText('main')).toBeTruthy();
+  });
+
+  it('renders no branch pill on the welcome screen (no workspace)', () => {
+    const { container } = render(<TitleBar {...baseProps} workspacePath="" currentBranch="" />);
+    expect(container.querySelector('.branch-skeleton-bar')).toBeNull();
+  });
+});

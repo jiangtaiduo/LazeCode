@@ -28,6 +28,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Project-tab close buttons are now always visible: they used to appear only
+  on hover, so every tab changed width as the pointer moved across the bar.
+  They sit dimmed by default and light up on hover instead.
+- Switching projects no longer shoves the tab strip around. The branch pill
+  was unmounted while branch info reloaded (the branch name is cleared on
+  every switch and refetched), and its natural width varied with the branch
+  name — the tabs to its right jumped left and back. The pill now has a
+  fixed width with an ellipsized name and stays mounted while loading as a
+  non-interactive skeleton, so the tab strip's start position is stable.
 - The language-server chain was effectively dead after the first file in a
   workspace: provider registration and the initial `didOpen` lived in the
   editor's one-shot mount hook, while the editor only swaps models on file

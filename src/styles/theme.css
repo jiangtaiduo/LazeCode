@@ -375,9 +375,12 @@ body.platform-mac .ide-titlebar {
   flex-shrink: 0;
 }
 
-/* 悬停出现的关闭按钮：不悬停时零占位 */
+/* 关闭按钮常显：悬停才出现会让 tab 宽度随鼠标进出不停变化，看着乱。
+   默认降透明度，悬停 tab 或按钮本身时提到 1。 */
 .project-tab-close {
-  display: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: none;
   background: transparent;
   color: var(--text-muted);
@@ -386,11 +389,12 @@ body.platform-mac .ide-titlebar {
   border-radius: 3px;
   line-height: 0;
   flex-shrink: 0;
+  opacity: 0.4;
+  transition: opacity 0.15s ease, background 0.15s ease;
 }
-.project-tab:hover .project-tab-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+.project-tab:hover .project-tab-close,
+.project-tab-close:hover {
+  opacity: 1;
 }
 .project-tab-close:hover {
   background: var(--overlay-hover);
@@ -542,6 +546,28 @@ body.platform-mac .ide-titlebar {
   transition: background 0.15s ease;
 }
 
+/* 分支 pill 定宽：项目切换时分支名长短不一、信息重拉有先后，
+   自然宽度会让后面的项目 tab 条左右横跳。定宽 + 名字省略号后，
+   tab 条的起点完全稳定；加载中渲染骨架占位（不卸载 pill）。 */
+.pycharm-branch-pill {
+  width: 180px;
+}
+.branch-pill-loading {
+  cursor: default;
+}
+.branch-skeleton-bar {
+  width: 72px;
+  height: 9px;
+  border-radius: 4px;
+  background: var(--overlay-hover);
+  animation: branch-skeleton-pulse 1.2s ease-in-out infinite;
+}
+@keyframes branch-skeleton-pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+
 .pycharm-project-pill:hover,
 .pycharm-branch-pill:hover,
 .pycharm-project-pill.active,
@@ -572,6 +598,15 @@ body.platform-mac .ide-titlebar {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  /* 定宽分支 pill 内：名字是可收缩项，长名省略号而不是把 pill 撑破 */
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+/* 定宽 pill 里图标/角标/箭头固定不缩，收缩只发生在名字上 */
+.pycharm-branch-pill .branch-sync-badge,
+.pycharm-branch-pill .pycharm-dropdown-arrow {
+  flex-shrink: 0;
 }
 
 .branch-sync-badge {

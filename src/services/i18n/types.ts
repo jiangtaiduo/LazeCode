@@ -1273,6 +1273,8 @@ export interface LocaleDict {
   /** 标题栏（TitleBar）：项目下拉、分支下拉、窗口动作按钮。 */
   titleBar: {
     projectPillTooltip: string;
+    /** 分支 pill 的加载占位提示（切项目重拉分支信息时显示骨架） */
+    branchLoadingTitle: string;
     /** 项目 tab tooltip 的运行中提示（参数为去重命令名，可能为空串） */
     tabRunningTooltip: LocaleFn<[string]>;
     /** 项目 tab × / 中键关闭的提示（参数为项目名） */

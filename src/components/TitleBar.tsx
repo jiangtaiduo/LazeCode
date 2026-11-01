@@ -665,10 +665,20 @@ export const TitleBar = React.memo(function TitleBar({
           )}
         </div>
 
-        {/* 2. Git Branch Dropdown Trigger — 非 git 仓库时隐藏 */}
-        {isRepo && currentBranch && (
+        {/* 2. Git Branch Dropdown Trigger — 非 git 仓库时隐藏。
+            切换项目时分支信息要重拉（currentBranch 先清空）：这里**不按
+            currentBranch 卸载**，加载中渲染骨架占位 —— 分支 pill 整块
+            消失再重建会把后面的项目 tab 左右推来推去。pill 本身定宽，
+            分支名长短变化也不再移动 tab 条。 */}
+        {isRepo && workspacePath && (
         <div className="pycharm-dropdown-wrapper" ref={branchMenuRef} data-tauri-drag-region="false">
-          {opActive ? (
+          {!opActive && !currentBranch ? (
+            // 加载占位：不可点（分支列表尚不可用），只维持布局
+            <div className="pycharm-branch-pill branch-pill-loading" title={t().titleBar.branchLoadingTitle}>
+              <GitBranchIcon size={14} color="var(--text-muted)" />
+              <span className="branch-skeleton-bar" />
+            </div>
+          ) : opActive ? (
             <div className="titlebar-op-cluster">
               <button
                 type="button"

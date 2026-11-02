@@ -2194,6 +2194,36 @@ pub fn vt_encode_key(
     term.encode_key(&input)
 }
 
+/// 把一次粘贴编码为写入 PTY 的字节。
+///
+/// 形态由终端当前模式决定：前台程序开启 bracketed paste（DECSET 2004，
+/// omp/bash/zsh 默认开）时包成 `ESC[200~…ESC[201~`，omp 等把回车当文本
+/// 插入输入框；未开启时换行转 `\r` 裸发（维持 shell 逐行执行的旧语义）。
+/// 模式状态只有终端自己知道，前端不应复刻 —— 与 vt_encode_key 同理。
+#[tauri::command]
+pub fn vt_encode_paste(
+    manager: State<'_, PtyManager>,
+    session_id: String,
+    text: String,
+) -> Result<Vec<u8>, String> {
+    // 表锁内只做 lookup + Arc::clone,终端操作在表锁外进行(与 vt_encode_key /
+    // vt_snapshot 同一约定:持表锁进终端锁会让一个慢操作把全部会话的
+    // spawn / close / resize 排在后面)。
+    let terminal = {
+        let sessions = manager
+            .sessions
+            .lock()
+            .map_err(|_| "PTY 状态锁失效".to_string())?;
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| format!("会话不存在: {session_id}"))?;
+        Arc::clone(&session.terminal)
+    };
+
+    let term = terminal.lock().map_err(|_| "终端状态锁失效".to_string())?;
+    term.encode_paste(&text)
+}
+
 /// 设置选区（端点为视口坐标，闭区间）
 #[tauri::command]
 pub fn vt_set_selection(

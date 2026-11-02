@@ -15,7 +15,6 @@ import {
   attachFilesToPasteText,
   pasteHasFiles,
   toAttachFiles,
-  wrapBracketedPaste,
 } from '../src/services/terminalAttach.ts';
 
 let pass = 0;
@@ -74,6 +73,12 @@ ok(!onlyName.includes('path') && !onlyName.includes('absolutePath'),
    `File 无路径属性（实测前提），实际原型属性: ${onlyName.join(',')}`);
 
 // ---- bracketed paste：omp 只有走这条路才把路径变成图片 chip ------------
+// 生产包裹已移交 Rust 引擎（vt_encode_paste → ghostty_paste_encode，按 DECSET
+// 2004 模式决定包裹与否；omp/bash/zsh 默认开着 2004，实际形态不变）。下面的
+// 本地助手只复刻同一种包裹形态当 fixture，验证 omp 的剥壳/取路径链路；
+// 包裹条件、内嵌结束序列剔除等字节级语义由 src-tauri 的 cargo 测试锁定。
+const wrapBracketedPaste = text =>
+  text === '' ? '' : `\x1b[200~${text.split('\x1b[201~').join('')}\x1b[201~`;
 eq(wrapBracketedPaste('/tmp/a.png'), '\x1b[200~/tmp/a.png\x1b[201~',
    '裸路径要包成 bracketed paste（omp 的图片 chip 链路只在 ESC[200~ 分支里）');
 eq(wrapBracketedPaste('/tmp/my notes/a b.png'), '\x1b[200~/tmp/my notes/a b.png\x1b[201~',

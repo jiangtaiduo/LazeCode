@@ -203,7 +203,7 @@ export const ProjectTabBar = React.memo(function ProjectTabBar({
   }
 
   return (
-    <div className="project-tabbar" data-tauri-drag-region="false">
+    <div className="project-tabbar" data-tauri-drag-region="deep">
       <div className="project-tab-strip" ref={stripRef}>
         {visibleTabs.map((tab, i) => {
           const a = activity[tab.path];

@@ -172,6 +172,11 @@ export const zhCN: LocaleDict = {
     consoleRunningTitle: '关闭控制台',
     consoleRunningConfirm: names => `控制台里还有命令在运行（${names}），关闭会终止这些进程。确定关闭？`,
     consoleRunningOk: '确定关闭',
+    // ---- 应用关闭确认 ----
+    appCloseConsoleTitle: '控制台任务正在运行',
+    appCloseConsoleConfirm: list =>
+      `以下项目的控制台还有任务在运行：\n${list}\n强制退出会连带终止这些控制台进程。确定退出？`,
+    appCloseConsoleOk: '强制退出',
     deleteStashTitle: '删除贮藏',
     deleteStashConfirm: name => `删除贮藏 "${name}"？\n其中保存的更改将无法恢复。`,
     deleteShelfTitle: '删除贮藏架',

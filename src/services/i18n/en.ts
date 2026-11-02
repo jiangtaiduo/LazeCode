@@ -190,6 +190,11 @@ export const en: LocaleDict = {
     consoleRunningConfirm: names =>
       `Commands are still running in the terminal (${names}). Closing it will terminate them. Close anyway?`,
     consoleRunningOk: 'Close anyway',
+    // ---- 应用关闭确认 ----
+    appCloseConsoleTitle: 'Console Tasks Running',
+    appCloseConsoleConfirm: list =>
+      `The following projects still have console tasks running:\n${list}\nForce quitting will terminate them together with the app. Quit anyway?`,
+    appCloseConsoleOk: 'Force Quit',
     deleteStashTitle: 'Delete stash',
     deleteStashConfirm: name => `Delete the stash "${name}"?\nThe changes it holds cannot be recovered.`,
     deleteShelfTitle: 'Delete shelf',

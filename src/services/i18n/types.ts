@@ -198,6 +198,10 @@ export interface LocaleDict {
     consoleRunningTitle: string;
     consoleRunningConfirm: LocaleFn<[string]>;
     consoleRunningOk: string;
+    // ---- 应用关闭确认 ----
+    appCloseConsoleTitle: string;
+    appCloseConsoleConfirm: LocaleFn<[string]>;
+    appCloseConsoleOk: string;
     // ---- 贮藏 / 贮藏架 ----
     deleteStashTitle: string;
     deleteStashConfirm: LocaleFn<[string]>;

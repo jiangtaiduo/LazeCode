@@ -10,6 +10,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Console-task confirmation before quitting the app: if any project's console
+  still has a task running (green ring or red outputting marquee on the
+  project tab), both the window close button and Cmd+Q first show a confirm
+  dialog listing those projects and their running commands; quitting (and
+  terminating those consoles) proceeds only after "Force Quit", and cancelling
+  keeps the app open. Before the dialog opens, the Rust-side "force-exit after
+  10 s without a reply" flush failsafe is disarmed so the dialog may stay open
+  indefinitely; concurrent close-button and Cmd+Q triggers share one dialog.
+
 - Browser-style project tabs in the title bar: the leftmost LC logo button now
   hosts the project menu (formerly on the project-name pill), the branch
   selector follows, and every project opened in the window gets a tab for
@@ -33,6 +42,70 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Switching to a project whose console was actively outputting could stop the
+  marquee for one poll cycle (red → green → red). Activating a pane records a
+  UI-event timestamp, and the 500 ms redraw grace classified the real output
+  that kept arriving right after the switch as interactive repaint, so the
+  next poll saw "busy but quiet". UI events now carry whether the session was
+  outputting at the moment of recording (per-session result of the latest
+  poll): a hot event no longer suppresses output within its window, while
+  quiet consoles keep the one-shot repaint suppression. Keyboard echo stays
+  unconditionally suppressed at 200 ms.
+- Short white lines could appear after typing Chinese: the IME preedit was the
+  only text drawn outside the per-row clip, so descenders (q/g/p/y/j) leaked
+  1–2 px past the row bottom into the next row; during composition that row is
+  never repainted (row-level diff says "unchanged"), and the instant the
+  preedit is committed or deleted, the cursor row is erased and repainted while
+  the leaked white pixels stay until that row's content changes. Preedit now
+  shares the same row clip as regular glyphs. Also fixes a stale closure in the
+  render loop: the rAF loop is created once when ready, so its tick kept
+  calling the first-frame refresh even after a font-size change produced a new
+  paint/refresh (cell size came from refs, font metrics from the stale
+  closure); the tick now goes through a render-time mirror ref.
+- Pasting multi-line text into the console triggered Enter per line: paste
+  never checked the bracketed-paste (DECSET 2004) mode and normalized all
+  newlines to `\r` before writing to the PTY, so TUIs that only recognize
+  `ESC[200~…201~` paste markers (like omp) treated each `\r` as Enter. Paste
+  (including Finder file-path attachments) now goes through a new
+  `vt_encode_paste` command that lets the engine encode by the foreground
+  program's 2004 mode: enabled — wrap in paste markers and keep newlines
+  verbatim (omp inserts the whole text into its input box); disabled — legacy
+  `\n`→`\r` behavior. The always-wrap attachment path is gone, so literal
+  escape markers are no longer injected into programs without 2004.
+
+- Switching between project consoles could flash the "outputting" marquee
+  even though every console was idle. The echo filter only knew about
+  keyboard/paste/IME writes; a PTY resize (SIGWINCH) or a forwarded mouse
+  event makes the TUI repaint without recording an input time, so the repaint
+  was classified as command output. Resize, mouse protocol events, key-release
+  writes and pane activation now record a separate UI-event timestamp with a
+  500 ms grace (keyboard echo stays at 200 ms), so those interactive repaints
+  no longer light the marquee.
+- The console canvas could reach the right window edge because the grid was
+  derived from `clientWidth/clientHeight` including the host padding; the
+  content-box fix restores the side inset, and the canvas host now uses a
+  14 px horizontal inset for a clearer, symmetric right gap.
+- The title bar could only be dragged from its outer padding/edges. The
+  project tab strip's background was marked non-draggable, and the native
+  `-webkit-app-region` drag competed with Tauri's drag-region handler. The
+  strip background is now a deep drag region (tabs, close buttons and the
+  overflow menu stay non-draggable) and dragging is handled solely by
+  `data-tauri-drag-region`, so the whole title-bar background can move the
+  window; double-click still maximizes.
+- The console's last row (input line and cursor) was clipped against the status
+  bar when the panel was maximized. The terminal grid was derived from
+  `clientWidth/clientHeight`, which include the canvas host's padding, so
+  the PTY received one more row and two more columns than the visible content
+  box; the extra row was painted into the bottom padding and cut off. Grid
+  sizing now subtracts the computed padding. Row painting is also clipped to
+  its own cell row, so glyph ink that overhangs the row by a pixel can no
+  longer linger on an unchanged neighbour as short white lines under text
+  (which previously disappeared only after scrolling forced a repaint).
+- A maximized console kept the height computed from `window.innerHeight` at
+  the moment React last rendered. Maximizing or half-screening the app window
+  does not trigger a re-render, so the open console stayed at its old size.
+  The dock height is now a CSS `calc(100vh - titlebar - statusbar)` expression
+  that the layout engine re-evaluates on every window resize.
 - Bottom-panel visibility (console / changes / closed) was shared by every
   project open in a window: opening the console in project B and switching
   back to project A — which had it closed — popped the console open there too.

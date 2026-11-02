@@ -340,7 +340,8 @@ body[data-variant="1"].platform-mac .ide-titlebar { padding-left: 78px; }
 
 [data-variant="1"] .terminal-canvas-host {
   background: var(--term-bg);
-  padding: 12px;
+  /* 左右 14px：与左侧内容间隔对齐，也给右缘留出更明显的安全边距 */
+  padding: 12px 14px;
 }
 
 /* --------------------------------------------------------------------------

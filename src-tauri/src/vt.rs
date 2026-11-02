@@ -361,6 +361,19 @@ extern "C" {
     fn ghostty_key_event_set_composing(event: *mut c_void, composing: bool);
     fn ghostty_key_event_set_utf8(event: *mut c_void, utf8: *const u8, len: usize);
     fn ghostty_key_event_set_unshifted_codepoint(event: *mut c_void, codepoint: u32);
+
+    // ── 粘贴编码（终端无关的纯函数，见 paste.h）──
+    // 按调用方给定的 bracketed 标志决定形态：包裹 `ESC[200~…ESC[201~`，
+    // 或把 \n 转 \r；不安全的控制字节（NUL/ESC/DEL 等）原地替换成空格。
+    // 「开没开 2004」的判断在 encode_paste 里用终端模式完成，这里只管编码。
+    fn ghostty_paste_encode(
+        data: *mut u8,
+        data_len: usize,
+        bracketed: bool,
+        buf: *mut u8,
+        buf_len: usize,
+        out_written: *mut usize,
+    ) -> c_int;
 }
 
 /// `GhosttyMods`（u16 位域，取自 key/event.h）
@@ -3098,6 +3111,65 @@ impl NativeTerminal {
         }
 
         Ok(buf[..out_len].to_vec())
+    }
+
+    /// 把一次粘贴编码为写入 PTY 的字节。
+    ///
+    /// 形态由终端当前模式决定：前台程序开启 bracketed paste（DECSET 2004，
+    /// omp/bash/zsh 默认开）时包成 `ESC[200~…ESC[201~`，多行内容整段进
+    /// 粘贴状态机（omp 把回车当文本插入输入框）；未开启时换行转 `\r` 裸发。
+    /// 包裹与否的判断依据只有引擎里的模式状态，前端不应复刻 —— 与
+    /// encode_key 同理。引擎同时把不安全的控制字节（NUL/ESC/DEL 等）替换
+    /// 成空格：内嵌的 `ESC[201~` 因此失去结束序列的能力，无法借此逃出
+    /// 粘贴状态机。
+    pub fn encode_paste(&self, text: &str) -> Result<Vec<u8>, String> {
+        // 空输入直接回空：bracketed 模式下编码空串也只会产出一对裸标记
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
+        // paste.h：data 会被引擎原地改写（控制字节→空格、\n→\r），
+        // 必须给一份可变拷贝，不能直接借 &str 的只读内存。
+        let mut data = text.as_bytes().to_vec();
+        // 包裹最多多出 ESC[200~ 与 ESC[201~ 共 12 字节；不包裹只会更短。
+        let bracketed = self.mode_enabled(2004); // GHOSTTY_MODE_BRACKETED_PASTE
+        let mut buf = vec![0u8; data.len() + 12];
+        let mut written: usize = 0;
+        const GHOSTTY_OUT_OF_SPACE: c_int = -3;
+        let mut rc = unsafe {
+            ghostty_paste_encode(
+                data.as_mut_ptr(),
+                data.len(),
+                bracketed,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut written,
+            )
+        };
+        if rc == GHOSTTY_OUT_OF_SPACE {
+            // 按引擎回报的所需大小重试一次（防御性：上界已算足，正常不会走到）
+            buf = vec![0u8; written];
+            rc = unsafe {
+                ghostty_paste_encode(
+                    data.as_mut_ptr(),
+                    data.len(),
+                    bracketed,
+                    buf.as_mut_ptr(),
+                    buf.len(),
+                    &mut written,
+                )
+            };
+        }
+        if rc != 0 {
+            return Err(format!(
+                "编码粘贴失败: {rc}（len={} bracketed={bracketed}）",
+                text.len()
+            ));
+        }
+        if written > buf.len() {
+            return Err(crate::error_proto::coded_display("encode_overflow", written));
+        }
+        buf.truncate(written);
+        Ok(buf)
     }
 }
 

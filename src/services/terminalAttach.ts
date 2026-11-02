@@ -11,7 +11,7 @@
  *   系统 Cmd+C → NSPasteboard(fileURL/NSFilenames) → Rust clipboard_file_paths
  *              ↘ clipboardData.files（只有文件名，不可用）
  *   终端 Cmd+V → onTextareaPaste 拿到「是否有文件」的信号 → 调 Rust 取路径
- *              → bracketed paste 包着绝对路径进 PTY
+ *              → 交引擎按 2004 模式编码进 PTY（omp 开着 bracketed paste）
  *
  * # 预览由 omp 自己画，本模块不渲染
  *
@@ -23,7 +23,7 @@
  * # 为什么这段逻辑独立成 service
  *
  * GhosttyTerminal.tsx 已经两千多行，粘贴路径里再塞路径归一、去重、shell
- * 引号转义、bracketed paste 包裹，会把文件改到不可维护。放 service 里可单测。
+ * 引号转义，会把文件改到不可维护。放 service 里可单测。
  *
  * # 与「普通文本粘贴」的关系
  *
@@ -139,39 +139,6 @@ export function attachFilesToPasteText(files: readonly TerminalAttachFile[]): st
   return files
     .map(f => (needsShellQuote(f.absPath) ? shellQuote(f.absPath) : f.absPath))
     .join(' ');
-}
-
-/** bracketed paste 的起止序列（DECSET 2004）。对 readline/zsh/omp 而言语义
- *  一致：中间内容是一整块粘贴，勿逐键处理。 */
-const BRACKET_PASTE_START = '\x1b[200~';
-const BRACKET_PASTE_END = '\x1b[201~';
-
-/**
- * 把附件文本包成一次 bracketed paste 写进 PTY。
- *
- * **这不是可选的优化，是功能成立的前提**（omp 18.8.3 二进制实测）：
- * omp 编辑器只在 `handleInput` 收到 `ESC[200~` 后才进入粘贴状态机，
- * `#E.process(e)` 返回 `handled` 才可能走到
- * `Cue(pasteContent) → onPasteImagePath → t.attach({type:"image"})`
- * 这条**把已存在的图片路径变成 [Image #N] chip（带缩略图）**的链路。
- * 裸 `pty.write()` 的字节走逐键分支，`Cue` 永不被调用 —— 路径只会变成
- * 编辑器里的一串普通字符，用户看到的缩略图不会出现。
- *
- * 附带收益（同样是 omp 编辑器实测行为）：裸写时每个字符会触发
- * `updateAutocomplete()` 路径补全浮层（键入 `/tmp/ph` 弹候选），
- * 且每个字符都入撤销栈；包起来则整段一次插入、一次撤销。
- *
- * shell 侧：bash/zsh 默认开启 bracketed paste（readline 的
- * `enable-bracketed-paste`），中间内容会原样进命令行，**但其中的换行不再
- * 触发执行**。本格式化保证单行，所以两种模式下结果一致；换行的风险由
- * `attachFilesToPasteText` 的空格连接策略从源头消掉，不依赖这个包裹。
- */
-export function wrapBracketedPaste(text: string): string {
-  if (text === '') return '';
-  // 中间内容里的结束序列必须剔除：否则用户选中的文件名里若含这三个字符
-  // （极端但可能），粘贴状态机会提前收尾，剩下半截走逐键路径。
-  const safe = text.split(BRACKET_PASTE_END).join('');
-  return `${BRACKET_PASTE_START}${safe}${BRACKET_PASTE_END}`;
 }
 
 /** 空格与 shell 元字符：任一项出现就必须整段加引号。 */

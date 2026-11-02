@@ -611,12 +611,19 @@ export const App: React.FC = () => {
    */
   const [projectActivity, setProjectActivity] = useState<Record<string, { busy: boolean; outputting: boolean }>>({});
   const projectActivityCommandsRef = useRef<Record<string, string[]>>({});
+  /**
+   * busy 桶的镜像 ref：关闭/退出确认走 onCloseRequested、before-exit 等
+   * 事件回调，不能依赖渲染提交时机（闭包里的 state 可能还是旧值），
+   * 与上面命令 ref 同批更新，永远对齐最新一次活动事件。
+   */
+  const projectActivityBusyRef = useRef<Record<string, { busy: boolean; outputting: boolean }>>({});
   const onProjectActivityStable = useStableCallback((map: Record<string, ProjectActivityInfo>) => {
     const commands: Record<string, string[]> = {};
     for (const [p, a] of Object.entries(map)) commands[p] = a.commands;
     projectActivityCommandsRef.current = commands;
     const buckets: Record<string, { busy: boolean; outputting: boolean }> = {};
     for (const [p, a] of Object.entries(map)) buckets[p] = { busy: a.busy, outputting: a.outputting };
+    projectActivityBusyRef.current = buckets;
     setProjectActivity(prev => {
       const prevKeys = Object.keys(prev);
       const nextKeys = Object.keys(buckets);
@@ -1665,6 +1672,50 @@ export const App: React.FC = () => {
     return pending;
   }, [flushAllDirtyBuffers]);
 
+  /** 关闭确认框在途标记：红点与 Cmd+Q 并发触发时，第二方直接按取消处理，
+   *  不叠加弹窗（appConfirm 的新请求会把旧请求以「取消」解决掉）。 */
+  const closeConfirmInFlight = useRef(false);
+
+  /**
+   * 退出前的控制台任务确认：任一项目 busy（状态条绿框或跑马灯）即弹确认框，
+   * 每行列「项目路径 — 命令1, 命令2」，超过 4 个项目折叠为「+N …」。
+   * 返回 false 表示用户取消，调用方放弃本次关闭/退出；无 busy 项目时
+   * 不打扰（行为与现状一致）。读镜像 ref，与渲染提交时机解耦。
+   */
+  const confirmAppCloseWithConsole = useStableCallback(async (): Promise<boolean> => {
+    const busyProjects: string[] = [];
+    let overflow = 0;
+    for (const [p, a] of Object.entries(projectActivityBusyRef.current)) {
+      if (!a.busy) continue;
+      if (busyProjects.length >= 4) {
+        overflow += 1;
+        continue;
+      }
+      const cmds = (projectActivityCommandsRef.current[p] ?? []).filter(Boolean);
+      busyProjects.push(cmds.length > 0 ? `${p} — ${cmds.join(', ')}` : p);
+    }
+    if (busyProjects.length === 0) return true;
+    if (overflow > 0) busyProjects.push(`+${overflow} …`);
+    if (closeConfirmInFlight.current) return false;
+    closeConfirmInFlight.current = true;
+    try {
+      // Rust 对 before-exit 有「10 秒未回应即强退」的写盘兜底（lib.rs
+      // ExitRequested）。确认框要停留多久都可能，先 cancel 解除兜底
+      // （挂起的强退线程醒来时见 PENDING=false 自行作废）；红点路径本无
+      // 此兜底，调用是无害的 no-op。确认后走 finish_app_exit 正常退出。
+      await invokeCommand('cancel_app_exit').catch(() => {});
+      return await appConfirm(t().dialog.appCloseConsoleConfirm(busyProjects.join('\n')), {
+        title: t().dialog.appCloseConsoleTitle,
+        kind: 'warning',
+        danger: true,
+        okLabel: t().dialog.appCloseConsoleOk,
+        cancelLabel: t().dialog.cancel,
+      });
+    } finally {
+      closeConfirmInFlight.current = false;
+    }
+  });
+
   // 关窗：Tauri 的 close 是异步的，先 prevent，写盘完成后再 destroy。
   useEffect(() => {
     if (!isTauriEnvironment()) return;
@@ -1691,6 +1742,11 @@ export const App: React.FC = () => {
         } catch {
           /* 查询失败时按无子窗口处理 */
         }
+        // 有控制台任务在跑时先确认：取消则放弃关闭，窗口保持打开。
+        if (!(await confirmAppCloseWithConsole())) {
+          closing = false;
+          return;
+        }
         const ok = await flushAllOnce().catch(() => false);
         if (!ok) {
           closing = false;
@@ -1711,7 +1767,7 @@ export const App: React.FC = () => {
       disposed = true;
       unlisten?.();
     };
-  }, [flushAllOnce]);
+  }, [flushAllOnce, confirmAppCloseWithConsole]);
 
   // Cmd+Q / 原生菜单退出：Rust 先 prevent_exit 并广播此事件，前端写盘后
   // 再通知后端真正退出。写盘失败时通知 cancel，应用保持打开。
@@ -1720,6 +1776,12 @@ export const App: React.FC = () => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen('app://before-exit', async () => {
+      // 有控制台任务在跑时先确认：取消则通知后端放弃本次退出，应用保持
+      // 打开（不调 cancel_app_exit 会卡在 prevent_exit 状态）。
+      if (!(await confirmAppCloseWithConsole())) {
+        await invokeCommand('cancel_app_exit').catch(() => {});
+        return;
+      }
       const ok = await flushAllOnce().catch(() => false);
       if (ok) {
         await invokeCommand('finish_app_exit').catch(() => {});
@@ -1736,7 +1798,7 @@ export const App: React.FC = () => {
       disposed = true;
       unlisten?.();
     };
-  }, [flushAllOnce]);
+  }, [flushAllOnce, confirmAppCloseWithConsole]);
 
   // 编辑停顿 1.2s 后自动保存。editTick 让同一文件里的连续输入也重置计时器，
   // 否则 dirty 路径集合不变、effect 不重跑，定时器不会续期。
@@ -6324,7 +6386,14 @@ export const App: React.FC = () => {
                     display: activeBottomTool === 'terminal' ? 'flex' : 'none'
                   }
                 : {
-                    height: terminalMaximized ? `${workspaceMaxH()}px` : `${Math.min(terminalPanelHeight, workspaceMaxH())}px`,
+                    // 用 CSS 视口单位而不是渲染期算出的 px：窗口从非最大化
+                    // 切到最大化/半屏时 React 不会因 resize 重渲染，内联的
+                    // 旧 px 会让已打开的控制台停在旧高度（不跟随放大）。
+                    // calc 由布局引擎在每次 resize 时重算，max/min 与原
+                    // workspaceMaxH() 的 200px 下限保持一致。
+                    height: terminalMaximized
+                      ? 'max(200px, calc(100vh - var(--titlebar-h) - var(--panel-title-h)))'
+                      : `min(${terminalPanelHeight}px, max(200px, calc(100vh - var(--titlebar-h) - var(--panel-title-h))))`,
                     flex: terminalMaximized ? '1 1 auto' : undefined,
                     display: activeBottomTool === 'terminal' ? 'flex' : 'none'
                   }

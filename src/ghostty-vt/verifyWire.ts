@@ -1126,32 +1126,30 @@ pass('终端网格由宿主 content-box 推导且不重复扣 padding', () => {
     '未找到 GhosttyTerminal.tsx 的 gridSizeFromHost'
   );
 
-  // 宿主 823×398（截图 3 实测比例）、单元格 7.8×18（13px 字号 * 1.38）
-  // 与生产实现同口径：content-box 直接除，不再扣 16px padding
+  // 宿主 content-box 823×398（截图 3 实测比例）、单元格 7.8×18
+  // （13px 字号 * 1.38）：纯函数只接收 content-box，直接除即可。
   const grid = { cols: Math.max(20, Math.floor(823 / 7.8)), rows: Math.max(4, Math.floor(398 / 18)) };
   assert(
     grid.cols === 105 && grid.rows === 22,
     `宿主 823×398 / 格 7.8×18 应为 105×22，实际 ${grid.cols}×${grid.rows}`
   );
 
-  // 同一宿主若再扣一遍 16px，列数/行数各少 2 —— 画面比视口窄一截，
-  // 而 shell 已按宽网格输出，prompt 就会折行、光标错位
-  const narrow = { cols: Math.max(20, Math.floor((823 - 16) / 7.8)), rows: Math.max(4, Math.floor((398 - 16) / 18)) };
+  // `clientWidth/clientHeight` 含 padding：终端宿主有 12px 内边距，必须先用
+  // 计算样式扣掉再交给 gridSizeFromHost。直接传 client 尺寸会多算一行，
+  // 最后一行被画进底部内边距、再被状态栏切掉（输入行/光标只剩上半截）。
   assert(
-    narrow.cols !== grid.cols && narrow.rows !== grid.rows,
-    'content-box 尺寸不应再减一遍 padding（否则网格小于视口）'
+    /getComputedStyle\(host\)/.test(src) &&
+      /clientWidth\s*-\s*padX/.test(src) &&
+      /clientHeight\s*-\s*padY/.test(src),
+    'applyHostSize 必须先扣掉宿主 padding，把 content-box 交给 gridSizeFromHost'
+  );
+  assert(
+    /gridSizeFromHost\(\s*\n?\s*contentW,/.test(src),
+    'gridSizeFromHost 必须接收扣过 padding 的 contentW'
   );
 
-  // 代码里不允许再出现「宿主尺寸 - 16」的手工扣 padding（注释里的历史说明除外）
-  const codeLines = src
-    .split('\n')
-    .filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l))
-    .join('\n');
-  const rectSubtract = /(rect|getBoundingClientRect\(\))[\s\S]{0,80}-\s*16/.test(codeLines);
-  assert(!rectSubtract, '不应再出现宿主尺寸 - 16 的手工扣 padding');
-
   // applyHostSize 是唯一推导入口：RO 回调、spawn 兜底、rAF 自愈都走它
-  const applyUsesHelper = /applyHostSize[\s\S]{0,500}gridSizeFromHost\(/.test(src);
+  const applyUsesHelper = /applyHostSize[\s\S]{0,2000}gridSizeFromHost\(/.test(src);
   assert(applyUsesHelper, 'applyHostSize 必须调用 gridSizeFromHost');
   assert(
     /const ro = new ResizeObserver\(\(\) => \{\s*applyHostSize\(\);/.test(src),
@@ -1166,11 +1164,10 @@ pass('终端网格由宿主 content-box 推导且不重复扣 padding', () => {
     '尺寸签名变化时必须调用 applyHostSize'
   );
 
-  // 隐藏面板不应缩放网格：宿主 <4px 直接返回。
-  // 用 clientWidth/clientHeight（content-box）而不是 offsetWidth（含 padding）：
-  // 含 padding 的尺寸会多算一列/一行，canvas 超出内容区被 overflow 裁掉。
+  // 隐藏面板不应缩放网格：宿主 content-box <4px 直接返回。
+  // 先扣 padding 再判断：display:none 时 client 尺寸为 0，content 也为 0。
   assert(
-    /clientWidth < 4 \|\| host\.clientHeight < 4/.test(src),
+    /contentW < 4 \|\| contentH < 4/.test(src),
     '宿主不可见时必须跳过同步（避免 PTY 被缩到最小行列）'
   );
 

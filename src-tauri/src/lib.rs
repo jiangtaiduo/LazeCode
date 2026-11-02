@@ -796,6 +796,7 @@ pub fn run() {
             vt_mouse_tracking,
             vt_set_colors,
             vt_encode_key,
+            vt_encode_paste,
             vt_set_selection,
             vt_select_word,
             vt_select_line,

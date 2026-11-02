@@ -234,18 +234,7 @@ html, body, #root {
   flex-shrink: 0;
   user-select: none;
   -webkit-user-select: none;
-  -webkit-app-region: drag;
   cursor: default;
-}
-
-.ide-titlebar button,
-.ide-titlebar input,
-.ide-titlebar select,
-.ide-titlebar textarea,
-.ide-titlebar .win-btn,
-.ide-titlebar .tb-btn,
-.ide-titlebar .pycharm-dropdown-wrapper {
-  -webkit-app-region: no-drag;
 }
 
 body.platform-mac .ide-titlebar {

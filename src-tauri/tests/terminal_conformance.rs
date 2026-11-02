@@ -333,6 +333,49 @@ fn modes_hyperlinks_and_osc52_are_side_effect_free() {
 }
 
 #[test]
+fn paste_encode_follows_bracketed_paste_mode() {
+    let mut term = new_term(20, 3);
+
+    // 默认（从未收到 2004h）：不包裹，换行转 \r —— 与旧行为一致，普通 shell
+    // 收到的还是裸回车。
+    assert!(!term.mode_enabled(2004), "新终端不应自带 bracketed paste");
+    assert_eq!(term.encode_paste("a\nb").unwrap(), b"a\rb");
+
+    // 开启 2004（omp/bash/zsh 的默认状态）：整段包进粘贴状态机，omp 把
+    // 里面的回车当文本插入输入框而不是逐个执行。
+    term.write(b"\x1b[?2004h");
+    assert!(term.mode_enabled(2004), "2004h 未开启");
+    let wrapped = term.encode_paste("a\nb").unwrap();
+    assert!(wrapped.starts_with(b"\x1b[200~"), "开启 2004 必须包 ESC[200~: {wrapped:?}");
+    assert!(wrapped.ends_with(b"\x1b[201~"), "开启 2004 必须以 ESC[201~ 收尾: {wrapped:?}");
+    assert_eq!(&wrapped[6..wrapped.len() - 6], b"a\nb", "包裹内内容不得被改动: {wrapped:?}");
+
+    // 关闭 2004（有的程序不开）：回到裸发，不得残留包裹标记。
+    term.write(b"\x1b[?2004l");
+    assert!(!term.mode_enabled(2004), "2004l 未关闭");
+    assert_eq!(term.encode_paste("a\nb").unwrap(), b"a\rb");
+
+    // 空输入：不产出任何字节（尤其不能只发一对裸标记，否则程序收到一次
+    // 「空粘贴」，有的 TUI 会清掉正在输入的行）。
+    assert_eq!(term.encode_paste("").unwrap(), b"");
+}
+
+#[test]
+fn paste_encode_defuses_embedded_terminator() {
+    // 内嵌的 ESC[201~ 是唯一的逃逸向量：不剔除的话，恶意/误复制的文本能
+    // 提前收尾粘贴状态机，剩余字节走逐键路径直接执行。
+    let mut term = new_term(20, 3);
+    term.write(b"\x1b[?2004h");
+    let wrapped = term
+        .encode_paste("/tmp/a.png\x1b[201~evil")
+        .expect("编码失败");
+    let hits = wrapped.windows(6).filter(|w| w == b"\x1b[201~").count();
+    assert_eq!(hits, 1, "结束序列只允许出现在收尾，实际 {hits} 处: {wrapped:?}");
+    assert!(wrapped.starts_with(b"\x1b[200~"), "包裹起点被破坏: {wrapped:?}");
+    assert!(wrapped.ends_with(b"\x1b[201~"), "包裹终点被破坏: {wrapped:?}");
+}
+
+#[test]
 fn scrollback_preserves_history() {
     let mut term = new_term(10, 3);
     for index in 0..20 {

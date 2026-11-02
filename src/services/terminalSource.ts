@@ -177,6 +177,21 @@ export class TerminalSource {
     return Uint8Array.from(bytes);
   }
 
+  /**
+   * 把一次粘贴编码为写入 PTY 的字节。
+   *
+   * 形态由终端当前模式（DECSET 2004）决定：开启则整段包成 bracketed paste，
+   * 未开启则换行转 `\r` 裸发。与 encodeKey 同理，模式状态只有原生知道，
+   * 前端不应复刻这套逻辑。
+   */
+  async encodePaste(text: string): Promise<Uint8Array> {
+    const bytes = await invoke<number[]>('vt_encode_paste', {
+      sessionId: this.sessionId,
+      text
+    });
+    return Uint8Array.from(bytes);
+  }
+
   /** 设置选区。端点为视口坐标，闭区间。 */
   async setSelection(
     startX: number,

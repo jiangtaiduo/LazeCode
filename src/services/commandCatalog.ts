@@ -197,6 +197,7 @@ export const COMMAND_CATALOG: Record<TauriCommand, CommandMeta> = {
   unregister_workspace: { title: 'Unregister workspace', titleZh: '注销工作区', category: 'system', risk: 'write' },
   vt_clear_selection: { title: 'Clear terminal selection', titleZh: '清除终端选区', category: 'terminal', risk: 'write' },
   vt_encode_key: { title: 'Encode terminal key', titleZh: '编码终端按键', category: 'terminal', risk: 'read' },
+  vt_encode_paste: { title: 'Encode terminal paste', titleZh: '编码终端粘贴', category: 'terminal', risk: 'read' },
   vt_engine_info: { title: 'Terminal engine info', titleZh: '终端引擎信息', category: 'terminal', risk: 'read' },
   vt_image_data: { title: 'Terminal image data', titleZh: '终端图片数据', category: 'terminal', risk: 'read' },
   vt_images: { title: 'Terminal images', titleZh: '终端图片列表', category: 'terminal', risk: 'read' },

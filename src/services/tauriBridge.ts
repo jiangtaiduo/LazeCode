@@ -436,6 +436,7 @@ async function simulateCommand<T>(cmd: TauriCommand, args?: Record<string, unkno
     case 'pty_close_by_cwd':
     case 'vt_snapshot':
     case 'vt_encode_key':
+    case 'vt_encode_paste':
     case 'vt_set_selection':
     case 'vt_clear_selection':
     case 'vt_selected_text':

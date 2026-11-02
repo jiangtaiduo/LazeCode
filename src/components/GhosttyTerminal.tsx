@@ -37,8 +37,10 @@ import { HIDDEN_CANVAS_RELEASE_MS, shouldReleaseCanvas } from './terminalCanvasR
 import {
   isConsoleOutputting,
   pruneInputSessions,
+  recordUiEvent,
   recordUserInput,
-  type InputTimes
+  type InputTimes,
+  type UiTimes
 } from './terminalInputEcho';
 import { TerminalA11yMirror } from './TerminalA11yMirror';
 import { frameToA11yText } from '../ghostty-vt/a11y';
@@ -48,7 +50,6 @@ import {
   attachFilesToPasteText,
   pasteHasFiles,
   toAttachFiles,
-  wrapBracketedPaste,
 } from '../services/terminalAttach';
 import type { TerminalAttachFile } from '../services/terminalAttach';
 
@@ -319,12 +320,12 @@ function urlAtCell(frame: CellFrame, col: number, row: number): string | null {
 /**
  * 由宿主内容尺寸推导终端网格（cols/rows）。
  *
- * `contentW/H` 必须是 `.terminal-canvas-host` 的 **content-box** 尺寸
- * （`ResizeObserver.contentRect` 或 `offsetWidth/offsetHeight` 都已是扣掉
- * padding 后的值）。历史上这里按 `getBoundingClientRect() - 16` 手扣 padding，
- * 与 RO 的 contentRect 口径不一致，同一宿主会算出两套行列 —— 表现就是
- * PTY 停在旧网格、prompt 折行、光标被挤到第二行行首，整片区域不出内容。
- * 现在两条路径都收敛到这个纯函数，口径只有一处。
+ * `contentW/H` 必须是 `.terminal-canvas-host` 的 **content-box** 尺寸。
+ * 注意 `clientWidth/clientHeight` **包含 padding**（只扣 border/滚动条），
+ * 直接除会把上下/左右内边距算成 1~3 个格子：PTY 的 rows 比可视
+ * 区域多一行，最后一行被画进面板底部内边距、再被状态栏切掉 —— 表现就是
+ * 输入行/光标只剩上半截。调用方必须先用计算样式扣掉 padding；
+ * `ResizeObserver.contentRect` 本身是 content-box，可直接使用。
  *
  * 单元格尺寸给 0（度量尚未完成）时退回默认值，避免除零。
  */
@@ -459,6 +460,28 @@ export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTe
   const markUserInput = useCallback((sessionId: string) => {
     recordUserInput(userInputTimesRef.current, sessionId, Date.now());
   }, []);
+  /**
+   * UI 事件时刻（按会话）：PTY resize、鼠标协议事件、keyup release。
+   * 这些交互会让 TUI 整屏重绘，用 500ms 宽限过滤；与键盘输入的 200ms
+   * 回显窗口分开。只写 ref，不参与渲染。
+   */
+  const uiEventTimesRef = useRef<UiTimes>(new Map());
+  /**
+   * 各会话最近一次轮询的 outputting 结果。UI 事件记录时据此判定「记录时
+   * 控制台正在输出」：正在输出的会话不受 500ms UI 宽限抑制——切到正在
+   * 输出的项目时，宽限窗不得把持续输出压成重绘（跑马灯会绿闪一轮轮询）。
+   * 后台会话收不到 dirty 信号（只有屏上会话订阅），轮询结果是前端唯一
+   * 的输出活动来源。只写 ref，不参与渲染。
+   */
+  const outputtingBySessionRef = useRef<Map<string, boolean>>(new Map());
+  const markUiEvent = useCallback((sessionId: string) => {
+    recordUiEvent(
+      uiEventTimesRef.current,
+      sessionId,
+      Date.now(),
+      outputtingBySessionRef.current.get(sessionId) === true
+    );
+  }, []);
   const lastActivitySig = useRef('');
   useEffect(() => {
     if (!allPaneSig) {
@@ -493,7 +516,10 @@ export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTe
         return;
       }
       if (cancelled) return;
-      pruneInputSessions(userInputTimesRef.current, new Set(owner.keys()));
+      const liveSessions = new Set(owner.keys());
+      pruneInputSessions(userInputTimesRef.current, liveSessions);
+      pruneInputSessions(uiEventTimesRef.current, liveSessions);
+      pruneInputSessions(outputtingBySessionRef.current, liveSessions);
       const receivedAt = Date.now();
       for (const row of rows ?? []) {
         const project = owner.get(row.sessionId);
@@ -501,7 +527,17 @@ export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTe
         if (!bucket || !row.busy) continue;
         bucket.busy = true;
         for (const c of row.commands ?? []) bucket.commands.add(c);
-        if (isConsoleOutputting(userInputTimesRef.current, row.sessionId, row.lastOutputMs, receivedAt)) {
+        const outputting = isConsoleOutputting(
+          userInputTimesRef.current,
+          uiEventTimesRef.current,
+          row.sessionId,
+          row.lastOutputMs,
+          receivedAt
+        );
+        // 记下每会话结果：下一次 UI 事件（切 tab/resize/滚轮）记录时据此
+        // 判定「正在输出」，正在输出的会话不进 500ms 抑制窗
+        outputtingBySessionRef.current.set(row.sessionId, outputting);
+        if (outputting) {
           bucket.outputting = true;
         }
       }
@@ -1045,6 +1081,7 @@ export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTe
                       onActivate={() => setActivePane(tab.id, paneId)}
                       onPwdChange={handlePwdChange}
                       onUserInput={markUserInput}
+                      onUiEvent={markUiEvent}
                     />
                   </div>
                 ) : null
@@ -1112,9 +1149,11 @@ interface SingleGhosttySessionProps {
   onPwdChange?: (sessionId: string, pwd: string | null) => void;
   /** 用户向该会话写入输入（键盘/粘贴/IME）：父组件据此识别回显，不点亮跑马灯 */
   onUserInput?: (sessionId: string) => void;
+  /** UI 事件（PTY resize / 鼠标协议 / keyup）：父组件据此过滤 TUI 交互重绘 */
+  onUiEvent?: (sessionId: string) => void;
 }
 
-const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, cwd, shell, fontSize = DEFAULT_FONT_SIZE, themeKey, active = false, onScreen = active, placement = 'bottom', onExited, onActivate, onPwdChange, onUserInput }) => {
+const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, cwd, shell, fontSize = DEFAULT_FONT_SIZE, themeKey, active = false, onScreen = active, placement = 'bottom', onExited, onActivate, onPwdChange, onUserInput, onUiEvent }) => {
   // 字体规格由字号推导，改动后重新度量单元格网格
   const fontSpec = `${fontSize}px ${FONT_FAMILY}`;
   const hostRef = useRef<HTMLDivElement>(null);
@@ -1122,6 +1161,9 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const sourceRef = useRef<TerminalSource | null>(null);
   const ptyRef = useRef<PtyHandle | null>(null);
+  /** onUiEvent 的稳定镜像：rAF/RO 回调与事件处理器不捕获渲染期闭包 */
+  const onUiEventRef = useRef(onUiEvent);
+  onUiEventRef.current = onUiEvent;
 
 
   // compositionend 后标记：中文上屏的时序是 compositionend → 紧跟一个 keydown
@@ -1332,6 +1374,14 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
    * 重新同步网格。抵消 ResizeObserver 漏回调的场景，见 applyHostSize 的注释。
    */
   const lastHostSig = useRef('');
+  /**
+   * 宿主 content-box 高度（已扣 padding）。
+   *
+   * `paint` 里用它决定 canvas 要铺多少行；`clientHeight` 含 padding，
+   * 直接除会让 canvas 多画两行、伸进底部内边距再被裁掉。只由
+   * `applyHostSize` 在尺寸变化时写入，避免每帧读计算样式。
+   */
+  const hostContentH = useRef(0);
   const [cursorInfo, setCursorInfo] = useState<{
     visible: boolean;
     style: number;
@@ -1409,10 +1459,10 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
     // 画布高度必须贴住宿主：`termRows` 来自 PTY，resize 尚未落地（或失败）
     // 时它小于宿主容量，canvas 只画到旧行数，余下的高度露出
     // `.terminal-canvas-host` 的 CSS 底色 —— 用户看到「内容只占上半屏、
-    // 下半空白」。这里把绘制高度抬到「不小于宿主」并按整行取整，
-    // 空缺的行由下面的默认底色铺满。
-    const hostEl = hostRef.current;
-    const hostH = hostEl && hostEl.clientHeight > 4 ? hostEl.clientHeight : 0;
+    // 下半空白」。这里把绘制高度抬到「不小于宿主 content-box」并按整行取整，
+    // 空缺的行由下面的默认底色铺满。必须用 content-box：`clientHeight`
+    // 含 padding，会多画两行并伸进底部内边距，被面板裁掉半行。
+    const hostH = hostContentH.current > 4 ? hostContentH.current : 0;
     const hostRows = hostH > 0 && ch > 0 ? Math.ceil(hostH / ch) : 0;
     const drawRows = Math.max(termRows, hostRows);
     const heightPx = drawRows * ch;
@@ -1557,17 +1607,30 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
           redrawRow = true;
         }
       }
+      let rowClipped = false;
       if (redrawRow) {
+        // 整行绘制都裁到本行矩形内。字形墨迹（CJK 底部笔画、斜体/描边
+        // 抗锯齿）可能越过 1~2px 的行界；行级重绘只擦自己这一行，越过
+        // 边界的像素会留在相邻行上，且相邻行内容未变时不会被重绘 ——
+        // 表现就是文字底部偶尔出现 1px 短白线，滚动触发重绘后才消失。
+        // 裁掉越界墨迹从根上杜绝这种跨行污染。
+        const rTop = rowTop(row);
+        const rBottom = rowBottom(row);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, rTop, widthPx, rBottom - rTop);
+        ctx.clip();
+        rowClipped = true;
+
         // 先整行擦成默认底色。必须做：canvas 是叠加绘制，不擦的话
         // 上一帧的残影（尤其是背景色不同的 run）会透出来。
         // 边界用设备像素取整值，保证与相邻行、与绘制矩形完全无缝覆盖。
         ctx.fillStyle = rgbCss(defaultBg, FALLBACK_BG);
-        const rTop = rowTop(row);
-        ctx.fillRect(0, rTop, widthPx, rowBottom(row) - rTop);
+        ctx.fillRect(0, rTop, widthPx, rBottom - rTop);
         if (rowFlags[row] & RowFlag.Prompt) {
           // 极淡的 prompt 带：不遮字形，只提示 shell integration 的命令起点
           ctx.fillStyle = 'rgba(53, 116, 240, 0.07)';
-          ctx.fillRect(0, rTop, widthPx, rowBottom(row) - rTop);
+          ctx.fillRect(0, rTop, widthPx, rBottom - rTop);
         }
       }
 
@@ -1651,6 +1714,7 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
 
         col += runLen;
       }
+      if (rowClipped) ctx.restore();
     }
 
     // 内联图片（Kitty 图形协议）：画在文字之上、选区高亮之下。
@@ -1720,10 +1784,20 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
       // 同一公式，preedit 与已上屏文字的基线严格对齐。
       const cx = frame.cursorX * cw;
       const cy = rowTop(frame.cursorY);
+      // preedit 与行循环内的字形同一套行裁剪：拼音的降部（q/g/p/y/j）墨迹
+      // 会越出行底 1~2px 渗入下一行；合成期间下一行不重绘（rowUnchanged
+      // 跳过），提交/删除拼音的瞬间光标行被擦净，渗入下一行的白色墨迹
+      // 无人擦除 —— 残留为「输入时偶尔出现的短白线」，直到该行内容变化。
+      const pBot = rowBottom(frame.cursorY);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, cy, widthPx, pBot - cy);
+      ctx.clip();
       ctx.font = fontSpec; // run 绘制可能改成 bold/italic，preedit 用常规字重
       ctx.fillStyle = rgbCss(defaultFg, FALLBACK_FG);
       const textYOffset = Math.round((ch - fontSize) / 2);
       ctx.fillText(preedit, cx, cy + textYOffset);
+      ctx.restore();
       // 只画预编辑文本，不再叠加底部横线：横线会被用户误认为光标残影，
       // 且与终端真实 block/underline 光标叠在同一行时尤其明显。
       cursorDrawnRow.current = frame.cursorY;
@@ -1985,6 +2059,14 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
     [paint, refreshKittyImages]
   );
 
+  /** rAF 循环的 refresh 镜像。循环只在 ready 时创建一次，tick 的闭包永远
+   *  指向首帧那个 refresh；而 refresh 依赖 paint、paint 依赖 fontSpec/fontSize
+   *  —— 字号变化生成新 paint/refresh 后旧闭包仍被调用，字形会用旧字号
+   *  画进新格子（格宽来自 ref 是新值，基线偏移还是旧值）。渲染期同步
+   *  镜像（tabsRef/onUiEventRef 同款惯例），tick 一律经 ref 取最新实现。 */
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
   /**
    * 按宿主实际内容尺寸同步网格（cols/rows）与 PTY 尺寸。
    *
@@ -2005,16 +2087,24 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
     const host = hostRef.current;
     if (!host) return;
     // display:none 时宿主盒子为 0：保持原网格，避免把 PTY 缩到最小行列再弹回
-    // （vim 等全屏程序会闪屏重排）
-    // `clientWidth/clientHeight` 才是 content-box（padding 已扣除）；
-    // `offsetWidth/offsetHeight` 含 padding。用错口径会多算一列/一行，
-    // canvas 超出内容区被 overflow 裁掉一列，格内容与格边界错位。
-    // 面板 display:none 时两者都是 0：保持原网格，避免把 PTY 缩到最小
-    // 行列再弹回（vim 等全屏程序会闪屏重排）。
-    if (host.clientWidth < 4 || host.clientHeight < 4) return;
+    // （vim 等全屏程序会闪屏重排）。
+    //
+    // `clientWidth/clientHeight` **包含 padding**：终端宿主有内边距，
+    // 直接除会多算一列/一行。多出来的行被画进面板底部内边距，再被状态栏
+    // 切掉 —— 就是「最后一行（输入行/光标）只剩上半截」的根因。这里用
+    // 计算样式把 padding 扣掉，只把真正的 content-box 交给网格推导。
+    const cs = getComputedStyle(host);
+    const padX =
+      (Number.parseFloat(cs.paddingLeft) || 0) + (Number.parseFloat(cs.paddingRight) || 0);
+    const padY =
+      (Number.parseFloat(cs.paddingTop) || 0) + (Number.parseFloat(cs.paddingBottom) || 0);
+    const contentW = host.clientWidth - padX;
+    const contentH = host.clientHeight - padY;
+    if (contentW < 4 || contentH < 4) return;
+    hostContentH.current = contentH;
     const next = gridSizeFromHost(
-      host.clientWidth,
-      host.clientHeight,
+      contentW,
+      contentH,
       cellW.current,
       cellH.current
     );
@@ -2032,6 +2122,9 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
     if (!changed && next.cols === cols && next.rows === rows) return;
     setCols(next.cols);
     setRows(next.rows);
+    // SIGWINCH 会让 TUI 整屏重绘；先记 UI 事件再下发 resize，保证重绘
+    // 输出落在 UI 宽限窗口内（异步 resolve 之后再记可能晚于输出）。
+    onUiEventRef.current?.(sessionId);
     // resize 失败必须可见：静默吞掉会让 PTY 停在旧网格，canvas 按旧 rows
     // 画成溢出高度，用户看到「内容只占上半屏、下方空白」。
     // 镜子只在 resolve 后更新：失败时下一轮仍会重试。
@@ -2200,8 +2293,11 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
       return;
     }
     lastHostSig.current = '';
+    // 切回该控制台时，面板从 display:none 恢复可能伴随一次尺寸同步，
+    // TUI 会因此整屏重绘；把它当作 UI 反馈，不点亮跑马灯。
+    onUiEvent?.(sessionId);
     applyHostSize();
-  }, [active, placement, ready, applyHostSize]);
+  }, [active, placement, ready, applyHostSize, onUiEvent, sessionId]);
 
   // 自适应容器尺寸 (ResizeObserver)
   //
@@ -2234,10 +2330,10 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
 
   // rAF 渲染循环
   //
-  // 依赖刻意只有 `[ready]`：`paint` 依赖 `blinking`、`refresh` 依赖 `paint`，
-  // 若把它们写进依赖数组，每次光标闪烁都会 tear down 重建整个 rAF 循环
-  // 与 setInterval（一秒两次重建）。改为：循环内只调 `refresh`，
-  // 需要的可变状态（blink 相位）读 ref，渲染结果始终基于最新闭包。
+  // 依赖刻意只有 `[ready]`：`paint` 依赖 `fontSpec/fontSize`、`refresh` 依赖
+  // `paint`，若把它们写进依赖数组，字号变化会 tear down 重建整个 rAF 循环
+  // 与 setInterval。改为：循环内只调 `refreshRef.current`（渲染期镜像，永远
+  // 是最新 refresh），blink 相位读 ref，可变状态不进闭包。
   useEffect(() => {
     if (!ready) return;
     let running = true;
@@ -2254,6 +2350,8 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
         // 备用屏 + DEC 1007 转方向键，其余回滚本地视口 —— 备用屏没有本地
         // scrollback，一律本地回滚会让 omp/opencode 这类 TUI 完全滚不动。
         const at = wheelAt.current;
+        // 滚轮可能被转发给鼠标跟踪的 TUI，触发整屏重绘；记为 UI 事件。
+        onUiEventRef.current?.(sessionId);
         void sourceRef.current?.wheel(scrollDelta, at.x, at.y, at.mods).then(() => {
           dirty.current = true;
         });
@@ -2295,7 +2393,7 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
         // 若允许后续帧继续入队，渲染循环会被一串永不 settle 的 promise 埋住。
         // 改为只保留一个 in-flight，上一帧超时/失败后立即释放锁重试。
         inFlight.current = true;
-        void refresh(needsFull).finally(() => {
+        void refreshRef.current(needsFull).finally(() => {
           inFlight.current = false;
         });
       }
@@ -2404,6 +2502,7 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
       if (button === null) return;
       mouseForwardButton.current = button;
       const mods = (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
+      onUiEventRef.current?.(sessionId);
       void sourceRef.current?.mouse(0, button, cell.x, cell.y, mods).catch(() => {});
       return;
     }
@@ -2431,6 +2530,7 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
     if (mouseForwardButton.current !== null) {
       if (cell) {
         const mods = (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
+        onUiEventRef.current?.(sessionId);
         void sourceRef.current
           ?.mouse(2, mouseForwardButton.current, cell.x, cell.y, mods)
           .catch(() => {});
@@ -2473,6 +2573,7 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
         const mods = e
           ? (e.ctrlKey ? 2 : 0) | (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0)
           : 0;
+        onUiEventRef.current?.(sessionId);
         void sourceRef.current?.mouse(1, button, cell.x, cell.y, mods).catch(() => {});
       }
       dirty.current = true;
@@ -2544,18 +2645,20 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
   }, []);
 
 
-  /** 粘贴：textarea 的原生粘贴路径把文本写入 PTY（换行规整为 \r）。
-   *  之前没有 onPaste，Cmd+V / 右键粘贴被整个丢弃。
+  /** 粘贴：textarea 的原生粘贴路径把文本写入 PTY，形态由原生按 2004 模式
+   *  编码 —— 前台程序开了 bracketed paste（omp/bash/zsh 默认开）就整段包裹，
+   *  否则换行规整为 \r 裸发。之前没有 onPaste，Cmd+V / 右键粘贴被整个丢弃。
    *
    *  图片增强：剪贴板里是截图 / 浏览器「复制图片」时（无文本、files 可能为
    *  空 —— WKWebView 不一定把图片暴露成 File），同样调 Rust 取路径：Rust 把
-   *  public.png / public.tiff 数据落成临时文件，路径经 bracketed paste 进
-   *  PTY，omp 认得图片路径，自己画 [Image #N] 缩略图 chip。
+   *  public.png / public.tiff 数据落成临时文件，路径交引擎按模式编码进
+   *  PTY（omp 自己开着 2004，实际包成 bracketed paste），omp 认得图片路径，
+   *  自己画 [Image #N] 缩略图 chip。
    *
    *  文件增强：剪贴板里是 Finder 复制的文件/文件夹时（files 非空），
    *  绝对路径不在 clipboardData 里 —— `File` 只有 name/type/size。所以
    *  先同步判定「是不是文件粘贴」（files 非空即 true，不付 IPC 往返），
-   *  再异步调 Rust 取绝对路径，包成 bracketed paste 写进 PTY。
+   *  再异步调 Rust 取绝对路径，交引擎按模式编码写进 PTY。
    *
    *  **不在 LazeCode 侧渲染附件预览**：omp 的编辑器自己就画 `img #N` chip
    *  （缩略图 + 尺寸，见截图），一切遵循它的规格。LazeCode 再画一遍既是重复，
@@ -2570,31 +2673,66 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
     const pty = ptyRef.current;
     if (!pty) return;
 
-    /** 普通文本粘贴：原样下发，\\n 规整为 \\r（shell 需要回车）。 */
+    /** 普通文本粘贴：交原生按 2004 模式编码（前台程序开了 bracketed paste
+     *  就整段包裹，否则换行规整为 \r 裸发）。编码失败（如后端未升级）按
+     *  未开启 2004 的旧语义兜底：本地 \n→\r 裸发，保证粘贴可用。 */
     const writeTextToPty = (payload: string) => {
-      const bytes = new TextEncoder().encode(payload.replace(/\r?\n/g, '\r'));
-      onUserInput?.(sessionId);
-      pty.write(bytes).catch(err => {
-        console.error('[terminal] 粘贴下发失败:', err instanceof Error ? err.message : String(err));
-      });
       // 清掉暂存内容：textarea 只是 IME/剪贴板中转 buffer，留着会被下次组合输入读走
       if (textareaRef.current) textareaRef.current.value = '';
+      onUserInput?.(sessionId);
+      const source = sourceRef.current;
+      const send = (bytes: Uint8Array) => {
+        pty.write(bytes).catch(err => {
+          console.error('[terminal] 粘贴下发失败:', err instanceof Error ? err.message : String(err));
+        });
+      };
+      if (!source) {
+        send(new TextEncoder().encode(payload.replace(/\r?\n/g, '\r')));
+        return;
+      }
+      source
+        .encodePaste(payload)
+        .then(send)
+        .catch(err => {
+          console.error(
+            '[terminal] 粘贴编码失败，降级为裸输入:',
+            err instanceof Error ? err.message : String(err)
+          );
+          send(new TextEncoder().encode(payload.replace(/\r?\n/g, '\r')));
+        });
     };
 
-    /** 附件路径：必须走 bracketed paste。
-     *  omp 编辑器只在收到 ESC[200~ 后才可能把「已存在的图片路径」变成
-     *  带缩略图的 [Image #N] chip；裸写路径只会得到一串普通字符。
-     *  详见 wrapBracketedPaste 的文档（含 omp 18.8.3 二进制的实测证据）。 */
+    /** 附件路径：同样交原生按 2004 模式编码。omp 编辑器只在收到 ESC[200~
+     *  后才可能把「已存在的图片路径」变成带缩略图的 [Image #N] chip
+     *  （omp 自己开着 2004，实际必然包裹）；对未开启 2004 的程序则裸发
+     *  路径，不再注入 200~ 字面标记。编码失败时降级为 \r 裸发（粘贴可用，
+     *  只是丢 chip 增强）。 */
     const writeAttachToPty = (files: readonly TerminalAttachFile[]) => {
-      const wrapped = wrapBracketedPaste(attachFilesToPasteText(files));
-      if (wrapped === '') return;
-      // 不规整 \r\n：bracketed paste 的起止序列就是控制字符，replace 会破坏它们
-      const bytes = new TextEncoder().encode(wrapped);
-      onUserInput?.(sessionId);
-      pty.write(bytes).catch(err => {
-        console.error('[terminal] 附件路径下发失败:', err instanceof Error ? err.message : String(err));
-      });
+      const payload = attachFilesToPasteText(files);
+      if (payload === '') return;
       if (textareaRef.current) textareaRef.current.value = '';
+      onUserInput?.(sessionId);
+      const source = sourceRef.current;
+      const send = (bytes: Uint8Array) => {
+        if (bytes.length === 0) return;
+        pty.write(bytes).catch(err => {
+          console.error('[terminal] 附件路径下发失败:', err instanceof Error ? err.message : String(err));
+        });
+      };
+      if (!source) {
+        send(new TextEncoder().encode(payload.replace(/\r?\n/g, '\r')));
+        return;
+      }
+      source
+        .encodePaste(payload)
+        .then(send)
+        .catch(err => {
+          console.error(
+            '[terminal] 附件路径编码失败，降级为裸输入:',
+            err instanceof Error ? err.message : String(err)
+          );
+          send(new TextEncoder().encode(payload.replace(/\r?\n/g, '\r')));
+        });
     };
 
     if (!hasFiles) {
@@ -2785,7 +2923,10 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
     void (async () => {
       try {
         const bytes = await source.encodeKey(input);
-        if (bytes.length > 0) await pty.write(bytes);
+        if (bytes.length > 0) {
+          onUiEventRef.current?.(sessionId);
+          await pty.write(bytes);
+        }
       } catch (err) {
         console.error('[terminal] 抬起事件下发失败:', err instanceof Error ? err.message : String(err));
       }

@@ -34,6 +34,12 @@ import { CellDiffCache } from '../ghostty-vt/cellFrame';
 import { domKeyToInput, KEY_ACTION } from '../ghostty-vt/domKeys';
 import { TerminalTabContextMenu } from './TerminalTabContextMenu';
 import { HIDDEN_CANVAS_RELEASE_MS, shouldReleaseCanvas } from './terminalCanvasRelease';
+import {
+  isConsoleOutputting,
+  pruneInputSessions,
+  recordUserInput,
+  type InputTimes
+} from './terminalInputEcho';
 import { TerminalA11yMirror } from './TerminalA11yMirror';
 import { frameToA11yText } from '../ghostty-vt/a11y';
 import type { TerminalTabMenuState } from './TerminalTabContextMenu';
@@ -132,7 +138,8 @@ interface GhosttyTerminalProps {
   onBusyChange?: (busy: boolean, commands: string[]) => void;
   /**
    * 全部项目的控制台活动变化（顶栏项目 tab 状态条的数据源），key 为项目路径。
-   * busy=有 shell 之外的进程在跑；outputting=2 秒内有过输出（跑马灯动画）。
+   * busy=有 shell 之外的进程在跑；outputting=2 秒内有过控制台自身输出
+   * （用户输入回显/TUI 按键重绘已按时间窗过滤，不点亮跑马灯）。
    * 仅在项目状态桶或命令集变化时回调——2s 一次的例行轮询不得打扰父组件渲染。
    */
   onProjectActivity?: (map: Record<string, ProjectActivityInfo>) => void;
@@ -149,14 +156,13 @@ export interface GhosttyTerminalHandle {
 export interface ProjectActivityInfo {
   /** 有 shell 之外的进程在跑 */
   busy: boolean;
-  /** 2 秒内有过输出（跑马灯动画判定） */
+  /** 2 秒内有过控制台自身输出（用户输入回显/TUI 按键重绘不计） */
   outputting: boolean;
   /** 运行中的命令名（去重，供 tooltip 展示） */
   commands: string[];
 }
 
-/** 「正在输出」的新鲜度阈值：最后输出 2s 内算活跃，超过回落静态橙框。 */
-const OUTPUT_ACTIVE_MS = 2000;
+/** 「正在输出」的新鲜度阈值由 terminalInputEcho 统一提供（轮询与回显窗口共用）。 */
 
 interface Rgb {
   r: number;
@@ -444,6 +450,15 @@ export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTe
     () => tabs.map(t => `${t.projectKey}\u0000${t.panes.join('\u0000')}`).sort().join('\u0001'),
     [tabs]
   );
+  /**
+   * 用户输入时刻（按会话）。轮询拿到 lastOutputMs 后反推输出时刻，
+   * 落在输入后 200ms 内的输出视为回显/TUI 重绘，不点亮跑马灯。
+   * 只写 ref，不参与渲染。
+   */
+  const userInputTimesRef = useRef<InputTimes>(new Map());
+  const markUserInput = useCallback((sessionId: string) => {
+    recordUserInput(userInputTimesRef.current, sessionId, Date.now());
+  }, []);
   const lastActivitySig = useRef('');
   useEffect(() => {
     if (!allPaneSig) {
@@ -478,13 +493,17 @@ export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTe
         return;
       }
       if (cancelled) return;
+      pruneInputSessions(userInputTimesRef.current, new Set(owner.keys()));
+      const receivedAt = Date.now();
       for (const row of rows ?? []) {
         const project = owner.get(row.sessionId);
         const bucket = project ? acc.get(project) : undefined;
         if (!bucket || !row.busy) continue;
         bucket.busy = true;
         for (const c of row.commands ?? []) bucket.commands.add(c);
-        if (row.lastOutputMs != null && row.lastOutputMs < OUTPUT_ACTIVE_MS) bucket.outputting = true;
+        if (isConsoleOutputting(userInputTimesRef.current, row.sessionId, row.lastOutputMs, receivedAt)) {
+          bucket.outputting = true;
+        }
       }
       // 项目状态桶 + 命令集都不变才跳过：2s 例行轮询不许每次都重渲染父组件
       const sig = [...acc.entries()]
@@ -1025,6 +1044,7 @@ export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTe
                       onExited={() => removeExitedPane(tab.id, paneId)}
                       onActivate={() => setActivePane(tab.id, paneId)}
                       onPwdChange={handlePwdChange}
+                      onUserInput={markUserInput}
                     />
                   </div>
                 ) : null
@@ -1090,9 +1110,11 @@ interface SingleGhosttySessionProps {
   onActivate?: () => void;
   /** shell cwd 变化（OSC 7/9/1337）上报：父组件取活动分屏的值并入全局状态栏 */
   onPwdChange?: (sessionId: string, pwd: string | null) => void;
+  /** 用户向该会话写入输入（键盘/粘贴/IME）：父组件据此识别回显，不点亮跑马灯 */
+  onUserInput?: (sessionId: string) => void;
 }
 
-const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, cwd, shell, fontSize = DEFAULT_FONT_SIZE, themeKey, active = false, onScreen = active, placement = 'bottom', onExited, onActivate, onPwdChange }) => {
+const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, cwd, shell, fontSize = DEFAULT_FONT_SIZE, themeKey, active = false, onScreen = active, placement = 'bottom', onExited, onActivate, onPwdChange, onUserInput }) => {
   // 字体规格由字号推导，改动后重新度量单元格网格
   const fontSpec = `${fontSize}px ${FONT_FAMILY}`;
   const hostRef = useRef<HTMLDivElement>(null);
@@ -2551,6 +2573,7 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
     /** 普通文本粘贴：原样下发，\\n 规整为 \\r（shell 需要回车）。 */
     const writeTextToPty = (payload: string) => {
       const bytes = new TextEncoder().encode(payload.replace(/\r?\n/g, '\r'));
+      onUserInput?.(sessionId);
       pty.write(bytes).catch(err => {
         console.error('[terminal] 粘贴下发失败:', err instanceof Error ? err.message : String(err));
       });
@@ -2565,8 +2588,9 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
     const writeAttachToPty = (files: readonly TerminalAttachFile[]) => {
       const wrapped = wrapBracketedPaste(attachFilesToPasteText(files));
       if (wrapped === '') return;
-      // 不规整 \\r\\n：bracketed paste 的起止序列就是控制字符，replace 会破坏它们
+      // 不规整 \r\n：bracketed paste 的起止序列就是控制字符，replace 会破坏它们
       const bytes = new TextEncoder().encode(wrapped);
+      onUserInput?.(sessionId);
       pty.write(bytes).catch(err => {
         console.error('[terminal] 附件路径下发失败:', err instanceof Error ? err.message : String(err));
       });
@@ -2730,6 +2754,7 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
     try {
       const bytes = await source.encodeKey(input);
       if (bytes.length > 0) {
+        onUserInput?.(sessionId);
         await pty.write(bytes);
       }
     } catch (err) {
@@ -2828,6 +2853,7 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
     const pty = ptyRef.current;
     if (pty) {
       const bytes = new TextEncoder().encode(text);
+      onUserInput?.(sessionId);
       pty.write(bytes).catch(err => {
         console.error('[terminal] IME 输入下发失败:', err instanceof Error ? err.message : String(err));
       });

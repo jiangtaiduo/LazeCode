@@ -75,10 +75,14 @@
   --accent-soft: rgba(0, 113, 227, 0.12);
   --accent-line: rgba(0, 113, 227, 0.4);
   --accent-glow: rgba(0, 113, 227, 0.22);
-  /* 项目 tab：浅色上淡背景更淡（同 --accent-soft 的比例），状态环基于
-     本 variant 的深橙 --git-mod #b25000 减淡 */
-  --tab-current-bg: rgba(0, 113, 227, 0.2);
-  --tab-state-ring: rgba(178, 80, 0, 0.6);
+  /* 项目 tab：浅色上 accent 填充更淡，顶部高光提亮、投影更轻；
+     状态环是 macOS 交通灯绿/红。 */
+  --tab-current-bg: rgba(0, 113, 227, 0.36);
+  --tab-current-highlight: rgba(255, 255, 255, 0.35);
+  --tab-current-shadow: rgba(0, 0, 0, 0.2);
+  --tab-state-static: #28c840;
+  --tab-state-running: var(--win-close);
+  --tab-state-running-dim: rgba(255, 95, 87, 0.5);
   --git-del-faint: rgba(215, 0, 21, 0.07);
   --git-del-line: rgba(215, 0, 21, 0.3);
   --git-add-faint: rgba(36, 138, 61, 0.1);

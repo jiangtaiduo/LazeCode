@@ -19,7 +19,7 @@ export interface ProjectTabActivity {
 interface ProjectTabBarProps {
   tabs: ProjectTab[];
   activePath: string;
-  /** 各项目控制台活动：缺席或 !busy=灰框；busy=静态橙框；busy+outputting=跑马灯 */
+  /** 各项目控制台活动：缺席或 !busy=灰框；busy=静态绿框；busy+outputting=红色跑马灯 */
   activity: Record<string, ProjectTabActivity>;
   /** 命令名走 ref：tooltip 数据不参与渲染比较（activity 只存状态桶） */
   activityCommandsRef?: React.MutableRefObject<Record<string, string[]>>;
@@ -225,6 +225,20 @@ export const ProjectTabBar = React.memo(function ProjectTabBar({
               onClick={() => handleTabClick(tab.path)}
               onAuxClick={e => handleTabAuxClick(e, tab.path)}
             >
+              {a?.busy && a.outputting && (
+                <svg className="project-tab-marquee" aria-hidden="true" focusable="false">
+                  <rect
+                    className="project-tab-marquee-runner"
+                    x="0"
+                    y="0"
+                    width="100%"
+                    height="100%"
+                    rx="5.5"
+                    ry="5.5"
+                    pathLength="100"
+                  />
+                </svg>
+              )}
               <span
                 className="project-tab-badge"
                 style={{ background: getProjectBadgeColor(tab.name) }}

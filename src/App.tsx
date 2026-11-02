@@ -605,8 +605,9 @@ export const App: React.FC = () => {
   const [tabOrder, setTabOrder] = useState<string[]>([]);
   /**
    * 各项目的控制台活动状态（顶栏项目 tab 状态条）：busy=有进程在跑，
-   * outputting=2 秒内有过输出。GhosttyTerminal 侧已做签名去重，这里
-   * 只再守一层桶比较；命令名全量走 ref 供 tooltip 读取而不触发渲染。
+   * outputting=2 秒内有过控制台自身输出（输入回显/TUI 按键重绘已过滤）。
+   * GhosttyTerminal 侧已做签名去重，这里只再守一层桶比较；命令名全量
+   * 走 ref 供 tooltip 读取而不触发渲染。
    */
   const [projectActivity, setProjectActivity] = useState<Record<string, { busy: boolean; outputting: boolean }>>({});
   const projectActivityCommandsRef = useRef<Record<string, string[]>>({});

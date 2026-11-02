@@ -90,6 +90,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to the full six-command sweep; under directory-event bursts this re-ran
   log/branches/tags repeatedly. The follow-up now keeps the light shape unless
   a full refresh was actually requested.
+- Project-tab console indicators treated keystroke echo and TUI redraws as
+  console output, so typing into the terminal started the activity runner. A
+  short per-session echo window now filters PTY output that follows user input;
+  running-but-idle tabs use a macOS traffic-light green ring, active output
+  uses a red runner that travels the border at a uniform pace, and the active
+  tab is an accent-filled raised chip instead of an accent underline.
 
 ### Performance
 

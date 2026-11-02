@@ -55,16 +55,20 @@ describe('ProjectTabBar', () => {
     expect(screen.getByTitle(/^alpha\b/).className).toContain('tab-idle');
   });
 
-  it('busy 但无输出 → 静态橙框；busy 且输出 → 跑马灯类', () => {
+  it('busy 但无输出 → 静态绿框；busy 且输出 → 红色跑马灯', () => {
     setup({
       activity: {
         '/w/beta': { busy: true, outputting: false },
         '/w/gamma': { busy: true, outputting: true }
       }
     });
-    expect(screen.getByTitle(/^beta\b/).className).toContain('tab-busy');
-    expect(screen.getByTitle(/^beta\b/).className).not.toContain('tab-active-output');
-    expect(screen.getByTitle(/^gamma\b/).className).toContain('tab-active-output');
+    const busyTab = screen.getByTitle(/^beta\b/);
+    const outputTab = screen.getByTitle(/^gamma\b/);
+    expect(busyTab.className).toContain('tab-busy');
+    expect(busyTab.className).not.toContain('tab-active-output');
+    expect(busyTab.querySelector('.project-tab-marquee-runner')).toBeNull();
+    expect(outputTab.className).toContain('tab-active-output');
+    expect(outputTab.querySelector('.project-tab-marquee-runner')).not.toBeNull();
   });
 
   it('点击 tab 触发 onSelect（传项目路径）', () => {

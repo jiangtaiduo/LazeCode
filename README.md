@@ -25,7 +25,7 @@ operations that can reach the network.
 
 | | |
 | :--- | :--- |
-| Status | `0.1.3`, alpha |
+| Status | `0.2.0`, alpha |
 | Platform | macOS 13+, Apple Silicon (arm64); tested on macOS 27 |
 | Stack | Tauri 2, Rust 1.90+, React 19, Monaco, Ghostty VT |
 | License | MIT |

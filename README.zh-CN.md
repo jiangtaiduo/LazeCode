@@ -22,7 +22,7 @@ LazeCode 是一个只保留编辑器、Git 和控制台等核心功能的 macOS 
 
 | | |
 | :--- | :--- |
-| 状态 | `0.1.3`，alpha |
+| 状态 | `0.2.0`，alpha |
 | 平台 | macOS 13+，Apple Silicon（arm64）；已在 macOS 27 测试 |
 | 技术栈 | Tauri 2、Rust 1.90+、React 19、Monaco、Ghostty VT |
 | 许可证 | MIT |

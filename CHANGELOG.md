@@ -6,7 +6,7 @@ All notable changes to LazeCode are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-11-02
 
 ### Added
 
@@ -170,21 +170,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   uses a red runner that travels the border at a uniform pace, and the active
   tab is an accent-filled raised chip instead of an accent underline.
 
-### Performance
-
-- LSP document changes are debounced per file (200 ms): full-text sync turned
-  every keystroke into a whole-document stringify + IPC + server-side reparse;
-  closing a file flushes the pending change first so formatting never sees a
-  stale buffer.
-- The status-bar cursor indicator now subscribes in its own leaf component:
-  the subscription previously sat at the top of the App component, so every
-  arrow key re-ran the entire 6,500-line App body — the exact cost the
-  cursor store's design comment promised to avoid.
-- CommitDrawer/MergeToolDialog per-keystroke re-renders and the
-  per-pointermove modal dragging hook are known remaining items, deferred
-  (they need prop-stability audits / a drag-skeleton refactor; interactions
-  are user-paced and not on the keystroke path).
-
 - Files created externally (build tools, agent CLIs, Finder) inside a
   subdirectory of an open project no longer require a manual reload to appear
   in the file tree. Two causes: the directory watcher was non-recursive, and
@@ -202,6 +187,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   non-recursive watcher happened to drop all `.git` events and masked this.
 
 ### Performance
+
+- LSP document changes are debounced per file (200 ms): full-text sync turned
+  every keystroke into a whole-document stringify + IPC + server-side reparse;
+  closing a file flushes the pending change first so formatting never sees a
+  stale buffer.
+- The status-bar cursor indicator now subscribes in its own leaf component:
+  the subscription previously sat at the top of the App component, so every
+  arrow key re-ran the entire 6,500-line App body — the exact cost the
+  cursor store's design comment promised to avoid.
+- CommitDrawer/MergeToolDialog per-keystroke re-renders and the
+  per-pointermove modal dragging hook are known remaining items, deferred
+  (they need prop-stability audits / a drag-skeleton refactor; interactions
+  are user-paced and not on the keystroke path).
 
 - `git log` no longer re-runs `git rev-list HEAD` (full-history output, tens of
   thousands of lines on monorepos) on every refresh and every log pagination:

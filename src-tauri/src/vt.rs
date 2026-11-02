@@ -3166,7 +3166,10 @@ impl NativeTerminal {
             ));
         }
         if written > buf.len() {
-            return Err(crate::error_proto::coded_display("encode_overflow", written));
+            return Err(crate::error_proto::coded_display(
+                "encode_overflow",
+                written,
+            ));
         }
         buf.truncate(written);
         Ok(buf)

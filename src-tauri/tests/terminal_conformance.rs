@@ -346,9 +346,19 @@ fn paste_encode_follows_bracketed_paste_mode() {
     term.write(b"\x1b[?2004h");
     assert!(term.mode_enabled(2004), "2004h 未开启");
     let wrapped = term.encode_paste("a\nb").unwrap();
-    assert!(wrapped.starts_with(b"\x1b[200~"), "开启 2004 必须包 ESC[200~: {wrapped:?}");
-    assert!(wrapped.ends_with(b"\x1b[201~"), "开启 2004 必须以 ESC[201~ 收尾: {wrapped:?}");
-    assert_eq!(&wrapped[6..wrapped.len() - 6], b"a\nb", "包裹内内容不得被改动: {wrapped:?}");
+    assert!(
+        wrapped.starts_with(b"\x1b[200~"),
+        "开启 2004 必须包 ESC[200~: {wrapped:?}"
+    );
+    assert!(
+        wrapped.ends_with(b"\x1b[201~"),
+        "开启 2004 必须以 ESC[201~ 收尾: {wrapped:?}"
+    );
+    assert_eq!(
+        &wrapped[6..wrapped.len() - 6],
+        b"a\nb",
+        "包裹内内容不得被改动: {wrapped:?}"
+    );
 
     // 关闭 2004（有的程序不开）：回到裸发，不得残留包裹标记。
     term.write(b"\x1b[?2004l");
@@ -370,9 +380,18 @@ fn paste_encode_defuses_embedded_terminator() {
         .encode_paste("/tmp/a.png\x1b[201~evil")
         .expect("编码失败");
     let hits = wrapped.windows(6).filter(|w| w == b"\x1b[201~").count();
-    assert_eq!(hits, 1, "结束序列只允许出现在收尾，实际 {hits} 处: {wrapped:?}");
-    assert!(wrapped.starts_with(b"\x1b[200~"), "包裹起点被破坏: {wrapped:?}");
-    assert!(wrapped.ends_with(b"\x1b[201~"), "包裹终点被破坏: {wrapped:?}");
+    assert_eq!(
+        hits, 1,
+        "结束序列只允许出现在收尾，实际 {hits} 处: {wrapped:?}"
+    );
+    assert!(
+        wrapped.starts_with(b"\x1b[200~"),
+        "包裹起点被破坏: {wrapped:?}"
+    );
+    assert!(
+        wrapped.ends_with(b"\x1b[201~"),
+        "包裹终点被破坏: {wrapped:?}"
+    );
 }
 
 #[test]

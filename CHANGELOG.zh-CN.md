@@ -6,7 +6,7 @@
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
-## [未发布]
+## [0.2.0] - 2026-11-02
 
 ### 新增
 
@@ -119,18 +119,6 @@
   有进程但静止的 tab 用 macOS 交通灯绿细框,输出中用匀速绕边跑的红色光段,
   当前 tab 改成 accent 填充的浮起胶囊,不再画 accent 下划线。
 
-### 性能
-
-- LSP 文档变更按文件防抖(200ms):全文同步下每个键都是一整篇文档的
-  stringify + IPC + 服务端整篇 re-parse;close 时先 flush 挂起的变更,
-  格式化不会读到落后于最后一次击键的缓冲。
-- 状态栏光标位置指示器改为叶子组件内订阅:此前订阅挂在 App 顶层,每次
-  方向键都重跑 6500 行的 App 函数体 —— 正是 cursor store 设计注释里
-  承诺要避免、却被订阅位置架空的代价。
-- CommitDrawer/MergeToolDialog 的每键重渲染与弹窗拖拽 hook 的逐
-  pointermove setState 是已知待办,暂缓(需要 prop 稳定性审计 / 拖拽
-  骨架重构;均为用户节奏交互,不在击键热路径上)。
-
 - 外部程序（构建工具、agent CLI、Finder）往已打开项目的**子目录**里新建文件，
   文件树不再需要手动刷新才能看到。两个原因：目录监听是非递归的，notify 的
   FSEvents 后端会把比「根的直接子项」更深的事件直接丢掉 ——
@@ -144,6 +132,16 @@
   非递归监听恰好丢弃了全部 `.git` 事件,掩盖了这个回环。
 
 ### 性能
+
+- LSP 文档变更按文件防抖(200ms):全文同步下每个键都是一整篇文档的
+  stringify + IPC + 服务端整篇 re-parse;close 时先 flush 挂起的变更,
+  格式化不会读到落后于最后一次击键的缓冲。
+- 状态栏光标位置指示器改为叶子组件内订阅:此前订阅挂在 App 顶层,每次
+  方向键都重跑 6500 行的 App 函数体 —— 正是 cursor store 设计注释里
+  承诺要避免、却被订阅位置架空的代价。
+- CommitDrawer/MergeToolDialog 的每键重渲染与弹窗拖拽 hook 的逐
+  pointermove setState 是已知待办,暂缓(需要 prop 稳定性审计 / 拖拽
+  骨架重构;均为用户节奏交互,不在击键热路径上)。
 
 - `git log` 不再在每次刷新与每翻一页日志时重跑 `git rev-list HEAD`（全历史
   输出，monorepo 上数万行）：祖先集合按「仓库 + HEAD sha」缓存，HEAD 移动

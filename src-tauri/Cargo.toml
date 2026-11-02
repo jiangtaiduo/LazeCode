@@ -36,7 +36,7 @@ dirs = "6"
 # 打开文件的外部修改监听（fs_watch_files → fs://external-change 事件）
 notify = "8"
 # 终端内联图片：Kitty 图形协议里 f=100 传 PNG，引擎要求嵌入方提供解码器
-png = "0.17"
+png = "0.18"
 ignore = "0.4.30"
 nucleo-matcher = "0.3.1"
 toml = "1.0.7"

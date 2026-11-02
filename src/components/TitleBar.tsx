@@ -687,7 +687,7 @@ export const TitleBar = React.memo(function TitleBar({
                   setIsBranchMenuOpen(prev => !prev);
                   setIsProjectMenuOpen(false);
                 }}
-                title={t().titleBar.branchPillTooltip}
+                title={`${opLabel}\n${t().titleBar.branchPillTooltip}`}
               >
                 <span className="titlebar-op-warn">⚠</span>
                 <span className="pycharm-branch-name">{opLabel}</span>
@@ -723,7 +723,7 @@ export const TitleBar = React.memo(function TitleBar({
                 setIsBranchMenuOpen(prev => !prev);
                 setIsProjectMenuOpen(false);
               }}
-              title={t().titleBar.branchPillTooltip}
+              title={`${currentBranch}\n${t().titleBar.branchPillTooltip}`}
             >
               <GitBranchIcon size={14} color="currentColor" />
               <span className="pycharm-branch-name">{currentBranch}</span>

@@ -72,6 +72,39 @@ describe('TitleBar branch pill stability', () => {
     expect(screen.getByText('main')).toBeTruthy();
   });
 
+  it('keeps the full branch name in the pill tooltip when the label is truncated', () => {
+    const longBranch = 'feature/payment-refund-v2-with-a-very-long-suffix';
+    render(<TitleBar {...baseProps} currentBranch={longBranch} />);
+
+    const pill = screen.getByTitle(
+      `${longBranch} Click to switch or create a Git branch`
+    );
+    expect(pill).toHaveAttribute(
+      'title',
+      `${longBranch}\nClick to switch or create a Git branch`
+    );
+    expect(pill).toHaveTextContent(longBranch);
+  });
+
+  it('keeps the full operation label in the operation pill tooltip', () => {
+    const longBranch = 'feature/payment-refund-v2-with-a-very-long-suffix';
+    render(
+      <TitleBar
+        {...baseProps}
+        currentBranch={longBranch}
+        sequencer={{ merging: true, cherryPicking: false, rebasing: false }}
+      />
+    );
+
+    const pill = screen.getByTitle(
+      `Merging in ${longBranch} Click to switch or create a Git branch`
+    );
+    expect(pill).toHaveAttribute(
+      'title',
+      `Merging in ${longBranch}\nClick to switch or create a Git branch`
+    );
+  });
+
   it('renders no branch pill on the welcome screen (no workspace)', () => {
     const { container } = render(<TitleBar {...baseProps} workspacePath="" currentBranch="" />);
     expect(container.querySelector('.branch-skeleton-bar')).toBeNull();

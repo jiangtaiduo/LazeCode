@@ -32,7 +32,7 @@ portable-pty = "0.9"
 trash = "5"
 # 窗口几何持久化的配置目录（~/Library/Application Support/<id> 等），
 # tauri 的 path() 只能在 setup 之后使用，而窗口创建（读盘恢复）早于 setup
-dirs = "6"
+dirs = "7"
 # 打开文件的外部修改监听（fs_watch_files → fs://external-change 事件）
 notify = "8"
 # 终端内联图片：Kitty 图形协议里 f=100 传 PNG，引擎要求嵌入方提供解码器

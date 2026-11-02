@@ -42,7 +42,7 @@ nucleo-matcher = "0.3.1"
 toml = "1.0.7"
 # 非 UTF-8 源文件（GBK/Shift_JIS/UTF-16 等）：检测 + 解码/回写。
 encoding_rs = "0.8"
-chardetng = "0.1"
+chardetng = "1.0"
 # Find in Files / Replace in Files 的正则、whole-word、大小写匹配
 regex = "1"
 globset = "0.4"

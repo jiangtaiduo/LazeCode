@@ -5,6 +5,7 @@ import {
   IconWindowClose,
   FolderIcon,
   IconNewWindow,
+  IconFilePlus,
   TerminalStripeIcon,
   SettingsStripeIcon
 } from './FileIcons';
@@ -13,6 +14,8 @@ import { APP_VERSION } from '../services/appVersion';
 
 interface WelcomeViewProps {
   onOpenProject: () => void;
+  /** 无项目新建文件（NSSavePanel 由用户定名字/路径/后缀） */
+  onNewFile?: () => void;
   onCloneRepository?: () => void;
   onOpenRecent: (path: string) => void;
   onRemoveRecent: (path: string, e: React.MouseEvent) => void;
@@ -25,6 +28,7 @@ interface WelcomeViewProps {
 
 export const WelcomeView: React.FC<WelcomeViewProps> = ({
   onOpenProject,
+  onNewFile,
   onCloneRepository,
   onOpenRecent,
   onRemoveRecent,
@@ -63,6 +67,17 @@ export const WelcomeView: React.FC<WelcomeViewProps> = ({
                   <div className="action-sub">{t().welcome.openWorkspaceSub}</div>
                 </div>
               </button>
+
+              {onNewFile && (
+                <button className="welcome-action-btn" onClick={onNewFile}>
+                  <span className="action-icon"><IconFilePlus size={15} color="var(--text-secondary)" /></span>
+                  <div className="action-text">
+                    <div className="action-main">{t().welcome.newFile}</div>
+                    <div className="action-sub">{t().welcome.newFileSub}</div>
+                  </div>
+                  <kbd className="welcome-kbd">⌘N</kbd>
+                </button>
+              )}
 
               {onCloneRepository && (
                 <button className="welcome-action-btn" onClick={onCloneRepository}>

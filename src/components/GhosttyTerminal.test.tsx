@@ -205,3 +205,39 @@ describe('GhosttyTerminal busy polling', () => {
     }
   });
 });
+
+describe('GhosttyTerminal without a project (welcome screen)', () => {
+  beforeEach(() => {
+    mocks.invokeCommand.mockReset();
+    ptyMocks.spawnPty.mockReset();
+    ptyMocks.subscribeDirty.mockReset();
+    ptyMocks.subscribeExit.mockReset();
+    ptyMocks.subscribePwd.mockReset();
+    ptyMocks.spawnPty.mockResolvedValue({
+      sessionId: 's1',
+      shell: '/bin/zsh',
+      cwd: '/Users/tester',
+      write: async () => {},
+      resize: async () => {},
+      close: async () => {}
+    });
+    ptyMocks.subscribeDirty.mockResolvedValue(() => {});
+    ptyMocks.subscribeExit.mockResolvedValue(() => {});
+    ptyMocks.subscribePwd.mockResolvedValue(() => {});
+    mocks.invokeCommand.mockImplementation(async (command: string) => {
+      if (command === 'pty_sessions_busy') return [];
+      return null;
+    });
+  });
+
+  it('spawns a ~ session instead of showing an empty panel', async () => {
+    // 欢迎页直接打开控制台：projectKey 为空也必须起一个 shell，
+    // 不能只显示一块空白面板；cwd 交给后端回退到用户目录（~）。
+    const view = render(<GhosttyTerminal visible projectKey="" openProjects={[]} />);
+    await waitFor(() => expect(ptyMocks.spawnPty).toHaveBeenCalled());
+    const options = ptyMocks.spawnPty.mock.calls[0][0] as { cwd?: string; projectKey?: string };
+    expect(options.projectKey).toBe('');
+    expect(options.cwd ?? '').toBe('');
+    view.unmount();
+  });
+});

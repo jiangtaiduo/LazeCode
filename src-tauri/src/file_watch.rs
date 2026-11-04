@@ -326,14 +326,21 @@ pub fn fs_watch_files(
     window: tauri::WebviewWindow,
     state: State<'_, FileWatchState>,
     registry: State<'_, WorkspaceRegistry>,
+    grants: State<'_, crate::commands::PathGrantRegistry>,
     paths: Vec<String>,
 ) -> Result<(), String> {
     if paths.len() > 2000 {
         return Err("打开文件过多，拒绝注册无界监听".to_string());
     }
     // 只监听已授权工作区内的路径：否则 renderer 可让内核监视 ~/.ssh 等目录。
+    // 工作区之外认原生面板 grant（pick_save_path 新建的无项目文件）——
+    // 用户手势授权与工作区路径同强度。
     for p in &paths {
-        authorize_workspace_path(&registry, p, false)?;
+        if authorize_workspace_path(&registry, p, false).is_err()
+            && !grants.is_granted(std::path::Path::new(p))
+        {
+            return Err(crate::error_proto::coded("path_outside_workspace", p));
+        }
     }
     let label = window.label().to_string();
     // 先停本窗口的旧监听：切换项目/开关标签期间避免新旧两份事件叠加。

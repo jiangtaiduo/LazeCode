@@ -179,12 +179,14 @@ export const COMMAND_CATALOG: Record<TauriCommand, CommandMeta> = {
   open_external_url: { title: 'Open external URL', titleZh: '打开外部链接', category: 'system', risk: 'write' },
   pty_close: { title: 'Close terminal', titleZh: '关闭终端', category: 'terminal', risk: 'write' },
   pty_close_by_cwd: { title: 'Close terminals by directory', titleZh: '按目录关闭终端', category: 'terminal', risk: 'write' },
+  pty_close_by_project: { title: 'Close terminals by project', titleZh: '按项目关闭终端', category: 'terminal', risk: 'write' },
   pty_resize: { title: 'Resize terminal', titleZh: '调整终端尺寸', category: 'terminal', risk: 'write' },
   pty_session_busy: { title: 'Terminal busy probe', titleZh: '终端占用探测', category: 'terminal', risk: 'read' },
   pty_sessions_busy: { title: 'Batch terminal busy probe', titleZh: '批量终端占用探测', category: 'terminal', risk: 'read' },
   pty_spawn: { title: 'Spawn terminal', titleZh: '启动终端', category: 'terminal', risk: 'write' },
   pty_write: { title: 'Write to terminal', titleZh: '向终端写入', category: 'terminal', risk: 'write' },
   pick_path: { title: 'Pick file or directory', titleZh: '选择文件或目录', category: 'files', risk: 'read' },
+  pick_save_path: { title: 'Save panel (new file path)', titleZh: '保存面板（新建文件路径）', category: 'files', risk: 'read' },
   read_directory: { title: 'Read directory', titleZh: '读取目录', category: 'files', risk: 'read' },
   read_file_content: { title: 'Read file', titleZh: '读取文件', category: 'files', risk: 'read' },
   read_file_text: { title: 'Read text with encoding', titleZh: '读取文本与编码', category: 'files', risk: 'read' },
@@ -214,6 +216,7 @@ export const COMMAND_CATALOG: Record<TauriCommand, CommandMeta> = {
   vt_mouse_tracking: { title: 'Terminal mouse tracking', titleZh: '终端鼠标跟踪状态', category: 'terminal', risk: 'read' },
   vt_set_colors: { title: 'Set terminal colors', titleZh: '设置终端颜色', category: 'terminal', risk: 'write' },
   write_file_content: { title: 'Write file', titleZh: '写入文件', category: 'files', risk: 'write' },
+  write_file_granted: { title: 'Write granted new file', titleZh: '写入面板授权的新文件', category: 'files', risk: 'write' },
   write_file_text: { title: 'Write text with encoding', titleZh: '按编码写入文本', category: 'files', risk: 'write' },
 };
 

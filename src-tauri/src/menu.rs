@@ -36,6 +36,7 @@ pub mod ids {
     // ---- File ----
     pub const NEW_WINDOW: &str = "new_window";
     pub const OPEN_PROJECT: &str = "open_project";
+    pub const NEW_FILE: &str = "new_file";
     pub const CLOSE_PROJECT: &str = "close_project";
     pub const SAVE: &str = "save";
     pub const SAVE_ALL: &str = "save_all";
@@ -91,6 +92,7 @@ pub struct MenuLabels {
     pub help: &'static str,
     pub new_window: &'static str,
     pub open_project: &'static str,
+    pub new_file: &'static str,
     pub close_project: &'static str,
     pub save: &'static str,
     pub save_all: &'static str,
@@ -137,6 +139,7 @@ impl MenuLabels {
         help: "Help",
         new_window: "New Window",
         open_project: "Open Project…",
+        new_file: "New File…",
         close_project: "Close",
         save: "Save",
         save_all: "Save All",
@@ -182,6 +185,7 @@ impl MenuLabels {
         help: "帮助",
         new_window: "新建窗口",
         open_project: "打开项目…",
+        new_file: "新建文件…",
         close_project: "关闭",
         save: "保存",
         save_all: "保存全部",
@@ -275,6 +279,8 @@ pub fn build_menu_with<R: Runtime>(
         true,
         Some("CmdOrCtrl+O"),
     )?;
+    // 新建文件（无项目时也能用）：NSSavePanel 流程，对齐 PyCharm File › New…
+    let new_file = MenuItem::with_id(handle, ids::NEW_FILE, l.new_file, true, Some("CmdOrCtrl+N"))?;
     let close_project = MenuItem::with_id(
         handle,
         ids::CLOSE_PROJECT,
@@ -307,6 +313,7 @@ pub fn build_menu_with<R: Runtime>(
         &[
             &new_window,
             &open_project,
+            &new_file,
             &close_project,
             &PredefinedMenuItem::separator(handle)?,
             &save,
@@ -589,6 +596,7 @@ mod tests {
             ("help", l.help),
             ("new_window", l.new_window),
             ("open_project", l.open_project),
+            ("new_file", l.new_file),
             ("close_project", l.close_project),
             ("save", l.save),
             ("save_all", l.save_all),

@@ -85,15 +85,19 @@ export async function spawnPty(options: {
   rows: number;
   cwd?: string;
   shell?: string;
+  /** 归属项目 key（App 的 workspacePath）。关闭项目按它终止会话，
+      区分两个同目录的单文件工作区（cwd 相同）。 */
+  projectKey?: string;
 }): Promise<PtyHandle> {
-  const { sessionId, cols, rows, cwd, shell } = options;
+  const { sessionId, cols, rows, cwd, shell, projectKey } = options;
 
   const result = await invokeCommand<PtySpawnResult>('pty_spawn', {
     sessionId,
     cols,
     rows,
     cwd: cwd ?? null,
-    shell: shell ?? null
+    shell: shell ?? null,
+    projectKey: projectKey ?? null
   });
 
   return {
@@ -133,4 +137,14 @@ export async function spawnPty(options: {
 /** 终止属于某个工作区的全部终端会话（关闭项目即终止） */
 export async function closePtyByCwd(cwd: string): Promise<number> {
   return invokeCommand<number>('pty_close_by_cwd', { cwd });
+}
+
+/**
+ * 终止归属指定项目 key（工作区路径，含单文件工作区）的全部终端会话。
+ *
+ * 比 closePtyByCwd  reliable：cwd 对「同目录两个单文件工作区」必然相同，
+ * 关 A 会把 B 的终端一起杀掉；projectKey 是两个工作区的唯一区分键。
+ */
+export async function closePtyByProject(projectKey: string): Promise<number> {
+  return invokeCommand<number>('pty_close_by_project', { projectKey });
 }

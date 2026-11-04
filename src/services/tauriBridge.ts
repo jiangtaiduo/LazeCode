@@ -288,6 +288,7 @@ async function simulateCommand<T>(cmd: TauriCommand, args?: Record<string, unkno
       } as unknown as T;
 
     case 'pick_path':
+    case 'pick_save_path':
       return null as unknown as T;
 
     case 'read_file_content':
@@ -434,6 +435,7 @@ async function simulateCommand<T>(cmd: TauriCommand, args?: Record<string, unkno
     case 'pty_resize':
     case 'pty_close':
     case 'pty_close_by_cwd':
+    case 'pty_close_by_project':
     case 'vt_snapshot':
     case 'vt_encode_key':
     case 'vt_encode_paste':
@@ -586,6 +588,7 @@ async function simulateCommand<T>(cmd: TauriCommand, args?: Record<string, unkno
     case 'fs_watch_dirs':
     case 'fs_watch_files':
     case 'write_file_content':
+    case 'write_file_granted':
     case 'write_file_text':
     case 'vt_set_colors':
     case 'vt_scroll':

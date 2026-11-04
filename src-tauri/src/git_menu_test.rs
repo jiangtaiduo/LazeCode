@@ -269,7 +269,7 @@ fn branch_create_rename_checkout() {
     let d = basic_repo("branch-crud");
     // New Branch from HEAD~1（startPoint）
     let parent = git(&d, &["rev-parse", "HEAD~1"]).trim().to_string();
-    git_create_branch(repo(&d), "old-name".to_string(), Some(parent)).expect("create");
+    git_create_branch(repo(&d), "old-name".to_string(), Some(parent), None).expect("create");
     git_rename_branch(repo(&d), "old-name".to_string(), "new-name".to_string()).expect("rename");
     let branches = block_on(git_branches(repo(&d))).expect("branches");
     assert!(branches
@@ -281,6 +281,38 @@ fn branch_create_rename_checkout() {
     assert!(cur.iter().any(|b| b.name == "new-name" && b.is_current));
     // old-name 从 second 之前建：a.txt 只有两行
     assert_eq!(r(&d, "a.txt"), "line1\nline2\n");
+}
+
+/// 「创建不切换」：switch=false 走 git branch，HEAD/工作区保持原分支。
+/// 用户手动测试的关键回归：建分支后当前分支必须仍是 main。
+#[test]
+fn branch_create_without_switch_keeps_head() {
+    let d = basic_repo("branch-noswitch");
+    let before = git(&d, &["rev-parse", "HEAD"]);
+
+    git_create_branch(repo(&d), "wip-later".to_string(), None, Some(false))
+        .expect("create without switch");
+
+    let branches = block_on(git_branches(repo(&d))).expect("branch list");
+    assert!(branches
+        .iter()
+        .any(|b| b.name == "wip-later" && !b.is_remote));
+    assert!(
+        !branches
+            .iter()
+            .any(|b| b.name == "wip-later" && b.is_current),
+        "新分支不应成为当前分支"
+    );
+    assert!(
+        branches.iter().any(|b| b.name == "main" && b.is_current),
+        "HEAD 必须仍留在 main"
+    );
+    assert_eq!(git(&d, &["rev-parse", "HEAD"]).trim(), before.trim());
+
+    // switch=true（默认路径）依旧建并切换：兼容旧语义
+    git_create_branch(repo(&d), "wip-now".to_string(), None, Some(true)).expect("create+switch");
+    let after = block_on(git_branches(repo(&d))).expect("branch list again");
+    assert!(after.iter().any(|b| b.name == "wip-now" && b.is_current));
 }
 
 #[test]

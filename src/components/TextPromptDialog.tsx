@@ -17,21 +17,29 @@ export interface TextPromptRequest {
   defaultValue?: string;
   /** 允许空值确认（默认要求非空，如 tag 描述）；空值确认时 resolve '' */
   allowEmpty?: boolean;
+  /**
+   * 可选复选框（如「New Branch from ref…」的“创建后切换”）。勾选态通过
+   * onConfirm 的第二参回传；无 checkbox 时恒为 true。
+   */
+  checkbox?: { label: string; defaultChecked?: boolean };
 }
 
 interface TextPromptDialogProps {
   request: TextPromptRequest | null;
-  onConfirm: (value: string) => void;
+  /** values 为输入值；有 checkbox 时第二项是勾选态 */
+  onConfirm: (value: string, checked?: boolean) => void;
   onClose: () => void;
 }
 
 export const TextPromptDialog: React.FC<TextPromptDialogProps> = ({ request, onConfirm, onClose }) => {
   const [value, setValue] = useState('');
+  const [checked, setChecked] = useState(true);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!request) return;
     setValue(request.defaultValue ?? '');
+    setChecked(request.checkbox?.defaultChecked ?? true);
     requestAnimationFrame(() => {
       const el = inputRef.current;
       if (!el) return;
@@ -54,7 +62,7 @@ export const TextPromptDialog: React.FC<TextPromptDialogProps> = ({ request, onC
   const trimmed = value.trim();
   const canConfirm = request.allowEmpty === true || trimmed.length > 0;
   const submit = () => {
-    if (canConfirm) onConfirm(trimmed);
+    if (canConfirm) onConfirm(trimmed, request.checkbox ? checked : true);
   };
 
   return (
@@ -76,6 +84,16 @@ export const TextPromptDialog: React.FC<TextPromptDialogProps> = ({ request, onC
             if (e.key === 'Enter') submit();
           }}
         />
+        {request.checkbox && (
+          <label className="py-name-checkbox">
+            <input
+              type="checkbox"
+              checked={checked}
+              onChange={e => setChecked(e.target.checked)}
+            />
+            <span>{request.checkbox.label}</span>
+          </label>
+        )}
         <div className="py-dialog-footer">
           <button className="py-name-btn" onClick={onClose}>
             {t().namePrompt.cancel}

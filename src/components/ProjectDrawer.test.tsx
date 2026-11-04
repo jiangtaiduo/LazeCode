@@ -33,8 +33,10 @@ function renderDrawer(options: {
   );
 }
 
-describe('ProjectDrawer single-file workspace', () => {
-  it('renders the file row instead of a collapsible project folder', () => {
+describe('ProjectDrawer single-file session', () => {
+  it('does not list the temporary file in the project tree', () => {
+    // 单文件是临时打开（参考 Zed/IDEA）：左侧项目栏不列文件，
+    // 只给提示；文件本身在编辑器标签里。
     const path = '/Users/tester/Documents/brandable_domains.txt';
     const { container } = renderDrawer({
       rootPath: path,
@@ -42,12 +44,9 @@ describe('ProjectDrawer single-file workspace', () => {
       singleFile: true
     });
 
+    expect(container.querySelector('.tree-node-row')).toBeNull();
     expect(container.querySelector('.tree-root-item')).toBeNull();
-    const row = container.querySelector('.tree-node-row');
-    expect(row).not.toBeNull();
-    expect(row?.classList.contains('is-file')).toBe(true);
-    expect(row?.classList.contains('is-dir')).toBe(false);
-    expect(container.querySelector('.tree-chevron')).toBeNull();
+    expect(container.querySelector('.empty-project-prompt')).not.toBeNull();
   });
 
   it('still renders a collapsible root for directory workspaces', () => {

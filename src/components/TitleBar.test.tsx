@@ -109,4 +109,25 @@ describe('TitleBar branch pill stability', () => {
     const { container } = render(<TitleBar {...baseProps} workspacePath="" currentBranch="" />);
     expect(container.querySelector('.branch-skeleton-bar')).toBeNull();
   });
+
+  it('shows a static not-a-repo pill in non-git projects (no flicker, no tab push)', () => {
+    // 切到非 git 项目时如果 pill 整块卸载，后面的项目 tab 会被左右推来推去；
+    // 必须渲染同宽占位。占位是**静态文案**——不能再挂脉冲骨架，
+    // 否则非 git 项目看起来像永远在加载（用户看到的一直闪烁）。
+    const { container } = render(<TitleBar {...baseProps} isRepo={false} currentBranch="" />);
+    const pill = container.querySelector('.pycharm-branch-pill.branch-pill-nogit');
+    expect(pill).not.toBeNull();
+    expect(pill?.textContent).toContain('Not a Git repository');
+    expect(container.querySelector('.branch-skeleton-bar')).toBeNull();
+    expect(container.querySelector('.branch-pill-loading')).toBeNull();
+    // 占位不可点：没有分支下拉按钮
+    expect(document.querySelector('.pycharm-branch-pill:not(.branch-pill-nogit)')).toBeNull();
+  });
+
+  it('hides the branch pill entirely for single-file sessions', () => {
+    // 单文件不是项目：顶栏不显示分支 pill / 项目上下文
+    const { container } = render(<TitleBar {...baseProps} singleFile />);
+    expect(container.querySelector('.pycharm-branch-pill')).toBeNull();
+    expect(container.querySelector('.branch-skeleton-bar')).toBeNull();
+  });
 });

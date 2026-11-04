@@ -139,8 +139,10 @@ export type TauriCommand =
   | 'open_external_url'
   | 'open_merge_tool_window'
   | 'pick_path'
+  | 'pick_save_path'
   | 'pty_close'
   | 'pty_close_by_cwd'
+  | 'pty_close_by_project'
   | 'pty_resize'
   | 'pty_session_busy'
   | 'pty_sessions_busy'
@@ -177,4 +179,5 @@ export type TauriCommand =
   | 'vt_snapshot_diff'
   | 'vt_wheel'
   | 'write_file_content'
+  | 'write_file_granted'
   | 'write_file_text';

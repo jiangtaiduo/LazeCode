@@ -470,6 +470,15 @@ export const IconNewWindow: React.FC<{ size?: number; color?: string }> = React.
   </svg>
 ));
 
+/** 新建文件：页面 + 顶部加号（欢迎页 New File 入口用） */
+export const IconFilePlus: React.FC<{ size?: number; color?: string }> = React.memo(({ size = 14, color = 'currentColor' }) => (
+  <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+    <path d="M9 1.5H4.5A1.5 1.5 0 0 0 3 3v10a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 13V5.5L9 1.5z" {...outlineProps(color)} />
+    <path d="M9 1.5V5.5H13" {...outlineProps(color)} />
+    <path d="M8 7.5v4M6 9.5h4" {...outlineProps(color)} />
+  </svg>
+));
+
 export const IconTag: React.FC<{ size?: number; color?: string }> = React.memo(({ size = 10, color = 'currentColor' }) => (
   <svg width={size} height={size} viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
     <path d="M2.5 7V3a.5.5 0 0 1 .5-.5h4a1 1 0 0 1 .71.29l5.79 5.8a1 1 0 0 1 0 1.41l-4 4a1 1 0 0 1-1.41 0l-5.8-5.8a1 1 0 0 1-.29-.7z" {...outlineProps(color)} />

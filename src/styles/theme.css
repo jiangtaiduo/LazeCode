@@ -526,6 +526,42 @@ body.platform-mac .ide-titlebar {
   height: 100%;
 }
 
+/* ---- 拖文件/文件夹进窗口的「打开」预览遮罩 ----
+   pointer-events 必须 none：Windows/macOS 的原生拖放在 webview 上不会派发
+   DOM drop 事件给遮罩本身，若遮罩吃掉事件，Tauri 的 DragDrop 通道也会被打断。
+   遮罩只做视觉：跟随鼠标的呼吸虚线框 + 居中提示。 */
+.drop-open-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--bg-app) 55%, transparent);
+  backdrop-filter: blur(1.5px);
+}
+.drop-open-overlay::before {
+  content: '';
+  position: absolute;
+  inset: 14px;
+  border: 2px dashed var(--accent);
+  border-radius: 10px;
+  opacity: 0.75;
+}
+.drop-open-overlay-label {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 10px 18px;
+  border-radius: 8px;
+  background: var(--bg-dialog);
+  border: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 500;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.25);
+  white-space: nowrap;
+}
+
 .pycharm-dropdown-wrapper {
   position: relative;
   display: inline-flex;
@@ -563,6 +599,14 @@ body.platform-mac .ide-titlebar {
 }
 .branch-pill-loading {
   cursor: default;
+}
+/* 非 git 项目：静态文案（不参与脉冲动画），同宽占位以稳住后续 tab 布局 */
+.branch-pill-nogit {
+  cursor: default;
+  color: var(--text-muted);
+}
+.branch-pill-nogit:hover {
+  background: transparent;
 }
 .branch-skeleton-bar {
   width: 72px;
@@ -1108,6 +1152,34 @@ body[data-variant="2"] .pycharm-menu-item.project-item.selected {
   gap: 6px;
   justify-content: flex-end;
 }
+.pycharm-new-branch-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+.pycharm-new-branch-switch input[type='checkbox'] {
+  accent-color: var(--accent);
+  margin: 0;
+}
+/* 通用文本输入框的可选复选框行（New Branch from ref 等） */
+.py-name-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  padding: 0 2px;
+}
+.py-name-checkbox input[type='checkbox'] {
+  accent-color: var(--accent);
+  margin: 0;
+}
 .pycharm-btn-primary {
   background: var(--accent);
   border: none;
@@ -1350,6 +1422,27 @@ body.platform-mac .tool-sidebar-strip {
   background: var(--bg-hover, var(--overlay-faint));
 }
 /* 追加查看的外部目录：与项目根视觉区分（描边底色 + 徽标） */
+/* 项目树 / 外部追加目录（含拖入项）之间的分组横条 */
+.tree-external-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+  user-select: none;
+}
+.tree-external-divider-label {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  color: var(--text-muted, var(--text-muted));
+}
+.tree-external-divider-line {
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border-color);
+  opacity: 0.7;
+}
 .tree-external-root {
   margin-top: 4px;
   background: var(--overlay-faint);
@@ -4764,6 +4857,12 @@ body[data-variant="2"] .empty-app-title {
 .editor-error-icon { font-size: 26px; color: var(--warn); }
 .editor-error-title { font-size: 13px; font-weight: 600; color: var(--text-primary); }
 .editor-error-detail { max-width: 620px; font-family: var(--font-code); font-size: 12px; color: var(--text-secondary); word-break: break-all; }
+/* 分支切换上下文提示：中文说明（非路径），用 UI 字体并弱化 */
+.editor-error-detail.editor-error-hint {
+  font-family: var(--font-ui);
+  color: var(--text-muted, var(--text-secondary));
+  margin-top: 2px;
+}
 .editor-error-actions { display: flex; gap: 8px; margin-top: 10px; }
 .editor-error-actions button {
   padding: 5px 14px;

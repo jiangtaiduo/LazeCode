@@ -63,6 +63,7 @@ import { useStableCallback } from './hooks/useStableCallback';
 import { useFavoriteBranches } from './hooks/useFavoriteBranches';
 import { useCommitMessageHistory, loadCommitMessages } from './hooks/useCommitMessageHistory';
 import { invokeCommand, isTauriEnvironment } from './services/tauriBridge';
+import { closePtyByProject } from './services/pty';
 import { useAppMenu, MENU } from './services/appMenu';
 import { setCursorIndicator as setCursorRef, useCursorIndicator } from './services/cursorStore';
 import { checkForAppUpdate, type UpdateInfo } from './services/updaterService';
@@ -298,6 +299,8 @@ interface ProjectSessionSnapshot {
   fileTree: FileNode[];
   /** 工作区根是否为单个文件（单文件工作区不显示可折叠的项目根节点） */
   workspaceIsFile: boolean;
+  /** 追加浏览的外部目录/拖入文件（切走再切回要保留，否则附加的文件会消失） */
+  externalRoots: FileNode[];
   treeExpanded: Set<string>;
   activeTab: 'editor' | 'diff' | 'compare-branches';
   /** Diff 标签是否存在（与「是否为当前标签」分离：切去看别的文件不该让 Diff 消失） */
@@ -489,7 +492,10 @@ export const App: React.FC = () => {
   const [fsClipboard, setFsClipboard] = useState<{ path: string; cut: boolean } | null>(null);
   const [nameDialog, setNameDialog] = useState<NameDialogState | null>(null);
   /** 通用文本输入框（替代 window.prompt —— 抽离为 hooks/useTextPrompt） */
-  const { textPromptReq, appPrompt, resolveTextPrompt } = useTextPrompt();
+  const { textPromptReq, appPrompt, resolveTextPrompt, lastChecked } = useTextPrompt();
+  /** lastChecked 的 ref 镜像：await appPrompt 返回后的同步读取点 */
+  const promptCheckedRef = useRef(true);
+  promptCheckedRef.current = lastChecked;
   // Compare With…：任意两个磁盘文件的内容对比
   const [fsCompareFiles, setFsCompareFiles] = useState<{ oldPath: string; newPath: string } | null>(null);
   // Stash 对话框
@@ -907,6 +913,9 @@ export const App: React.FC = () => {
    * 用 ref 转发：实现仍是那一份，这里只是提前拿到可调用的壳。
    */
   const closeFilesForExternalDeleteRef = useRef<(paths: string[]) => void>(() => {});
+  /** closeWorkspace 的前向 ref：closeFile（定义在前）在单文件会话关掉最后一个
+      标签时要结束会话，回到欢迎页。实现仍是 closeWorkspace 那一份。 */
+  const closeWorkspaceRef = useRef<() => void>(() => {});
   const closeFilesForExternalDelete = useCallback(
     (paths: string[]) => closeFilesForExternalDeleteRef.current(paths),
     []
@@ -1445,6 +1454,10 @@ export const App: React.FC = () => {
     if (activeFilePathRef.current === pathToClose) {
       if (remaining.length > 0) {
         void openFile(remaining[Math.min(Math.max(closedIndex, 0), remaining.length - 1)]);
+      } else if (workspaceIsFileRef.current) {
+        // 单文件会话不是项目：最后一个编辑器标签关掉 = 结束会话回欢迎页
+        //（会话本身没有项目 tab 可留，留着只会是一个空壳工作区）。
+        closeWorkspaceRef.current();
       } else {
         setActiveFilePath('');
       }
@@ -2114,6 +2127,11 @@ export const App: React.FC = () => {
     setSequencer(null);
     setHasMoreCommits(false);
     setCurrentBranch('');
+    // isRepo 同步回乐观初值：后续项目以「未知的 git 状态」看待，refreshGit
+    // 再据 git repo info 落地为 true/false。此前保持上一项目的值：从单文件
+    // 工作区（is_repo=false）切回 git 项目时，在数据到达前 pill 显示的是
+    // 「非 Git 仓库」占位 —— 用户看到"分支名丢了"，数据到达才恢复。
+    setIsRepo(true);
     // 日志过滤必须跟着项目重置：logPath 是 A 项目的路径，切到 B 项目后
     // git_log 拿着它当 pathspec，B 仓库里匹配不到 → 静默返回空列表，
     // 用户看到的是「新项目没有提交」而非「过滤不匹配」。
@@ -2217,9 +2235,6 @@ export const App: React.FC = () => {
         }
       }
       const seq = ++workspaceSeqRef.current;
-      openOrderRef.current = [root, ...openOrderRef.current.filter(p => p !== root)];
-      // tab 条：新项目追加到尾部（用户拖拽过的话保持已有位置）
-      setTabOrder(order => (order.includes(root) ? order : [...order, root]));
       setExternalRoots([]);
       // 向后端登记工作区根：read/write/delete/paste 只允许落在已登记根之内。
       // 后端原本对这些命令零路径校验，等于「打开项目即授予任意文件读写」。
@@ -2242,17 +2257,12 @@ export const App: React.FC = () => {
         // 失配而提前返回。monotonic forward 不可能复活任何旧的 in-flight。
         workspaceSeqRef.current = seq + 1;
         showStatus(t().status.openProjectFailedAuth(errText(err)));
-        openOrderRef.current = openOrderRef.current.filter(p => p !== root);
-        setTabOrder(order => order.filter(p => p !== root));
         setExternalRoots([]);
         return;
       }
       setWorkspacePath(root);
-      saveRecentWorkspace(root);
       // 项目层设置与树加载并行：读文件是独立 IPC，不阻塞树渲染
       refreshProjectLayer(root, () => seq === workspaceSeqRef.current);
-      // 遥测（只记"打开了"，不记路径）：耗时/命令明细由 tauriBridge 统一记
-      trackEvent('Project Opened');
       resetGitUiForWorkspaceSwitch();
       try {
         const tree = await invokeCommand<FileNode>('read_directory', { path: root, maxDepth: 2, ignored: settings.ignoredPatterns });
@@ -2274,7 +2284,9 @@ export const App: React.FC = () => {
         setBuffers({});
 
         if (!tree.isDirectory) {
-          // 单文件工作区：将单个文件放入树中，并立刻打开它
+          // 单文件会话：**不是项目**。不写最近项目/最后工作区（否则重启会
+          // 自动打开一张图），不进项目 tab 序（用户要求顶栏不显示单文件），
+          // 也不参与项目会话快照（切走即丢弃，关闭即整个消失）。
           setWorkspaceIsFile(true);
           setFileTree(internFileTree([tree]));
           setTreeExpanded(new Set());
@@ -2287,6 +2299,12 @@ export const App: React.FC = () => {
           setTreeExpanded(new Set([root]));
           setOpenFilePaths([]);
           setActiveFilePath('');
+          // 只有目录才是「项目」：最近项目 / 最后工作区 / 项目 tab 序在这里登记
+          saveRecentWorkspace(root);
+          openOrderRef.current = [root, ...openOrderRef.current.filter(p => p !== root)];
+          setTabOrder(order => (order.includes(root) ? order : [...order, root]));
+          // 遥测（只记"打开了"，不记路径）：耗时/命令明细由 tauriBridge 统一记
+          trackEvent('Project Opened');
         }
       } catch (err) {
         showStatus(t().status.loadWorkspaceFailed(errText(err)));
@@ -2389,29 +2407,40 @@ export const App: React.FC = () => {
     if (pruned) setSessionPruneTick(t => t + 1);
   }, []);
 
-  /** 窗口内切换项目：快照当前项目会话 → 恢复目标项目（有快照恢复，无快照正常载入） */
+  /** 窗口内切换项目：快照当前项目会话 → 恢复目标项目（有快照恢复，无快照正常载入）。
+   *  单文件会话不是项目：不存快照，切走前落盘脏缓冲后整个丢弃。 */
   const switchToProject = useCallback(
-    (target: string) => {
+    async (target: string): Promise<void> => {
       if (!target || target === workspacePath) return;
+      // 单文件会话切走：先把脏缓冲写盘（失败就放弃切换，不静默丢修改），
+      // 再释放它的工作区授权与终端 —— 它不会以快照形式回来。
+      if (workspacePath && workspaceIsFile) {
+        const dirty = Object.values(buffersRef.current).some(b => b.dirty);
+        if (dirty) {
+          await autoSaveAll();
+          const remaining = Object.values(buffersRef.current).filter(b => b.dirty).length;
+          if (remaining > 0) {
+            showStatus(t().status.stillDirtyCancelledCount(remaining));
+            return;
+          }
+        }
+        if (isTauriEnvironment()) {
+          void invokeCommand('unregister_workspace', { path: workspacePath }).catch(() => {});
+          void closePtyByProject(workspacePath).catch(() => {});
+        }
+      }
       // 作废在途的 loadWorkspace 响应：快照恢复是同步的，旧项目的异步树/文件响应不得再落地
       workspaceSeqRef.current += 1;
-      setExternalRoots([]);
       // 立刻清掉旧项目的 Changes/分支/提交，并作废在途 Git 刷新
       resetGitUiForWorkspaceSwitch();
-      openOrderRef.current = [
-        target,
-        ...(workspacePath && workspacePath !== target ? [workspacePath] : []),
-        ...openOrderRef.current.filter(p => p !== target && p !== workspacePath),
-      ];
-      // tab 条：目标项目已在表内（用户排过序）就保持原位
-      setTabOrder(order => (order.includes(target) ? order : [...order, target]));
-      if (workspacePath) {
+      if (workspacePath && !workspaceIsFile) {
         projectSessionsRef.current[workspacePath] = {
           openFilePaths,
           activeFilePath,
           buffers: { ...buffersRef.current },
           fileTree,
           workspaceIsFile,
+          externalRoots,
           treeExpanded: new Set(treeExpanded),
           activeTab: activeTab === 'compare-branches' ? 'editor' : activeTab,
           diffOpen,
@@ -2431,10 +2460,17 @@ export const App: React.FC = () => {
       const snap = projectSessionsRef.current[target];
       if (snap) {
         delete projectSessionsRef.current[target];
+        // 项目才进打开序 / tab 条（单文件目标无快照，走 loadWorkspace 且不登记）
+        openOrderRef.current = [
+          target,
+          ...openOrderRef.current.filter(p => p !== target),
+        ];
+        setTabOrder(order => (order.includes(target) ? order : [...order, target]));
         buffersRef.current = { ...snap.buffers };
         setBuffers(buffersRef.current);
         setFileTree(snap.fileTree);
         setWorkspaceIsFile(snap.workspaceIsFile ?? false);
+        setExternalRoots(snap.externalRoots ?? []);
         setTreeExpanded(new Set(snap.treeExpanded));
         setOpenFilePaths(snap.openFilePaths);
         setActiveFilePath(snap.activeFilePath);
@@ -2455,17 +2491,20 @@ export const App: React.FC = () => {
         saveRecentWorkspace(target);
         // Git 状态已清空；随 workspacePath 变化的 refreshGit effect 立即拉新项目数据
       } else {
-        void loadWorkspace(target);
+        // 无快照：目录 → loadWorkspace 正常载入并登记为项目；
+        // 单文件 → 单文件会话（不登记项目、不进 tab 条）
+        await loadWorkspace(target);
       }
       // 3) 快照数可能因本次新增超出上限，异步回收最旧的那些（含写盘，故不阻塞切换）
       void pruneProjectSessions(target);
     },
     [
       workspacePath,
+      workspaceIsFile,
       openFilePaths,
       activeFilePath,
       fileTree,
-      workspaceIsFile,
+      externalRoots,
       treeExpanded,
       activeTab,
       markdownViewModes,
@@ -2479,34 +2518,152 @@ export const App: React.FC = () => {
       fsCompareFiles,
       activeBottomTool,
       loadWorkspace,
-      resetGitUiForWorkspaceSwitch
+      resetGitUiForWorkspaceSwitch,
+      autoSaveAll,
+      showStatus
+    ]
+  );
+
+  /**
+   * 打开拖入 / Open With 的路径（文件或目录）。
+   *
+   * 语义（用户口径：单文件不是项目）：
+   * - 目录 → 作为项目打开（switchToProject）；
+   * - 文件，且当前无项目 / 当前是单文件会话 → 进入或追加到同一单文件会话
+   *   （顶栏不显示为项目；关闭即消失，不做快照）；
+   * - 文件，且当前有目录项目 → 作为「外部 / 拖入」项附加到当前项目并打开编辑。
+   */
+  const openDroppedPaths = useCallback(
+    async (paths: string[]) => {
+      // 循环内的本地上下文：state 更新是异步的，连续拖入多个文件时
+      // 闭包里的 workspacePath/workspaceIsFile 不会跟着变。
+      let currentKey = workspacePath;
+      let currentIsFile = workspaceIsFile;
+      for (const path of paths) {
+        if (!path) continue;
+        // 拖入即用户手势：先登记工作区授权（与原生 pick_path 同一授权模型），
+        // 后续 read_directory / 编辑器读写 / 外部修改监听都在授权面内。
+        try {
+          await invokeCommand('register_workspace', { path, readOnly: false });
+        } catch (err) {
+          showStatus(t().status.openDirFailed(errText(err)));
+          continue;
+        }
+        let node: FileNode | null = null;
+        try {
+          node = await invokeCommand<FileNode>('read_directory', {
+            path,
+            maxDepth: 0,
+            ignored: settings.ignoredPatterns
+          });
+        } catch {
+          node = null;
+        }
+        if (!node) continue;
+        if (node.isDirectory) {
+          await switchToProject(path);
+          currentKey = path;
+          currentIsFile = false;
+          continue;
+        }
+        // ── 文件 ──
+        const file = node;
+        if (currentKey && !currentIsFile) {
+          // 有目录项目：附加为外部文件并打开（不改变当前项目）
+          setExternalRoots(prev => (prev.some(r => r.path === file.path) ? prev : [...prev, file]));
+          setOpenFilePaths(prev => (prev.includes(file.path) ? prev : [...prev, file.path]));
+          setActiveFilePath(file.path);
+          setActiveTab('editor');
+          void openFile(file.path);
+          continue;
+        }
+        // 无项目或单文件会话：文件进同一个「单文件会话」（不是项目）
+        const first = !currentKey;
+        if (first) {
+          workspaceSeqRef.current += 1;
+          setExternalRoots([]);
+          setWorkspacePath(path);
+          resetGitUiForWorkspaceSwitch();
+          currentKey = path;
+        }
+        currentIsFile = true;
+        setWorkspaceIsFile(true);
+        setFileTree(prev => {
+          const base = first ? [] : prev;
+          return internFileTree(base.some(n => n.path === file.path) ? base : [...base, file]);
+        });
+        setOpenFilePaths(prev => (prev.includes(file.path) ? prev : [...prev, file.path]));
+        setActiveFilePath(file.path);
+        setActiveTab('editor');
+        void openFile(file.path);
+      }
+    },
+    [
+      workspacePath,
+      workspaceIsFile,
+      openFile,
+      switchToProject,
+      resetGitUiForWorkspaceSwitch,
+      settings.ignoredPatterns,
+      showStatus
     ]
   );
 
   // Finder "Open With" / Dock recent documents -> native RunEvent::Opened ->
-  // open the path as the current project (switchToProject handles dirty buffers).
+  // 与拖放同一语义（文件 → 单文件会话；目录 → 项目）。
   useEffect(() => {
     if (!isTauriEnvironment()) return;
     let unlisten: (() => void) | undefined;
     void listen<string[]>('app://open-paths', event => {
-      const target = event.payload.find(Boolean);
-      if (target) switchToProject(target);
+      void openDroppedPaths(event.payload);
     }).then(fn => {
       unlisten = fn;
     });
     return () => {
       unlisten?.();
     };
-  }, [switchToProject]);
+  }, [openDroppedPaths]);
 
-  /** 本窗口可切换项目列表随工作区变化而更新（当前项目始终在列） */
+  /** 拖拽打开预览状态：enter/over 记鼠标位置，用于画整个窗口的高亮遮罩 */
+  const [dropHover, setDropHover] = useState<{ x: number; y: number } | null>(null);
+
+  // Finder/桌面向窗口拖文件或文件夹：Tauri webview DragDrop 事件直接带本地
+  // 路径，无需 webUtils。语义见 openDroppedPaths。
   useEffect(() => {
-    const paths = Array.from(new Set([workspacePath, ...Object.keys(projectSessionsRef.current)])).filter(Boolean);
+    if (!isTauriEnvironment()) return;
+    const win = getCurrentWindow();
+    let unlisten: (() => void) | undefined;
+    void win.onDragDropEvent(event => {
+      const p = event.payload;
+      if (p.type === 'enter' || p.type === 'over') {
+        setDropHover({ x: p.position.x, y: p.position.y });
+      } else if (p.type === 'drop') {
+        setDropHover(null);
+        void openDroppedPaths(p.paths);
+      } else {
+        setDropHover(null);
+      }
+    }).then(fn => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [openDroppedPaths]);
+
+  /** 本窗口可切换项目列表随工作区变化而更新（单文件不是项目：不进项目 tab 条） */
+  useEffect(() => {
+    const paths = Array.from(
+      new Set([
+        ...(workspacePath && !workspaceIsFile ? [workspacePath] : []),
+        ...Object.keys(projectSessionsRef.current)
+      ])
+    ).filter(Boolean);
     const mapped = paths.map(p => ({ path: p, name: p.split(/[\\/]/).filter(Boolean).pop() ?? p }));
     setSessionProjects(prev =>
       prev.length === mapped.length && prev.every((x, i) => x.path === mapped[i].path) ? prev : mapped
     );
-  }, [workspacePath, sessionPruneTick]);
+  }, [workspacePath, workspaceIsFile, sessionPruneTick]);
 
   /** 窗口标题同步为当前项目名：供其它窗口的「打开的项目」分区展示 */
   useEffect(() => {
@@ -2553,9 +2710,37 @@ export const App: React.FC = () => {
         });
         picked = typeof res === 'string' ? res : null;
       }
-      if (picked) switchToProject(picked);
+      if (picked) void switchToProject(picked);
     } catch (err) {
       showStatus(t().status.openDirFailed(errText(err)));
+    }
+  }, [switchToProject, showStatus, workspacePath]);
+
+  /**
+   * 无项目新建文件（File › New File… / 欢迎页入口）：
+   * NSSavePanel 由用户定文件名 + 目录（默认文稿目录），然后按面板授权
+   * 写空文件并直接打开。有项目时走同一条命令：面板授权落 PathGrantRegistry，
+   * 工作区路径仍走原来的白名单授权写文件（write_file_granted 双通道）。
+   */
+  const handleNewFile = useCallback(async () => {
+    if (!isTauriEnvironment()) {
+      showStatus(t().status.browserPreviewNoDirPicker);
+      return;
+    }
+    try {
+      // 默认目录：有项目用项目根（面板自己会带出上次目录），无项目不传 ——
+      // NSSavePanel 默认落在用户的文稿目录（macOS 惯例）。
+      const picked = await invokeCommand<string | null>('pick_save_path', {
+        title: t().titleBar.newFileTitle,
+        defaultDir: workspacePath || undefined,
+        defaultName: null
+      });
+      if (!picked) return;
+      await invokeCommand('write_file_granted', { path: picked, content: '' });
+      await switchToProject(picked);
+      showStatus(t().status.createdFile(baseNameOf(picked)));
+    } catch (err) {
+      showStatus(t().status.fileOpFailed(errText(err)));
     }
   }, [switchToProject, showStatus, workspacePath]);
 
@@ -3052,11 +3237,15 @@ export const App: React.FC = () => {
     }
   }, [workspacePath, refreshGit, appPrompt]);
 
-  // 创建并切换新分支
-  const handleCreateBranch = useCallback(async (branchName: string) => {
+  // 创建新分支（switch=true 同时切换；false 只建不切，HEAD 留在原分支）
+  const handleCreateBranch = useCallback(async (branchName: string, switchTo?: boolean) => {
     if (!workspacePath) return;
     try {
-      await invokeCommand('git_create_branch', { repoPath: resolveGitRoot(), branch: branchName });
+      await invokeCommand('git_create_branch', {
+        repoPath: resolveGitRoot(),
+        branch: branchName,
+        switch: switchTo !== false
+      });
       await refreshGit();
     } catch (err) {
       const message = errText(err);
@@ -3379,14 +3568,23 @@ export const App: React.FC = () => {
   // ---- 分支右键菜单动作（对齐 PyCharm 分支右键）----
   /** toggleFavoriteBranch 已随 hook 迁出（hooks/useFavoriteBranches）。 */
 
-  /** 从选定 ref 创建并切换新分支（New Branch from Selected） */
+  /** 从选定 ref 创建新分支（New Branch from Selected）：弹窗可取消“创建后切换” */
   const handleCreateBranchFrom = useCallback(
     async (refName: string) => {
-      const name = await appPrompt(t().git.branchCreatedPrompt(refName));
+      const name = await appPrompt(t().git.branchCreatedPrompt(refName), '', {
+        checkbox: { label: t().titleBar.checkoutAfterCreate, defaultChecked: true }
+      });
+      // lastChecked 是 resolveTextPrompt 落下的勾选态（await 之后已定）
+      const switchTo = promptCheckedRef.current;
       if (!name || !name.trim()) return;
       if (!workspacePath) return;
       try {
-        await invokeCommand('git_create_branch', { repoPath: resolveGitRoot(), branch: name.trim(), startPoint: refName });
+        await invokeCommand('git_create_branch', {
+          repoPath: resolveGitRoot(),
+          branch: name.trim(),
+          startPoint: refName,
+          switch: switchTo
+        });
         showGitToast(t().git.branchCreatedFrom(refName, name.trim()), 6000);
         await refreshGit();
       } catch (err) {
@@ -3449,10 +3647,12 @@ export const App: React.FC = () => {
     [workspacePath, refreshGit, showGitToast]
   );
 
-  /** 分支树工具栏：新建分支（先输入名字，再复用 TitleBar 的创建逻辑） */
+  /** 分支树工具栏：新建分支（弹窗含「创建后切换」复选框） */
   const handleCreateBranchPrompt = useCallback(async () => {
-    const name = await appPrompt(t().git.branchCreatedPrompt(currentBranch || 'HEAD'));
-    if (name?.trim()) await handleCreateBranch(name.trim());
+    const name = await appPrompt(t().git.branchCreatedPrompt(currentBranch || 'HEAD'), '', {
+      checkbox: { label: t().titleBar.checkoutAfterCreate, defaultChecked: true }
+    });
+    if (name?.trim()) await handleCreateBranch(name.trim(), promptCheckedRef.current);
   }, [appPrompt, currentBranch, handleCreateBranch]);
 
   /** Show Files Diff / Compare Versions 的文件差异抽屉：把两个 ref 当作“提交”
@@ -5397,9 +5597,10 @@ export const App: React.FC = () => {
       if (isTauriEnvironment()) {
         // 注销工作区授权：关闭后该目录下的文件不再可读写
         void invokeCommand('unregister_workspace', { path: closing }).catch(() => {});
-        // 单文件工作区的终端 cwd 是文件所在目录（见 GhosttyTerminal spawnCwd）
-        const terminalCwd = snap?.workspaceIsFile ? parentOfPath(closing) : closing;
-        void invokeCommand('pty_close_by_cwd', { cwd: terminalCwd }).catch(() => {});
+        // 归属键 projectKey = 工作区路径（GhosttyTerminal spawn 时传入）。
+        // cwd 对「同目录两个单文件工作区」相同 —— 按它关会把别人的终端
+        // 一起杀掉；projectKey 在这两种场景都唯一。
+        void closePtyByProject(closing).catch(() => {});
       }
       openOrderRef.current = openOrderRef.current.filter(p => p !== closing);
       setTabOrder(order => order.filter(p => p !== closing));
@@ -5425,10 +5626,9 @@ export const App: React.FC = () => {
       if (isTauriEnvironment()) {
         // 注销工作区授权：关闭后该目录下的文件不再可读写
         void invokeCommand('unregister_workspace', { path: closedPath }).catch(() => {});
-        // 单文件工作区的终端 cwd 是文件所在目录（见 GhosttyTerminal spawnCwd），
-        // 关闭时也必须按同一形态匹配，否则 pty_close_by_cwd 会漏掉。
-        const terminalCwd = workspaceIsFile ? parentOfPath(closedPath) : closedPath;
-        void invokeCommand('pty_close_by_cwd', { cwd: terminalCwd }).catch(() => {});
+        // 归属键 projectKey = 工作区路径（GhosttyTerminal spawn 时传入），
+        // 单文件/目录两种形态都按它唯一关（ cwd 匹配在同目录单文件下会误杀）。
+        void closePtyByProject(closedPath).catch(() => {});
       }
     }
     // 作废在途加载；在清除顺序前找出上一个仍打开（有会话快照）的项目
@@ -5506,6 +5706,7 @@ export const App: React.FC = () => {
       setBuffers(buffersRef.current);
       setFileTree(prevSnap.fileTree);
       setWorkspaceIsFile(prevSnap.workspaceIsFile ?? false);
+      setExternalRoots(prevSnap.externalRoots ?? []);
       setTreeExpanded(new Set(prevSnap.treeExpanded));
       setOpenFilePaths(prevSnap.openFilePaths);
       setActiveFilePath(prevSnap.activeFilePath);
@@ -5529,13 +5730,19 @@ export const App: React.FC = () => {
       refreshProjectLayer(prevPath, () => workspacePathRef.current === prevPath);
       showStatus(t().status.projectClosedBackTo(baseNameOf(prevPath)));
     } else {
-      clearLastWorkspace();
+      // 关闭的若是单文件会话（不是项目），不要清掉 LAST_WORKSPACE：
+      // 它记录的是最近一次打开的**项目**，下次启动仍应恢复该项目。
+      // 单文件本来也不写 lastWorkspace（loadWorkspace 只在目录分支登记）。
+      if (!workspaceIsFile) clearLastWorkspace();
       // 无项目可回：清掉已关项目的层，回落 user 层
       clearProjectLayer();
       setSettings(loadSettings());
       showStatus(t().status.projectClosedNoneLeft);
     }
   }, [workspacePath, workspaceIsFile, refreshProjectLayer]);
+
+  // closeFile（定义在前）在单文件会话关掉最后一个标签时复用同一份关闭实现
+  closeWorkspaceRef.current = () => void closeWorkspace();
 
   const handleNewWindow = useCallback(() => {
     if (isTauriEnvironment()) {
@@ -5654,6 +5861,7 @@ export const App: React.FC = () => {
   useAppMenu({
     [MENU.NEW_WINDOW]: () => handleNewWindow(),
     [MENU.OPEN_PROJECT]: () => void pickWorkspace(),
+    [MENU.NEW_FILE]: () => void handleNewFile(),
     [MENU.CLOSE_PROJECT]: () => workspacePath && closeWorkspace(),
     [MENU.SAVE]: () => void saveActiveFile(),
     [MENU.SAVE_ALL]: () => void autoSaveAll(),
@@ -5991,6 +6199,7 @@ export const App: React.FC = () => {
         onOpenCommit={() => setActiveDrawer(prev => prev === 'commit' ? null : 'commit')}
         onPush={pushStable}
         isRepo={isRepo}
+        singleFile={workspaceIsFile}
       />
       {/* 2. Main IDE Body */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
@@ -6132,6 +6341,7 @@ export const App: React.FC = () => {
           {!workspacePath ? (
             <WelcomeView
               onOpenProject={pickWorkspace}
+              onNewFile={() => void handleNewFile()}
               onCloneRepository={() => setCloneOpen(true)}
               onOpenRecent={path => void loadWorkspace(path)}
               onRemoveRecent={removeRecentWorkspace}
@@ -6411,10 +6621,12 @@ export const App: React.FC = () => {
               onPointerDown={startResizeTerminalDock}
               title={t().git.dragResizeConsoleWidth}
             />
+            {/* 无项目 / 单文件会话：控制台落在 ~（用户目录）。单文件的
+                projectKey 是文件路径，不能当 cwd；Rust 侧也会再兜一层。 */}
             <GhosttyTerminal
               ref={terminalRef}
-              cwd={workspacePath || '.'}
-              spawnCwd={workspaceIsFile ? parentOfPath(workspacePath) : workspacePath || '.'}
+              cwd={workspacePath && !workspaceIsFile ? workspacePath : undefined}
+              spawnCwd={workspacePath && !workspaceIsFile ? workspacePath : undefined}
               projectKey={workspacePath}
               openProjects={sessionProjects.map(p => p.path)}
               onNotice={showStatus}
@@ -6714,7 +6926,7 @@ export const App: React.FC = () => {
       </React.Suspense>
 
       {/* 通用文本输入框（window.prompt 替代品：wry 未实现 JS 面板） */}
-      <TextPromptDialog request={textPromptReq} onConfirm={v => resolveTextPrompt(v)} onClose={() => resolveTextPrompt(null)} />
+      <TextPromptDialog request={textPromptReq} onConfirm={(v, checked) => resolveTextPrompt(v, checked)} onClose={() => resolveTextPrompt(null)} />
 
       {/* 通用确认弹窗（替代原生 NSAlert） */}
       <ConfirmDialog />
@@ -6905,6 +7117,15 @@ export const App: React.FC = () => {
               {t().updater.toastActionUpdate}
             </button>
           </div>
+        </div>
+      )}
+      {dropHover && (
+        <div
+          className="drop-open-overlay"
+          style={{ left: `${dropHover.x}px`, top: `${dropHover.y}px` }}
+          data-file-drop="active"
+        >
+          <span className="drop-open-overlay-label">{t().common.dropToOpenLabel}</span>
         </div>
       )}
     </div>

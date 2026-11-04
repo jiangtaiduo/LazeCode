@@ -12,6 +12,7 @@ import { isTauriEnvironment } from './tauriBridge';
 export const MENU = {
   NEW_WINDOW: 'app-menu://new_window',
   OPEN_PROJECT: 'app-menu://open_project',
+  NEW_FILE: 'app-menu://new_file',
   CLOSE_PROJECT: 'app-menu://close_project',
   SAVE: 'app-menu://save',
   SAVE_ALL: 'app-menu://save_all',

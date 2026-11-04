@@ -123,8 +123,9 @@ interface GhosttyTerminalProps {
   /** 最大化/还原面板切换 */
   onToggleMaximize?: () => void;
   /**
-   * 终端 spawn 的工作目录。单文件工作区的 projectKey 是文件路径，不能直接
-   * 当 cwd 用；父组件传文件所在目录，目录工作区传工作区本身。
+   * 终端 spawn 的工作目录。目录工作区传工作区本身；单文件会话 / 未打开项目
+   * 时父组件不传 —— 单文件的 projectKey 是文件路径不能当 cwd，后端会回退到
+   * 用户目录（~）。
    */
   spawnCwd?: string;
   /** 状态栏提示（标签上限 / 预算耗尽等）；未提供时静默。 */
@@ -638,7 +639,8 @@ export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTe
   }, [visible, activeTabId, tabs, projectKey]);
 
   const addTab = useCallback(async () => {
-    if (!projectKey) return;
+    // projectKey 允许为空：欢迎页打开了控制台也不能什么都不显示 ——
+    // 空 key 就是「未绑定项目」的会话组，cwd 由后端回退到 ~。
     // 每个分屏对应一个常驻 PTY（shell 进程 + 读线程 + fd），设上限防资源无界消耗。
     // 按钮在达到上限时禁用；这里兜住自动补标签等非按钮路径。
     const currentTabs = tabsRef.current;
@@ -715,7 +717,9 @@ export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTe
   // 被复用（它们的 PTY 已经终止，会显示成死终端）。
   useEffect(() => {
     if (tabs.length === 0) return;
-    const keep = new Set([projectKey, ...openProjects].filter(Boolean));
+    // ''（未绑定项目的会话）是 app 级会话：切到项目也不回收，回到欢迎页
+    // 还能接上之前那个 shell；其余按当前项目 + 常驻项目保留。
+    const keep = new Set(['', projectKey, ...openProjects]);
     const stale = tabs.filter(t => !keep.has(t.projectKey));
     if (stale.length === 0) return;
     const staleIds = new Set(stale.map(t => t.id));
@@ -736,9 +740,10 @@ export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTe
     stalePanes.forEach(id => closePtyById(id));
   }, [openProjects, projectKey, tabs]);
 
-  // 切换到某个项目且该项目还没有会话时，自动补一个新会话
+  // 切换到某个项目且该项目还没有会话时，自动补一个新会话；未打开项目
+  // （projectKey 为空）同样补一个 ~ 下的会话，而不是留一块空白面板。
   useEffect(() => {
-    if (!visible || !projectKey) return;
+    if (!visible) return;
     if (tabs.some(t => t.projectKey === projectKey)) return;
     void addTab();
   }, [visible, projectKey, tabs, addTab]);
@@ -1071,6 +1076,7 @@ export const GhosttyTerminal = React.forwardRef<GhosttyTerminalHandle, GhosttyTe
                           ? spawnCwd ?? tab.projectKey ?? cwd
                           : tab.projectKey
                       }
+                      projectKey={tab.projectKey}
                       shell={shell}
                       fontSize={fontSize}
                       themeKey={themeKey}
@@ -1128,6 +1134,8 @@ interface SingleGhosttySessionProps {
   sessionId: string;
   cwd?: string;
   shell?: string;
+  /** 归属项目 key（App 的 workspacePath，含单文件路径）：PTY 关闭按它匹配 */
+  projectKey?: string;
   fontSize?: number;
   themeKey?: string;
   /** 面板可见且这是当前活动会话：挂载/激活后自动聚焦画布 */
@@ -1153,7 +1161,7 @@ interface SingleGhosttySessionProps {
   onUiEvent?: (sessionId: string) => void;
 }
 
-const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, cwd, shell, fontSize = DEFAULT_FONT_SIZE, themeKey, active = false, onScreen = active, placement = 'bottom', onExited, onActivate, onPwdChange, onUserInput, onUiEvent }) => {
+const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, cwd, shell, projectKey, fontSize = DEFAULT_FONT_SIZE, themeKey, active = false, onScreen = active, placement = 'bottom', onExited, onActivate, onPwdChange, onUserInput, onUiEvent }) => {
   // 字体规格由字号推导，改动后重新度量单元格网格
   const fontSpec = `${fontSize}px ${FONT_FAMILY}`;
   const hostRef = useRef<HTMLDivElement>(null);
@@ -1395,7 +1403,12 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
   const a11yLastText = useRef('');
   // shell integration 报告的 cwd；未启用时回退到 spawn 的 cwd。
   const [pwd, setPwd] = useState<string | undefined>(cwd);
-  useEffect(() => setPwd(cwd), [cwd]);
+  /** shell 是否已用 OSC 上报过 cwd：上报后不再用 spawn 结果覆盖。 */
+  const pwdReportedRef = useRef(false);
+  useEffect(() => {
+    pwdReportedRef.current = false;
+    setPwd(cwd);
+  }, [cwd]);
   // cwd 变化即上报（父组件只消费当前项目活动分屏的那一份，并入全局状态栏）
   useEffect(() => {
     onPwdChange?.(sessionId, pwd ?? null);
@@ -2166,7 +2179,9 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
         // 而 refresh 的 catch 把它静默吞掉，rAF 每秒 60 次空转，
         // 光标还在闪 —— 用户以为终端卡死了。
         unsubscribePwd = await subscribePwd(sessionId, value => {
-          if (!disposed) setPwd(value ? normalizePwd(value) : cwd);
+          if (disposed) return;
+          if (value) pwdReportedRef.current = true;
+          setPwd(value ? normalizePwd(value) : cwd);
         });
         if (disposed) {
           unsubscribePwd();
@@ -2192,7 +2207,7 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
           return;
         }
 
-        pty = await spawnPty({ sessionId, cols, rows, cwd, shell });
+        pty = await spawnPty({ sessionId, cols, rows, cwd, shell, projectKey });
         // 竞态兜底：cleanup 可能在本 await 期间就已经跑完（彼时 pty 还是
         // null，pty?.close() 是空操作）。此时 spawn 刚刚 resolve，会话已经
         // 在 Rust 侧建好了，必须由这里负责关掉 —— 否则 PtyManager 里的
@@ -2202,6 +2217,10 @@ const SingleGhosttySession: React.FC<SingleGhosttySessionProps> = ({ sessionId, 
           return;
         }
         ptyRef.current = pty;
+        // spawn 时 Rust 已把「不可用的 cwd（空 / 单文件路径）」解析成真实
+        // 工作目录（无项目 / 单文件会话 = ~）：状态栏先用它，等 shell 的
+        // OSC 上报到达后再覆盖。
+        if (!pwdReportedRef.current && pty.cwd) setPwd(pty.cwd);
         // spawn 用的就是此刻的 gridRef（可能已被首次 applyHostSize 推进），
         // 记进镜子：否则 applyHostSize 会以为 PTY 已是另一套尺寸而补发 resize。
         ptySizeRef.current = { cols, rows, cellW: cellW.current, cellH: cellH.current, synced: true };

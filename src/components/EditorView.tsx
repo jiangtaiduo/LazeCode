@@ -4,6 +4,7 @@ import type { Monaco } from '@monaco-editor/react';
 import { isTauriEnvironment, invokeCommand } from '../services/tauriBridge';
 import { isImageFile } from '../services/fileTypes';
 import { t } from '../services/i18n';
+import { describeBackendError } from '../services/i18n/errors';
 import { MONACO_THEME_BY_APP_THEME, UNICODE_HIGHLIGHT_OPTIONS } from '../services/monacoSetup';
 import { IconHistory, IconAnnotate } from './FileIcons';
 import { EditorContextMenu, type EditorMenuState } from './EditorContextMenu';
@@ -514,7 +515,12 @@ export const EditorView: React.FC<EditorViewProps> = ({
         <div className="editor-error-panel">
           <div className="editor-error-icon">⚠</div>
           <div className="editor-error-title">{t().editor.cannotOpenFile}</div>
-          <div className="editor-error-detail">{loadError}</div>
+          <div className="editor-error-detail">{describeBackendError(loadError)}</div>
+          {(loadErrorCode === 'path_not_found' || loadErrorCode === 'dir_not_found') && (
+            <div className="editor-error-detail editor-error-hint">
+              {t().editor.missingMaybeBranchSwitched}
+            </div>
+          )}
           {loadErrorCode === 'file_too_large' && (
             <div className="editor-error-actions">
               <button type="button" onClick={() => onRevealFile?.(filePath)}>

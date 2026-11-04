@@ -32,6 +32,7 @@ export interface LocaleDict {
     help: string;
     newWindow: string;
     openProject: string;
+    newFile: string;
     closeProject: string;
     save: string;
     saveAll: string;
@@ -275,6 +276,8 @@ export interface LocaleDict {
     zoomIn: string;
     zoomReset: string;
     cannotOpenFile: string;
+    /** 打开失败的分支切换上下文提示（路径不存在时给出） */
+    missingMaybeBranchSwitched: string;
     blameTooltip: LocaleFn<[string, string, string]>;
     revealInFinder: string;
     forceOpen: string;
@@ -294,9 +297,13 @@ export interface LocaleDict {
     collapseAll: string;
     openExternalDir: string;
     noProjectOpen: string;
+    /** 单文件会话（临时打开）：左侧项目树不列文件，提示在编辑器标签中查看 */
+    singleFileHint: string;
     openFolder: string;
     externalDirTooltip: LocaleFn<[string]>;
     externalBadge: string;
+    /** 项目树与外部追加目录之间的分组横条文案 */
+    externalSection: string;
     removeExternalDir: string;
     nodeContextHint: string;
     containsUncommitted: string;
@@ -1033,6 +1040,8 @@ export interface LocaleDict {
     copy: string;
     copied: string;
     pathNotFound: string;
+    /** 拖入文件预览遮罩的提示（Discover 拖放打开） */
+    dropToOpenLabel: string;
   };
   /** Git 底部面板（GitBottomPanel）：页签、分支树、日志过滤栏、提交详情、右键菜单。 */
   gitPanel: {
@@ -1279,6 +1288,10 @@ export interface LocaleDict {
     projectPillTooltip: string;
     /** 分支 pill 的加载占位提示（切项目重拉分支信息时显示骨架） */
     branchLoadingTitle: string;
+    /** 非 git 项目的分支 pill 占位提示（同宽不卸载，防项目 tab 抖动） */
+    notRepoPill: string;
+    /** 新建文件（NSSavePanel）的对话框标题 */
+    newFileTitle: string;
     /** 项目 tab tooltip 的运行中提示（参数为去重命令名，可能为空串） */
     tabRunningTooltip: LocaleFn<[string]>;
     /** 项目 tab × / 中键关闭的提示（参数为项目名） */
@@ -1299,6 +1312,10 @@ export interface LocaleDict {
     filterBranchesPlaceholder: string;
     newBranchNamePlaceholder: string;
     createAndSwitch: string;
+    /** 「创建后切换到新分支」复选框文案 */
+    checkoutAfterCreate: string;
+    /** 只建不切换时确认按钮文案 */
+    createBranchOnly: string;
     newBranchAction: string;
     localBranchesSection: string;
     noMatchingLocalBranches: string;
@@ -1353,6 +1370,8 @@ export interface LocaleDict {
     quickStart: string;
     openWorkspace: string;
     openWorkspaceSub: string;
+    newFile: string;
+    newFileSub: string;
     newWindow: string;
     newWindowSub: string;
     globalSearch: string;

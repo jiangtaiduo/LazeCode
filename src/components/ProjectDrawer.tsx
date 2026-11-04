@@ -10,6 +10,7 @@ import { buildTreeOffsets, computeTreeWindow } from './treeWindow';
 const EMPTY_STATUS_BY_PATH: Record<string, string> = {};
 const EMPTY_PATH_SET: Set<string> = new Set();
 const EMPTY_ROOTS: FileNode[] = [];
+const EMPTY_FILES: FileNode[] = [];
 const EMPTY_CHANGED_FILES: GitChangedFile[] = [];
 const CHEVRON_DOWN_11 = Object.freeze(<IconChevronDown size={11} color="var(--text-muted)" />);
 const CHEVRON_RIGHT_11 = Object.freeze(<IconChevronRight size={11} color="var(--text-muted)" />);
@@ -77,10 +78,11 @@ interface ProjectDrawerProps {
   onSelectionChange?: (paths: string[]) => void;
 }
 
-/** 行高与 CSS 保持同步：.tree-node-row 22 / .tree-root-item 24 / .tree-external-root 24+margin 4 */
+/** 行高与 CSS 保持同步：.tree-node-row 22 / .tree-root-item 24 / .tree-external-root 24+margin 4 / 分组横条 22 */
 const TREE_NODE_H = 22;
 const TREE_ROOT_H = 24;
 const TREE_EXTERNAL_H = 28;
+const TREE_EXTERNAL_DIVIDER_H = 22;
 /** .project-tree-container 的 padding-top：scrollTop 坐标系从这里开始 */
 const TREE_PADDING_TOP = 4;
 /** 两屏余量，避免快速滚动时合成线程先看到空白 */
@@ -98,6 +100,7 @@ export interface ProjectDrawerHandle {
 
 type VisibleRow =
   | { kind: 'project-root'; key: string; height: number }
+  | { kind: 'external-divider'; key: string; height: number }
   | { kind: 'external-root'; key: string; ext: FileNode; height: number }
   | {
       kind: 'node';
@@ -221,9 +224,9 @@ const ProjectDrawerImpl = React.forwardRef<ProjectDrawerHandle, ProjectDrawerPro
      return prefixes;
    }, [gitStatusByPath]);
 
-  // 过滤树（filterText 状态已删除：它从未有写入入口，恒为 ''。
-  // 保留 filterNode 纯函数供未来过滤入口复用，此处直接透传原列表）。
-  const visibleFiles = files;
+  // 单文件会话（临时打开，参考 Zed/IDEA）：左侧项目栏不列文件 ——
+  // 文件只在编辑器标签里出现，项目树保持为空。
+  const visibleFiles = singleFile ? EMPTY_FILES : files;
 
   const visibleExternalRoots = externalRoots;
 
@@ -272,7 +275,13 @@ const ProjectDrawerImpl = React.forwardRef<ProjectDrawerHandle, ProjectDrawerPro
       if (projectRootExpanded) walk(visibleFiles, 1, true);
     }
 
-    for (const ext of visibleExternalRoots) {
+    for (let i = 0; i < visibleExternalRoots.length; i++) {
+      const ext = visibleExternalRoots[i];
+      if (i === 0) {
+        // 视觉分隔：项目树与追加的外部目录之间插一条分组横条（拖入的
+        // 文件/文件夹也落在这组里），外部搜索定位对它跳过。
+        out.push({ kind: 'external-divider', key: 'ext:divider', height: TREE_EXTERNAL_DIVIDER_H });
+      }
       out.push({ kind: 'external-root', key: `ext:${ext.path}`, ext, height: TREE_EXTERNAL_H });
       if (expandedPaths.has(ext.path)) walk(ext.children ?? [], 1, false);
     }
@@ -477,6 +486,22 @@ const ProjectDrawerImpl = React.forwardRef<ProjectDrawerHandle, ProjectDrawerPro
       );
     }
 
+    if (row.kind === 'external-divider') {
+      // 分组横条：项目树 / 追加的外部目录（含拖入项）的分界。
+      // pointer-events none 让 click 穿透下方（无操作），只是视觉。
+      return (
+        <div
+          key={row.key}
+          className="tree-external-divider"
+          style={{ height: row.height }}
+          role="presentation"
+        >
+          <span className="tree-external-divider-label">{t().drawer.externalSection}</span>
+          <span className="tree-external-divider-line" />
+        </div>
+      );
+    }
+
     if (row.kind === 'external-root') {
       const ext = row.ext;
       const extExpanded = expandedPaths.has(ext.path);
@@ -537,7 +562,7 @@ const ProjectDrawerImpl = React.forwardRef<ProjectDrawerHandle, ProjectDrawerPro
           <button
             className="tb-icon-btn"
             onClick={onLocateActive}
-            disabled={!activeFile || !onLocateActive}
+            disabled={!activeFile || !onLocateActive || singleFile}
             title={t().drawer.locateInTree}
           >
             <IconLocate size={14} />
@@ -561,7 +586,7 @@ const ProjectDrawerImpl = React.forwardRef<ProjectDrawerHandle, ProjectDrawerPro
           <button
             className="tb-icon-btn"
             onClick={onOpenExternalDirectory}
-            disabled={!rootPath || !onOpenExternalDirectory}
+            disabled={!rootPath || !onOpenExternalDirectory || singleFile}
             title={t().drawer.openExternalDir}
           >
             <ProjectStripeIcon size={15} color="var(--text-muted)" />
@@ -578,6 +603,16 @@ const ProjectDrawerImpl = React.forwardRef<ProjectDrawerHandle, ProjectDrawerPro
         {!rootPath ? (
           <div className="empty-project-prompt">
             <div style={{ color: 'var(--text-secondary)', marginBottom: '8px' }}>{t().drawer.noProjectOpen}</div>
+            <button className="open-dir-btn" onClick={onOpenDirectory}>
+              {t().drawer.openFolder}
+            </button>
+          </div>
+        ) : singleFile ? (
+          // 单文件会话：文件不当项目列在树里（临时查看，见编辑器标签）
+          <div className="empty-project-prompt">
+            <div style={{ color: 'var(--text-secondary)', marginBottom: '8px', lineHeight: 1.5 }}>
+              {t().drawer.singleFileHint}
+            </div>
             <button className="open-dir-btn" onClick={onOpenDirectory}>
               {t().drawer.openFolder}
             </button>

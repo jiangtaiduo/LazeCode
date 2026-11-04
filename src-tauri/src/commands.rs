@@ -1007,14 +1007,27 @@ pub async fn read_file_content(
 }
 
 /// 编辑器打开文件使用：返回文本 + 实际编码，保存时按同一编码回写。
+///
+/// 工作区白名单之外认 PathGrantRegistry（原生面板授予的路径）：
+/// `pick_save_path` 新建的无项目文件、`pick_path` 打开的外部 diff 源都
+/// 落在这一类 —— 用户手势授权的路径读写一路放行到编辑器。
 #[tauri::command]
 pub async fn read_file_text(
     path: String,
     force: Option<bool>,
     registry: tauri::State<'_, WorkspaceRegistry>,
+    grants: tauri::State<'_, PathGrantRegistry>,
     cache: tauri::State<'_, crate::file_cache::FileCache>,
 ) -> Result<FileTextDto, String> {
-    read_file_text_impl(&path, force.unwrap_or(false), &registry, Some(&cache)).await
+    if authorize_workspace_path(&registry, &path, false).is_ok()
+        || grants.is_granted(Path::new(&path))
+    {
+        return read_file_text_impl(&path, force.unwrap_or(false), &registry, Some(&cache)).await;
+    }
+    Err(crate::error_proto::coded(
+        "path_outside_workspace",
+        path.as_str(),
+    ))
 }
 
 /// 编辑器直接打开的软上限：超过即拒绝并返回 `file_too_large`（前端弹
@@ -1175,6 +1188,45 @@ pub async fn write_file_text(
     write_file_content_impl(&path, content, encoding.as_deref(), &registry, Some(&cache)).await
 }
 
+/// 写入由用户手势授权的路径（NSSavePanel / pick_save_path 新建文件的画面）。
+///
+/// 与 `write_file_content` 的差别在授权点：先试工作区白名单，未命中再认
+/// PathGrantRegistry 里的原生面板 grant（`grants.is_contained` 允许目标是
+/// grant 目录下尚未存在的.GetChild —— 面板授权的是那一刻选中的文件/父目录）。
+/// 纯前端传入的任意路径两个条件都不会过，与工作区模型同强度。
+#[tauri::command]
+pub async fn write_file_granted(
+    path: String,
+    content: String,
+    registry: tauri::State<'_, WorkspaceRegistry>,
+    grants: tauri::State<'_, PathGrantRegistry>,
+    cache: tauri::State<'_, crate::file_cache::FileCache>,
+) -> Result<(), String> {
+    let authorized = authorize_workspace_path(&registry, &path, true).or_else(|_| {
+        if grants.is_contained(Path::new(&path)) {
+            Ok(PathBuf::from(&path))
+        } else {
+            Err(crate::error_proto::coded("path_outside_workspace", &path))
+        }
+    })?;
+    // 目标可能尚不存在（save 面板新建）：写之前建出父目录，atomistic 失败时
+    // grant 已过闸，不存在路径注入面。
+    if let Some(parent) = authorized.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let owned = authorized.to_string_lossy().to_string();
+    let path_owned = path.to_string();
+    let bytes = crate::file_encoding::encode_text(&content, None)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::file_encoding::atomic_write(std::path::Path::new(&owned), &bytes)
+    })
+    .await
+    .map_err(|e| format!("write_file_granted 任务失败: {e}"))?
+    .map_err(|e| format!("Failed to write {}: {}", path_owned, e))?;
+    cache.invalidate(&authorized);
+    Ok(())
+}
+
 /// `write_file_content` 的无状态实现。成功后清掉该路径的缓存条目——
 ///
 /// 不清，下一次读会命中写之前的旧版本（key 的 mtime 已变其实不会命中，
@@ -1280,8 +1332,20 @@ pub(crate) fn base64_encode(bytes: &[u8]) -> String {
 pub async fn read_image_bytes(
     path: String,
     registry: tauri::State<'_, WorkspaceRegistry>,
+    grants: tauri::State<'_, PathGrantRegistry>,
 ) -> Result<ImageBytesDto, String> {
-    let authorized = authorize_workspace_path(&registry, &path, false)?;
+    // 与 read_file_text 同一授权模型：工作区之外认面板 grant
+    //（pick_save_path 新建的无项目文件等）。授权失败给 path_outside_workspace。
+    if authorize_workspace_path(&registry, &path, false).is_err()
+        && !grants.is_granted(Path::new(&path))
+    {
+        return Err(crate::error_proto::coded(
+            "path_outside_workspace",
+            path.as_str(),
+        ));
+    }
+    let authorized =
+        authorize_workspace_path(&registry, &path, false).unwrap_or_else(|_| PathBuf::from(&path));
     let mime = image_mime_for(&authorized)
         .ok_or_else(|| crate::error_proto::coded("not_an_image", &path))?;
     let mime = mime.to_string();
@@ -1920,7 +1984,20 @@ pub struct FileProbeDto {
 pub async fn file_probe(
     path: String,
     registry: tauri::State<'_, WorkspaceRegistry>,
+    grants: tauri::State<'_, PathGrantRegistry>,
 ) -> Result<FileProbeDto, String> {
+    // 工作区之外认 PathGrantRegistry：`pick_save_path` 新建的文件不在任何
+    // 工作区里，探针若把越界一律当不存在，打开的缓冲永远拿不到磁盘基线。
+    if authorize_workspace_path(&registry, &path, false).is_err()
+        && !grants.is_granted(Path::new(&path))
+    {
+        return Ok(FileProbeDto {
+            exists: false,
+            is_file: false,
+            len: 0,
+            mtime_ms: None,
+        });
+    }
     file_probe_impl(&path, &registry).await
 }
 
@@ -1955,17 +2032,42 @@ async fn file_probe_impl(path: &str, registry: &WorkspaceRegistry) -> Result<Fil
 pub async fn fs_delete(
     path: String,
     registry: tauri::State<'_, WorkspaceRegistry>,
+    grants: tauri::State<'_, PathGrantRegistry>,
 ) -> Result<(), String> {
+    // 工作区之外认面板 grant：pick_save_path 新建的无项目文件也要能删
+    //（与 read/write 同一授权模型，用户手势授权的文件生命周期完整）。
+    // grant 路径以原语义落 trash（软链删链接本身），不进工作区 impl。
+    if authorize_workspace_path(&registry, &path, true).is_err()
+        && grants.is_granted(Path::new(&path))
+    {
+        let path_owned = path.to_string();
+        return tauri::async_runtime::spawn_blocking(move || {
+            if fs::symlink_metadata(&path_owned).is_err() {
+                return Err(crate::error_proto::coded("path_not_found", path_owned));
+            }
+            trash::delete(Path::new(&path_owned)).map_err(|e| format!("移入废纸篓失败: {}", e))
+        })
+        .await
+        .map_err(|e| format!("fs_delete 任务失败: {e}"))?;
+    }
     fs_delete_impl(&path, &registry).await
 }
 
-/// `fs_delete` 的无状态实现。
+/// `fs_delete` 的无状态实现：命令入口（grant 通道放行后的落地）与只读根
+/// 审计测试共同复用。三条语义：
+/// - 工作区路径：`authorize_entry_path` 全语义（只读根拒绝返回
+///   `workspace_read_only`，软链操作链接本身）；
+/// - 面板 grant 路径：操作链接本身（对齐上面软链语义），直接用原路径；
+/// - 都不满足：`path_outside_workspace`。
 async fn fs_delete_impl(path: &str, registry: &WorkspaceRegistry) -> Result<(), String> {
-    // 移入废纸篓可能触发 Finder/Explorer 往返，同步执行会卡住 ipc worker。
+    // 移入废纸篓可能触发 Finder/Explorer 往返，同步执行会占住 ipc worker。
+    // 与原实现同语义：授权（含只读根拒绝、软链链接本身）全部走
+    // `authorize_entry_path`；grant 通道在命令入口已放行，impl 不再看见
+    // 「工作区之外但已授予」的路径 —— 为了不越权，grant 路径在入口直接
+    // canonicalize 后以原语义落 trash（见 fs_delete 命令体）。
     let authorized = authorize_entry_path(registry, path, true)?;
     let path = path.to_string();
     tauri::async_runtime::spawn_blocking(move || {
-        // 对软链用 symlink_metadata：悬空链也应当被删除，而不是报不存在
         if fs::symlink_metadata(&authorized).is_err() {
             return Err(crate::error_proto::coded("path_not_found", path));
         }
@@ -4165,25 +4267,41 @@ pub fn git_checkout(repo_path: Option<String>, branch: String) -> Result<String,
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// 从指定起点创建并切换分支；start_point 为空时从当前 HEAD 创建
+/// 创建分支；`switch=true` 时同时切换（checkout -b），`false` 只建不切
+/// （branch <b> [start_point]，留在当前分支/HEAD 上不动工作区）。
+/// start_point 为空时从当前 HEAD 创建。
 #[tauri::command]
 pub fn git_create_branch(
     repo_path: Option<String>,
     branch: String,
     start_point: Option<String>,
+    switch: Option<bool>,
 ) -> Result<String, String> {
     let dir = repo_path.unwrap_or_else(|| ".".to_string());
     reject_option_like(&branch)?;
     let mut cmd = git_cmd();
-    // `-b` 紧跟的下一个 token 原样作为分支名取值（parse-options 对必填选项值
-    // 不做选项解析），所以分支名直接跟在 `-b` 后面；`--end-of-options` 只能
-    // 放在起点之前 —— 之前写成 `checkout -b --end-of-options <branch>` 会把
-    // `--end-of-options` 当成分支名（`fatal: '--end-of-options' is not a valid
-    // branch name`），带起点与不带起点的建分支全灭，功能测试抓到（git_menu_test）。
-    cmd.arg("-C").arg(&dir).args(["checkout", "-b", &branch]);
+    cmd.arg("-C").arg(&dir);
+    let switch = switch.unwrap_or(true);
+    if switch {
+        // `-b` 紧跟的下一个 token 原样作为分支名取值（parse-options 对必填选项值
+        // 不做选项解析），所以分支名直接跟在 `-b` 后面；`--end-of-options` 只能
+        // 放在起点之前 —— 之前写成 `checkout -b --end-of-options <branch>` 会把
+        // `--end-of-options` 当成分支名（`fatal: '--end-of-options' is not a valid
+        // branch name`），带起点与不带起点的建分支全灭，功能测试抓到（git_menu_test）。
+        cmd.args(["checkout", "-b", &branch]);
+    } else {
+        // branch <branch>：位置第一个 token 已由 `-C <dir>` 锚定，分支名与起点
+        // 之间插入 --end-of-options 防「分支名形如 -foo」的选项注入。
+        cmd.args(["branch", "--end-of-options", &branch]);
+    }
     if let Some(sp) = start_point.as_deref().filter(|s| !s.trim().is_empty()) {
-        reject_option_like(sp)?;
-        cmd.arg("--end-of-options").arg(sp.trim());
+        // checkout -b <branch> <start_point>：起点就是最后一个位置参数，分支名
+        // 已被 -b 消费，起点前不能再插 --end-of-options（会被当起点名）；
+        // branch 模式下 --end-of-options 已在分支名前，起点跟在其后即可。
+        if !switch {
+            reject_option_like(sp)?;
+        }
+        cmd.arg(sp.trim());
     }
 
     let output = git_output_local(&mut cmd).map_err(|e| format!("create branch failed: {}", e))?;
@@ -10137,6 +10255,73 @@ pub async fn git_commits_diff(
     })
     .await
     .map_err(|e| format!("git_commits_diff 任务失败: {e}"))?
+}
+
+#[cfg(target_os = "macos")]
+fn pick_save_path_native(
+    title: Option<String>,
+    default_dir: Option<String>,
+    default_name: Option<String>,
+) -> Option<String> {
+    use objc2_app_kit::NSSavePanel;
+    use objc2_foundation::{MainThreadMarker, NSString, NSURL};
+    let mtm = MainThreadMarker::new()?;
+    let panel = NSSavePanel::savePanel(mtm);
+    // 新建文件必须允许在面板里顺手创建目录（macOS 系统面板行为）。
+    panel.setCanCreateDirectories(true);
+    panel.setCanSelectHiddenExtension(true);
+    if let Some(t) = &title {
+        panel.setTitle(Some(&NSString::from_str(t)));
+    }
+    if let Some(n) = &default_name {
+        panel.setNameFieldStringValue(&NSString::from_str(n));
+    }
+    if let Some(p) = &default_dir {
+        let ns_str = NSString::from_str(p);
+        let url = NSURL::fileURLWithPath(&ns_str);
+        panel.setDirectoryURL(Some(&url));
+    }
+    if panel.runModal() == 1 {
+        panel.URL().and_then(|u| u.path()).map(|p| p.to_string())
+    } else {
+        None
+    }
+}
+
+/// 原生 NSSavePanel：无项目新建文件 / 另存用。返回用户选定的**完整绝对路径**
+/// （含文件名）。与 `pick_path` 同一手势授权模型：面板返回的路径登记进
+/// PathGrantRegistry，随后 write_file_content 才能落在已登记工作区之外。
+#[tauri::command]
+pub async fn pick_save_path(
+    app: tauri::AppHandle,
+    title: Option<String>,
+    default_dir: Option<String>,
+    default_name: Option<String>,
+    grants: tauri::State<'_, PathGrantRegistry>,
+) -> Result<Option<String>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.run_on_main_thread(move || {
+            let res = pick_save_path_native(title, default_dir, default_name);
+            let _ = tx.send(res);
+        })
+        .map_err(|e| format!("Failed to run on main thread: {e}"))?;
+        let picked = rx.recv().map_err(|e| format!("Dialog aborted: {e}"))?;
+        if let Some(p) = picked.as_deref() {
+            grants.grant(Path::new(p));
+        }
+        Ok(picked)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _app = app;
+        let _title = title;
+        let _default_dir = default_dir;
+        let _default_name = default_name;
+        let _grants = grants;
+        Ok(None)
+    }
 }
 
 #[cfg(target_os = "macos")]

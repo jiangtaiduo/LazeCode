@@ -148,6 +148,10 @@ struct PtySession {
     terminal: Arc<Mutex<NativeTerminal>>,
     /// 会话所属工作区（关闭项目时按此终止会话）
     cwd: String,
+    /// 会话归属的项目 key（前端 projectKey = 工作区路径，含单文件工作区）。
+    /// cwd 对「同目录两个单文件」必然相同，按项目关闭时（pty_close_by_project）
+    /// 以此为准 —— cwd 只做展示/兼容入口的粗匹配。
+    project_key: String,
     /// 创建该会话的窗口 label：窗口销毁时只清理本窗口的会话
     /// （close_for_window），不能误杀其它窗口的终端
     window_label: String,
@@ -368,6 +372,32 @@ impl PtyManager {
             .collect())
     }
 
+    /// 摘除「指定窗口 + 指定项目」的全部会话。
+    ///
+    /// 相比 cwd 匹配的关键差别：cwd 是终端的工作目录（单文件工作区 = 文件
+    /// 所在目录），两个来自同一父目录的单文件工作区 cwd 相同 —— 按 cwd 关
+    /// 会把别人的终端一起杀掉。projectKey（工作区路径本身）在这两种场景下
+    /// 都唯一，是正确的归属键。
+    fn remove_by_project_window(
+        &self,
+        project_key: &str,
+        window_label: &str,
+    ) -> Result<Vec<PtySession>, String> {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| "PTY 状态锁失效".to_string())?;
+        let ids: Vec<String> = sessions
+            .iter()
+            .filter(|(_, s)| s.project_key == project_key && s.window_label == window_label)
+            .map(|(id, _)| id.clone())
+            .collect();
+        Ok(ids
+            .into_iter()
+            .filter_map(|id| sessions.remove(&id))
+            .collect())
+    }
+
     /// 终止属于指定窗口的全部会话：窗口销毁时兜底，只清理本窗口创建的
     /// PTY，其它窗口的会话不受影响。返回关闭的会话数。
     ///
@@ -460,6 +490,34 @@ fn resolve_shell(requested: Option<String>) -> Result<String, String> {
     }
 }
 
+/// 终端可用的工作目录：空串、"."、以及「存在但不是目录」的路径都不是可用的
+/// cwd —— 单文件会话的 projectKey 是文件路径，前端可能把它当 cwd 传来，
+/// 传给 `CommandBuilder::cwd` 会让 spawn 以 Not a directory 失败。返回 None
+/// 时调用方回退用户目录（`~`）。
+fn usable_cwd(cwd: Option<&str>) -> Option<String> {
+    let candidate = cwd?.trim();
+    if candidate.is_empty() || candidate == "." {
+        return None;
+    }
+    std::path::Path::new(candidate)
+        .is_dir()
+        .then(|| candidate.to_string())
+}
+
+/// 会话归属键：前端 GhosttyTerminal 知道 projectKey（工作区路径 / 单文件路径）。
+///
+/// 显式传空串 = 前端「不绑定项目」的 app 级会话（欢迎页打开的控制台）：保留
+/// `""` 作归属键，**不能**回退成 cwd —— 否则用户把家目录当项目打开时，两者的
+/// 键会撞在一起，关闭那个项目会误杀欢迎页的 shell。只有旧调用方完全没传
+/// （None）时，才回退到 cwd（旧兼容路径）。
+fn resolve_project_key(requested: Option<String>, working_dir: &str) -> String {
+    match requested {
+        Some(raw) if !raw.trim().is_empty() => raw.trim().to_string(),
+        Some(_) => String::new(),
+        None => working_dir.to_string(),
+    }
+}
+
 // `#[allow(clippy::too_many_arguments)]` 是必需的：这是 Tauri 的 IPC 入口，
 // 签名由前端 `invoke('pty_spawn', {...})` 的参数名一一约定。把 5 个可选参数
 // 收进一个结构体会改变序列化契约（前端必须跟着改），换来的是纯粹的风格收益。
@@ -475,6 +533,7 @@ pub fn pty_spawn(
     rows: u16,
     cwd: Option<String>,
     shell: Option<String>,
+    project_key: Option<String>,
 ) -> Result<PtySpawnResult, String> {
     // 网格尺寸夹到合法区间：与 pty_resize 同口径（IPC 是信任边界，
     // 见 clamp_grid 的说明）。这里比 resize 更要紧 —— openpty 的 PtySize
@@ -499,9 +558,11 @@ pub fn pty_spawn(
     // shell 白名单校验失败必须在此中止：这里还没创建任何资源，
     // 提前返回不会留下半初始化的 PTY。
     let shell_path = resolve_shell(shell)?;
-    let working_dir = cwd
-        .clone()
-        .filter(|c| !c.trim().is_empty() && c != ".")
+    let working_dir = usable_cwd(cwd.as_deref())
+        // 未指定 cwd（欢迎页/单文件会话未绑目录）时落在用户目录：从 Finder
+        // 启动的 app 进程 current_dir 是 "/"，那不是用户能用的工作目录。
+        // 老版本先回退 current_dir，用户看到控制台开在根目录。
+        .or_else(|| std::env::var("HOME").ok().filter(|h| !h.trim().is_empty()))
         .or_else(|| {
             std::env::current_dir()
                 .ok()
@@ -515,6 +576,7 @@ pub fn pty_spawn(
     let cwd_key = std::fs::canonicalize(&working_dir)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| working_dir.clone());
+    let project_key = resolve_project_key(project_key, &working_dir);
 
     let mut cmd = CommandBuilder::new(&shell_path);
     // 以登录 shell 启动，保证 PATH 与用户配置一致
@@ -746,6 +808,8 @@ pub fn pty_spawn(
         terminal,
         // 存规范化形态：pty_close_by_cwd 按它比较（见 working_dir 处的注释）
         cwd: cwd_key,
+        // 归属键：pty_close_by_project 按它比较（projectKey 优先于 cwd）
+        project_key,
         window_label,
         retired,
         last_output,
@@ -1511,6 +1575,41 @@ fn canonical_cwd(cwd: &str) -> String {
         .unwrap_or_else(|_| cwd.trim().to_string())
 }
 
+/// 按项目 key（前端工作区路径）关闭该项目在此窗口的全部终端会话。
+///
+/// 与 `pty_close_by_cwd` 的分工：projectKey 对单文件工作区就是文件路径本身，
+/// 两个同目录的单文件工作区 cwd 相同但 projectKey 不同 —— 按项目关终端必须
+/// 以它为准，否则关 A 会把 B 的终端一起杀掉。旧命令保留给外部插件/回退。
+#[tauri::command]
+pub async fn pty_close_by_project(
+    manager: State<'_, PtyManager>,
+    window: tauri::Window,
+    project_key: String,
+) -> Result<usize, String> {
+    // 裸字符串比较足够：projectKey 在同一窗口内由前端一致地传入（spawn 与
+    // close 是同一个 state.workspacePath 值），不跨设备，无任何规范化需求。
+    // 但仍 trim 防御空格混入（重要：这个值对 cwd 有路径形态歧义，对 key 没有）。
+    let key = project_key.trim().to_string();
+    if key.is_empty() {
+        return Ok(0);
+    }
+    let window_label = window.label().to_string();
+    let stale = manager.remove_by_project_window(&key, &window_label)?;
+    let count = stale.len();
+    if count > 0 {
+        // 与 pty_close_by_cwd 同论：kill/reap 丢后台线程，命令立即返回。
+        tauri::async_runtime::spawn_blocking(move || {
+            for session in stale {
+                close_session(session);
+            }
+        })
+        .await
+        .map_err(|e| format!("PTY 关闭任务失败: {e}"))?;
+        manager.rebalance_scrollback();
+    }
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1540,11 +1639,54 @@ mod tests {
             child: Arc::new(Mutex::new(child_box)),
             terminal: Arc::new(Mutex::new(NativeTerminal::new(80, 24).unwrap())),
             cwd: cwd.to_string(),
+            project_key: cwd.to_string(),
             window_label: window_label.to_string(),
             retired: Arc::new(AtomicBool::new(false)),
             last_output: Arc::new(Mutex::new(None)),
             reader: None,
         }
+    }
+
+    /// 欢迎页控制台显式传空 projectKey：必须保持 ''（不能回退成 cwd），
+    /// 否则把家目录当项目打开时，关闭项目会把欢迎页的 shell 一起杀掉。
+    #[test]
+    fn explicit_empty_project_key_stays_unbound() {
+        assert_eq!(resolve_project_key(Some(String::new()), "/Users/x"), "");
+        assert_eq!(resolve_project_key(Some("   ".to_string()), "/Users/x"), "");
+        assert_eq!(
+            resolve_project_key(Some(" /repo ".to_string()), "/Users/x"),
+            "/repo"
+        );
+        assert_eq!(
+            resolve_project_key(None, "/Users/x"),
+            "/Users/x",
+            "旧调用方未传时才回退 cwd"
+        );
+    }
+
+    /// 单文件会话把文件路径当 projectKey 传来：不是目录就必须视为「未指定」，
+    /// 否则 shell spawn 直接 Not a directory；欢迎页的空串 / "." 同理。
+    #[test]
+    fn usable_cwd_only_accepts_directories() {
+        let dir = std::env::temp_dir();
+        let dir_str = dir.to_string_lossy().to_string();
+        assert_eq!(usable_cwd(Some(&dir_str)), Some(dir_str.clone()));
+
+        let file = dir.join(format!("lazecode-usable-cwd-{}", std::process::id()));
+        std::fs::write(&file, b"x").expect("写临时文件失败");
+        let file_str = file.to_string_lossy().to_string();
+        assert_eq!(usable_cwd(Some(&file_str)), None, "文件路径不能当 cwd");
+        std::fs::remove_file(&file).ok();
+
+        assert_eq!(usable_cwd(Some("")), None);
+        assert_eq!(usable_cwd(Some("   ")), None);
+        assert_eq!(usable_cwd(Some(".")), None);
+        assert_eq!(usable_cwd(None), None);
+        assert_eq!(
+            usable_cwd(Some("/definitely/not/here/lazecode")),
+            None,
+            "不存在的目录交给 cwd 也一样会失败"
+        );
     }
 
     /// 同 cwd 的两个窗口：只允许创建者窗口关闭自己的会话。
@@ -1568,6 +1710,34 @@ mod tests {
         assert_eq!(left.len(), 2, "其它窗口 / 其它 cwd 的会话必须保留");
         assert!(left.contains(&"other-window".to_string()));
         assert!(left.contains(&"other-cwd".to_string()));
+        manager.close_all();
+    }
+
+    /// projectKey 归属：同 cwd（同父目录的单文件工作区）不同 projectKey
+    /// 的会话互不影响 —— 按 cwd 关是误杀，按 project 关只杀自己。
+    #[test]
+    fn close_by_project_is_scoped_to_project_key() {
+        let manager = PtyManager::new();
+        {
+            let mut sessions = manager.sessions.lock().unwrap();
+            // 两个单文件工作区（文件在同一个目录）：cwd 相同，projectKey 不同
+            sessions.insert("file-a".into(), test_session("/home/user/work", "main"));
+            sessions.insert("file-b".into(), test_session("/home/user/work", "main"));
+            // 用户另一个窗口开的目录项目（cwd 也在这目录）——不受影响
+            sessions.insert("proj-c".into(), test_session("/home/user/work", "win_2"));
+        }
+
+        let removed = manager
+            .remove_by_project_window("/home/user/work", "main")
+            .unwrap();
+        assert_eq!(removed.len(), 2, "main 窗口的两个单文件会话都要摘除");
+        for session in removed {
+            close_session(session);
+        }
+
+        let left: Vec<String> = manager.sessions.lock().unwrap().keys().cloned().collect();
+        assert_eq!(left.len(), 1);
+        assert!(left.contains(&"proj-c".to_string()));
         manager.close_all();
     }
 
@@ -1939,6 +2109,7 @@ mod tests {
                     NativeTerminal::new(40, 5).expect("创建终端失败"),
                 )),
                 cwd: String::new(),
+                project_key: String::new(),
                 window_label: String::new(),
                 retired: Arc::new(AtomicBool::new(false)),
                 master: Arc::new(Mutex::new(master)),
@@ -2759,6 +2930,7 @@ mod busy_probe_tests {
             child: Arc::clone(&child),
             terminal: Arc::new(Mutex::new(NativeTerminal::new(80, 24).unwrap())),
             cwd: "/tmp".to_string(),
+            project_key: "/tmp".to_string(),
             window_label: "test".to_string(),
             retired: Arc::new(AtomicBool::new(false)),
             last_output: Arc::new(Mutex::new(None)),

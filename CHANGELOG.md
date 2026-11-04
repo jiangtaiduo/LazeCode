@@ -6,6 +6,77 @@ All notable changes to LazeCode are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-04
+
+### Added
+
+- Single-file sessions (not projects): opening/dropping one or more loose files
+  enters the same single-file session — the title bar no longer shows them as
+  project tabs and the left project panel no longer lists these temporary files
+  (Zed/IDEA-style temporary open: only a hint and an "Open Folder" entry; the
+  files live in the editor tabs). They are not written to recent/last project
+  history and take no part in project session snapshots. Closing the last
+  editor tab ends the session and returns to the welcome screen; a closed loose
+  file never "comes back" on its own.
+- Dropping files while a project is open attaches them to that project as
+  "External / Dropped" entries and opens them in the editor without switching
+  projects or adding project tabs; dropping a folder still opens it as a
+  project.
+- New file with no project open: File › New File… (⌘N, also on the welcome
+  screen). The NSSavePanel lets the user choose the name, format and location
+  (macOS convention: Documents); the file opens directly in a single-file
+  session.
+- Console with no project open: the welcome screen's "Open Console" (and the
+  search/menu entries) now actually spawns a shell in the user's home
+  directory (`~`) instead of showing an empty panel. The session is not bound
+  to a project — it survives switching to a project and back (app-level
+  session) and ends when its tab is closed.
+- Drag-and-drop open: files or folders from Finder/desktop can be dropped onto
+  the window. While dragging, the whole window shows a highlight overlay; the
+  file tree gains an "External / Dropped" section divider (dropped files
+  included).
+- Create a branch without switching it: the branch dropdown's New Branch…
+  form, the branch-tree toolbar and the New Branch from 'x'… dialog all carry
+  a "switch to the new branch after creating" checkbox; unchecked, they run
+  plain `git branch` (HEAD and the working tree stay on the current branch).
+  Default behavior remains create-and-switch.
+- "File missing in this branch" context: when switching branches / checking
+  out a tag makes an open file vanish in the current branch, the error panel
+  adds a contextual line under the raw error (the file does not exist in the
+  current branch; the tab stays open and its content returns when switching
+  back).
+
+### Fixed
+
+- Dropped images failed with `ERR:path_outside_workspace`: `read_image_bytes`
+  only consulted the workspace allow-list and lacked the native-panel grant
+  channel that `read_file_text` has; both now share the same authorization
+  model (`register_workspace` as well as PathGrant panel paths pass).
+- Console default directory: with no project open, or a single-file session
+  open, the console now always starts in the user's home directory (`~`).
+  Previously no cwd fell back to the process current_dir (`/` when launched
+  from Finder) and a single-file session used the file's parent directory. The
+  frontend now sends no cwd in both cases, and the backend treats empty / `.` /
+  non-directory (a single-file path) as "not specified" and falls back to
+  `$HOME`; the status bar shows the resolved directory. Directory projects
+  still start at the project root.
+- Title bar jitter when switching between git and non-git projects: the branch
+  pill used to unmount when `isRepo` was false and rebuild when switching back.
+  A fixed-width pill now stays mounted for project workspaces (a static
+  "Not a Git repository" label for non-git projects — not the pulsing skeleton,
+  which looked like it was forever loading; skeleton while loading), so layout
+  is identical across the git ↔ non-git transition; single-file sessions hide
+  it entirely.
+- Stale `isRepo` on project switch: switching from a non-git single-file
+  session back to a git project showed the "Not a Git repository" placeholder
+  until data arrived. `isRepo` now resets to the optimistic initial value on
+  switch (skeleton while loading, correct branch once data lands).
+- Consoles of sibling single-file workspaces killed together: closing a
+  project used to match terminals by cwd — two single-file workspaces whose
+  files share a parent directory have identical cwd. Terminal sessions are now
+  owned by projectKey (new command `pty_close_by_project`); the cwd match
+  remains as a compatibility path.
+
 ## [0.2.0] - 2026-11-02
 
 ### Added

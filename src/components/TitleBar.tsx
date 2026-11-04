@@ -60,7 +60,7 @@ interface TitleBarProps {
   onCheckoutTag?: (name: string) => void;
   onDeleteTag?: (tag: GitTag) => void;
   onCheckoutRef?: () => void;
-  onCreateBranch?: (branchName: string) => void;
+  onCreateBranch?: (branchName: string, switchTo?: boolean) => void;
   favorites?: string[];
   /**
    * 分支操作子菜单（点击下拉行滑出）：
@@ -95,8 +95,10 @@ interface TitleBarProps {
    */
   availableUpdateVersion?: string;
   onAvailableUpdateClick?: () => void;
-  /** 当前项目/文件是否受 Git 管理：不受 Git 管理时不显示分支名 */
+  /** 当前工作区/文件是否受 Git 管理：不受 Git 管理时不显示分支名 */
   isRepo?: boolean;
+  /** 当前打开的是单文件会话（不是项目）：顶栏不显示项目 tab 与分支 pill */
+  singleFile?: boolean;
 }
 
 /**
@@ -149,7 +151,8 @@ export const TitleBar = React.memo(function TitleBar({
   onPush,
   availableUpdateVersion,
   onAvailableUpdateClick,
-  isRepo = false
+  isRepo = false,
+  singleFile = false
 }: TitleBarProps) {
   useLanguageRefresh();
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
@@ -158,6 +161,8 @@ export const TitleBar = React.memo(function TitleBar({
   const [branchFilter, setBranchFilter] = useState('');
   const [isCreatingBranch, setIsCreatingBranch] = useState(false);
   const [newBranchName, setNewBranchName] = useState('');
+  /** 「创建后是否切换」选项：默认勾选（切换），取消则只建分支留在当前分支 */
+  const [newBranchSwitch, setNewBranchSwitch] = useState(true);
   /** 分支下拉用户拖出的高度（null = 未拖过，走 CSS 默认 max-height） */
   const [branchMenuHeight, setBranchMenuHeight] = useState<number | null>(null);
   const [sectionsOpen, setSectionsOpen] = useState({
@@ -334,9 +339,11 @@ export const TitleBar = React.memo(function TitleBar({
     e.preventDefault();
     if (newBranchName.trim()) {
       if (onCreateBranch) {
-        onCreateBranch(newBranchName.trim());
-      } else {
+        onCreateBranch(newBranchName.trim(), newBranchSwitch);
+      } else if (newBranchSwitch) {
         onSelectBranch(newBranchName.trim());
+      } else {
+        // 「不切换」：无后端回调时也要关掉整个建分支流程
       }
       setNewBranchName('');
       setIsCreatingBranch(false);
@@ -665,14 +672,23 @@ export const TitleBar = React.memo(function TitleBar({
           )}
         </div>
 
-        {/* 2. Git Branch Dropdown Trigger — 非 git 仓库时隐藏。
+        {/* 2. Git Branch Dropdown Trigger — 每个已打开的**项目**都常驻（定宽 180）。
             切换项目时分支信息要重拉（currentBranch 先清空）：这里**不按
-            currentBranch 卸载**，加载中渲染骨架占位 —— 分支 pill 整块
-            消失再重建会把后面的项目 tab 左右推来推去。pill 本身定宽，
-            分支名长短变化也不再移动 tab 条。 */}
-        {isRepo && workspacePath && (
+            currentBranch 卸载**，加载中渲染骨架占位；非 git 项目渲染同宽的
+            「无 Git 仓库」占位。git ↔ 非 git 项目间切换时 pill 整块消失再
+            重建会把后面的项目 tab 左右推来推去（此前 isRepo 参与卸载条件），
+            现在 UI 只在三种同宽形态间切换，布局完全不动。
+            无项目（欢迎页）/ 单文件会话（不是项目）：整块卸载。 */}
+        {workspacePath && !singleFile && (
         <div className="pycharm-dropdown-wrapper" ref={branchMenuRef} data-tauri-drag-region="false">
-          {!opActive && !currentBranch ? (
+          {!isRepo ? (
+            // 非 git 项目：静态文案占位（不是加载态 —— 脉冲骨架会让人以为
+            // 一直在加载）。同宽维持布局，不弹分支菜单。
+            <div className="pycharm-branch-pill branch-pill-nogit" title={t().titleBar.notRepoPill}>
+              <GitBranchIcon size={14} color="var(--text-muted)" />
+              <span className="pycharm-branch-name">{t().titleBar.notRepoPill}</span>
+            </div>
+          ) : !opActive && !currentBranch ? (
             // 加载占位：不可点（分支列表尚不可用），只维持布局
             <div className="pycharm-branch-pill branch-pill-loading" title={t().titleBar.branchLoadingTitle}>
               <GitBranchIcon size={14} color="var(--text-muted)" />
@@ -889,9 +905,17 @@ export const TitleBar = React.memo(function TitleBar({
                     onChange={e => setNewBranchName(e.target.value)}
                     autoFocus
                   />
+                  <label className="pycharm-new-branch-switch">
+                    <input
+                      type="checkbox"
+                      checked={newBranchSwitch}
+                      onChange={e => setNewBranchSwitch(e.target.checked)}
+                    />
+                    <span>{t().titleBar.checkoutAfterCreate}</span>
+                  </label>
                   <div className="pycharm-new-branch-btns">
                     <button type="submit" className="pycharm-btn-primary" disabled={!newBranchName.trim()}>
-                      {t().titleBar.createAndSwitch}
+                      {newBranchSwitch ? t().titleBar.createAndSwitch : t().titleBar.createBranchOnly}
                     </button>
                     <button
                       type="button"

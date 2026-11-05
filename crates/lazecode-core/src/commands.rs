@@ -16,13 +16,32 @@ pub enum Command {
     RefreshLog,
     SelectCommit(String),
     OpenDiff(String),
-    Search { query: String, request_id: u64 },
+    Search {
+        query: String,
+        request_id: u64,
+    },
     SaveTab(u64),
     SaveAll,
     NewTerminal,
-    NewTerminalCommand { title: String, command: String },
+    NewTerminalCommand {
+        title: String,
+        command: String,
+    },
     RestartTerminal(u64),
     CloseTerminal(u64),
+    /// Create a linked worktree from the current HEAD of the active project
+    /// at `parent/name`, then open it.
+    CreateWorktree {
+        name: String,
+    },
+    /// Switch the project pane to another registered worktree (by name).
+    SwitchWorktree(String),
+    /// Close a linked worktree (registration + checkout); `force` discards
+    /// uncommitted changes.
+    RemoveWorktree {
+        name: String,
+        force: bool,
+    },
     SaveWorkspace,
     Quit,
 }

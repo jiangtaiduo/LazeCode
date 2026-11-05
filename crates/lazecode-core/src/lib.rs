@@ -8,6 +8,6 @@ pub mod settings;
 pub use commands::Command;
 pub use model::{
     AppModel, DiffTab, FileTab, PanelTab, ProjectState, SidebarView, Tab, TabKind, TerminalTab,
-    Toast, ToastKind, UiState,
+    Toast, ToastKind, UiState, WorktreeState,
 };
 pub use settings::{Language, Settings, ThemeMode, WorkspaceFile};

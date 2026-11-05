@@ -37,6 +37,7 @@ pub struct TermSearchState {
 pub enum MenuKind {
     Project,
     Branch,
+    Worktree,
 }
 
 pub struct MenuState {
@@ -53,6 +54,14 @@ pub enum DialogState {
     DeleteBranch {
         name: String,
         error: Option<String>,
+    },
+    NewWorktree {
+        value: String,
+        error: Option<String>,
+    },
+    RemoveWorktree {
+        name: String,
+        worktree_path: std::path::PathBuf,
     },
     CloseDirtyTab {
         tab_id: u64,
@@ -227,6 +236,7 @@ pub enum PaletteAction {
     OpenSearch,
     About,
     SwitchProject(usize),
+    SwitchWorktree { project: usize, name: String },
     Quit,
 }
 

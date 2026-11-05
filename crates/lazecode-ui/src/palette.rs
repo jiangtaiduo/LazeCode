@@ -355,6 +355,42 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
         }
     }
 
+    // Worktrees of the active project (skip the already-open main entry).
+    if let Some((project_index, project)) = model
+        .active_project
+        .and_then(|index| model.projects.get(index).map(|project| (index, project)))
+    {
+        for worktree in &project.worktrees {
+            if worktree.is_main {
+                continue;
+            }
+            let title_label = if model.settings.language.is_zh() {
+                format!("切换工作树 {}", worktree.name)
+            } else {
+                format!("Switch worktree {}", worktree.name)
+            };
+            let matches = query.is_empty()
+                || worktree.name.to_lowercase().contains(&query)
+                || worktree
+                    .path
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .contains(&query);
+            if matches {
+                items.push(PaletteItem {
+                    icon: Icon::Worktree,
+                    title: title_label,
+                    subtitle: worktree.path.display().to_string(),
+                    shortcut: None,
+                    action: PaletteAction::SwitchWorktree {
+                        project: project_index,
+                        name: worktree.name.clone(),
+                    },
+                });
+            }
+        }
+    }
+
     if let Some(project) = model.active_project() {
         for tab in &project.tabs {
             if let TabKind::File(file) = &tab.kind {
@@ -479,7 +515,18 @@ fn execute(action: PaletteAction, model: &mut AppModel, rt: &mut UiRuntime) {
             rt.settings_open = true;
             model.ui.settings_section = 3;
         }
-        PaletteAction::SwitchProject(index) => model.switch_project(index),
+        PaletteAction::SwitchProject(index) => {
+            model.switch_project(index);
+            rt.clear_terminal_cache();
+        }
+        PaletteAction::SwitchWorktree { project, name } => {
+            if let Some(project_state) = model.projects.get_mut(project) {
+                if let Err(err) = project_state.ensure_worktree(&name) {
+                    model.toast(err, ToastKind::Error);
+                }
+            }
+            rt.clear_terminal_cache();
+        }
         PaletteAction::Quit => {
             let dirty = model
                 .projects

@@ -75,8 +75,9 @@ fn project_bar(ui: &mut Ui, model: &AppModel, theme: &Theme, rect: Rect) {
     let project = model.active_project().unwrap();
     let changes = project.changes().len();
     let running = project
-        .terminals
+        .worktrees
         .iter()
+        .flat_map(|worktree| worktree.terminals.iter())
         .filter(|terminal| terminal.session.is_running())
         .count();
     let tone = Color32::from_rgb(project.tone.0, project.tone.1, project.tone.2);
@@ -479,8 +480,9 @@ fn draw_tree_foot(ui: &mut Ui, model: &mut AppModel, theme: &Theme, rect: Rect) 
         Align2::LEFT_CENTER,
     );
     let running = project
-        .terminals
+        .worktrees
         .iter()
+        .flat_map(|worktree| worktree.terminals.iter())
         .filter(|terminal| terminal.session.is_running())
         .count();
     ui.painter().text(
@@ -1000,6 +1002,7 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     #[derive(Clone)]
     struct Row {
         project: usize,
+        worktree: usize,
         terminal: u64,
         name: String,
         command: String,
@@ -1011,30 +1014,38 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     }
     let mut rows: Vec<Row> = Vec::new();
     for (project_index, project) in model.projects.iter().enumerate() {
-        let group_running = project
-            .terminals
-            .iter()
-            .filter(|terminal| terminal.session.is_running())
-            .count();
-        for (terminal_index, terminal) in project.terminals.iter().enumerate() {
-            let secs = terminal.started.elapsed().as_secs();
-            rows.push(Row {
-                project: project_index,
-                terminal: terminal.id,
-                name: terminal.title.clone(),
-                command: if let Some(command) = terminal.spawn_command.clone() {
-                    command
-                } else if terminal.title != terminal.session.command_label {
-                    terminal.session.command_label.clone()
-                } else {
-                    crate::tr!(model, "default shell", "默认 shell").to_string()
-                },
-                running: terminal.session.is_running(),
-                elapsed: format_elapsed(secs),
-                group: project.name.clone(),
-                group_start: terminal_index == 0,
-                group_running,
-            });
+        for (worktree_index, worktree) in project.worktrees.iter().enumerate() {
+            let group_running = worktree
+                .terminals
+                .iter()
+                .filter(|terminal| terminal.session.is_running())
+                .count();
+            let label = if worktree.is_main {
+                project.name.clone()
+            } else {
+                format!("{} · {}", project.name, worktree.name)
+            };
+            for (terminal_index, terminal) in worktree.terminals.iter().enumerate() {
+                let secs = terminal.started.elapsed().as_secs();
+                rows.push(Row {
+                    project: project_index,
+                    worktree: worktree_index,
+                    terminal: terminal.id,
+                    name: terminal.title.clone(),
+                    command: if let Some(command) = terminal.spawn_command.clone() {
+                        command
+                    } else if terminal.title != terminal.session.command_label {
+                        terminal.session.command_label.clone()
+                    } else {
+                        crate::tr!(model, "default shell", "默认 shell").to_string()
+                    },
+                    running: terminal.session.is_running(),
+                    elapsed: format_elapsed(secs),
+                    group: label.clone(),
+                    group_start: terminal_index == 0,
+                    group_running,
+                });
+            }
         }
     }
 
@@ -1106,7 +1117,8 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                     let (row_rect, response) = ui
                         .allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
                     let active = model.active_project == Some(row.project)
-                        && model.projects[row.project].active_terminal == Some(row.terminal);
+                        && model.projects[row.project].worktrees[row.worktree].active_terminal
+                            == Some(row.terminal);
                     if active {
                         ui.painter().rect_filled(
                             row_rect.shrink2(Vec2::new(6.0, 2.0)),
@@ -1173,7 +1185,7 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                     if action.clicked() {
                         if row.running {
                             if let Some(terminal) =
-                                model.projects[row.project].terminal_by_id(row.terminal)
+                                model.projects[row.project].term_by_id(row.terminal)
                             {
                                 terminal.session.kill();
                             }
@@ -1183,9 +1195,12 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                     }
                     if response.clicked() {
                         model.switch_project(row.project);
-                        model.projects[row.project].active_terminal = Some(row.terminal);
+                        model.projects[row.project].active_worktree = row.worktree;
+                        model.projects[row.project].worktrees[row.worktree].active_terminal =
+                            Some(row.terminal);
                         model.ui.panel_visible = true;
                         model.ui.panel_tab = PanelTab::Console;
+                        rt.clear_terminal_cache();
                     }
                 }
                 ui.add_space(10.0);

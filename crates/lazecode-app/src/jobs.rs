@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender};
-use lazecode_core::{AppModel, Command, ProjectState, Settings, TabKind, ToastKind};
+use lazecode_core::{AppModel, Command, ProjectState, Settings, TabKind, ToastKind, WorktreeState};
 use lazecode_fs::{SearchHit, SearchOptions};
 use lazecode_git::{BranchInfo, CommitDetails, CommitInfo, FileDiff, LogOptions, RepoSnapshot};
 use lazecode_terminal::Notifier;
@@ -55,6 +55,16 @@ pub enum JobResult {
         root: PathBuf,
         path: PathBuf,
         revision: u64,
+        result: Result<(), String>,
+    },
+    WorktreeAdded {
+        project_root: PathBuf,
+        name: String,
+        result: Result<PathBuf, String>,
+    },
+    WorktreeRemoved {
+        project_root: PathBuf,
+        name: String,
         result: Result<(), String>,
     },
 }
@@ -721,6 +731,109 @@ impl JobQueue {
                 runtime.terminal_selections.remove(&id);
                 runtime.terminal_search.remove(&id);
             }
+            Command::CreateWorktree { name } => {
+                let Some(project) = model.active_project() else {
+                    return;
+                };
+                let project_root = project.root.clone();
+                let destination = project_root.parent().unwrap_or(&project_root).join(&name);
+                if destination.exists() {
+                    model.toast(
+                        if model.settings.language.is_zh() {
+                            format!("路径已存在：{}", destination.display())
+                        } else {
+                            format!("Path already exists: {}", destination.display())
+                        },
+                        ToastKind::Error,
+                    );
+                    return;
+                }
+                let key = format!("worktree-add:{}", name);
+                let job_name = name.clone();
+                self.spawn("worktree-add", key, move || {
+                    let result =
+                        lazecode_git::add_worktree_detached_at_head(&project_root, &destination)
+                            .map_err(|err| err.to_string());
+                    JobResult::WorktreeAdded {
+                        project_root,
+                        name: job_name,
+                        result,
+                    }
+                });
+            }
+            Command::SwitchWorktree(name) => {
+                if let Some(project) = model.active_project_mut() {
+                    match project.ensure_worktree(&name) {
+                        Ok(Some(())) => {
+                            // New worktree attached; snapshot comes via the job below.
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            model.toast(err, ToastKind::Error);
+                        }
+                    }
+                }
+            }
+            Command::RemoveWorktree { name, force } => {
+                let Some(project) = model.active_project() else {
+                    return;
+                };
+                let project_root = project.root.clone();
+                let worktree_path = project
+                    .worktrees
+                    .iter()
+                    .find(|worktree| worktree.name == name)
+                    .map(|worktree| worktree.path.clone());
+                let Some(worktree_path) = worktree_path else {
+                    return;
+                };
+                if project
+                    .worktrees
+                    .iter()
+                    .find(|worktree| worktree.name == name)
+                    .is_some_and(|worktree| worktree.is_main)
+                {
+                    model.toast(
+                        if model.settings.language.is_zh() {
+                            "主工作树不能被删除"
+                        } else {
+                            "The main worktree cannot be removed"
+                        },
+                        ToastKind::Error,
+                    );
+                    return;
+                }
+                // Drop consoles of the worktree being removed.
+                let terminal_ids: Vec<u64> = project
+                    .worktrees
+                    .iter()
+                    .find(|worktree| worktree.name == name)
+                    .map(|worktree| worktree.terminals.iter().map(|t| t.id).collect())
+                    .unwrap_or_default();
+                if let Some(project) = model.active_project_mut() {
+                    for id in terminal_ids {
+                        project.close_terminal(id);
+                        runtime.terminal_snapshots.remove(&id);
+                        runtime.terminal_selections.remove(&id);
+                        runtime.terminal_search.remove(&id);
+                        if runtime.terminal_focus == Some(id) {
+                            runtime.terminal_focus = None;
+                        }
+                    }
+                }
+                let key = format!("worktree-remove:{}", name);
+                let job_name = name.clone();
+                self.spawn("worktree-remove", key, move || {
+                    let result =
+                        lazecode_git::remove_worktree(&project_root, &worktree_path, force)
+                            .map_err(|err| err.to_string());
+                    JobResult::WorktreeRemoved {
+                        project_root,
+                        name: job_name,
+                        result,
+                    }
+                });
+            }
             Command::SaveWorkspace => model.save_workspace(),
             Command::Quit => model.should_quit = true,
         }
@@ -961,6 +1074,67 @@ impl JobQueue {
                             } else if file.doc.revision == revision {
                                 file.doc.dirty = false;
                             }
+                        }
+                    }
+                }
+            }
+            JobResult::WorktreeAdded {
+                project_root,
+                name,
+                result,
+            } => match result {
+                Ok(path) => {
+                    if let Some(project) = model
+                        .projects
+                        .iter_mut()
+                        .find(|project| project.root == project_root)
+                    {
+                        project.attach_worktree(WorktreeState::load(
+                            name.clone(),
+                            path.clone(),
+                            false,
+                        ));
+                        self.refresh_git(path.clone(), None);
+                        self.refresh_log(path.clone(), None);
+                        self.refresh_branches(project_root.clone());
+                    }
+                    model.toast(
+                        if model.settings.language.is_zh() {
+                            format!("已创建工作树 {name}")
+                        } else {
+                            format!("Created worktree {name}")
+                        },
+                        ToastKind::Success,
+                    );
+                }
+                Err(err) => {
+                    model.toast(
+                        if model.settings.language.is_zh() {
+                            format!("无法创建工作树 {name}：{err}")
+                        } else {
+                            format!("Cannot create worktree {name}: {err}")
+                        },
+                        ToastKind::Error,
+                    );
+                }
+            },
+            JobResult::WorktreeRemoved {
+                project_root,
+                name,
+                result,
+            } => {
+                if let Some(project) = model
+                    .projects
+                    .iter_mut()
+                    .find(|project| project.root == project_root)
+                {
+                    match result {
+                        Ok(()) => {
+                            project.detach_worktree(&name);
+                            model.ui.sidebar_view = lazecode_core::SidebarView::Consoles;
+                        }
+                        Err(err) => {
+                            model.toast(err, ToastKind::Error);
                         }
                     }
                 }

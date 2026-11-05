@@ -839,6 +839,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam"
+version = "0.8.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e71406cd8807725f7ac2f999a4cdd32e98f829fdf65f528343cebf945e41df1e"
+dependencies = [
+ "crossbeam-channel",
+ "crossbeam-deque",
+ "crossbeam-epoch",
+ "crossbeam-queue",
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -862,6 +875,15 @@ name = "crossbeam-epoch"
 version = "0.9.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-queue"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03e8bd762f7479489c70ed6c768ddca99d7296857de437a68dcb2a94365b3fae"
 dependencies = [
  "crossbeam-utils",
 ]
@@ -1023,6 +1045,17 @@ name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
+
+[[package]]
+name = "dua-core"
+version = "4.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d687862f3206e7c660daeb6ab0200c65e58fccd7e508819e4bd9949304c640a8"
+dependencies = [
+ "crossbeam",
+ "libc",
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "dunce"
@@ -1672,6 +1705,7 @@ dependencies = [
  "gix-utils",
  "gix-validate",
  "gix-worktree",
+ "gix-worktree-state",
  "gix-worktree-stream",
  "gix-zlib",
  "nonempty",
@@ -2479,6 +2513,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fe92aec0a25cf073394492a6ee2aa4d27632acde91a653d34de0e4da6afb485d"
 dependencies = [
  "bstr",
+ "dua-core",
  "gix-attributes",
  "gix-error",
  "gix-fs",
@@ -2488,7 +2523,29 @@ dependencies = [
  "gix-index",
  "gix-object",
  "gix-path",
+ "gix-trace",
+ "gix-utils",
  "gix-validate",
+]
+
+[[package]]
+name = "gix-worktree-state"
+version = "0.37.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18abf655ef8b8467657ac64b337171a9f4612ca6a421858a765857584beec9e8"
+dependencies = [
+ "bstr",
+ "gix-error",
+ "gix-filter",
+ "gix-fs",
+ "gix-index",
+ "gix-object",
+ "gix-parallel",
+ "gix-path",
+ "gix-trace",
+ "gix-utils",
+ "gix-worktree",
+ "io-close",
 ]
 
 [[package]]
@@ -2981,6 +3038,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c033f80b2c113cdf91ab7a33faa9cbc014726dcad99880c8609af2a370edf37d"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "io-close"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cadcf447f06744f8ce713d2d6239bb5bde2c357a452397a9ed90c625da390bc"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]

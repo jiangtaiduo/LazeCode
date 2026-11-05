@@ -144,7 +144,75 @@ pub struct TerminalTab {
     pub started: Instant,
 }
 
+/// One worktree of a project: a checkout with its own tree, Git state,
+/// watcher and consoles. The main checkout is always present and first.
+pub struct WorktreeState {
+    pub name: String,
+    pub path: PathBuf,
+    /// True for the project's registered root (`.git` is a directory, not a
+    /// `gitdir:` file).
+    pub is_main: bool,
+    pub tree: FileTree,
+    pub git: Option<RepoSnapshot>,
+    pub git_error: Option<String>,
+    pub terminals: Vec<TerminalTab>,
+    pub active_terminal: Option<u64>,
+    pub watcher: Option<ProjectWatcher>,
+    pub last_watch_poll: Instant,
+    pub git_loading: bool,
+    /// UI-side branch filter for the Git log view (per worktree).
+    pub log_branch: Option<String>,
+}
+
+impl WorktreeState {
+    pub fn branch(&self) -> String {
+        self.git
+            .as_ref()
+            .and_then(|git| git.branch.clone())
+            .unwrap_or_else(|| {
+                if let Some(head) = self.git.as_ref().and_then(|git| git.head.as_ref()) {
+                    format!("{} (detached)", head.short)
+                } else {
+                    "no branch".to_string()
+                }
+            })
+    }
+
+    /// Load the tree/git/watcher state of one checkout without spawning a
+    /// console. Callers attach consoles afterwards via `open_terminal_in`.
+    pub fn load(name: String, path: PathBuf, is_main: bool) -> Self {
+        let tree = load_tree(&path);
+        let watcher = lazecode_fs::watch_project(&path).ok();
+        let (git, git_error) = match lazecode_git::snapshot(&path) {
+            Ok(snapshot) => (Some(snapshot), None),
+            Err(err) => {
+                let message = err.to_string();
+                if message.contains("not a Git repository") {
+                    (None, None)
+                } else {
+                    (None, Some(message))
+                }
+            }
+        };
+        Self {
+            name,
+            path,
+            is_main,
+            tree,
+            git,
+            git_error,
+            terminals: Vec::new(),
+            active_terminal: None,
+            watcher,
+            last_watch_poll: Instant::now(),
+            git_loading: false,
+            log_branch: None,
+        }
+    }
+}
+
 pub struct ProjectState {
+    /// The registered project root (the main checkout).
     pub root: PathBuf,
     pub name: String,
     pub initials: String,
@@ -167,8 +235,10 @@ pub struct ProjectState {
     pub commit_message: String,
     pub amend: bool,
     pub unchecked_paths: HashSet<String>,
-    pub terminals: Vec<TerminalTab>,
-    pub active_terminal: Option<u64>,
+    /// All worktrees incl. the main one at index 0.
+    pub worktrees: Vec<WorktreeState>,
+    /// Index into `worktrees` of the console/tree pane target.
+    pub active_worktree: usize,
     pub watcher: Option<ProjectWatcher>,
     pub last_watch_poll: Instant,
     pub git_loading: bool,
@@ -244,8 +314,8 @@ impl ProjectState {
             commit_message: String::new(),
             amend: false,
             unchecked_paths: HashSet::new(),
-            terminals: Vec::new(),
-            active_terminal: None,
+            worktrees: Vec::new(),
+            active_worktree: 0,
             watcher,
             last_watch_poll: Instant::now(),
             git_loading: false,
@@ -254,6 +324,8 @@ impl ProjectState {
         if let Some(first) = project.log.first() {
             project.selected_commit = Some(first.id.clone());
         }
+        let main = WorktreeState::load("main".to_string(), project.root.clone(), true);
+        project.worktrees.push(main);
         if let Err(err) = project.open_terminal(None, None, SessionKind::Shell, settings, notifier)
         {
             // A bad shell setting must not make the whole project (and every
@@ -305,6 +377,26 @@ impl ProjectState {
         }
         self.prune_unchecked();
         self.git_loading = false;
+    }
+
+    /// Refresh the Git snapshot of one worktree by its path.
+    pub fn refresh_git_for(&mut self, path: &Path) {
+        let Some(worktree) = self
+            .worktrees
+            .iter_mut()
+            .find(|worktree| worktree.path == path)
+        else {
+            return;
+        };
+        worktree.git_loading = true;
+        match lazecode_git::snapshot(path) {
+            Ok(snapshot) => {
+                worktree.git = Some(snapshot);
+                worktree.git_error = None;
+            }
+            Err(err) => worktree.git_error = Some(err.to_string()),
+        }
+        worktree.git_loading = false;
     }
 
     pub fn prune_unchecked_public(&mut self) {
@@ -365,6 +457,80 @@ impl ProjectState {
     pub fn active_tab_index(&self) -> Option<usize> {
         let id = self.active_tab?;
         self.tabs.iter().position(|tab| tab.id == id)
+    }
+
+    /// The worktree whose tree/consoles/gits are shown in the pane.
+    pub fn active_worktree(&self) -> &WorktreeState {
+        &self.worktrees[self
+            .active_worktree
+            .min(self.worktrees.len().saturating_sub(1))]
+    }
+
+    /// Name of the focused worktree, for UI identity checks.
+    pub fn active_worktree_index(&self) -> Option<usize> {
+        if self.worktrees.is_empty() {
+            return None;
+        }
+        Some(self.active_worktree)
+    }
+
+    pub fn active_worktree_mut(&mut self) -> &mut WorktreeState {
+        let index = self
+            .active_worktree
+            .min(self.worktrees.len().saturating_sub(1));
+        &mut self.worktrees[index]
+    }
+
+    pub fn worktree_index(&self, name: &str) -> Option<usize> {
+        self.worktrees.iter().position(|wt| wt.name == name)
+    }
+
+    /// Switch to an already attached worktree, or attach one that exists in
+    /// Git but is not yet loaded into the model. Returns `Ok(Some(()))` when
+    /// a new worktree was attached, `Ok(None)` when it was already loaded.
+    pub fn ensure_worktree(&mut self, name: &str) -> Result<Option<()>, String> {
+        if let Some(index) = self.worktree_index(name) {
+            self.active_worktree = index;
+            return Ok(None);
+        }
+        // A worktree registered in git but not attached yet: load it cold
+        // (no console spawns automatically; a worktree keeps its own set).
+        let all = lazecode_git::list_worktrees(&self.root).map_err(|err| err.to_string())?;
+        let Some(info) = all.into_iter().find(|worktree| worktree.name == name) else {
+            return Err(format!("worktree '{name}' does not exist"));
+        };
+        let worktree = WorktreeState::load(info.name, info.path, false);
+        let index = self.worktrees.len();
+        self.worktrees.push(worktree);
+        self.active_worktree = index;
+        Ok(Some(()))
+    }
+
+    /// Register a freshly created worktree and focus it.
+    pub fn attach_worktree(&mut self, worktree: WorktreeState) {
+        // A worktree with the same path may already exist.
+        if let Some(index) = self
+            .worktrees
+            .iter()
+            .position(|existing| existing.path == worktree.path)
+        {
+            self.worktrees[index] = worktree;
+            self.active_worktree = index;
+            return;
+        }
+        self.worktrees.push(worktree);
+        self.active_worktree = self.worktrees.len() - 1;
+    }
+
+    /// Drop the model entry for a linked worktree after git removal.
+    pub fn detach_worktree(&mut self, name: &str) {
+        let Some(index) = self.worktrees.iter().position(|wt| wt.name == name) else {
+            return;
+        };
+        self.worktrees.remove(index);
+        if self.active_worktree >= self.worktrees.len() {
+            self.active_worktree = self.worktrees.len().saturating_sub(1);
+        }
     }
 
     pub fn tab_by_id(&self, id: u64) -> Option<&Tab> {
@@ -478,17 +644,26 @@ impl ProjectState {
         }
     }
 
-    pub fn active_terminal_index(&self) -> Option<usize> {
-        let id = self.active_terminal?;
-        self.terminals.iter().position(|terminal| terminal.id == id)
+    pub fn term_by_id(&self, id: u64) -> Option<&TerminalTab> {
+        self.worktrees
+            .iter()
+            .find_map(|wt| wt.terminals.iter().find(|terminal| terminal.id == id))
     }
 
-    pub fn terminal_by_id(&self, id: u64) -> Option<&TerminalTab> {
-        self.terminals.iter().find(|terminal| terminal.id == id)
+    pub fn term_by_id_mut(&mut self, id: u64) -> Option<&mut TerminalTab> {
+        self.worktrees
+            .iter_mut()
+            .find_map(|wt| wt.terminals.iter_mut().find(|terminal| terminal.id == id))
     }
 
-    pub fn terminal_by_id_mut(&mut self, id: u64) -> Option<&mut TerminalTab> {
-        self.terminals.iter_mut().find(|terminal| terminal.id == id)
+    /// Console index (in the pane) that owns the terminal id.
+    pub fn active_terminal_owner(&self, id: u64) -> Option<(usize, usize)> {
+        for (wt_index, wt) in self.worktrees.iter().enumerate() {
+            if let Some(term_index) = wt.terminals.iter().position(|terminal| terminal.id == id) {
+                return Some((wt_index, term_index));
+            }
+        }
+        None
     }
 
     pub fn open_terminal(
@@ -499,11 +674,26 @@ impl ProjectState {
         settings: &Settings,
         notifier: Option<Arc<dyn Notifier>>,
     ) -> Result<u64, String> {
+        let cwd = self.active_worktree().path.clone();
+        self.open_terminal_in(cwd, command, title, kind, settings, notifier)
+    }
+
+    /// Open a console inside the active worktree rooted at `cwd` (which
+    /// differs for linked worktrees).
+    pub fn open_terminal_in(
+        &mut self,
+        cwd: PathBuf,
+        command: Option<String>,
+        title: Option<String>,
+        kind: SessionKind,
+        settings: &Settings,
+        notifier: Option<Arc<dyn Notifier>>,
+    ) -> Result<u64, String> {
         let shell = settings.terminal.shell.clone();
         let options = SpawnOptions {
             shell,
             command: command.clone(),
-            cwd: self.root.clone(),
+            cwd: cwd.clone(),
             cols: 110,
             rows: 28,
             scrollback: settings.terminal.scrollback,
@@ -513,7 +703,8 @@ impl ProjectState {
         let session = lazecode_terminal::spawn(options).map_err(|err| err.to_string())?;
         let id = NEXT_TERMINAL.fetch_add(1, Ordering::Relaxed);
         let title = title.unwrap_or_else(|| session.command_label.clone());
-        self.terminals.push(TerminalTab {
+        let terminal = self.active_worktree_mut();
+        terminal.terminals.push(TerminalTab {
             id,
             session,
             title,
@@ -521,20 +712,28 @@ impl ProjectState {
             spawn_command: command,
             started: Instant::now(),
         });
-        self.active_terminal = Some(id);
+        terminal.active_terminal = Some(id);
         Ok(id)
     }
 
     pub fn close_terminal(&mut self, id: u64) {
-        let Some(index) = self.terminals.iter().position(|terminal| terminal.id == id) else {
+        let Some(wt_index) = self
+            .worktrees
+            .iter()
+            .position(|wt| wt.terminals.iter().any(|terminal| terminal.id == id))
+        else {
             return;
         };
-        self.terminals.remove(index);
-        if self.active_terminal == Some(id) {
-            self.active_terminal = self
+        let wt = &mut self.worktrees[wt_index];
+        let Some(index) = wt.terminals.iter().position(|terminal| terminal.id == id) else {
+            return;
+        };
+        wt.terminals.remove(index);
+        if wt.active_terminal == Some(id) {
+            wt.active_terminal = wt
                 .terminals
                 .get(index.saturating_sub(1))
-                .or_else(|| self.terminals.first())
+                .or_else(|| wt.terminals.first())
                 .map(|terminal| terminal.id);
         }
     }
@@ -545,10 +744,11 @@ impl ProjectState {
         settings: &Settings,
         notifier: Option<Arc<dyn Notifier>>,
     ) -> Result<(), String> {
-        let Some(index) = self.terminals.iter().position(|terminal| terminal.id == id) else {
+        let Some((wt_index, term_index)) = self.active_terminal_owner(id) else {
             return Err("terminal not found".into());
         };
-        let old = &self.terminals[index];
+        let wt = &mut self.worktrees[wt_index];
+        let old = &wt.terminals[term_index];
         let command = old.spawn_command.clone();
         let title = old.title.clone();
         let kind = old.kind;
@@ -556,7 +756,7 @@ impl ProjectState {
         let session = lazecode_terminal::spawn(SpawnOptions {
             shell,
             command,
-            cwd: self.root.clone(),
+            cwd: wt.path.clone(),
             cols: 110,
             rows: 28,
             scrollback: settings.terminal.scrollback,
@@ -564,10 +764,10 @@ impl ProjectState {
             kind,
         })
         .map_err(|err| err.to_string())?;
-        self.terminals[index].session = session;
-        self.terminals[index].title = title;
-        self.terminals[index].started = Instant::now();
-        self.active_terminal = Some(id);
+        wt.terminals[term_index].session = session;
+        wt.terminals[term_index].title = title;
+        wt.terminals[term_index].started = Instant::now();
+        wt.active_terminal = Some(id);
         Ok(())
     }
 }
@@ -643,6 +843,11 @@ impl AppModel {
                     |tab| matches!(&tab.kind, TabKind::File(file) if &file.doc.path == active_tab),
                 ) {
                     self.projects[*index].active_tab = Some(tab.id);
+                }
+            }
+            if let Some(name) = workspace.active_worktrees.get(path) {
+                if let Some(worktree_index) = self.projects[*index].worktree_index(name) {
+                    self.projects[*index].active_worktree = worktree_index;
                 }
             }
         }
@@ -777,14 +982,10 @@ impl AppModel {
     pub fn total_running(&self) -> usize {
         self.projects
             .iter()
-            .map(|project| {
-                project
-                    .terminals
-                    .iter()
-                    .filter(|terminal| terminal.session.is_running())
-                    .count()
-            })
-            .sum()
+            .flat_map(|project| project.worktrees.iter())
+            .flat_map(|worktree| worktree.terminals.iter())
+            .filter(|terminal| terminal.session.is_running())
+            .count()
     }
 
     pub fn total_changes(&self) -> usize {
@@ -836,6 +1037,7 @@ impl AppModel {
             panel_height: Some(self.ui.panel_height),
             open_tabs: BTreeMap::new(),
             active_tabs: BTreeMap::new(),
+            active_worktrees: BTreeMap::new(),
         };
         for project in &self.projects {
             let files: Vec<PathBuf> = project
@@ -855,6 +1057,8 @@ impl AppModel {
                     }
                 }
             }
+            file.active_worktrees
+                .insert(project.root.clone(), project.active_worktree().name.clone());
         }
         if let Err(err) = file.save() {
             log::warn!("cannot save workspace: {err}");

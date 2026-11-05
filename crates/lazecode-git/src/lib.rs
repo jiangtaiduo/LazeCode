@@ -19,12 +19,14 @@ pub mod tree;
 pub mod worktree;
 
 pub use changelists::Changelists;
-pub use diff::{commit_details, file_diff};
+pub use diff::{
+    commit_details, commit_file_diff, diff_commits, diff_ref_worktree, diff_two_files, file_diff,
+};
 pub use history::{
-    cherry_pick, cherry_pick_abort, cherry_pick_continue, conflict_list, drop_commit, merge,
-    merge_abort, merge_continue, rebase, rebase_abort, rebase_continue, rebase_skip, require_clean,
-    reset, resolve_take, revert, sequencer_state, squash_commits, ConflictEntry, ResetMode,
-    SequencerState,
+    cherry_pick, cherry_pick_abort, cherry_pick_continue, conflict_list, drop_commit,
+    mark_conflict_resolved, merge, merge_abort, merge_continue, merge_file_content, rebase,
+    rebase_abort, rebase_continue, rebase_skip, require_clean, reset, resolve_take, revert,
+    sequencer_state, squash_commits, ConflictEntry, MergeFile3Way, ResetMode, SequencerState,
 };
 pub use introspect::{
     blame, compare_branches, compare_commits, file_history, lfs_pull, lfs_status, lfs_track,

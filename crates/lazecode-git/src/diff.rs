@@ -17,8 +17,44 @@ fn load_blob_capped(repo: &gix::Repository, oid: ObjectId) -> Vec<u8> {
     };
     if header.size() > MAX_DIFF_BYTES as u64 {
         return Vec::new();
-    }
+    };
     blob_bytes(repo, oid).unwrap_or_default()
+}
+
+fn build_file_diff(
+    path: String,
+    old: Vec<u8>,
+    new: Vec<u8>,
+    old_exists: bool,
+    new_exists: bool,
+) -> FileDiff {
+    let binary = old.iter().take(8000).any(|b| *b == 0) || new.iter().take(8000).any(|b| *b == 0);
+    let kind = match (old_exists, new_exists) {
+        (false, true) => ChangeKind::Added,
+        (true, false) => ChangeKind::Deleted,
+        _ => ChangeKind::Modified,
+    };
+    if binary || old.len() > MAX_DIFF_BYTES || new.len() > MAX_DIFF_BYTES {
+        return FileDiff {
+            path,
+            kind,
+            old_text: String::new(),
+            new_text: String::new(),
+            diff: Default::default(),
+            binary,
+        };
+    }
+    let old_text = String::from_utf8_lossy(&old).into_owned();
+    let new_text = String::from_utf8_lossy(&new).into_owned();
+    let diff = lazecode_text::diff::diff_text(&old_text, &new_text);
+    FileDiff {
+        path,
+        kind,
+        old_text,
+        new_text,
+        diff,
+        binary,
+    }
 }
 
 pub fn file_diff(root: &Path, path: &str) -> Result<FileDiff> {
@@ -26,11 +62,12 @@ pub fn file_diff(root: &Path, path: &str) -> Result<FileDiff> {
     let repo = discover(root)?;
     let workdir = workdir(&repo)?;
     let head_map = head_tree_map(&repo)?;
-    let old = head_map
-        .get(path)
+    let old_entry = head_map.get(path);
+    let old = old_entry
         .map(|entry| load_blob_capped(&repo, entry.oid))
         .unwrap_or_default();
     let abs = safe_worktree_join(&workdir, path)?;
+    let exists = std::fs::symlink_metadata(&abs).is_ok();
     let new = match std::fs::symlink_metadata(&abs) {
         Ok(metadata) if metadata.file_type().is_symlink() => std::fs::read_link(&abs)
             .map(|target| target.to_string_lossy().into_owned().into_bytes())
@@ -40,34 +77,127 @@ pub fn file_diff(root: &Path, path: &str) -> Result<FileDiff> {
         }
         _ => Vec::new(),
     };
-    let binary = old.iter().take(8000).any(|b| *b == 0) || new.iter().take(8000).any(|b| *b == 0);
-    let exists = std::fs::symlink_metadata(&abs).is_ok();
-    let kind = match (head_map.contains_key(path), exists) {
-        (false, true) => ChangeKind::Added,
-        (true, false) => ChangeKind::Deleted,
-        _ => ChangeKind::Modified,
+    Ok(build_file_diff(
+        path.to_string(),
+        old,
+        new,
+        old_entry.is_some(),
+        exists,
+    ))
+}
+
+pub fn commit_file_diff(root: &Path, commit_spec: &str, path: &str) -> Result<FileDiff> {
+    validate_repo_path(path)?;
+    let repo = discover(root)?;
+    let id = resolve_commit(&repo, commit_spec)?;
+    let commit = repo.find_commit(id)?;
+    let parent_id = commit.parent_ids().next().map(|id| id.detach());
+    let parent_map = if let Some(parent_id) = parent_id {
+        commit_tree_map(&repo, parent_id)?
+    } else {
+        Default::default()
     };
-    if binary || old.len() > MAX_DIFF_BYTES || new.len() > MAX_DIFF_BYTES {
-        return Ok(FileDiff {
-            path: path.to_string(),
-            kind,
-            old_text: String::new(),
-            new_text: String::new(),
-            diff: Default::default(),
-            binary,
-        });
-    }
-    let old_text = String::from_utf8_lossy(&old).into_owned();
-    let new_text = String::from_utf8_lossy(&new).into_owned();
-    let diff = lazecode_text::diff::diff_text(&old_text, &new_text);
-    Ok(FileDiff {
-        path: path.to_string(),
-        kind,
-        old_text,
-        new_text,
-        diff,
-        binary,
-    })
+    let current_map = commit_tree_map(&repo, id)?;
+    let old_entry = parent_map.get(path);
+    let new_entry = current_map.get(path);
+    let old = old_entry
+        .map(|entry| load_blob_capped(&repo, entry.oid))
+        .unwrap_or_default();
+    let new = new_entry
+        .map(|entry| load_blob_capped(&repo, entry.oid))
+        .unwrap_or_default();
+    Ok(build_file_diff(
+        path.to_string(),
+        old,
+        new,
+        old_entry.is_some(),
+        new_entry.is_some(),
+    ))
+}
+
+pub fn diff_commits(root: &Path, from_spec: &str, to_spec: &str, path: &str) -> Result<FileDiff> {
+    validate_repo_path(path)?;
+    let repo = discover(root)?;
+    let from_id = resolve_commit(&repo, from_spec)?;
+    let to_id = resolve_commit(&repo, to_spec)?;
+    let from_map = commit_tree_map(&repo, from_id)?;
+    let to_map = commit_tree_map(&repo, to_id)?;
+    let old_entry = from_map.get(path);
+    let new_entry = to_map.get(path);
+    let old = old_entry
+        .map(|entry| load_blob_capped(&repo, entry.oid))
+        .unwrap_or_default();
+    let new = new_entry
+        .map(|entry| load_blob_capped(&repo, entry.oid))
+        .unwrap_or_default();
+    Ok(build_file_diff(
+        path.to_string(),
+        old,
+        new,
+        old_entry.is_some(),
+        new_entry.is_some(),
+    ))
+}
+
+pub fn diff_ref_worktree(root: &Path, ref_spec: &str, path: &str) -> Result<FileDiff> {
+    validate_repo_path(path)?;
+    let repo = discover(root)?;
+    let workdir = workdir(&repo)?;
+    let ref_id = resolve_commit(&repo, ref_spec)?;
+    let ref_map = commit_tree_map(&repo, ref_id)?;
+    let old_entry = ref_map.get(path);
+    let old = old_entry
+        .map(|entry| load_blob_capped(&repo, entry.oid))
+        .unwrap_or_default();
+    let abs = safe_worktree_join(&workdir, path)?;
+    let exists = std::fs::symlink_metadata(&abs).is_ok();
+    let new = match std::fs::symlink_metadata(&abs) {
+        Ok(metadata) if metadata.file_type().is_symlink() => std::fs::read_link(&abs)
+            .map(|target| target.to_string_lossy().into_owned().into_bytes())
+            .unwrap_or_default(),
+        Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_DIFF_BYTES as u64 => {
+            std::fs::read(&abs).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+    Ok(build_file_diff(
+        path.to_string(),
+        old,
+        new,
+        old_entry.is_some(),
+        exists,
+    ))
+}
+
+pub fn diff_two_files(old_path: &Path, new_path: &Path) -> Result<FileDiff> {
+    let old = if old_path.is_file() {
+        std::fs::read(old_path).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let new = if new_path.is_file() {
+        std::fs::read(new_path).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let display_name = format!(
+        "{} ↔ {}",
+        old_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("left"),
+        new_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("right"),
+    );
+    Ok(build_file_diff(
+        display_name,
+        old,
+        new,
+        old_path.is_file(),
+        new_path.is_file(),
+    ))
 }
 
 pub fn commit_details(root: &Path, spec: &str) -> Result<CommitDetails> {

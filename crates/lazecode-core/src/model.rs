@@ -96,16 +96,61 @@ impl Default for UiState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MarkdownViewMode {
+    #[default]
+    Code,
+    Preview,
+    Split,
+}
+
 pub struct FileTab {
     pub doc: Document,
     pub external: bool,
+    pub md_mode: MarkdownViewMode,
+    pub annotate: bool,
+    pub blame: Option<Vec<lazecode_git::BlameLine>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiffViewMode {
+    #[default]
+    Unified,
+    SideBySide,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiffSource {
+    Worktree {
+        path: String,
+    },
+    Commit {
+        commit: String,
+        path: String,
+    },
+    CompareWithLocal {
+        commit: String,
+        path: String,
+    },
+    CompareCommits {
+        from: String,
+        to: String,
+        path: String,
+    },
+    Files {
+        old_path: PathBuf,
+        new_path: PathBuf,
+    },
 }
 
 pub struct DiffTab {
+    pub source: DiffSource,
     pub path: String,
     pub diff: Option<FileDiff>,
     pub loading: bool,
     pub error: Option<String>,
+    pub view_mode: DiffViewMode,
+    pub current_hunk: usize,
 }
 
 pub enum TabKind {
@@ -122,15 +167,28 @@ impl Tab {
     pub fn title(&self) -> String {
         match &self.kind {
             TabKind::File(file) => file.doc.title(),
-            TabKind::Diff(diff) => diff
-                .path
-                .rsplit('/')
-                .next()
-                .unwrap_or(&diff.path)
-                .to_string(),
+            TabKind::Diff(diff) => {
+                let base = diff.path.rsplit('/').next().unwrap_or(&diff.path);
+                match &diff.source {
+                    DiffSource::Worktree { .. } => base.to_string(),
+                    DiffSource::Commit { commit, .. } => {
+                        format!("{base} ({})", &commit[..commit.len().min(7)])
+                    }
+                    DiffSource::CompareWithLocal { commit, .. } => {
+                        format!("{base} (Local ↔ {})", &commit[..commit.len().min(7)])
+                    }
+                    DiffSource::CompareCommits { from, to, .. } => {
+                        format!(
+                            "{base} ({}..{})",
+                            &from[..from.len().min(7)],
+                            &to[..to.len().min(7)]
+                        )
+                    }
+                    DiffSource::Files { .. } => base.to_string(),
+                }
+            }
         }
     }
-
     pub fn path(&self) -> Option<&str> {
         match &self.kind {
             TabKind::File(file) => file.doc.path.to_str(),
@@ -722,34 +780,100 @@ impl ProjectState {
         let external = !path.starts_with(&self.root);
         self.tabs.push(Tab {
             id,
-            kind: TabKind::File(FileTab { doc, external }),
+            kind: TabKind::File(FileTab {
+                doc,
+                external,
+                md_mode: MarkdownViewMode::Code,
+                annotate: false,
+                blame: None,
+            }),
         });
         self.active_tab = Some(id);
         self.expand_parents(&path);
         Ok(id)
     }
 
-    pub fn open_diff(&mut self, path: String) -> u64 {
-        if let Some(tab) = self
-            .tabs
-            .iter()
-            .find(|tab| matches!(&tab.kind, TabKind::Diff(diff) if diff.path == path))
-        {
+    pub fn open_diff_source(&mut self, source: DiffSource) -> u64 {
+        if let Some(tab) = self.tabs.iter().find(|tab| match &tab.kind {
+            TabKind::Diff(diff) => diff.source == source,
+            _ => false,
+        }) {
             self.active_tab = Some(tab.id);
             return tab.id;
         }
         let id = NEXT_TAB.fetch_add(1, Ordering::Relaxed);
+        let path = match &source {
+            DiffSource::Worktree { path }
+            | DiffSource::Commit { path, .. }
+            | DiffSource::CompareWithLocal { path, .. }
+            | DiffSource::CompareCommits { path, .. } => path.clone(),
+            DiffSource::Files { old_path, new_path } => format!(
+                "{} ↔ {}",
+                old_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("left"),
+                new_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("right"),
+            ),
+        };
         self.tabs.push(Tab {
             id,
             kind: TabKind::Diff(DiffTab {
+                source,
                 path,
                 diff: None,
                 loading: true,
                 error: None,
+                view_mode: DiffViewMode::Unified,
+                current_hunk: 0,
             }),
         });
         self.active_tab = Some(id);
         id
+    }
+
+    pub fn open_diff(&mut self, path: String) -> u64 {
+        self.open_diff_source(DiffSource::Worktree { path })
+    }
+
+    pub fn open_commit_diff(&mut self, commit: String, path: String) -> u64 {
+        self.open_diff_source(DiffSource::Commit { commit, path })
+    }
+
+    pub fn open_compare_with_local_diff(&mut self, commit: String, path: String) -> u64 {
+        self.open_diff_source(DiffSource::CompareWithLocal { commit, path })
+    }
+
+    pub fn open_compare_commits_diff(&mut self, from: String, to: String, path: String) -> u64 {
+        self.open_diff_source(DiffSource::CompareCommits { from, to, path })
+    }
+
+    pub fn open_files_diff(&mut self, old_path: PathBuf, new_path: PathBuf) -> u64 {
+        self.open_diff_source(DiffSource::Files { old_path, new_path })
+    }
+
+    pub fn set_diff_for_source(&mut self, source: &DiffSource, result: Result<FileDiff, String>) {
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| match &tab.kind {
+            TabKind::Diff(diff) => &diff.source == source,
+            _ => false,
+        }) {
+            if let TabKind::Diff(diff) = &mut tab.kind {
+                diff.loading = false;
+                match result {
+                    Ok(file_diff) => {
+                        diff.diff = Some(file_diff);
+                        diff.error = None;
+                    }
+                    Err(err) => {
+                        diff.diff = None;
+                        diff.error = Some(err);
+                    }
+                }
+            }
+        }
     }
 
     pub fn set_diff(&mut self, path: &str, result: Result<FileDiff, String>) {

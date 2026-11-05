@@ -224,6 +224,54 @@ pub fn change_stats(old: &str, new: &str) -> (u32, u32) {
     (additions, deletions)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InlineChunkKind {
+    Unchanged,
+    Delete,
+    Add,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlineChunk {
+    pub kind: InlineChunkKind,
+    pub text: String,
+}
+
+/// Compute intra-line word-level differences between an old line and a new line.
+pub fn inline_diff(old: &str, new: &str) -> (Vec<InlineChunk>, Vec<InlineChunk>) {
+    let diff = SimilarDiff::from_words(old, new);
+    let mut old_chunks = Vec::new();
+    let mut new_chunks = Vec::new();
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Equal => {
+                let val = change.value().to_string();
+                old_chunks.push(InlineChunk {
+                    kind: InlineChunkKind::Unchanged,
+                    text: val.clone(),
+                });
+                new_chunks.push(InlineChunk {
+                    kind: InlineChunkKind::Unchanged,
+                    text: val,
+                });
+            }
+            ChangeTag::Delete => {
+                old_chunks.push(InlineChunk {
+                    kind: InlineChunkKind::Delete,
+                    text: change.value().to_string(),
+                });
+            }
+            ChangeTag::Insert => {
+                new_chunks.push(InlineChunk {
+                    kind: InlineChunkKind::Add,
+                    text: change.value().to_string(),
+                });
+            }
+        }
+    }
+    (old_chunks, new_chunks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

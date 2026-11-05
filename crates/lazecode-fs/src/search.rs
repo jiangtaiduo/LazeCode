@@ -152,6 +152,57 @@ pub fn search_in_files(
     Ok(hits)
 }
 
+/// Replace matching text in files under `root`. Returns total number of replacements made.
+pub fn replace_in_files(
+    root: &Path,
+    query: &str,
+    replacement: &str,
+    options: &SearchOptions,
+    cancel: Option<&AtomicBool>,
+) -> Result<usize> {
+    if query.is_empty() {
+        return Ok(0);
+    }
+    let hits = search_in_files(root, query, options, cancel)?;
+    if hits.is_empty() {
+        return Ok(0);
+    }
+    let mut files: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for hit in hits {
+        files.insert(root.join(hit.path));
+    }
+    let escaped = regex::escape(query);
+    let pattern = if options.regex {
+        query.to_string()
+    } else {
+        escaped
+    };
+    let pattern = if options.whole_word && !options.regex {
+        format!(r"\b{pattern}\b")
+    } else {
+        pattern
+    };
+    let matcher = regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!options.case_sensitive)
+        .size_limit(4 * 1024 * 1024)
+        .build()
+        .map_err(|err| FsError::Pattern(err.to_string()))?;
+
+    let mut total_count = 0;
+    for file_path in files {
+        if let Ok(content) = std::fs::read_to_string(&file_path) {
+            let count = matcher.find_iter(&content).count();
+            if count > 0 {
+                let replaced = matcher.replace_all(&content, replacement);
+                if std::fs::write(&file_path, replaced.as_bytes()).is_ok() {
+                    total_count += count;
+                }
+            }
+        }
+    }
+    Ok(total_count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

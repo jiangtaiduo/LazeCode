@@ -48,6 +48,26 @@ pub enum MenuKind {
     BranchContext {
         project: usize,
     },
+    /// Project tree right-click context menu (payload: relative path).
+    TreeContext {
+        project: usize,
+        is_dir: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GitToolsTab {
+    #[default]
+    Submodules,
+    Lfs,
+    Remotes,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RebaseTodoRow {
+    pub action: String,
+    pub commit: String,
+    pub message: String,
 }
 
 pub struct MenuState {
@@ -109,6 +129,70 @@ pub enum DialogState {
         tab_id: u64,
         name: String,
     },
+    NewFile {
+        dir: std::path::PathBuf,
+        value: String,
+        error: Option<String>,
+    },
+    NewDirectory {
+        dir: std::path::PathBuf,
+        value: String,
+        error: Option<String>,
+    },
+    RenamePath {
+        old_path: std::path::PathBuf,
+        value: String,
+        error: Option<String>,
+    },
+    DeletePath {
+        path: std::path::PathBuf,
+        is_dir: bool,
+    },
+    ConflictResolve {
+        path: String,
+        ours: String,
+        theirs: String,
+        worktree: String,
+    },
+    CompareBranches {
+        left: String,
+        right: String,
+        sides: Option<Box<(lazecode_git::CompareSide, lazecode_git::CompareSide)>>,
+        loading: bool,
+    },
+    CompareCommits {
+        from: String,
+        to: String,
+        files: Vec<(String, String)>,
+        loading: bool,
+    },
+    StashManager {
+        stashes: Vec<lazecode_git::StashEntry>,
+        selected: usize,
+    },
+    ShelfManager {
+        shelves: Vec<lazecode_git::ShelfEntry>,
+        selected: usize,
+    },
+    FileHistory {
+        path: String,
+        entries: Vec<lazecode_git::HistoryEntry>,
+        selected: usize,
+    },
+    GitTools {
+        tab: GitToolsTab,
+        submodules: Vec<lazecode_git::SubmoduleEntry>,
+        lfs_status: Option<lazecode_git::LfsStatus>,
+    },
+    CloneRepo {
+        url: String,
+        dest: String,
+        error: Option<String>,
+    },
+    InteractiveRebase {
+        onto: String,
+        todos: Vec<RebaseTodoRow>,
+    },
     Quit,
 }
 
@@ -131,6 +215,12 @@ pub struct FindState {
 pub struct SearchState {
     pub open: bool,
     pub query: String,
+    pub replacement: String,
+    pub replace_mode: bool,
+    pub file_mask: String,
+    pub case_sensitive: bool,
+    pub regex: bool,
+    pub whole_word: bool,
     pub results: Vec<SearchHit>,
     pub selected: usize,
     pub searched: bool,

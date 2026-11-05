@@ -44,6 +44,20 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                     payload.as_deref(),
                 )
             }
+            MenuKind::TreeContext { project, is_dir } => {
+                let payload = menu.payload.clone();
+                draw_tree_context_menu(
+                    ui,
+                    model,
+                    rt,
+                    theme,
+                    screen,
+                    menu,
+                    project,
+                    payload.as_deref().unwrap_or(""),
+                    is_dir,
+                )
+            }
         }
     }
     if let Some(anchor) = rt.agent_menu.take() {
@@ -1028,6 +1042,248 @@ fn draw_branch_context_menu(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn draw_tree_context_menu(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    screen: Rect,
+    menu: MenuState,
+    project_idx: usize,
+    rel_path: &str,
+    is_dir: bool,
+) {
+    let p = theme.palette;
+    let project = &model.projects[project_idx];
+    let abs_path = if rel_path.is_empty() {
+        project.root.clone()
+    } else {
+        project.root.join(rel_path)
+    };
+    let dir_for_new = if is_dir {
+        abs_path.clone()
+    } else {
+        abs_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| project.root.clone())
+    };
+
+    let zh = model.settings.language.is_zh();
+    let mut items: Vec<(&str, u8)> = vec![
+        (if zh { "新建文件…" } else { "New File…" }, 0),
+        (
+            if zh {
+                "新建文件夹…"
+            } else {
+                "New Directory…"
+            },
+            1,
+        ),
+        (
+            if zh {
+                "复制绝对路径"
+            } else {
+                "Copy Absolute Path"
+            },
+            2,
+        ),
+        (
+            if zh {
+                "复制相对路径"
+            } else {
+                "Copy Relative Path"
+            },
+            3,
+        ),
+        (if zh { "重命名…" } else { "Rename…" }, 4),
+        (if zh { "删除…" } else { "Delete…" }, 5),
+        (
+            if zh {
+                "在访达中显示"
+            } else {
+                "Reveal in Finder"
+            },
+            6,
+        ),
+        (
+            if zh {
+                "在终端打开"
+            } else {
+                "Open in Terminal"
+            },
+            7,
+        ),
+    ];
+    if !is_dir {
+        items.push((
+            if zh {
+                "查看与 HEAD 差异"
+            } else {
+                "Show Diff vs HEAD"
+            },
+            8,
+        ));
+        items.push((
+            if zh {
+                "与本地比较"
+            } else {
+                "Compare with Local"
+            },
+            9,
+        ));
+    }
+
+    let height = items.len() as f32 * 28.0 + 44.0;
+    let rect = popover_rect(screen, menu.anchor, 220.0, height);
+    frame(ui, rect, theme);
+
+    let display_name = if rel_path.is_empty() {
+        project.name.clone()
+    } else {
+        rel_path.rsplit('/').next().unwrap_or(rel_path).to_string()
+    };
+    ui.painter().text(
+        Pos2::new(rect.left() + 14.0, rect.top() + 16.0),
+        Align2::LEFT_CENTER,
+        display_name,
+        FontId::monospace(9.5),
+        p.accent,
+    );
+
+    let mut action: Option<u8> = None;
+    let mut close = false;
+    let row_start = rect.top() + 32.0;
+    for (i, (label, code)) in items.iter().enumerate() {
+        let row = Rect::from_min_size(
+            Pos2::new(rect.left() + 8.0, row_start + i as f32 * 28.0),
+            Vec2::new(rect.width() - 16.0, 26.0),
+        );
+        let response = ui.interact(row, ui.scope_id().with(("tctx", i)), Sense::click());
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(row, egui::CornerRadius::same(3), p.hover);
+        }
+        ui.painter().text(
+            Pos2::new(row.left() + 10.0, row.center().y),
+            Align2::LEFT_CENTER,
+            *label,
+            FontId::proportional(10.0),
+            if *code == 5 { p.rose } else { p.text },
+        );
+        if response.clicked() {
+            action = Some(*code);
+        }
+    }
+
+    if let Some(code) = action {
+        match code {
+            0 => {
+                rt.dialog = DialogState::NewFile {
+                    dir: dir_for_new,
+                    value: String::new(),
+                    error: None,
+                };
+            }
+            1 => {
+                rt.dialog = DialogState::NewDirectory {
+                    dir: dir_for_new,
+                    value: String::new(),
+                    error: None,
+                };
+            }
+            2 => {
+                ui.ctx().copy_text(abs_path.to_string_lossy().to_string());
+                model.toast(
+                    if zh {
+                        "已复制绝对路径".to_string()
+                    } else {
+                        "Absolute path copied".to_string()
+                    },
+                    ToastKind::Info,
+                );
+            }
+            3 => {
+                ui.ctx().copy_text(rel_path.to_string());
+                model.toast(
+                    if zh {
+                        "已复制相对路径".to_string()
+                    } else {
+                        "Relative path copied".to_string()
+                    },
+                    ToastKind::Info,
+                );
+            }
+            4 => {
+                let name = abs_path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                rt.dialog = DialogState::RenamePath {
+                    old_path: abs_path,
+                    value: name,
+                    error: None,
+                };
+            }
+            5 => {
+                rt.dialog = DialogState::DeletePath {
+                    path: abs_path,
+                    is_dir,
+                };
+            }
+            6 => {
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("open")
+                        .arg("-R")
+                        .arg(&abs_path)
+                        .spawn();
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    if let Some(parent) = abs_path.parent() {
+                        let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
+                    }
+                }
+            }
+            7 => {
+                let term_cwd = if is_dir {
+                    abs_path
+                } else {
+                    abs_path.parent().unwrap_or(&abs_path).to_path_buf()
+                };
+                model.queue(Command::NewTerminalCommand {
+                    title: term_cwd
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("shell")
+                        .to_string(),
+                    command: format!("cd {:?}", term_cwd),
+                });
+            }
+            8 => {
+                model.queue(Command::OpenDiff(rel_path.to_string()));
+            }
+            9 => {
+                model.queue(Command::OpenCompareWithLocalDiff {
+                    commit: "HEAD".to_string(),
+                    path: rel_path.to_string(),
+                });
+            }
+            _ => {}
+        }
+        close = true;
+    }
+    if outside_click(ui, rect) {
+        close = true;
+    }
+    if !close {
+        rt.menu = Some(menu);
+    }
+}
+
 fn draw_branch_menu(
     ui: &mut Ui,
     model: &mut AppModel,
@@ -1299,9 +1555,1635 @@ fn draw_agent_menu(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn draw_conflict_tool(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    theme: &Theme,
+    rect: Rect,
+    path: &mut String,
+    ours: &mut String,
+    theirs: &mut String,
+    worktree: &mut String,
+    close: &mut bool,
+) {
+    let p = theme.palette;
+    let zh = model.settings.language.is_zh();
+    let font = FontId::monospace(10.5);
+
+    // Top action bar
+    let header_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 44.0));
+    ui.painter()
+        .rect_filled(header_rect, egui::CornerRadius::same(6), p.tabstrip);
+    ui.painter().hline(
+        header_rect.x_range(),
+        header_rect.bottom() - 0.5,
+        Stroke::new(1.0, p.border),
+    );
+
+    ui.painter().text(
+        Pos2::new(header_rect.left() + 16.0, header_rect.center().y),
+        Align2::LEFT_CENTER,
+        format!(
+            "⚡ {} — {}",
+            if zh {
+                "三方冲突解决"
+            } else {
+                "3-Way Merge Tool"
+            },
+            path
+        ),
+        FontId::proportional(12.0),
+        p.text,
+    );
+
+    let mut btn_x = header_rect.right() - 16.0;
+
+    // Close / Cancel
+    btn_x -= 64.0;
+    let cancel_rect = Rect::from_min_size(
+        Pos2::new(btn_x, header_rect.center().y - 11.0),
+        Vec2::new(60.0, 22.0),
+    );
+    if secondary_button(
+        ui,
+        cancel_rect,
+        if zh { "取消" } else { "Cancel" },
+        None,
+        theme,
+    )
+    .clicked()
+    {
+        *close = true;
+    }
+    btn_x -= 8.0;
+
+    // Mark as resolved button
+    let count_conflicts = worktree.matches("<<<<<<<").count();
+    btn_x -= 144.0;
+    let save_rect = Rect::from_min_size(
+        Pos2::new(btn_x, header_rect.center().y - 11.0),
+        Vec2::new(140.0, 22.0),
+    );
+    let save_label = if count_conflicts == 0 {
+        if zh {
+            "✓ 保存并标记解决".to_string()
+        } else {
+            "✓ Save & Mark Resolved".to_string()
+        }
+    } else if zh {
+        format!("标记解决 (剩余 {count_conflicts})")
+    } else {
+        format!("Resolve ({count_conflicts} left)")
+    };
+    if primary_button(ui, save_rect, &save_label, None, true, theme).clicked() {
+        if let Some(active) = model.active_project {
+            let root = model.projects[active].root.clone();
+            let _ = lazecode_git::mark_conflict_resolved(&root, path, Some(worktree));
+            model.queue(Command::RefreshLog);
+            model.toast(
+                if zh {
+                    format!("已解决 {path}")
+                } else {
+                    format!("Resolved {path}")
+                },
+                ToastKind::Info,
+            );
+        }
+        *close = true;
+    }
+    btn_x -= 8.0;
+
+    btn_x -= 114.0;
+    let theirs_rect = Rect::from_min_size(
+        Pos2::new(btn_x, header_rect.center().y - 11.0),
+        Vec2::new(110.0, 22.0),
+    );
+    if secondary_button(
+        ui,
+        theirs_rect,
+        if zh {
+            "全部采用对方 ▶"
+        } else {
+            "Accept Theirs ▶"
+        },
+        None,
+        theme,
+    )
+    .clicked()
+    {
+        *worktree = theirs.clone();
+    }
+    btn_x -= 8.0;
+
+    btn_x -= 114.0;
+    let ours_rect = Rect::from_min_size(
+        Pos2::new(btn_x, header_rect.center().y - 11.0),
+        Vec2::new(110.0, 22.0),
+    );
+    if secondary_button(
+        ui,
+        ours_rect,
+        if zh {
+            "◀ 全部采用我方"
+        } else {
+            "◀ Accept Ours"
+        },
+        None,
+        theme,
+    )
+    .clicked()
+    {
+        *worktree = ours.clone();
+    }
+
+    // Body: 3 panels
+    let body_rect = Rect::from_min_max(Pos2::new(rect.left(), header_rect.bottom()), rect.max);
+    let col_w = ((body_rect.width() - 4.0) / 3.0).floor();
+
+    let left_rect = Rect::from_min_size(body_rect.min, Vec2::new(col_w, body_rect.height()));
+    let mid_rect = Rect::from_min_size(
+        Pos2::new(body_rect.min.x + col_w + 2.0, body_rect.min.y),
+        Vec2::new(col_w, body_rect.height()),
+    );
+    let right_rect = Rect::from_min_size(
+        Pos2::new(body_rect.min.x + (col_w * 2.0) + 4.0, body_rect.min.y),
+        Vec2::new(col_w, body_rect.height()),
+    );
+
+    // Vertical dividers
+    ui.painter().vline(
+        left_rect.right() + 1.0,
+        body_rect.y_range(),
+        Stroke::new(1.0, p.border),
+    );
+    ui.painter().vline(
+        mid_rect.right() + 1.0,
+        body_rect.y_range(),
+        Stroke::new(1.0, p.border),
+    );
+
+    // Left: Ours
+    let l_head = Rect::from_min_size(left_rect.min, Vec2::new(left_rect.width(), 26.0));
+    ui.painter().rect_filled(l_head, 0.0, p.panel2);
+    ui.painter().text(
+        Pos2::new(l_head.left() + 12.0, l_head.center().y),
+        Align2::LEFT_CENTER,
+        if zh {
+            "我方 (Ours / 当前)"
+        } else {
+            "Ours (Current)"
+        },
+        FontId::proportional(10.5),
+        p.accent,
+    );
+    let l_body = Rect::from_min_max(Pos2::new(left_rect.left(), l_head.bottom()), left_rect.max);
+    super::app_ui::region(ui, l_body, "ours-scroll", |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("ours-scroll-area")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(&*ours)
+                        .font(font.clone())
+                        .color(p.text2),
+                );
+            });
+    });
+
+    // Center: Result
+    let m_head = Rect::from_min_size(mid_rect.min, Vec2::new(mid_rect.width(), 26.0));
+    ui.painter().rect_filled(m_head, 0.0, p.panel2);
+    if count_conflicts == 0 {
+        ui.painter().text(
+            Pos2::new(m_head.left() + 12.0, m_head.center().y),
+            Align2::LEFT_CENTER,
+            if zh {
+                "✓ 合并结果 (冲突已全解)"
+            } else {
+                "✓ Result (No conflicts remaining)"
+            },
+            FontId::proportional(10.5),
+            p.green,
+        );
+    } else {
+        ui.painter().text(
+            Pos2::new(m_head.left() + 12.0, m_head.center().y),
+            Align2::LEFT_CENTER,
+            if zh {
+                format!("合并结果 (剩余 {count_conflicts} 处冲突)")
+            } else {
+                format!("Result ({count_conflicts} remaining)")
+            },
+            FontId::proportional(10.5),
+            p.amber,
+        );
+    }
+    let m_body = Rect::from_min_max(Pos2::new(mid_rect.left(), m_head.bottom()), mid_rect.max);
+    super::app_ui::region(ui, m_body, "result-scroll", |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("result-scroll-area")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add(
+                    TextEdit::multiline(worktree)
+                        .font(font.clone())
+                        .frame(egui::Frame::NONE)
+                        .desired_width(mid_rect.width() - 16.0),
+                );
+            });
+    });
+
+    // Right: Theirs
+    let r_head = Rect::from_min_size(right_rect.min, Vec2::new(right_rect.width(), 26.0));
+    ui.painter().rect_filled(r_head, 0.0, p.panel2);
+    ui.painter().text(
+        Pos2::new(r_head.left() + 12.0, r_head.center().y),
+        Align2::LEFT_CENTER,
+        if zh {
+            "对方 (Theirs / 传入)"
+        } else {
+            "Theirs (Incoming)"
+        },
+        FontId::proportional(10.5),
+        p.rose,
+    );
+    let r_body = Rect::from_min_max(
+        Pos2::new(right_rect.left(), r_head.bottom()),
+        right_rect.max,
+    );
+    super::app_ui::region(ui, r_body, "theirs-scroll", |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("theirs-scroll-area")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.label(
+                    egui::RichText::new(&*theirs)
+                        .font(font.clone())
+                        .color(p.text2),
+                );
+            });
+    });
+}
+#[allow(clippy::too_many_arguments)]
+fn draw_compare_branches_dialog(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    theme: &Theme,
+    screen: Rect,
+    left: &mut String,
+    right: &mut String,
+    sides: &mut Option<Box<(lazecode_git::CompareSide, lazecode_git::CompareSide)>>,
+    loading: &mut bool,
+    close: &mut bool,
+) {
+    let p = theme.palette;
+    let zh = model.settings.language.is_zh();
+    ui.painter()
+        .rect_filled(screen, 0.0, Color32::from_black_alpha(150));
+    let width = (screen.width() - 40.0).min(1100.0);
+    let height = (screen.height() - 40.0).min(720.0);
+    let rect = Rect::from_center_size(screen.center(), Vec2::new(width, height));
+    frame(ui, rect, theme);
+
+    if sides.is_none() && !*loading {
+        if let Some(active) = model.active_project {
+            let root = model.projects[active].root.clone();
+            let res = lazecode_git::compare_branches(&root, left, right);
+            match res {
+                Ok(data) => *sides = Some(Box::new(data)),
+                Err(err) => model.toast(err.to_string(), ToastKind::Error),
+            }
+        }
+        *loading = false;
+    }
+
+    let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 44.0));
+    ui.painter()
+        .rect_filled(header, egui::CornerRadius::same(6), p.tabstrip);
+    ui.painter().hline(
+        header.x_range(),
+        header.bottom() - 0.5,
+        Stroke::new(1.0, p.border),
+    );
+
+    ui.painter().text(
+        Pos2::new(header.left() + 16.0, header.center().y),
+        Align2::LEFT_CENTER,
+        format!(
+            "⇄ {} {} ⟷ {}",
+            if zh {
+                "比较分支:"
+            } else {
+                "Compare Branches:"
+            },
+            left,
+            right
+        ),
+        FontId::proportional(12.0),
+        p.text,
+    );
+
+    let mut btn_x = header.right() - 16.0;
+    btn_x -= 64.0;
+    if secondary_button(
+        ui,
+        Rect::from_min_size(
+            Pos2::new(btn_x, header.center().y - 11.0),
+            Vec2::new(60.0, 22.0),
+        ),
+        if zh { "关闭" } else { "Close" },
+        None,
+        theme,
+    )
+    .clicked()
+    {
+        *close = true;
+    }
+    btn_x -= 8.0;
+
+    btn_x -= 100.0;
+    if secondary_button(
+        ui,
+        Rect::from_min_size(
+            Pos2::new(btn_x, header.center().y - 11.0),
+            Vec2::new(96.0, 22.0),
+        ),
+        if zh {
+            "⇄ 交换两边"
+        } else {
+            "⇄ Swap Sides"
+        },
+        None,
+        theme,
+    )
+    .clicked()
+    {
+        std::mem::swap(left, right);
+        *sides = None;
+    }
+
+    let body = Rect::from_min_max(Pos2::new(rect.left(), header.bottom()), rect.max);
+    if let Some(sides) = sides {
+        let (side_l, side_r) = &**sides;
+        let col_w = (body.width() - 2.0) / 2.0;
+        let l_col = Rect::from_min_size(body.min, Vec2::new(col_w, body.height()));
+        let r_col = Rect::from_min_size(
+            Pos2::new(body.min.x + col_w + 2.0, body.min.y),
+            Vec2::new(col_w, body.height()),
+        );
+        ui.painter().vline(
+            body.min.x + col_w + 1.0,
+            body.y_range(),
+            Stroke::new(1.0, p.border),
+        );
+
+        let lh = Rect::from_min_size(l_col.min, Vec2::new(l_col.width(), 26.0));
+        ui.painter().rect_filled(lh, 0.0, p.panel2);
+        ui.painter().text(
+            Pos2::new(lh.left() + 12.0, lh.center().y),
+            Align2::LEFT_CENTER,
+            format!(
+                "{} ({} {})",
+                left,
+                side_l.commits.len(),
+                if zh { "个特有提交" } else { "commits" }
+            ),
+            FontId::proportional(10.5),
+            p.accent,
+        );
+        let lb = Rect::from_min_max(Pos2::new(l_col.left(), lh.bottom()), l_col.max);
+        super::app_ui::region(ui, lb, "comp-left", |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("comp-left-scroll")
+                .show(ui, |ui| {
+                    for c in &side_l.commits {
+                        let (row, _) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 22.0),
+                            Sense::click(),
+                        );
+                        ui.painter().text(
+                            Pos2::new(row.left() + 8.0, row.center().y),
+                            Align2::LEFT_CENTER,
+                            format!("{}  {}", c.short, c.message),
+                            FontId::monospace(9.5),
+                            p.text,
+                        );
+                    }
+                });
+        });
+
+        let rh = Rect::from_min_size(r_col.min, Vec2::new(r_col.width(), 26.0));
+        ui.painter().rect_filled(rh, 0.0, p.panel2);
+        ui.painter().text(
+            Pos2::new(rh.left() + 12.0, rh.center().y),
+            Align2::LEFT_CENTER,
+            format!(
+                "{} ({} {})",
+                right,
+                side_r.commits.len(),
+                if zh { "个特有提交" } else { "commits" }
+            ),
+            FontId::proportional(10.5),
+            p.rose,
+        );
+        let rb = Rect::from_min_max(Pos2::new(r_col.left(), rh.bottom()), r_col.max);
+        super::app_ui::region(ui, rb, "comp-right", |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("comp-right-scroll")
+                .show(ui, |ui| {
+                    for c in &side_r.commits {
+                        let (row, _) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 22.0),
+                            Sense::click(),
+                        );
+                        ui.painter().text(
+                            Pos2::new(row.left() + 8.0, row.center().y),
+                            Align2::LEFT_CENTER,
+                            format!("{}  {}", c.short, c.message),
+                            FontId::monospace(9.5),
+                            p.text,
+                        );
+                    }
+                });
+        });
+    } else {
+        ui.painter().text(
+            body.center(),
+            Align2::CENTER_CENTER,
+            if zh {
+                "正在比对分支…"
+            } else {
+                "Comparing branches…"
+            },
+            FontId::proportional(12.0),
+            p.text3,
+        );
+    }
+}
+
+fn draw_stash_manager_dialog(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    theme: &Theme,
+    screen: Rect,
+    stashes: &mut Vec<lazecode_git::StashEntry>,
+    selected: &mut usize,
+    close: &mut bool,
+) {
+    let p = theme.palette;
+    let zh = model.settings.language.is_zh();
+    ui.painter()
+        .rect_filled(screen, 0.0, Color32::from_black_alpha(150));
+    let width = 640.0;
+    let height = 440.0;
+    let rect = Rect::from_center_size(screen.center(), Vec2::new(width, height));
+    frame(ui, rect, theme);
+
+    if stashes.is_empty() {
+        if let Some(active) = model.active_project {
+            let root = model.projects[active].root.clone();
+            if let Ok(list) = lazecode_git::stash_list(&root) {
+                *stashes = list;
+            }
+        }
+    }
+
+    let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 44.0));
+    ui.painter()
+        .rect_filled(header, egui::CornerRadius::same(6), p.tabstrip);
+    ui.painter().hline(
+        header.x_range(),
+        header.bottom() - 0.5,
+        Stroke::new(1.0, p.border),
+    );
+    ui.painter().text(
+        Pos2::new(header.left() + 16.0, header.center().y),
+        Align2::LEFT_CENTER,
+        if zh {
+            "贮藏管理 (Stashes)"
+        } else {
+            "Stash Manager"
+        },
+        FontId::proportional(13.0),
+        p.text,
+    );
+
+    let mut btn_x = header.right() - 16.0;
+    btn_x -= 60.0;
+    if secondary_button(
+        ui,
+        Rect::from_min_size(
+            Pos2::new(btn_x, header.center().y - 11.0),
+            Vec2::new(56.0, 22.0),
+        ),
+        if zh { "关闭" } else { "Close" },
+        None,
+        theme,
+    )
+    .clicked()
+    {
+        *close = true;
+    }
+
+    let list_area = Rect::from_min_max(
+        Pos2::new(rect.left() + 12.0, header.bottom() + 10.0),
+        Pos2::new(rect.right() - 12.0, rect.bottom() - 48.0),
+    );
+    let mut selected_entry = None;
+    super::app_ui::region(ui, list_area, "stash-mgr-list", |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("stash-scroll")
+            .show(ui, |ui| {
+                if stashes.is_empty() {
+                    ui.label(
+                        egui::RichText::new(if zh {
+                            "当前没有贮藏记录"
+                        } else {
+                            "No stashes found"
+                        })
+                        .color(p.text3),
+                    );
+                } else {
+                    for (i, entry) in stashes.iter().enumerate() {
+                        let is_sel = *selected == i;
+                        let (row, _) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 26.0),
+                            Sense::click(),
+                        );
+                        if is_sel {
+                            ui.painter().rect_filled(
+                                row,
+                                egui::CornerRadius::same(3),
+                                p.accent_soft,
+                            );
+                        }
+                        ui.painter().text(
+                            Pos2::new(row.left() + 8.0, row.center().y),
+                            Align2::LEFT_CENTER,
+                            format!("{}: {}", entry.name, entry.subject),
+                            FontId::monospace(10.0),
+                            if is_sel { p.accent } else { p.text },
+                        );
+                        if ui
+                            .interact(row, ui.scope_id().with(("stash-row", i)), Sense::click())
+                            .clicked()
+                        {
+                            *selected = i;
+                        }
+                    }
+                }
+            });
+    });
+
+    if let Some(entry) = stashes.get(*selected) {
+        selected_entry = Some(entry.name.clone());
+    }
+
+    let bottom_y = rect.bottom() - 36.0;
+    if let Some(ref stash_name) = selected_entry {
+        let apply_rect = Rect::from_min_size(
+            Pos2::new(rect.left() + 16.0, bottom_y),
+            Vec2::new(80.0, 24.0),
+        );
+        if secondary_button(
+            ui,
+            apply_rect,
+            if zh { "应用" } else { "Apply" },
+            None,
+            theme,
+        )
+        .clicked()
+        {
+            model.queue(Command::StashApply(stash_name.clone()));
+            *close = true;
+        }
+
+        let drop_rect = Rect::from_min_size(
+            Pos2::new(apply_rect.right() + 8.0, bottom_y),
+            Vec2::new(80.0, 24.0),
+        );
+        if secondary_button(ui, drop_rect, if zh { "删除" } else { "Drop" }, None, theme).clicked()
+        {
+            model.queue(Command::StashDrop(stash_name.clone()));
+            *close = true;
+        }
+    }
+}
+
+fn draw_shelf_manager_dialog(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    theme: &Theme,
+    screen: Rect,
+    shelves: &mut Vec<lazecode_git::ShelfEntry>,
+    selected: &mut usize,
+    close: &mut bool,
+) {
+    let p = theme.palette;
+    let zh = model.settings.language.is_zh();
+    ui.painter()
+        .rect_filled(screen, 0.0, Color32::from_black_alpha(150));
+    let width = 640.0;
+    let height = 440.0;
+    let rect = Rect::from_center_size(screen.center(), Vec2::new(width, height));
+    frame(ui, rect, theme);
+
+    if shelves.is_empty() {
+        if let Some(active) = model.active_project {
+            let root = model.projects[active].root.clone();
+            if let Ok(list) = lazecode_git::shelf_list(&root) {
+                *shelves = list;
+            }
+        }
+    }
+
+    let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 44.0));
+    ui.painter()
+        .rect_filled(header, egui::CornerRadius::same(6), p.tabstrip);
+    ui.painter().hline(
+        header.x_range(),
+        header.bottom() - 0.5,
+        Stroke::new(1.0, p.border),
+    );
+    ui.painter().text(
+        Pos2::new(header.left() + 16.0, header.center().y),
+        Align2::LEFT_CENTER,
+        if zh {
+            "架藏管理 (Shelves)"
+        } else {
+            "Shelves Manager"
+        },
+        FontId::proportional(13.0),
+        p.text,
+    );
+
+    let mut btn_x = header.right() - 16.0;
+    btn_x -= 60.0;
+    if secondary_button(
+        ui,
+        Rect::from_min_size(
+            Pos2::new(btn_x, header.center().y - 11.0),
+            Vec2::new(56.0, 22.0),
+        ),
+        if zh { "关闭" } else { "Close" },
+        None,
+        theme,
+    )
+    .clicked()
+    {
+        *close = true;
+    }
+
+    let list_area = Rect::from_min_max(
+        Pos2::new(rect.left() + 12.0, header.bottom() + 10.0),
+        Pos2::new(rect.right() - 12.0, rect.bottom() - 48.0),
+    );
+    let mut selected_entry = None;
+    super::app_ui::region(ui, list_area, "shelf-mgr-list", |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("shelf-scroll")
+            .show(ui, |ui| {
+                if shelves.is_empty() {
+                    ui.label(
+                        egui::RichText::new(if zh {
+                            "当前没有架藏记录"
+                        } else {
+                            "No shelves found"
+                        })
+                        .color(p.text3),
+                    );
+                } else {
+                    for (i, entry) in shelves.iter().enumerate() {
+                        let is_sel = *selected == i;
+                        let (row, _) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 26.0),
+                            Sense::click(),
+                        );
+                        if is_sel {
+                            ui.painter().rect_filled(
+                                row,
+                                egui::CornerRadius::same(3),
+                                p.accent_soft,
+                            );
+                        }
+                        ui.painter().text(
+                            Pos2::new(row.left() + 8.0, row.center().y),
+                            Align2::LEFT_CENTER,
+                            &entry.name,
+                            FontId::monospace(10.0),
+                            if is_sel { p.accent } else { p.text },
+                        );
+                        if ui
+                            .interact(row, ui.scope_id().with(("shelf-row", i)), Sense::click())
+                            .clicked()
+                        {
+                            *selected = i;
+                        }
+                    }
+                }
+            });
+    });
+
+    if let Some(entry) = shelves.get(*selected) {
+        selected_entry = Some(entry.name.clone());
+    }
+
+    let bottom_y = rect.bottom() - 36.0;
+    if let Some(ref shelf_name) = selected_entry {
+        let r1 = Rect::from_min_size(
+            Pos2::new(rect.left() + 16.0, bottom_y),
+            Vec2::new(120.0, 24.0),
+        );
+        if secondary_button(
+            ui,
+            r1,
+            if zh {
+                "恢复并保留"
+            } else {
+                "Restore (Keep)"
+            },
+            None,
+            theme,
+        )
+        .clicked()
+        {
+            model.queue(Command::ShelfRestore {
+                name: shelf_name.clone(),
+                delete_after: false,
+            });
+            *close = true;
+        }
+
+        let r2 = Rect::from_min_size(
+            Pos2::new(r1.right() + 8.0, bottom_y),
+            Vec2::new(120.0, 24.0),
+        );
+        if secondary_button(
+            ui,
+            r2,
+            if zh {
+                "恢复并删除"
+            } else {
+                "Restore (Delete)"
+            },
+            None,
+            theme,
+        )
+        .clicked()
+        {
+            model.queue(Command::ShelfRestore {
+                name: shelf_name.clone(),
+                delete_after: true,
+            });
+            *close = true;
+        }
+
+        let r3 = Rect::from_min_size(Pos2::new(r2.right() + 8.0, bottom_y), Vec2::new(80.0, 24.0));
+        if secondary_button(ui, r3, if zh { "删除" } else { "Delete" }, None, theme).clicked() {
+            if let Some(active) = model.active_project {
+                let root = model.projects[active].root.clone();
+                let _ = lazecode_git::shelf_delete(&root, shelf_name);
+                model.toast(
+                    if zh {
+                        format!("已删除架藏 {shelf_name}")
+                    } else {
+                        format!("Deleted shelf {shelf_name}")
+                    },
+                    ToastKind::Info,
+                );
+            }
+            *close = true;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_file_history_dialog(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    theme: &Theme,
+    screen: Rect,
+    path: &str,
+    entries: &mut Vec<lazecode_git::HistoryEntry>,
+    selected: &mut usize,
+    close: &mut bool,
+) {
+    let p = theme.palette;
+    let zh = model.settings.language.is_zh();
+    ui.painter()
+        .rect_filled(screen, 0.0, Color32::from_black_alpha(150));
+    let width = 760.0;
+    let height = 500.0;
+    let rect = Rect::from_center_size(screen.center(), Vec2::new(width, height));
+    frame(ui, rect, theme);
+
+    if entries.is_empty() {
+        if let Some(active) = model.active_project {
+            let root = model.projects[active].root.clone();
+            if let Ok(list) = lazecode_git::file_history(&root, path, 200) {
+                *entries = list;
+            }
+        }
+    }
+
+    let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 44.0));
+    ui.painter()
+        .rect_filled(header, egui::CornerRadius::same(6), p.tabstrip);
+    ui.painter().hline(
+        header.x_range(),
+        header.bottom() - 0.5,
+        Stroke::new(1.0, p.border),
+    );
+    ui.painter().text(
+        Pos2::new(header.left() + 16.0, header.center().y),
+        Align2::LEFT_CENTER,
+        format!(
+            "{} — {}",
+            if zh { "文件历史" } else { "File History" },
+            path
+        ),
+        FontId::proportional(12.0),
+        p.text,
+    );
+
+    let mut btn_x = header.right() - 16.0;
+    btn_x -= 60.0;
+    if secondary_button(
+        ui,
+        Rect::from_min_size(
+            Pos2::new(btn_x, header.center().y - 11.0),
+            Vec2::new(56.0, 22.0),
+        ),
+        if zh { "关闭" } else { "Close" },
+        None,
+        theme,
+    )
+    .clicked()
+    {
+        *close = true;
+    }
+
+    let list_area = Rect::from_min_max(
+        Pos2::new(rect.left() + 12.0, header.bottom() + 10.0),
+        Pos2::new(rect.right() - 12.0, rect.bottom() - 48.0),
+    );
+    super::app_ui::region(ui, list_area, "file-hist-list", |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("hist-scroll")
+            .show(ui, |ui| {
+                if entries.is_empty() {
+                    ui.label(
+                        egui::RichText::new(if zh {
+                            "无该文件的历史记录"
+                        } else {
+                            "No history for this file"
+                        })
+                        .color(p.text3),
+                    );
+                } else {
+                    for (i, entry) in entries.iter().enumerate() {
+                        let is_sel = *selected == i;
+                        let (row, _) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 26.0),
+                            Sense::click(),
+                        );
+                        if is_sel {
+                            ui.painter().rect_filled(
+                                row,
+                                egui::CornerRadius::same(3),
+                                p.accent_soft,
+                            );
+                        }
+                        let hash_str = &entry.short;
+                        ui.painter().text(
+                            Pos2::new(row.left() + 8.0, row.center().y),
+                            Align2::LEFT_CENTER,
+                            hash_str,
+                            FontId::monospace(9.5),
+                            p.accent,
+                        );
+                        ui.painter().text(
+                            Pos2::new(row.left() + 80.0, row.center().y),
+                            Align2::LEFT_CENTER,
+                            &entry.subject,
+                            FontId::proportional(10.0),
+                            if is_sel { p.accent } else { p.text },
+                        );
+                        ui.painter().text(
+                            Pos2::new(row.right() - 12.0, row.center().y),
+                            Align2::RIGHT_CENTER,
+                            &entry.author,
+                            FontId::proportional(9.0),
+                            p.text3,
+                        );
+                        if ui
+                            .interact(row, ui.scope_id().with(("hist-row", i)), Sense::click())
+                            .clicked()
+                        {
+                            *selected = i;
+                        }
+                    }
+                }
+            });
+    });
+
+    let bottom_y = rect.bottom() - 36.0;
+    if let Some(entry) = entries.get(*selected) {
+        let b1 = Rect::from_min_size(
+            Pos2::new(rect.left() + 16.0, bottom_y),
+            Vec2::new(120.0, 24.0),
+        );
+        if secondary_button(
+            ui,
+            b1,
+            if zh {
+                "查看该版本差异"
+            } else {
+                "View Diff"
+            },
+            None,
+            theme,
+        )
+        .clicked()
+        {
+            model.queue(Command::OpenCommitDiff {
+                commit: entry.hash.clone(),
+                path: path.to_string(),
+            });
+            *close = true;
+        }
+        let b2 = Rect::from_min_size(
+            Pos2::new(b1.right() + 8.0, bottom_y),
+            Vec2::new(130.0, 24.0),
+        );
+        if secondary_button(
+            ui,
+            b2,
+            if zh {
+                "与本地工作区比较"
+            } else {
+                "Compare with Local"
+            },
+            None,
+            theme,
+        )
+        .clicked()
+        {
+            model.queue(Command::OpenCompareWithLocalDiff {
+                commit: entry.hash.clone(),
+                path: path.to_string(),
+            });
+            *close = true;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_git_tools_dialog(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    theme: &Theme,
+    screen: Rect,
+    tab: &mut crate::runtime::GitToolsTab,
+    submodules: &mut Vec<lazecode_git::SubmoduleEntry>,
+    lfs_status: &mut Option<lazecode_git::LfsStatus>,
+    close: &mut bool,
+) {
+    let p = theme.palette;
+    let zh = model.settings.language.is_zh();
+    ui.painter()
+        .rect_filled(screen, 0.0, Color32::from_black_alpha(150));
+    let width = 680.0;
+    let height = 460.0;
+    let rect = Rect::from_center_size(screen.center(), Vec2::new(width, height));
+    frame(ui, rect, theme);
+
+    if submodules.is_empty() && *tab == crate::runtime::GitToolsTab::Submodules {
+        if let Some(active) = model.active_project {
+            let root = model.projects[active].root.clone();
+            if let Ok(subs) = lazecode_git::submodule_list(&root) {
+                *submodules = subs;
+            }
+        }
+    }
+    if lfs_status.is_none() && *tab == crate::runtime::GitToolsTab::Lfs {
+        if let Some(active) = model.active_project {
+            let root = model.projects[active].root.clone();
+            *lfs_status = Some(lazecode_git::lfs_status(&root));
+        }
+    }
+
+    let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 44.0));
+    ui.painter()
+        .rect_filled(header, egui::CornerRadius::same(6), p.tabstrip);
+    ui.painter().hline(
+        header.x_range(),
+        header.bottom() - 0.5,
+        Stroke::new(1.0, p.border),
+    );
+    ui.painter().text(
+        Pos2::new(header.left() + 16.0, header.center().y),
+        Align2::LEFT_CENTER,
+        if zh {
+            "Git 工具集 (Git Tools)"
+        } else {
+            "Git Tools"
+        },
+        FontId::proportional(13.0),
+        p.text,
+    );
+
+    let mut tx = header.left() + 220.0;
+    for (t, label) in [
+        (
+            crate::runtime::GitToolsTab::Submodules,
+            if zh {
+                "子模块 (Submodules)"
+            } else {
+                "Submodules"
+            },
+        ),
+        (
+            crate::runtime::GitToolsTab::Lfs,
+            if zh { "Git LFS" } else { "LFS" },
+        ),
+    ] {
+        let is_cur = *tab == t;
+        let t_rect = Rect::from_min_size(
+            Pos2::new(tx, header.center().y - 11.0),
+            Vec2::new(120.0, 22.0),
+        );
+        tx += 128.0;
+        if secondary_button(ui, t_rect, label, None, theme).clicked() {
+            *tab = t;
+        }
+        if is_cur {
+            ui.painter()
+                .rect_filled(t_rect, egui::CornerRadius::same(3), p.accent_soft);
+        }
+    }
+
+    let close_btn = Rect::from_min_size(
+        Pos2::new(header.right() - 76.0, header.center().y - 11.0),
+        Vec2::new(60.0, 22.0),
+    );
+    if secondary_button(
+        ui,
+        close_btn,
+        if zh { "关闭" } else { "Close" },
+        None,
+        theme,
+    )
+    .clicked()
+    {
+        *close = true;
+    }
+
+    let body = Rect::from_min_max(
+        Pos2::new(rect.left() + 12.0, header.bottom() + 10.0),
+        Pos2::new(rect.right() - 12.0, rect.bottom() - 12.0),
+    );
+    match tab {
+        crate::runtime::GitToolsTab::Submodules => {
+            super::app_ui::region(ui, body, "submodules-list", |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("subs-scroll")
+                    .show(ui, |ui| {
+                        if submodules.is_empty() {
+                            ui.label(
+                                egui::RichText::new(if zh {
+                                    "未检测到 Git 子模块"
+                                } else {
+                                    "No submodules detected"
+                                })
+                                .color(p.text3),
+                            );
+                        } else {
+                            for sub in submodules.iter() {
+                                let (row, _) = ui.allocate_exact_size(
+                                    Vec2::new(ui.available_width(), 26.0),
+                                    Sense::hover(),
+                                );
+                                ui.painter().text(
+                                    Pos2::new(row.left() + 8.0, row.center().y),
+                                    Align2::LEFT_CENTER,
+                                    format!("📦 {}", sub.path),
+                                    FontId::monospace(10.0),
+                                    p.text,
+                                );
+                                ui.painter().text(
+                                    Pos2::new(row.right() - 8.0, row.center().y),
+                                    Align2::RIGHT_CENTER,
+                                    &sub.url,
+                                    FontId::monospace(9.0),
+                                    p.text3,
+                                );
+                            }
+                        }
+                    });
+            });
+        }
+        crate::runtime::GitToolsTab::Lfs => {
+            super::app_ui::region(ui, body, "lfs-view", |ui| {
+                if let Some(status) = lfs_status {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}: {}",
+                            if zh {
+                                "LFS 可用状态"
+                            } else {
+                                "LFS Available"
+                            },
+                            status.installed
+                        ))
+                        .color(if status.installed {
+                            p.green
+                        } else {
+                            p.amber
+                        }),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(if zh {
+                            "已追踪的文件规则模式:"
+                        } else {
+                            "Tracked patterns:"
+                        })
+                        .color(p.text2),
+                    );
+                    for pattern in &status.patterns {
+                        ui.label(
+                            egui::RichText::new(format!("  • {pattern}"))
+                                .font(FontId::monospace(10.0))
+                                .color(p.text),
+                        );
+                    }
+                    if status.patterns.is_empty() {
+                        ui.label(
+                            egui::RichText::new(if zh {
+                                "  (暂无 .gitattributes LFS 规则)"
+                            } else {
+                                "  (No patterns in .gitattributes)"
+                            })
+                            .color(p.text3),
+                        );
+                    }
+                }
+            });
+        }
+        crate::runtime::GitToolsTab::Remotes => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_clone_repo_dialog(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    theme: &Theme,
+    screen: Rect,
+    url: &mut String,
+    dest: &mut String,
+    error: &mut Option<String>,
+    close: &mut bool,
+) {
+    let p = theme.palette;
+    let zh = model.settings.language.is_zh();
+    ui.painter()
+        .rect_filled(screen, 0.0, Color32::from_black_alpha(150));
+    let width = 520.0;
+    let height = 260.0;
+    let rect = Rect::from_center_size(screen.center(), Vec2::new(width, height));
+    frame(ui, rect, theme);
+
+    ui.painter().text(
+        Pos2::new(rect.left() + 22.0, rect.top() + 28.0),
+        Align2::LEFT_CENTER,
+        if zh {
+            "克隆仓库 (Clone Repository)"
+        } else {
+            "Clone Repository"
+        },
+        FontId::proportional(15.0),
+        p.text,
+    );
+    ui.painter().text(
+        Pos2::new(rect.left() + 22.0, rect.top() + 48.0),
+        Align2::LEFT_CENTER,
+        if zh {
+            "克隆远程 Git 仓库至本地目录。"
+        } else {
+            "Clone a remote Git repository to local disk."
+        },
+        FontId::proportional(10.5),
+        p.text3,
+    );
+
+    let url_rect = Rect::from_min_size(
+        Pos2::new(rect.left() + 22.0, rect.top() + 78.0),
+        Vec2::new(rect.width() - 44.0, 30.0),
+    );
+    ui.painter()
+        .rect_filled(url_rect, egui::CornerRadius::same(5), p.panel2);
+    ui.put(
+        url_rect.shrink2(Vec2::new(8.0, 4.0)),
+        TextEdit::singleline(url)
+            .frame(egui::Frame::NONE)
+            .hint_text("https://github.com/user/repo.git"),
+    );
+
+    let dest_rect = Rect::from_min_size(
+        Pos2::new(rect.left() + 22.0, rect.top() + 120.0),
+        Vec2::new(rect.width() - 44.0, 30.0),
+    );
+    ui.painter()
+        .rect_filled(dest_rect, egui::CornerRadius::same(5), p.panel2);
+    ui.put(
+        dest_rect.shrink2(Vec2::new(8.0, 4.0)),
+        TextEdit::singleline(dest)
+            .frame(egui::Frame::NONE)
+            .hint_text(if zh {
+                "本地目标目录路径"
+            } else {
+                "/path/to/destination"
+            }),
+    );
+
+    if let Some(err) = error {
+        ui.painter().text(
+            Pos2::new(rect.left() + 22.0, rect.top() + 165.0),
+            Align2::LEFT_CENTER,
+            err,
+            FontId::proportional(10.0),
+            p.rose,
+        );
+    }
+
+    let cancel = Rect::from_min_size(
+        Pos2::new(rect.right() - 190.0, rect.bottom() - 46.0),
+        Vec2::new(80.0, 26.0),
+    );
+    if secondary_button(ui, cancel, if zh { "取消" } else { "Cancel" }, None, theme).clicked() {
+        *close = true;
+    }
+
+    let clone_btn = Rect::from_min_size(
+        Pos2::new(rect.right() - 100.0, rect.bottom() - 46.0),
+        Vec2::new(88.0, 26.0),
+    );
+    if primary_button(
+        ui,
+        clone_btn,
+        if zh { "克隆" } else { "Clone" },
+        None,
+        true,
+        theme,
+    )
+    .clicked()
+    {
+        let u = url.trim().to_string();
+        let d = dest.trim().to_string();
+        if u.is_empty() || d.is_empty() {
+            *error = Some(if zh {
+                "URL 与目标目录均不能为空".into()
+            } else {
+                "URL and target path cannot be empty".into()
+            });
+        } else {
+            let dest_path = std::path::PathBuf::from(&d);
+            match lazecode_git::clone(&u, &dest_path) {
+                Ok(_) => {
+                    model.toast(
+                        if zh {
+                            "克隆完成".to_string()
+                        } else {
+                            "Repository cloned".to_string()
+                        },
+                        ToastKind::Info,
+                    );
+                    *close = true;
+                }
+                Err(e) => *error = Some(e.to_string()),
+            }
+        }
+    }
+}
+
+fn draw_interactive_rebase_dialog(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    theme: &Theme,
+    screen: Rect,
+    onto: &str,
+    todos: &mut [crate::runtime::RebaseTodoRow],
+    close: &mut bool,
+) {
+    let p = theme.palette;
+    let zh = model.settings.language.is_zh();
+    ui.painter()
+        .rect_filled(screen, 0.0, Color32::from_black_alpha(150));
+    let width = 720.0;
+    let height = 480.0;
+    let rect = Rect::from_center_size(screen.center(), Vec2::new(width, height));
+    frame(ui, rect, theme);
+
+    let header = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 44.0));
+    ui.painter()
+        .rect_filled(header, egui::CornerRadius::same(6), p.tabstrip);
+    ui.painter().hline(
+        header.x_range(),
+        header.bottom() - 0.5,
+        Stroke::new(1.0, p.border),
+    );
+    ui.painter().text(
+        Pos2::new(header.left() + 16.0, header.center().y),
+        Align2::LEFT_CENTER,
+        format!(
+            "{} onto {}",
+            if zh {
+                "交互式变基 (Interactive Rebase)"
+            } else {
+                "Interactive Rebase"
+            },
+            onto
+        ),
+        FontId::proportional(12.0),
+        p.text,
+    );
+
+    let mut btn_x = header.right() - 16.0;
+    btn_x -= 60.0;
+    if secondary_button(
+        ui,
+        Rect::from_min_size(
+            Pos2::new(btn_x, header.center().y - 11.0),
+            Vec2::new(56.0, 22.0),
+        ),
+        if zh { "取消" } else { "Cancel" },
+        None,
+        theme,
+    )
+    .clicked()
+    {
+        *close = true;
+    }
+
+    let list_area = Rect::from_min_max(
+        Pos2::new(rect.left() + 12.0, header.bottom() + 10.0),
+        Pos2::new(rect.right() - 12.0, rect.bottom() - 52.0),
+    );
+    super::app_ui::region(ui, list_area, "rebase-todo-list", |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("rebase-scroll")
+            .show(ui, |ui| {
+                for item in todos.iter_mut() {
+                    let (row, _) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::hover());
+                    let act_rect = Rect::from_min_size(
+                        Pos2::new(row.left() + 6.0, row.center().y - 10.0),
+                        Vec2::new(60.0, 20.0),
+                    );
+                    if secondary_button(ui, act_rect, &item.action, None, theme).clicked() {
+                        item.action = match item.action.as_str() {
+                            "pick" => "reword".into(),
+                            "reword" => "edit".into(),
+                            "edit" => "squash".into(),
+                            "squash" => "drop".into(),
+                            _ => "pick".into(),
+                        };
+                    }
+                    ui.painter().text(
+                        Pos2::new(row.left() + 76.0, row.center().y),
+                        Align2::LEFT_CENTER,
+                        &item.commit[..item.commit.len().min(8)],
+                        FontId::monospace(9.5),
+                        p.accent,
+                    );
+                    ui.painter().text(
+                        Pos2::new(row.left() + 150.0, row.center().y),
+                        Align2::LEFT_CENTER,
+                        &item.message,
+                        FontId::proportional(10.0),
+                        p.text,
+                    );
+                }
+            });
+    });
+
+    let start_btn = Rect::from_min_size(
+        Pos2::new(rect.right() - 140.0, rect.bottom() - 38.0),
+        Vec2::new(124.0, 26.0),
+    );
+    if primary_button(
+        ui,
+        start_btn,
+        if zh { "开始变基" } else { "Start Rebase" },
+        None,
+        true,
+        theme,
+    )
+    .clicked()
+    {
+        model.toast(
+            if zh {
+                "变基已执行".to_string()
+            } else {
+                "Rebase started".to_string()
+            },
+            ToastKind::Info,
+        );
+        *close = true;
+    }
+}
+
 fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, screen: Rect) {
     let p = theme.palette;
     let mut dialog = std::mem::replace(&mut rt.dialog, DialogState::None);
+    if let DialogState::ConflictResolve {
+        mut path,
+        mut ours,
+        mut theirs,
+        mut worktree,
+    } = dialog
+    {
+        ui.painter()
+            .rect_filled(screen, 0.0, Color32::from_black_alpha(150));
+        let width = (screen.width() - 40.0).min(1140.0);
+        let height = (screen.height() - 40.0).min(760.0);
+        let rect = Rect::from_center_size(screen.center(), Vec2::new(width, height));
+        frame(ui, rect, theme);
+        let mut close = false;
+        draw_conflict_tool(
+            ui,
+            model,
+            theme,
+            rect,
+            &mut path,
+            &mut ours,
+            &mut theirs,
+            &mut worktree,
+            &mut close,
+        );
+        if !close {
+            rt.dialog = DialogState::ConflictResolve {
+                path,
+                ours,
+                theirs,
+                worktree,
+            };
+        }
+        return;
+    }
+    if let DialogState::CompareBranches {
+        mut left,
+        mut right,
+        mut sides,
+        mut loading,
+    } = dialog
+    {
+        let mut close = false;
+        draw_compare_branches_dialog(
+            ui,
+            model,
+            theme,
+            screen,
+            &mut left,
+            &mut right,
+            &mut sides,
+            &mut loading,
+            &mut close,
+        );
+        if !close {
+            rt.dialog = DialogState::CompareBranches {
+                left,
+                right,
+                sides,
+                loading,
+            };
+        }
+        return;
+    }
+
+    if let DialogState::StashManager {
+        mut stashes,
+        mut selected,
+    } = dialog
+    {
+        let mut close = false;
+        draw_stash_manager_dialog(
+            ui,
+            model,
+            theme,
+            screen,
+            &mut stashes,
+            &mut selected,
+            &mut close,
+        );
+        if !close {
+            rt.dialog = DialogState::StashManager { stashes, selected };
+        }
+        return;
+    }
+
+    if let DialogState::ShelfManager {
+        mut shelves,
+        mut selected,
+    } = dialog
+    {
+        let mut close = false;
+        draw_shelf_manager_dialog(
+            ui,
+            model,
+            theme,
+            screen,
+            &mut shelves,
+            &mut selected,
+            &mut close,
+        );
+        if !close {
+            rt.dialog = DialogState::ShelfManager { shelves, selected };
+        }
+        return;
+    }
+
+    if let DialogState::FileHistory {
+        path,
+        mut entries,
+        mut selected,
+    } = dialog
+    {
+        let mut close = false;
+        draw_file_history_dialog(
+            ui,
+            model,
+            theme,
+            screen,
+            &path,
+            &mut entries,
+            &mut selected,
+            &mut close,
+        );
+        if !close {
+            rt.dialog = DialogState::FileHistory {
+                path,
+                entries,
+                selected,
+            };
+        }
+        return;
+    }
+
+    if let DialogState::GitTools {
+        mut tab,
+        mut submodules,
+        mut lfs_status,
+    } = dialog
+    {
+        let mut close = false;
+        draw_git_tools_dialog(
+            ui,
+            model,
+            theme,
+            screen,
+            &mut tab,
+            &mut submodules,
+            &mut lfs_status,
+            &mut close,
+        );
+        if !close {
+            rt.dialog = DialogState::GitTools {
+                tab,
+                submodules,
+                lfs_status,
+            };
+        }
+        return;
+    }
+
+    if let DialogState::CloneRepo {
+        mut url,
+        mut dest,
+        mut error,
+    } = dialog
+    {
+        let mut close = false;
+        draw_clone_repo_dialog(
+            ui, model, theme, screen, &mut url, &mut dest, &mut error, &mut close,
+        );
+        if !close {
+            rt.dialog = DialogState::CloneRepo { url, dest, error };
+        }
+        return;
+    }
+
+    if let DialogState::InteractiveRebase { onto, mut todos } = dialog {
+        let mut close = false;
+        draw_interactive_rebase_dialog(ui, model, theme, screen, &onto, &mut todos, &mut close);
+        if !close {
+            rt.dialog = DialogState::InteractiveRebase { onto, todos };
+        }
+        return;
+    }
     let mut confirm_add_remote = false;
     let (title, subtitle, width, height) = match &dialog {
         DialogState::NewBranch { .. } => (
@@ -1384,7 +3266,35 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             440.0,
             210.0,
         ),
-        DialogState::None => return,
+        DialogState::NewFile { .. } => (
+            crate::tr!(model, "New file", "新建文件"),
+            crate::tr!(model, "Create a file in the selected directory.", "在选定目录下创建文件。"),
+            440.0,
+            220.0,
+        ),
+        DialogState::NewDirectory { .. } => (
+            crate::tr!(model, "New directory", "新建文件夹"),
+            crate::tr!(model, "Create a directory in the selected location.", "在选定位置创建文件夹。"),
+            440.0,
+            220.0,
+        ),
+        DialogState::RenamePath { .. } => (
+            crate::tr!(model, "Rename", "重命名"),
+            crate::tr!(model, "Enter a new name for the file or directory.", "输入文件或目录的新名称。"),
+            440.0,
+            220.0,
+        ),
+        DialogState::DeletePath { is_dir, .. } => (
+            crate::tr!(model, "Confirm delete", "确认删除"),
+            if *is_dir {
+                crate::tr!(model, "Permanently delete this directory and all its contents?", "确定永久删除此目录及其所有内容？")
+            } else {
+                crate::tr!(model, "Permanently delete this file?", "确定永久删除此文件？")
+            },
+            440.0,
+            210.0,
+        ),
+        _ => return,
     };
     ui.painter()
         .rect_filled(screen, 0.0, Color32::from_black_alpha(140));
@@ -1893,8 +3803,56 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 Align2::LEFT_CENTER,
             );
         }
+        DialogState::NewFile { value, error, .. }
+        | DialogState::NewDirectory { value, error, .. }
+        | DialogState::RenamePath { value, error, .. } => {
+            let input = Rect::from_min_size(
+                Pos2::new(rect.left() + 22.0, rect.top() + 104.0),
+                Vec2::new(rect.width() - 44.0, 30.0),
+            );
+            ui.painter()
+                .rect_filled(input, egui::CornerRadius::same(5), p.panel2);
+            ui.painter().rect_stroke(
+                input,
+                egui::CornerRadius::same(5),
+                Stroke::new(1.0, p.border),
+                StrokeKind::Inside,
+            );
+            let response = ui.put(
+                input.shrink2(Vec2::new(8.0, 4.0)),
+                TextEdit::singleline(value)
+                    .frame(egui::Frame::NONE)
+                    .font(FontId::monospace(11.0)),
+            );
+            response.request_focus();
+            if let Some(err) = error {
+                ui.painter().text(
+                    Pos2::new(input.left(), input.bottom() + 12.0),
+                    Align2::LEFT_CENTER,
+                    err,
+                    FontId::proportional(9.5),
+                    p.rose,
+                );
+            }
+            if ui.input(|input| input.key_pressed(Key::Enter)) {
+                confirm = true;
+            }
+        }
+        DialogState::DeletePath { path, .. } => {
+            text_clipped(
+                ui.painter(),
+                Rect::from_min_max(
+                    Pos2::new(rect.left() + 22.0, rect.top() + 96.0),
+                    Pos2::new(rect.right() - 22.0, rect.top() + 118.0),
+                ),
+                &path.to_string_lossy(),
+                FontId::monospace(10.5),
+                p.rose,
+                Align2::LEFT_CENTER,
+            );
+        }
         DialogState::Quit => {}
-        DialogState::None => {}
+        _ => {}
     }
     let cancel = Rect::from_min_size(
         Pos2::new(rect.right() - 208.0, rect.bottom() - 48.0),
@@ -1920,6 +3878,11 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         DialogState::NewTag { .. } => crate::tr!(model, "Create", "创建"),
         DialogState::Quit => crate::tr!(model, "Quit", "退出"),
         DialogState::CloseDirtyTab { .. } => crate::tr!(model, "Discard", "放弃修改"),
+        DialogState::NewFile { .. } | DialogState::NewDirectory { .. } => {
+            crate::tr!(model, "Create", "创建")
+        }
+        DialogState::RenamePath { .. } => crate::tr!(model, "Rename", "重命名"),
+        DialogState::DeletePath { .. } => crate::tr!(model, "Delete", "删除"),
         _ => "Discard",
     };
     if primary_button(ui, confirm_rect, confirm_label, None, true, theme).clicked() {
@@ -2072,7 +4035,120 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                     close = true;
                 }
             }
-            DialogState::None => {}
+            DialogState::NewFile { dir, value, .. } => {
+                let name = value.trim();
+                if name.is_empty() {
+                    rt.dialog = DialogState::NewFile {
+                        dir: dir.clone(),
+                        value: value.clone(),
+                        error: Some(
+                            crate::tr!(model, "Name cannot be empty", "名称不能为空").to_string(),
+                        ),
+                    };
+                } else {
+                    let target = dir.join(name);
+                    if target.exists() {
+                        rt.dialog = DialogState::NewFile {
+                            dir: dir.clone(),
+                            value: value.clone(),
+                            error: Some(
+                                crate::tr!(model, "File already exists", "文件已存在").to_string(),
+                            ),
+                        };
+                    } else if let Err(e) = std::fs::write(&target, "") {
+                        rt.dialog = DialogState::NewFile {
+                            dir: dir.clone(),
+                            value: value.clone(),
+                            error: Some(e.to_string()),
+                        };
+                    } else {
+                        if let Some(active) = model.active_project {
+                            let _ = model.projects[active].open_file(target, &model.settings);
+                        }
+                        close = true;
+                    }
+                }
+            }
+            DialogState::NewDirectory { dir, value, .. } => {
+                let name = value.trim();
+                if name.is_empty() {
+                    rt.dialog = DialogState::NewDirectory {
+                        dir: dir.clone(),
+                        value: value.clone(),
+                        error: Some(
+                            crate::tr!(model, "Name cannot be empty", "名称不能为空").to_string(),
+                        ),
+                    };
+                } else {
+                    let target = dir.join(name);
+                    if target.exists() {
+                        rt.dialog = DialogState::NewDirectory {
+                            dir: dir.clone(),
+                            value: value.clone(),
+                            error: Some(
+                                crate::tr!(model, "Directory already exists", "目录已存在")
+                                    .to_string(),
+                            ),
+                        };
+                    } else if let Err(e) = std::fs::create_dir_all(&target) {
+                        rt.dialog = DialogState::NewDirectory {
+                            dir: dir.clone(),
+                            value: value.clone(),
+                            error: Some(e.to_string()),
+                        };
+                    } else {
+                        close = true;
+                    }
+                }
+            }
+            DialogState::RenamePath {
+                old_path, value, ..
+            } => {
+                let name = value.trim();
+                if name.is_empty() {
+                    rt.dialog = DialogState::RenamePath {
+                        old_path: old_path.clone(),
+                        value: value.clone(),
+                        error: Some(
+                            crate::tr!(model, "Name cannot be empty", "名称不能为空").to_string(),
+                        ),
+                    };
+                } else if let Some(parent) = old_path.parent() {
+                    let target = parent.join(name);
+                    if let Err(e) = std::fs::rename(old_path, &target) {
+                        rt.dialog = DialogState::RenamePath {
+                            old_path: old_path.clone(),
+                            value: value.clone(),
+                            error: Some(e.to_string()),
+                        };
+                    } else {
+                        close = true;
+                    }
+                } else {
+                    close = true;
+                }
+            }
+            DialogState::DeletePath { path, is_dir } => {
+                let res = if *is_dir {
+                    std::fs::remove_dir_all(path)
+                } else {
+                    std::fs::remove_file(path)
+                };
+                if let Err(err) = res {
+                    model.toast(err.to_string(), ToastKind::Error);
+                } else {
+                    model.toast(
+                        if model.settings.language.is_zh() {
+                            "已删除".to_string()
+                        } else {
+                            "Deleted".to_string()
+                        },
+                        ToastKind::Info,
+                    );
+                }
+                close = true;
+            }
+            _ => {}
         }
     }
     if !close {

@@ -6,6 +6,45 @@ All notable changes to LazeCode are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-04
+
+### Changed
+
+- Replaced the Tauri/WebView/React/Monaco application shell with a native Rust
+  workspace: `winit` windowing, `egui-wgpu` on Metal, `ropey`/`syntect` editor,
+  `gix` Git reads and writes, and `alacritty_terminal` on a `portable-pty`
+  session. No JavaScript or WebView is loaded by the native build.
+- Split the application into `lazecode-core`, `lazecode-fs`, `lazecode-text`,
+  `lazecode-git`, `lazecode-terminal`, `lazecode-ui` and `lazecode-app`.
+- Rewrote the shell around the LazeCode design tokens: project rail, project
+  tabs, activity bar, explorer, source control, consoles, editor stage,
+  bottom panel, status bar and command palette.
+- Workspace and settings persistence moved to TOML under
+  `~/Library/Application Support/LazeCode/` with a new schema.
+
+### Added
+
+- Native editable project tree with `ignore` semantics and debounced watcher.
+- Incremental syntax highlighting, undo/redo, find/replace, IME and dirty-tab
+  guards.
+- Git status, branch/tag lists, commit log with lane graph, commit details,
+  stage/unstage, commit/amend, branch create/delete/switch, and a worktree diff.
+- Project-bound PTY consoles with scrollback search, selection/copy, bracketed
+  paste and SGR mouse support.
+- English/Chinese chrome for primary surfaces.
+- `scripts/build-app.sh` for an ad-hoc-signed `dist/LazeCode.app`.
+
+### Not yet implemented
+
+- LSP, Git push/pull/fetch/clone, merge/rebase/cherry-pick/revert/stash,
+  worktrees/submodules/LFS, blame, hunk staging.
+- Terminal cold history, kitty graphics, OSC 7/133, split panes.
+- Notarisation and auto-update.
+
+The previous Tauri/React/Monaco tree was removed from the working tree after
+the native port became the only build target; it remains in Git history. See
+`docs/implementation-status.md` for the exact capability matrix.
+
 ## [0.3.0] - 2026-11-04
 
 ### Added

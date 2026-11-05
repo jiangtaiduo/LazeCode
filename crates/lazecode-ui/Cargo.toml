@@ -1,0 +1,19 @@
+[package]
+name = "lazecode-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "egui interface for LazeCode"
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+egui.workspace = true
+unicode-width.workspace = true
+lazecode-core.workspace = true
+lazecode-fs.workspace = true
+lazecode-text.workspace = true
+lazecode-git.workspace = true
+lazecode-terminal.workspace = true

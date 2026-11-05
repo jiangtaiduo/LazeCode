@@ -1,0 +1,285 @@
+use std::path::Path;
+use std::process::Command;
+
+fn git(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+fn init() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["config", "user.name", "Tester"]);
+    git(dir.path(), &["config", "user.email", "tester@example.com"]);
+    dir
+}
+
+#[test]
+fn snapshot_stage_commit_and_log() {
+    let dir = init();
+    std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+
+    let snap = lazecode_git::snapshot(dir.path()).unwrap();
+    assert_eq!(snap.changes.len(), 2);
+    assert!(snap.changes.iter().all(|c| c.untracked));
+    assert_eq!(snap.branch.as_deref(), Some("main"));
+
+    lazecode_git::stage(dir.path(), &["a.txt".into(), "src/main.rs".into()]).unwrap();
+    let snap = lazecode_git::snapshot(dir.path()).unwrap();
+    assert_eq!(snap.changes.len(), 2);
+    assert!(snap.changes.iter().all(|c| c.staged.is_some()));
+    assert!(snap.has_tracked_changes());
+
+    lazecode_git::commit(dir.path(), "initial", false).unwrap();
+    let snap = lazecode_git::snapshot(dir.path()).unwrap();
+    assert!(
+        snap.changes.is_empty(),
+        "changes after commit: {:?}",
+        snap.changes
+    );
+    assert_eq!(snap.head.as_ref().unwrap().message, "initial");
+
+    let log = lazecode_git::log(dir.path(), Default::default()).unwrap();
+    assert_eq!(log.len(), 1);
+    assert_eq!(log[0].message, "initial");
+    assert!(log[0]
+        .refs
+        .iter()
+        .any(|r| r.kind == lazecode_git::RefKind::Head));
+
+    let branches = lazecode_git::branches(dir.path()).unwrap();
+    assert!(branches.iter().any(|b| b.name == "main" && b.current));
+}
+
+#[test]
+fn modify_diff_unstage_and_checkout() {
+    let dir = init();
+    std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "base", false).unwrap();
+
+    std::fs::write(dir.path().join("a.txt"), "one\nTWO\nthree\n").unwrap();
+    let snap = lazecode_git::snapshot(dir.path()).unwrap();
+    assert_eq!(snap.changes.len(), 1);
+    let change = &snap.changes[0];
+    assert_eq!(change.letter(), 'M');
+    assert_eq!(change.additions, 2);
+    assert_eq!(change.deletions, 1);
+
+    let diff = lazecode_git::file_diff(dir.path(), "a.txt").unwrap();
+    assert!(!diff.binary);
+    assert_eq!(diff.diff.additions, 2);
+    assert_eq!(diff.diff.deletions, 1);
+
+    lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap();
+    lazecode_git::unstage(dir.path(), &["a.txt".into()]).unwrap();
+    let snap = lazecode_git::snapshot(dir.path()).unwrap();
+    assert!(snap.changes[0].staged.is_none());
+
+    // Restore the worktree so the branch switch is allowed.
+    std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+    lazecode_git::checkout_branch(dir.path(), "main").unwrap();
+    let content = std::fs::read_to_string(dir.path().join("a.txt")).unwrap();
+    assert_eq!(content, "one\ntwo\n");
+
+    lazecode_git::create_branch(dir.path(), "feature", true).unwrap();
+    assert_eq!(git(dir.path(), &["branch", "--show-current"]), "feature");
+    lazecode_git::checkout_branch(dir.path(), "main").unwrap();
+    assert_eq!(git(dir.path(), &["branch", "--show-current"]), "main");
+}
+
+#[test]
+fn stage_deletion_removes_index_entry() {
+    let dir = init();
+    std::fs::write(dir.path().join("gone.txt"), "bye\n").unwrap();
+    lazecode_git::stage(dir.path(), &["gone.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "add gone", false).unwrap();
+    std::fs::remove_file(dir.path().join("gone.txt")).unwrap();
+    let snap = lazecode_git::snapshot(dir.path()).unwrap();
+    assert!(snap
+        .changes
+        .iter()
+        .any(|change| change.path == "gone.txt" && change.letter() == 'D'));
+    lazecode_git::stage(dir.path(), &["gone.txt".into()]).unwrap();
+    let snap = lazecode_git::snapshot(dir.path()).unwrap();
+    assert!(snap.changes.iter().any(|change| {
+        change.path == "gone.txt" && change.staged == Some(lazecode_git::ChangeKind::Deleted)
+    }));
+    lazecode_git::commit(dir.path(), "remove gone", false).unwrap();
+    assert!(lazecode_git::snapshot(dir.path())
+        .unwrap()
+        .changes
+        .is_empty());
+}
+
+#[test]
+fn commit_details_lists_files() {
+    let dir = init();
+    std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "base", false).unwrap();
+    std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "second", false).unwrap();
+    let details = lazecode_git::commit_details(dir.path(), "HEAD").unwrap();
+    assert_eq!(details.info.message, "second");
+    assert_eq!(details.files.len(), 1);
+    assert_eq!(details.files[0].path, "a.txt");
+    assert_eq!(details.files[0].additions, 1);
+}
+
+#[test]
+fn amend_replaces_head() {
+    let dir = init();
+    std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "first", false).unwrap();
+    lazecode_git::commit(dir.path(), "amended", true).unwrap();
+    assert_eq!(git(dir.path(), &["rev-list", "--count", "HEAD"]), "1");
+    assert_eq!(git(dir.path(), &["log", "-1", "--pretty=%s"]), "amended");
+}
+
+#[test]
+fn commit_checked_keeps_unchecked_paths_dirty() {
+    let dir = init();
+    std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "b\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into(), "b.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "base", false).unwrap();
+
+    std::fs::write(dir.path().join("a.txt"), "a\nA\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "b\nB\n").unwrap();
+    // Simulate a previously staged index: both files staged, only a checked.
+    lazecode_git::stage(dir.path(), &["a.txt".into(), "b.txt".into()]).unwrap();
+    lazecode_git::commit_checked(
+        dir.path(),
+        &["a.txt".into()],
+        &["b.txt".into()],
+        "only a",
+        false,
+    )
+    .unwrap();
+
+    let details = lazecode_git::commit_details(dir.path(), "HEAD").unwrap();
+    assert_eq!(details.info.message, "only a");
+    assert_eq!(details.files.len(), 1);
+    assert_eq!(details.files[0].path, "a.txt");
+
+    let snap = lazecode_git::snapshot(dir.path()).unwrap();
+    assert!(!snap.changes.iter().any(|change| change.path == "a.txt"));
+    let b = snap
+        .changes
+        .iter()
+        .find(|change| change.path == "b.txt")
+        .expect("b remains dirty");
+    assert!(b.staged.is_none());
+}
+
+#[test]
+fn commit_rejects_submodules_instead_of_dropping_gitlinks() {
+    let dir = init();
+    let sub = tempfile::tempdir().unwrap();
+    git(sub.path(), &["init", "-q", "-b", "main"]);
+    git(sub.path(), &["config", "user.name", "Tester"]);
+    git(sub.path(), &["config", "user.email", "tester@example.com"]);
+    std::fs::write(sub.path().join("sub.txt"), "sub\n").unwrap();
+    git(sub.path(), &["add", "sub.txt"]);
+    git(sub.path(), &["commit", "-q", "-m", "sub"]);
+    let sub_path = sub.path().to_string_lossy().to_string();
+    git(
+        dir.path(),
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &sub_path,
+            "sub",
+        ],
+    );
+    git(dir.path(), &["commit", "-q", "-m", "add submodule"]);
+
+    // The gitlink must not appear as a phantom staged addition.
+    let snap = lazecode_git::snapshot(dir.path()).unwrap();
+    assert!(snap.changes.iter().all(|change| change.path != "sub"));
+
+    std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap();
+    let error = lazecode_git::commit(dir.path(), "should fail", false).unwrap_err();
+    assert!(error.to_string().contains("submodule"), "{error}");
+    assert_eq!(git(dir.path(), &["rev-list", "--count", "HEAD"]), "1");
+}
+
+#[test]
+fn commit_rejects_unresolved_conflicts() {
+    let dir = init();
+    std::fs::write(dir.path().join("a.txt"), "base\n").unwrap();
+    git(dir.path(), &["add", "a.txt"]);
+    git(dir.path(), &["commit", "-q", "-m", "base"]);
+    git(dir.path(), &["checkout", "-q", "-b", "other"]);
+    std::fs::write(dir.path().join("a.txt"), "other\n").unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "other"]);
+    git(dir.path(), &["checkout", "-q", "main"]);
+    std::fs::write(dir.path().join("a.txt"), "main\n").unwrap();
+    git(dir.path(), &["commit", "-q", "-am", "main"]);
+    let output = Command::new("git")
+        .current_dir(dir.path())
+        .args(["merge", "other"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+
+    let error = lazecode_git::commit(dir.path(), "merge", false).unwrap_err();
+    assert!(error.to_string().contains("MERGE_HEAD"), "{error}");
+    let error = lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap_err();
+    assert!(error.to_string().contains("conflict"), "{error}");
+}
+
+#[test]
+fn checkout_does_not_follow_symlinked_directories_out_of_worktree() {
+    let dir = init();
+    std::fs::write(dir.path().join("base.txt"), "base\n").unwrap();
+    git(dir.path(), &["add", "base.txt"]);
+    git(dir.path(), &["commit", "-q", "-m", "base"]);
+
+    let outside = tempfile::tempdir().unwrap();
+    git(dir.path(), &["checkout", "-q", "-b", "symlink"]);
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("docs")).unwrap();
+    git(dir.path(), &["add", "docs"]);
+    git(dir.path(), &["commit", "-q", "-m", "symlink"]);
+
+    git(dir.path(), &["checkout", "-q", "main"]);
+    git(dir.path(), &["checkout", "-q", "-b", "target"]);
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    std::fs::write(dir.path().join("docs/x.txt"), "payload\n").unwrap();
+    git(dir.path(), &["add", "docs/x.txt"]);
+    git(dir.path(), &["commit", "-q", "-m", "target"]);
+
+    git(dir.path(), &["checkout", "-q", "symlink"]);
+    let error = lazecode_git::checkout_branch(dir.path(), "target").unwrap_err();
+    assert!(error.to_string().contains("symlink"), "{error}");
+    assert!(!outside.path().join("x.txt").exists());
+    assert!(!outside.path().join("docs").exists());
+}
+
+#[test]
+fn rejects_path_traversal_in_stage_and_diff() {
+    let dir = init();
+    std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+    assert!(lazecode_git::stage(dir.path(), &["../outside.txt".into()]).is_err());
+    assert!(lazecode_git::stage(dir.path(), &["/tmp/outside.txt".into()]).is_err());
+    assert!(lazecode_git::file_diff(dir.path(), "../outside.txt").is_err());
+}

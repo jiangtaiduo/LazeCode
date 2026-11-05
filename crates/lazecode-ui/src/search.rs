@@ -1,0 +1,223 @@
+use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2};
+use lazecode_core::{AppModel, Command, TabKind};
+
+use crate::icons::{paint as paint_icon, Icon};
+use crate::runtime::{SearchState, UiRuntime};
+use crate::theme::Theme;
+use crate::widgets::{secondary_button, text_clipped};
+
+pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme) {
+    let p = theme.palette;
+    let screen = ui.max_rect();
+    ui.painter()
+        .rect_filled(screen, 0.0, Color32::from_black_alpha(120));
+    let panel = Rect::from_center_size(
+        screen.center(),
+        Vec2::new(
+            screen.width().min(760.0) - 80.0,
+            screen.height().min(600.0) - 100.0,
+        ),
+    );
+    ui.painter()
+        .rect_filled(panel, egui::CornerRadius::same(10), p.elev);
+    ui.painter().rect_stroke(
+        panel,
+        egui::CornerRadius::same(10),
+        Stroke::new(1.0, p.border_strong),
+        StrokeKind::Inside,
+    );
+    let input = Rect::from_min_size(
+        Pos2::new(panel.left() + 16.0, panel.top() + 14.0),
+        Vec2::new(panel.width() - 32.0, 34.0),
+    );
+    ui.painter()
+        .rect_filled(input, egui::CornerRadius::same(6), p.panel2);
+    ui.painter().rect_stroke(
+        input,
+        egui::CornerRadius::same(6),
+        Stroke::new(1.0, p.border),
+        StrokeKind::Inside,
+    );
+    paint_icon(
+        ui.painter(),
+        Rect::from_center_size(
+            Pos2::new(input.left() + 16.0, input.center().y),
+            Vec2::splat(14.0),
+        ),
+        Icon::Search,
+        p.text3,
+    );
+    let state = &mut rt.search;
+    let field = Rect::from_min_max(
+        Pos2::new(input.left() + 30.0, input.top() + 4.0),
+        Pos2::new(input.right() - 12.0, input.bottom() - 4.0),
+    );
+    let response = ui.put(
+        field,
+        TextEdit::singleline(&mut state.query)
+            .frame(egui::Frame::NONE)
+            .hint_text(crate::tr!(
+                model,
+                "Search file contents across the project",
+                "在项目中搜索文件内容"
+            ))
+            .font(FontId::proportional(12.0)),
+    );
+    if state.focus_requested {
+        response.request_focus();
+        state.focus_requested = false;
+    }
+    let run_search = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+    if run_search {
+        run(model, state);
+    }
+
+    let result_area = Rect::from_min_max(
+        Pos2::new(panel.left() + 10.0, input.bottom() + 8.0),
+        Pos2::new(panel.right() - 10.0, panel.bottom() - 10.0),
+    );
+    if state.results.is_empty() {
+        ui.painter().text(
+            if state.searched {
+                panel.center()
+            } else {
+                Pos2::new(panel.center().x, panel.top() + 84.0)
+            },
+            Align2::CENTER_CENTER,
+            if state.searched {
+                crate::tr!(model, "No matches", "没有匹配")
+            } else {
+                crate::tr!(model, "Type a query and press Enter", "输入查询并按回车")
+            },
+            FontId::proportional(11.5),
+            p.text3,
+        );
+    } else {
+        ui.painter().text(
+            Pos2::new(panel.left() + 18.0, input.bottom() + 2.0),
+            Align2::LEFT_CENTER,
+            if model.settings.language.is_zh() {
+                format!("{} 个匹配", state.results.len())
+            } else {
+                format!("{} matches", state.results.len())
+            },
+            FontId::proportional(9.5),
+            p.text3,
+        );
+    }
+    let mut activate: Option<usize> = None;
+    let results = state.results.clone();
+    super::app_ui::region(ui, result_area, "search-results", |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("search-results-scroll")
+            .auto_shrink([false, false])
+            .show_rows(ui, 34.0, results.len(), |ui, range| {
+                for index in range {
+                    let hit = &results[index];
+                    let (row, response) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
+                    if index == state.selected || response.hovered() {
+                        ui.painter().rect_filled(
+                            row,
+                            egui::CornerRadius::same(4),
+                            if index == state.selected {
+                                p.active
+                            } else {
+                                p.hover
+                            },
+                        );
+                    }
+                    let (icon, tone) = file_icon(hit.path.to_str().unwrap_or_default(), theme);
+                    paint_icon(
+                        ui.painter(),
+                        Rect::from_center_size(
+                            Pos2::new(row.left() + 14.0, row.top() + 12.0),
+                            Vec2::splat(12.0),
+                        ),
+                        icon,
+                        tone,
+                    );
+                    let location = format!("{}:{}", hit.path.display(), hit.line);
+                    ui.painter().text(
+                        Pos2::new(row.left() + 26.0, row.top() + 11.0),
+                        Align2::LEFT_CENTER,
+                        &location,
+                        FontId::proportional(10.0),
+                        p.text3,
+                    );
+                    ui.painter().text(
+                        Pos2::new(row.left() + 26.0, row.top() + 24.0),
+                        Align2::LEFT_CENTER,
+                        &hit.line_text,
+                        FontId::monospace(10.5),
+                        p.text2,
+                    );
+                    if response.clicked() {
+                        activate = Some(index);
+                    }
+                }
+            });
+    });
+    if let Some(index) = activate {
+        if let Some(hit) = results.get(index) {
+            let settings = model.settings.clone();
+            if let Some(project) = model.active_project_mut() {
+                let path = project.root.join(&hit.path);
+                if let Ok(_id) = project.open_file(path, &settings) {
+                    if let Some(tab_id) = project.active_tab {
+                        if let Some(tab) = project.tab_mut_by_id(tab_id) {
+                            if let TabKind::File(file) = &mut tab.kind {
+                                file.doc.set_cursor(
+                                    lazecode_text::Cursor {
+                                        line: hit.line.saturating_sub(1),
+                                        col: 0,
+                                    },
+                                    false,
+                                );
+                                file.doc.scroll_line = hit.line.saturating_sub(6) as f32;
+                            }
+                        }
+                    }
+                }
+            }
+            rt.search.open = false;
+        }
+    }
+    let close = Rect::from_center_size(
+        Pos2::new(panel.right() - 24.0, panel.top() + 24.0),
+        Vec2::splat(18.0),
+    );
+    let close_response = ui.interact(close, ui.scope_id().with("search-close"), Sense::click());
+    paint_icon(ui.painter(), close.shrink(3.0), Icon::X, p.text3);
+    if close_response.clicked() {
+        rt.search.open = false;
+    }
+    let _ = (secondary_button, text_clipped);
+}
+
+fn run(model: &mut AppModel, state: &mut SearchState) {
+    if model.active_project().is_none() {
+        return;
+    }
+    state.request_id = state.request_id.wrapping_add(1);
+    state.results.clear();
+    state.selected = 0;
+    state.searched = false;
+    model.queue(Command::Search {
+        query: state.query.clone(),
+        request_id: state.request_id,
+    });
+}
+
+fn file_icon(path: &str, theme: &Theme) -> (Icon, Color32) {
+    let p = theme.palette;
+    let color = match path.rsplit('.').next().unwrap_or_default() {
+        "rs" => p.orange,
+        "ts" | "tsx" => p.blue,
+        "js" | "jsx" => p.amber,
+        "json" => p.amber,
+        "md" => p.text2,
+        _ => p.text3,
+    };
+    (Icon::File, color)
+}

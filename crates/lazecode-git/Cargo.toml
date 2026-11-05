@@ -1,0 +1,22 @@
+[package]
+name = "lazecode-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Pure-Rust Git integration built on gix"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+log.workspace = true
+gix.workspace = true
+similar.workspace = true
+parking_lot.workspace = true
+ignore.workspace = true
+lazecode-text.workspace = true
+lazecode-fs.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

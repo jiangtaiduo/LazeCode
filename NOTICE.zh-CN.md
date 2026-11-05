@@ -2,50 +2,28 @@
 
 [英文](NOTICE) | 简体中文
 
-LazeCode 使用 MIT 许可证。它依赖以下项目。
-
-> 本文件是英文 `NOTICE` 的方便阅读译本；如与英文原文有冲突，以英文原文为准。
-
-## 运行时依赖（随应用分发）
+LazeCode 使用 MIT 许可证。它是原生 Rust 应用，不捆绑 JavaScript 运行时、
+WebView 或 Node 包。主要运行时依赖包括：
 
 | 项目 | 许可证 |
 | :--- | :--- |
-| [React](https://github.com/facebook/react) | MIT |
-| [React DOM](https://github.com/facebook/react) | MIT |
-| [Monaco Editor](https://github.com/microsoft/monaco-editor) | MIT |
-| [@monaco-editor/react](https://github.com/suren-atoyan/monaco-react) | MIT |
-| [Tauri API](https://github.com/tauri-apps/tauri) | Apache-2.0 OR MIT |
-| [@tauri-apps/plugin-dialog](https://github.com/tauri-apps/plugins-workspace) | MIT OR Apache-2.0 |
-| [@tauri-apps/plugin-updater](https://github.com/tauri-apps/plugins-workspace) | MIT OR Apache-2.0 |
-| [tauri-plugin-log](https://github.com/tauri-apps/plugins-workspace) | Apache-2.0 OR MIT |
-| [react-markdown](https://github.com/remarkjs/react-markdown) | MIT |
-| [remark-gfm](https://github.com/remarkjs/remark-gfm) | MIT |
-| [rehype-highlight](https://github.com/rehypejs/rehype-highlight) | MIT |
-| [Ghostty](https://github.com/ghostty-org/ghostty) | MIT |
-| [nucleo-matcher](https://github.com/helix-editor/nucleo) | MPL-2.0 |
+| [egui](https://github.com/emilk/egui)、[wgpu](https://github.com/gfx-rs/wgpu)、[winit](https://github.com/rust-windowing/winit) | MIT OR Apache-2.0（winit 为 Apache-2.0） |
+| [gix](https://github.com/GitoxideLabs/gitoxide) | MIT OR Apache-2.0 |
+| [alacritty_terminal](https://github.com/alacritty/alacritty) | Apache-2.0 |
+| [portable-pty](https://github.com/wez/wezterm) | MIT |
+| [syntect](https://github.com/trishume/syntect)、[ropey](https://github.com/cessen/ropey) | MIT |
 | [notify](https://github.com/notify-rs/notify) | CC0-1.0 |
+| [encoding_rs](https://github.com/hsivonen/encoding_rs) | (Apache-2.0 OR MIT) AND BSD-3-Clause |
 
-Ghostty 的版权归 © 2024 Mitchell Hashimoto 及 Ghostty 贡献者所有。
-`libghostty-vt` 静态库由未经修改的 Ghostty 源码构建；
-`src-tauri/vendor/ghostty-vt/include/` 下的头文件逐字复制自该仓库。完整汇总以及
-Monaco/React 的署名见 `THIRD_PARTY_NOTICES.zh-CN.md`。
-
-## 构建工具（不随应用分发）
-
-| 项目 | 许可证 |
-| :--- | :--- |
-| [Vite](https://github.com/vitejs/vite) | MIT |
-| [TypeScript](https://github.com/microsoft/TypeScript) | Apache-2.0 |
-| [Tauri CLI](https://github.com/tauri-apps/tauri) | Apache-2.0 OR MIT |
-| [@vitejs/plugin-react](https://github.com/vitejs/vite) | MIT |
+完整直接依赖表与许可证说明见
+[`THIRD_PARTY_NOTICES.zh-CN.md`](THIRD_PARTY_NOTICES.zh-CN.md)。每个依赖都会
+附带自己的许可证元数据；发布前请使用 `cargo about` 生成完整的传递依赖清单。
 
 ## 法律说明
 
 - LazeCode 的界面参考 PyCharm，代码为本项目自有实现；本项目**不包含** JetBrains
   的源代码、图标或其他二进制资源。
-- PyCharm 和 JetBrains 是 JetBrains s.r.o. 的商标。本项目仅在描述设计参考与兼容性
-  时提及这些名称，不构成商标性使用，也不表示与 JetBrains 存在隶属或背书关系。
-- 不上传遥测，也没有账号系统或崩溃上报服务。可以在设置中开启一个小型本地诊断
-  缓冲区；它永远不会离开本机。唯一的自动网络请求是可选的更新检查（默认开启，
-  每天最多一次，请求本仓库的 GitHub 发布页；可在设置中关闭）。你配置的 Git 远端
-  和语言服务器可能自行发起网络请求。
+- PyCharm 和 JetBrains 是 JetBrains s.r.o. 的商标。本项目仅在描述设计参考时
+  提及这些名称，不表示与 JetBrains 存在隶属或背书关系。
+- LazeCode 不上传遥测；本地设置与工作区文件保存在
+  `~/Library/Application Support/LazeCode/`。

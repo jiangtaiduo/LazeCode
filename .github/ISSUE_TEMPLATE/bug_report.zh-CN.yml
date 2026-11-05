@@ -55,11 +55,9 @@ body:
   - type: textarea
     id: logs
     attributes:
-      label: 日志或 panic.log
+      label: 日志
       description: |
-        可选。发布构建崩溃后会把 `panic.log` 写到
-        `~/Library/Logs/io.github.jiangtaiduo.lazecode`；调试构建还会写入桌面
-        日志。请先隐去路径和令牌。
+        可选。请粘贴终端输出或崩溃回溯；提交前先隐去路径和令牌。
       render: text
   - type: textarea
     id: extra

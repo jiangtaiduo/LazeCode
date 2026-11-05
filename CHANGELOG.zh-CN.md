@@ -6,6 +6,41 @@
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [0.4.0] - 2026-11-04
+
+### 变更
+
+- 用原生 Rust 工作区替换 Tauri/WebView/React/Monaco 外壳：`winit` 窗口、
+  Metal 上的 `egui-wgpu`、`ropey`/`syntect` 编辑器、`gix` Git 读写，以及
+  `portable-pty` 上的 `alacritty_terminal` 会话。原生构建不再加载 JavaScript
+  或 WebView。
+- 拆分为 `lazecode-core`、`lazecode-fs`、`lazecode-text`、`lazecode-git`、
+  `lazecode-terminal`、`lazecode-ui`、`lazecode-app`。
+- 按 LazeCode 设计令牌重写外壳：项目栏、项目标签、活动栏、资源管理器、
+  源码管理、控制台、编辑器区域、底部面板、状态栏与命令面板。
+- 工作区与设置迁移到 `~/Library/Application Support/LazeCode/` 下的 TOML
+  新结构。
+
+### 新增
+
+- 遵循 `ignore` 语义的原生可编辑项目树与防抖文件监听。
+- 增量语法高亮、撤销/重做、查找替换、输入法与未保存标签拦截。
+- Git 状态、分支/标签、带 lane 图的提交历史、提交详情、暂存/取消暂存、
+  提交/修补、分支创建/删除/切换，以及工作区 Diff。
+- 绑定项目的 PTY 控制台，支持回滚搜索、选择复制、括号粘贴与 SGR 鼠标。
+- 主要界面的中英文。
+- `scripts/build-app.sh` 生成 ad-hoc 签名的 `dist/LazeCode.app`。
+
+### 尚未实现
+
+- LSP、Git push/pull/fetch/clone、merge/rebase/cherry-pick/revert/stash、
+  worktree/submodule/LFS、blame、按 hunk 暂存。
+- 终端冷历史、kitty 图形、OSC 7/133、分屏。
+- 公证与自动更新。
+
+旧的 Tauri/React/Monaco 树已在原生版本成为唯一构建目标后从工作树移除，仍可从
+Git 历史中找回。完整矩阵见 `docs/implementation-status.md`。
+
 ## [0.3.0] - 2026-11-04
 
 ### 新增

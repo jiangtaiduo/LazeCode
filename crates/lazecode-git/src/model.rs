@@ -123,6 +123,21 @@ pub struct BranchInfo {
     pub target: String,
 }
 
+/// One registered worktree of a repository. The main worktree is a member of
+/// every project's list, carrying `name = "main"`.
+#[derive(Clone, Debug)]
+pub struct WorktreeInfo {
+    /// Stable identifier: `"main"` or the directory name under `.git/worktrees/`.
+    pub name: String,
+    /// Absolute checkout path. The base for tree/search/watch/console cwd.
+    pub path: PathBuf,
+    /// Branch the worktree has checked out (`None` = detached or unborn HEAD).
+    pub branch: Option<String>,
+    pub locked: bool,
+    /// True when the checkout target vanished and only the registration remains.
+    pub prunable: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct GraphEdge {
     pub from_lane: usize,

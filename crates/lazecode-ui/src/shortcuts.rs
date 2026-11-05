@@ -161,6 +161,7 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     }
     if let Some(index) = switch_project {
         model.switch_project(index);
+        rt.clear_terminal_cache();
     }
     if close_overlay {
         if model.ui.command_palette_open {

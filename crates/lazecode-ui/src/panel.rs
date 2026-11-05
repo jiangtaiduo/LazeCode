@@ -42,8 +42,8 @@ fn draw_console(
         return;
     };
     let (count, tabs, active, running) = {
-        let project = &model.projects[index];
-        let tabs: Vec<(u64, String, bool, bool)> = project
+        let worktree = model.projects[index].active_worktree();
+        let tabs: Vec<(u64, String, bool, bool)> = worktree
             .terminals
             .iter()
             .map(|terminal| {
@@ -51,15 +51,15 @@ fn draw_console(
                     terminal.id,
                     terminal.title.clone(),
                     terminal.session.is_running(),
-                    project.active_terminal == Some(terminal.id),
+                    worktree.active_terminal == Some(terminal.id),
                 )
             })
             .collect();
         (
-            project.terminals.len(),
+            worktree.terminals.len(),
             tabs,
-            project.active_terminal,
-            project
+            worktree.active_terminal,
+            worktree
                 .terminals
                 .iter()
                 .filter(|terminal| terminal.session.is_running())
@@ -114,7 +114,7 @@ fn draw_console(
         model.ui.panel_visible = false;
     }
     rx -= 26.0;
-    let active_state = active.and_then(|id| model.projects[index].terminal_by_id(id));
+    let active_state = active.and_then(|id| model.projects[index].term_by_id(id));
     if let Some(terminal) = active_state {
         let action_rect =
             Rect::from_min_size(Pos2::new(rx - 24.0, head.top() + 4.0), Vec2::splat(24.0));
@@ -223,7 +223,7 @@ fn draw_console(
         if close_response.clicked() {
             close_terminal = Some(*id);
         } else if response.clicked() {
-            model.projects[index].active_terminal = Some(*id);
+            model.projects[index].active_worktree_mut().active_terminal = Some(*id);
             rt.set_terminal_focus(*id);
             model.ui.panel_tab = PanelTab::Console;
         }
@@ -253,12 +253,13 @@ fn draw_console(
     }
 
     // Body.
-    let active = model.projects[index].active_terminal;
+    let project = &mut model.projects[index];
+    let active = project.active_worktree().active_terminal;
     let Some(id) = active else {
         draw_empty(ui, theme, body, "No consoles open");
         return;
     };
-    let Some(terminal) = model.projects[index].terminal_by_id(id) else {
+    let Some(terminal) = project.term_by_id(id) else {
         draw_empty(ui, theme, body, "No consoles open");
         return;
     };
@@ -286,7 +287,7 @@ fn draw_console(
     }
     // Keep tab titles in sync with OSC titles.
     if let Some(title) = session.title() {
-        if let Some(terminal) = model.projects[index].terminal_by_id_mut(id) {
+        if let Some(terminal) = project.term_by_id_mut(id) {
             if !title.is_empty() && terminal.title != title {
                 terminal.title = title;
             }

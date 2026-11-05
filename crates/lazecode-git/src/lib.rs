@@ -11,6 +11,7 @@ pub mod model;
 pub mod ops;
 pub mod status;
 pub mod tree;
+pub mod worktree;
 
 pub use diff::{commit_details, file_diff};
 pub use log::{branches, log, log_ref, tags};
@@ -19,6 +20,10 @@ pub use ops::{
     checkout_branch, commit, commit_checked, create_branch, delete_branch, stage, unstage,
 };
 pub use status::snapshot;
+pub use worktree::{
+    add_worktree, add_worktree_detached_at_head, is_linked_worktree, list_worktrees, main_worktree,
+    prune_worktrees, remove_worktree,
+};
 
 use std::path::{Path, PathBuf};
 

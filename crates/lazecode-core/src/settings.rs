@@ -154,6 +154,8 @@ pub struct WorkspaceFile {
     pub recent: Vec<PathBuf>,
     pub projects: Vec<PathBuf>,
     pub active_project: Option<PathBuf>,
+    /// Focused worktree name per project root.
+    pub active_worktrees: std::collections::BTreeMap<PathBuf, String>,
     pub sidebar_view: Option<String>,
     pub sidebar_visible: Option<bool>,
     pub sidebar_width: Option<f32>,

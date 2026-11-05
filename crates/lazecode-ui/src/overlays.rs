@@ -14,6 +14,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         match menu.kind {
             MenuKind::Project => draw_project_menu(ui, model, rt, theme, screen, menu),
             MenuKind::Branch => draw_branch_menu(ui, model, rt, theme, screen, menu),
+            MenuKind::Worktree => draw_worktree_menu(ui, model, rt, theme, screen, menu),
         }
     }
     if let Some(anchor) = rt.agent_menu.take() {
@@ -148,8 +149,9 @@ fn draw_project_menu(
             Align2::LEFT_CENTER,
         );
         let running = project
-            .terminals
+            .worktrees
             .iter()
+            .flat_map(|worktree| worktree.terminals.iter())
             .filter(|terminal| terminal.session.is_running())
             .count();
         if running > 0 {
@@ -252,6 +254,180 @@ fn draw_project_menu(
     if !close {
         rt.menu = Some(menu);
     }
+}
+
+fn draw_worktree_menu(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    screen: Rect,
+    menu: MenuState,
+) {
+    let p = theme.palette;
+    let Some(index) = model.active_project else {
+        return;
+    };
+    let count = model.projects[index].worktrees.len();
+    let height = 86.0 + (count as f32 * 36.0).min(320.0) + 74.0;
+    let rect = popover_rect(screen, menu.anchor, 324.0, height);
+    frame(ui, rect, theme);
+    ui.painter().text(
+        Pos2::new(rect.left() + 14.0, rect.top() + 18.0),
+        Align2::LEFT_CENTER,
+        crate::tr!(model, "Worktrees", "工作树"),
+        FontId::proportional(11.0),
+        p.text3,
+    );
+    ui.painter().text(
+        Pos2::new(rect.right() - 14.0, rect.top() + 18.0),
+        Align2::RIGHT_CENTER,
+        if model.settings.language.is_zh() {
+            format!("{} 个已挂载", count)
+        } else {
+            format!("{count} attached")
+        },
+        FontId::monospace(9.0),
+        p.text3,
+    );
+    let mut close = false;
+    let mut switch_to: Option<String> = None;
+    let mut remove: Option<String> = None;
+    let rows_rect = Rect::from_min_max(
+        Pos2::new(rect.left() + 6.0, rect.top() + 32.0),
+        Pos2::new(rect.right() - 6.0, rect.bottom() - 40.0),
+    );
+    super::app_ui::region(ui, rows_rect, "worktree-menu", |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("worktree-menu-scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for worktree in model.projects[index].worktrees.iter() {
+                    let (row, response) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
+                    let is_active = model.projects[index].active_worktree_index()
+                        == Some(row_index(model, index, &worktree.name));
+                    if is_active {
+                        ui.painter()
+                            .rect_filled(row, egui::CornerRadius::same(4), p.active);
+                    } else if response.hovered() {
+                        ui.painter()
+                            .rect_filled(row, egui::CornerRadius::same(4), p.hover);
+                    }
+                    // Branch chip.
+                    let branch = worktree.branch();
+                    ui.painter().text(
+                        Pos2::new(row.left() + 12.0, row.top() + 9.0),
+                        Align2::LEFT_CENTER,
+                        &worktree.name,
+                        FontId::proportional(11.0),
+                        p.text,
+                    );
+                    text_clipped(
+                        ui.painter(),
+                        Rect::from_min_max(
+                            Pos2::new(row.left() + 12.0, row.top() + 17.0),
+                            Pos2::new(row.right() - 30.0, row.bottom()),
+                        ),
+                        &branch,
+                        FontId::monospace(9.0),
+                        p.text3,
+                        Align2::LEFT_CENTER,
+                    );
+                    if is_active {
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(row.right() - 36.0, row.center().y),
+                                Vec2::splat(11.0),
+                            ),
+                            Icon::Check,
+                            p.accent,
+                        );
+                    }
+                    // Remove control (linked worktrees only).
+                    if !worktree.is_main {
+                        let remove_rect = Rect::from_center_size(
+                            Pos2::new(row.right() - 14.0, row.center().y),
+                            Vec2::splat(20.0),
+                        );
+                        let remove_response = ui.interact(
+                            remove_rect,
+                            ui.scope_id()
+                                .with(("worktree-remove", worktree.name.clone())),
+                            Sense::click(),
+                        );
+                        if remove_response.hovered() {
+                            ui.painter().rect_filled(
+                                remove_rect,
+                                egui::CornerRadius::same(4),
+                                p.hover,
+                            );
+                            paint_icon(ui.painter(), remove_rect.shrink(4.0), Icon::Trash, p.rose);
+                        } else {
+                            paint_icon(ui.painter(), remove_rect.shrink(4.0), Icon::Trash, p.text3);
+                        }
+                        if remove_response.clicked() {
+                            remove = Some(worktree.name.clone());
+                        }
+                    }
+                    if response.clicked() {
+                        switch_to = Some(worktree.name.clone());
+                    }
+                }
+            });
+    });
+    let new_rect = Rect::from_min_size(
+        Pos2::new(rect.left() + 10.0, rect.bottom() - 34.0),
+        Vec2::new(rect.width() - 20.0, 28.0),
+    );
+    if secondary_button(
+        ui,
+        new_rect,
+        crate::tr!(model, "New worktree…", "新建工作树…"),
+        Some(Icon::Plus),
+        theme,
+    )
+    .clicked()
+    {
+        rt.dialog = DialogState::NewWorktree {
+            value: String::new(),
+            error: None,
+        };
+        close = true;
+    }
+    if let Some(name) = remove {
+        if let Some(worktree) = model.projects[index]
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.name == name)
+        {
+            rt.dialog = DialogState::RemoveWorktree {
+                name: name.clone(),
+                worktree_path: worktree.path.clone(),
+            };
+        }
+        close = true;
+    }
+    if let Some(name) = switch_to {
+        model.queue(Command::SwitchWorktree(name));
+        rt.clear_terminal_cache();
+        close = true;
+    }
+    if outside_click(ui, rect) {
+        close = true;
+    }
+    if !close {
+        rt.menu = Some(menu);
+    }
+}
+
+fn row_index(model: &AppModel, project: usize, name: &str) -> usize {
+    model.projects[project]
+        .worktrees
+        .iter()
+        .position(|worktree| worktree.name == name)
+        .unwrap_or(0)
 }
 
 fn draw_branch_menu(
@@ -535,6 +711,26 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             460.0,
             230.0,
         ),
+        DialogState::NewWorktree { .. } => (
+            crate::tr!(model, "New worktree", "新建工作树"),
+            crate::tr!(
+                model,
+                "Creates a sibling directory next to the project, checked out at the current HEAD. Consoles and Git state stay independent per worktree.",
+                "在项目同级目录创建一个新的检出（基于当前 HEAD），控制台与 Git 状态相互独立。"
+            ),
+            480.0,
+            230.0,
+        ),
+        DialogState::RemoveWorktree { .. } => (
+            crate::tr!(model, "Remove worktree", "删除工作树"),
+            crate::tr!(
+                model,
+                "The directories of the worktree and its consoles are removed. Uncommitted changes require confirmation.",
+                "将删除工作树目录及其控制台；未提交的更改需要确认。"
+            ),
+            470.0,
+            210.0,
+        ),
         DialogState::DeleteBranch { .. } => (
             crate::tr!(model, "Delete branch", "删除分支"),
             crate::tr!(model, "The branch and its reflog entry are removed. Commits stay reachable until garbage collection.", "将删除该分支及其 reflog 记录；提交在垃圾回收前仍可访问。"),
@@ -616,7 +812,54 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 confirm = true;
             }
         }
+        DialogState::NewWorktree { value, error } => {
+            let input = Rect::from_min_size(
+                Pos2::new(rect.left() + 22.0, rect.top() + 94.0),
+                Vec2::new(rect.width() - 44.0, 30.0),
+            );
+            ui.painter()
+                .rect_filled(input, egui::CornerRadius::same(5), p.panel2);
+            ui.painter().rect_stroke(
+                input,
+                egui::CornerRadius::same(5),
+                Stroke::new(1.0, p.border),
+                StrokeKind::Inside,
+            );
+            let response = ui.put(
+                input.shrink2(Vec2::new(8.0, 4.0)),
+                TextEdit::singleline(value)
+                    .frame(egui::Frame::NONE)
+                    .hint_text("my-feature")
+                    .font(FontId::monospace(11.0)),
+            );
+            response.request_focus();
+            if let Some(err) = error {
+                ui.painter().text(
+                    Pos2::new(input.left(), input.bottom() + 12.0),
+                    Align2::LEFT_CENTER,
+                    err,
+                    FontId::proportional(9.5),
+                    p.rose,
+                );
+            }
+            if ui.input(|input| input.key_pressed(Key::Enter)) {
+                confirm = true;
+            }
+        }
         DialogState::DeleteBranch { name, .. } => {
+            text_clipped(
+                ui.painter(),
+                Rect::from_min_max(
+                    Pos2::new(rect.left() + 22.0, rect.top() + 96.0),
+                    Pos2::new(rect.right() - 22.0, rect.top() + 118.0),
+                ),
+                name,
+                FontId::monospace(11.0),
+                p.amber,
+                Align2::LEFT_CENTER,
+            );
+        }
+        DialogState::RemoveWorktree { name, .. } => {
             text_clipped(
                 ui.painter(),
                 Rect::from_min_max(
@@ -658,6 +901,8 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
     );
     let confirm_label = match &dialog {
         DialogState::NewBranch { .. } => crate::tr!(model, "Create", "创建"),
+        DialogState::NewWorktree { .. } => crate::tr!(model, "Create", "创建"),
+        DialogState::RemoveWorktree { .. } => crate::tr!(model, "Remove", "删除"),
         DialogState::DeleteBranch { .. } => crate::tr!(model, "Delete", "删除"),
         DialogState::Quit => crate::tr!(model, "Quit", "退出"),
         DialogState::CloseDirtyTab { .. } => crate::tr!(model, "Discard", "放弃修改"),
@@ -682,6 +927,29 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                     model.queue(Command::CreateBranch(value));
                     close = true;
                 }
+            }
+            DialogState::NewWorktree { value, .. } => {
+                let value = value.trim().to_string();
+                if value.is_empty() {
+                    rt.dialog = DialogState::NewWorktree {
+                        value,
+                        error: Some(
+                            crate::tr!(model, "Enter a worktree name", "请输入工作树名")
+                                .to_string(),
+                        ),
+                    };
+                    close = true;
+                } else {
+                    model.queue(Command::CreateWorktree { name: value });
+                    close = true;
+                }
+            }
+            DialogState::RemoveWorktree { name, .. } => {
+                model.queue(Command::RemoveWorktree {
+                    name: name.clone(),
+                    force: false,
+                });
+                close = true;
             }
             DialogState::DeleteBranch { name, .. } => {
                 model.queue(Command::DeleteBranch(name.clone()));

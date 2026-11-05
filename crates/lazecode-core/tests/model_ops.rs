@@ -26,8 +26,8 @@ fn project_lifecycle_opens_files_and_terminals() {
     let settings = Settings::default();
     let mut project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
     assert_eq!(project.tree.file_count, 2);
-    assert_eq!(project.terminals.len(), 1);
-    let terminal_id = project.active_terminal.unwrap();
+    assert_eq!(project.active_worktree().terminals.len(), 1);
+    let terminal_id = project.active_worktree().active_terminal.unwrap();
 
     let tab = project
         .open_file(dir.path().join("src/main.rs"), &settings)
@@ -43,7 +43,7 @@ fn project_lifecycle_opens_files_and_terminals() {
     project.close_tab(tab);
     assert!(project.tabs.is_empty());
     project.close_terminal(terminal_id);
-    assert!(project.terminals.is_empty());
+    assert!(project.active_worktree().terminals.is_empty());
 }
 
 #[test]
@@ -81,6 +81,6 @@ fn bad_shell_setting_does_not_drop_the_project() {
     let mut settings = Settings::default();
     settings.terminal.shell = Some("/definitely/not/a/shell".to_string());
     let project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
-    assert!(project.terminals.is_empty());
+    assert!(project.active_worktree().terminals.is_empty());
     assert_eq!(project.tree.file_count, 1);
 }

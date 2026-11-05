@@ -56,15 +56,20 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 Color32::from_rgb(project.tone.0, project.tone.1, project.tone.2),
                 model.active_project == Some(index),
                 project
-                    .terminals
+                    .worktrees
                     .iter()
+                    .flat_map(|worktree| worktree.terminals.iter())
                     .filter(|terminal| terminal.session.is_running())
                     .count(),
                 project.initials.clone(),
                 project.name.clone(),
                 project.branch(),
                 project.root.display().to_string(),
-                project.terminals.len(),
+                project
+                    .worktrees
+                    .iter()
+                    .map(|worktree| worktree.terminals.len())
+                    .sum::<usize>(),
             )
         };
         let tile_rect = Rect::from_center_size(Pos2::new(cx, y + 17.0), Vec2::splat(34.0));
@@ -110,6 +115,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         }
         if response.clicked() {
             model.switch_project(index);
+            rt.clear_terminal_cache();
         }
         response.on_hover_ui(|ui| {
             ui.set_max_width(280.0);

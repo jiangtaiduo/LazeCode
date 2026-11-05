@@ -246,24 +246,57 @@ impl LazeApp {
         self.last_watch_poll = std::time::Instant::now();
         let mut changed: Vec<(std::path::PathBuf, Vec<std::path::PathBuf>)> = Vec::new();
         for project in &mut self.model.projects {
+            // The main worktree watcher lives on the project itself; linked
+            // worktrees carry their own.
             if let Some(watcher) = project.watcher.as_ref() {
                 if let Some(batch) = watcher.poll() {
                     changed.push((project.root.clone(), batch.changed));
+                }
+            }
+            for worktree in project.worktrees.iter().skip(1) {
+                if let Some(watcher) = worktree.watcher.as_ref() {
+                    if let Some(batch) = watcher.poll() {
+                        changed.push((worktree.path.clone(), batch.changed));
+                    }
                 }
             }
         }
         let had_changes = !changed.is_empty();
         let mut warnings = Vec::new();
         for (root, paths) in changed {
-            let Some(project) = self
-                .model
-                .projects
-                .iter_mut()
-                .find(|project| project.root == root)
+            // Find the worktree (its path) whose watcher fired.
+            let Some((position, wt_index)) =
+                self.model
+                    .projects
+                    .iter()
+                    .enumerate()
+                    .find_map(|(project_index, project)| {
+                        let path_match = project.root == root;
+                        if path_match {
+                            return Some((
+                                project_index,
+                                project
+                                    .worktrees
+                                    .iter()
+                                    .position(|worktree| worktree.is_main)?,
+                            )); // index 0
+                        }
+                        project
+                            .worktrees
+                            .iter()
+                            .position(|worktree| worktree.path == root)
+                            .map(|worktree_index| (project_index, worktree_index))
+                    })
             else {
                 continue;
             };
-            project.tree = lazecode_fs::tree::load_tree(&project.root);
+            let project = &mut self.model.projects[position];
+            if wt_index == 0 {
+                project.tree = lazecode_fs::tree::load_tree(&project.root);
+            } else {
+                project.worktrees[wt_index].tree =
+                    lazecode_fs::tree::load_tree(&project.worktrees[wt_index].path);
+            }
             for path in paths {
                 let canonical = path.canonicalize().unwrap_or(path);
                 let Some(tab) = project.tabs.iter_mut().find(|tab| {

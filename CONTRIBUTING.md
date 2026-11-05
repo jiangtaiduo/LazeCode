@@ -1,88 +1,54 @@
-# Contributing to LazeCode
+# Contributing
 
-[English](CONTRIBUTING.md) | [Simplified Chinese](CONTRIBUTING.zh-CN.md)
+Thanks for helping. LazeCode is a native macOS application written in Rust:
+`winit` + `egui-wgpu` for the shell and a small workspace under `crates/`.
+There is no WebView, JavaScript or Node runtime.
 
-Thanks for helping. LazeCode is a Tauri 2 application for macOS 27 on Apple
-Silicon (React 19 + Rust + native Ghostty VT). Code comments are mostly in
-Chinese; issues and pull requests in English or Simplified Chinese are welcome.
+## Build
 
-## Prerequisites
+Requirements: macOS 13+, Xcode command-line tools, and the Rust toolchain
+pinned by `rust-toolchain.toml`.
 
-- macOS 27 on Apple Silicon
-- Xcode Command Line Tools
-- Node.js 22.6 or newer (`nvm use` reads `.nvmrc`)
-- Rust 1.90 or newer (`rust-toolchain.toml` pins 1.90.0)
-- Zig only if you rebuild `libghostty-vt.a`
-
-## Setup
-
-```bash
-npm ci
-npm run tauri dev
+```sh
+cargo run -p lazecode-app
+./scripts/build-app.sh          # dist/LazeCode.app
+./scripts/build-app.sh --debug  # faster debug bundle
 ```
 
-Build a local ad-hoc signed app:
+## Checks
 
-```bash
-APPLE_SIGNING_IDENTITY=- npm run tauri build -- --bundles app
+All four must pass before a pull request:
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo build -p lazecode-app
 ```
 
-## Before opening a pull request
+UI changes should include a fresh `snapshot` image or a recording:
 
-```bash
-npm run check
-npm run test:ui
-npm run verify:fmt
-./scripts/clippy.sh
-cargo test --manifest-path src-tauri/Cargo.toml --locked
+```sh
+cargo run -p lazecode-app --bin snapshot -- /tmp/laze.png "$PWD" editor zh
 ```
 
-All five must pass. If you changed the wire format, run `npm run verify:wire`
-and add or update a check in `src/ghostty-vt/verifyWire.ts`.
+## Layout
 
-## What needs extra care
+| crate | responsibility |
+|---|---|
+| `lazecode-core` | projects, tabs, settings, commands, persistence |
+| `lazecode-fs` | tree scanning, encoding-aware IO, search, watchers |
+| `lazecode-text` | rope documents, undo, syntax cache, diff |
+| `lazecode-git` | `gix` read/write porcelain subset |
+| `lazecode-terminal` | PTY lifecycle, VT grid, snapshots, input/search |
+| `lazecode-ui` | theme, widgets, views, overlays |
+| `lazecode-app` | winit/egui-wgpu shell, event routing, jobs |
 
-- **Cell frame / key encoding:** Rust and TypeScript must agree on every offset
-  and bit. `verifyWire.ts` is the executable contract; a change on one side
-  without the other is a bug even if both compile.
-- **Terminal goldens:** update them only with
-  `UPDATE_GOLDENS=1 cargo test --test terminal_conformance`, then review every
-  changed golden by hand.
-- **i18n:** add new keys to `src/services/i18n/types.ts`, `en.ts` and
-  `zh-CN.ts`. The Rust menu has a small mirror; `verify:menu` and `verify:i18n`
-  guard the two sides. See `docs/i18n.md`.
-- **Tauri commands:** add the command to `src/services/tauriCommands.ts` and
-  `commandCatalog.ts`; `verify-tauri-commands` and `verify-command-catalog`
-  fail on drift.
-- **Security:** do not add IPC that accepts an arbitrary path without routing
-  it through `WorkspaceRegistry` or `PathGrantRegistry`. New subprocesses need
-  a timeout and must not use a shell.
-- **Secrets:** never commit signing keys, `.env` files, certificates or real
-  user data. Test fixtures must be synthetic.
-- **Documentation:** each user-facing document has an English and a Simplified
-  Chinese version. Update both in the same pull request and keep the language
-  links and internal links pointing at the matching version.
+## Guidelines
 
-## Code style
-
-- Rust: `cargo fmt` (the repository is formatted) and clippy with `-D warnings`.
-- TypeScript/CSS: the existing style is two-space indentation and single
-  quotes; keep changes focused. A formatter/linter is not enforced yet.
-- Keep comments factual and close to the invariant they explain.
-
-## Commit and PR conventions
-
-- One logical change per pull request. Include a short motivation and the
-  commands you ran.
-- UI changes: include a screenshot or a short recording.
-- Do not include build output (`dist/`, `src-tauri/target/`) or local
-  screenshots.
-
-## Release process
-
-Maintainers: see `docs/architecture.md` for the build and release overview.
-Release tags are `vX.Y.Z`; CI builds on `macos-15` (arm64). The
-`TAURI_SIGNING_PRIVATE_KEY` value is stored only in repository secrets and is
-used only for updater artifacts. Without a Developer ID certificate CI signs the
-app ad-hoc with `APPLE_SIGNING_IDENTITY=-`; it cannot be notarized. Do not
-describe a build as notarized until it is.
+- Keep UI work off the winit thread when it can block or take unbounded time.
+- Every background queue must be bounded; every cache needs an eviction rule.
+- Never silently weaken a safety check (paths, Git index, file encoding).
+- Add a regression test for every bug fix.
+- Keep English and Simplified Chinese user-facing docs in sync.
+- Do not include build output (`.app`, `target/`), signing keys or real user data.

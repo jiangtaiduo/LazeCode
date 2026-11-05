@@ -6,16 +6,12 @@
 
 ## Verification
 
-- [ ] `npm run check`
-- [ ] `npm run test:ui`
-- [ ] `npm run verify:fmt`
-- [ ] `./scripts/clippy.sh`
-- [ ] `cargo test --manifest-path src-tauri/Cargo.toml --locked`
+- [ ] `cargo fmt --all --check`
+- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
+- [ ] `cargo test --workspace`
 - [ ] UI change includes a screenshot or recording
 
 ## Notes
 
-- [ ] Wire-format or key-table changes include a matching `verifyWire.ts` check.
 - [ ] User-facing documentation was updated in both English and Simplified Chinese.
-- [ ] Terminal goldens were regenerated only with `UPDATE_GOLDENS=1` and reviewed.
 - [ ] No secrets, signing keys, real user data or build output are included.

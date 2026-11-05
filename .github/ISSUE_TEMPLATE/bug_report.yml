@@ -55,11 +55,10 @@ body:
   - type: textarea
     id: logs
     attributes:
-      label: Logs or panic.log
+      label: Logs
       description: |
-        Optional. Release builds write `panic.log` under
-        `~/Library/Logs/io.github.jiangtaiduo.lazecode` after a crash; debug
-        builds also write desktop logs there. Redact paths and tokens.
+        Optional. Paste terminal output or a crash trace. Redact paths and
+        tokens before submitting.
       render: text
   - type: textarea
     id: extra

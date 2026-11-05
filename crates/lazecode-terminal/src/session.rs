@@ -12,7 +12,8 @@ use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize};
 use rio_vt::ansi::CursorShape as RioCursorShape;
 use rio_vt::config::colors::{AnsiColor, NamedColor};
 use rio_vt::crosswords::grid::{Dimensions, Scroll};
-use rio_vt::crosswords::pos::{Column, Line};
+use rio_vt::crosswords::pos::{Column, Line, Pos};
+use rio_vt::crosswords::search::RegexSearch;
 use rio_vt::crosswords::square::{CellFlags, ContentTag, Wide};
 use rio_vt::crosswords::style::Style;
 use rio_vt::crosswords::{Crosswords, CrosswordsSize, Mode as RioMode};
@@ -643,9 +644,80 @@ impl Session {
         }
     }
 
-    /// Plain case-insensitive search across scrollback + screen.
+    /// Case-insensitive search across scrollback + screen.
+    ///
+    /// Walks the whole grid with rio-vt's DFAs (`regex_search_right` from
+    /// the topmost history line through the last screen line); each hit maps
+    /// back to an absolute line index (negative = history) for the UI.
     pub fn search(&self, query: &str) -> Vec<TerminalMatch> {
         if query.is_empty() {
+            return Vec::new();
+        }
+        let term = self.term.lock();
+        let cols = term.grid.columns();
+        let rows = term.grid.screen_lines();
+        let history = term.history_size() as i32;
+        let mut regex = match RegexSearch::new(query) {
+            Ok(regex) => regex,
+            // Invalid regex: fall back to plain literal scan.
+            Err(_) => return self.search_literal(query),
+        };
+        let start = Pos {
+            row: Line(-history),
+            col: Column(0),
+        };
+        let end = Pos {
+            row: Line(rows as i32 - 1),
+            col: Column(cols.saturating_sub(1)),
+        };
+        let mut matches = Vec::new();
+        // Origin: scan starts at `start` and stops at `end`; the ring wraps
+        // once past `end`, so a loop that always advances and clamps to the
+        // [start, end] window bounds the enumeration deterministically.
+        let mut origin = start;
+        while let Some(hit) = term.regex_search_right(&mut regex, origin, end) {
+            let line = hit.start().row.0;
+            if line < start.row.0 || line > end.row.0 {
+                break;
+            }
+            let start_col = hit.start().col.0;
+            let len = hit.end().col.0.saturating_sub(start_col) + 1;
+            matches.push(TerminalMatch {
+                line,
+                col: start_col.min(cols.saturating_sub(1)),
+                len,
+            });
+            if matches.len() >= 2_000 {
+                break;
+            }
+            // Advance origin just past this hit; same-row hits chain, and one
+            // past the end column rolls to the next line's column 0 via the
+            // grid's own cursor math in regex_search_right's reverse DFA.
+            if hit.end().col.0 + 1 >= cols {
+                if hit.end().row.0 >= end.row.0 {
+                    break;
+                }
+                origin = Pos {
+                    row: Line(hit.end().row.0 + 1),
+                    col: Column(0),
+                };
+            } else {
+                origin = Pos {
+                    row: hit.end().row,
+                    col: Column(hit.end().col.0 + 1),
+                };
+            }
+            if origin.row.0 > end.row.0 {
+                break;
+            }
+        }
+        matches
+    }
+
+    /// Literal byte scan used when the query is not a valid regex.
+    fn search_literal(&self, query: &str) -> Vec<TerminalMatch> {
+        let needle = query.to_lowercase();
+        if needle.is_empty() {
             return Vec::new();
         }
         let term = self.term.lock();
@@ -674,10 +746,9 @@ impl Session {
                     }
                 }
             }
-            let needle = query.to_lowercase();
             let hay_l = text.to_lowercase();
             if hay_l.len() != text.len() {
-                for (start_col, c) in text.char_indices() {
+                for (start_col, _) in text.char_indices() {
                     if text[start_col..].to_lowercase().starts_with(&needle) {
                         matches.push(TerminalMatch {
                             line: line_index,
@@ -685,15 +756,11 @@ impl Session {
                                 .get(text[..start_col].chars().count())
                                 .copied()
                                 .unwrap_or(0),
-                            len: query.chars().count(),
+                            len: needle.chars().count(),
                         });
                         if matches.len() >= 2_000 {
                             return matches;
                         }
-                        if c.is_ascii() {
-                            continue;
-                        }
-                        let _ = c;
                     }
                 }
             } else {
@@ -1045,6 +1112,41 @@ mod tests {
         session.scroll_bottom();
         session.snapshot_into(&mut snap);
         assert_eq!(snap.display_offset, 0);
+    }
+
+    #[test]
+    fn search_regex_classes_match_in_scrollback() {
+        // The search box feeds the rio DFA directly: character classes and
+        // case-folding work without a lowercase round-trip.
+        let options = SpawnOptions {
+            cwd: std::env::temp_dir(),
+            cols: 60,
+            rows: 6,
+            command: Some(
+                "for i in 1 2 3 4 5 6 7 8 9 10; do echo line-$i; done; echo done-marker"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        let session = spawn(options).expect("spawn");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while std::time::Instant::now() < deadline {
+            if !session.search("done-marker").is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let hits = session.search("line-[7-9]");
+        assert!(!hits.is_empty(), "regex class should match line-7..9");
+        // rio-vt smart-case (Alacritty/less convention): a lowercase query is
+        // case-insensitive, an uppercase query matches case-sensitively.
+        let folded = session.search("done-mark");
+        assert!(!folded.is_empty(), "lowercase query should fold case");
+        let sensitive = session.search("done-MARK");
+        assert!(
+            sensitive.is_empty(),
+            "uppercase query is case-sensitive: must NOT hit lowercase text"
+        );
     }
 
     #[test]

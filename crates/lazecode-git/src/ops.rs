@@ -617,28 +617,29 @@ pub fn apply_patch(root: &Path, patch: &str, cached: bool, reverse: bool) -> Res
         base.push("--reverse".into());
     }
     let run = |extra: &[&str]| -> Result<std::process::Output> {
+        use std::io::Write as _;
+        use std::process::Stdio;
         let mut cmd = std::process::Command::new("git");
-        cmd.current_dir(&worktree).args(&base);
-        for arg in extra {
-            cmd.arg(arg);
-        }
-        let temp = std::env::temp_dir().join(format!(
-            "lazecode-apply-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::write(&temp, patch.as_bytes())?;
-        cmd.arg(&temp);
-        let result = cmd
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .map_err(|err| anyhow::anyhow!("git apply failed: {err}"));
-        let _ = std::fs::remove_file(&temp);
-        result
+        cmd.current_dir(&worktree)
+            .args(&base)
+            .args(extra)
+            .arg("-") // read the patch from stdin
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd
+            .spawn()
+            .map_err(|err| anyhow::anyhow!("git apply failed: {err}"))?;
+        // Patches are capped at 16 MiB above; blocking writes to the OS pipe
+        // back off naturally while git reads, so there is no deadlock.
+        child
+            .stdin
+            .take()
+            .expect("stdin piped")
+            .write_all(patch.as_bytes())?;
+        child
+            .wait_with_output()
+            .map_err(|err| anyhow::anyhow!("git apply failed: {err}"))
     };
     let check = run(&["--check"])?;
     if !check.status.success() {

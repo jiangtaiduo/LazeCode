@@ -3,8 +3,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender};
-use lazecode_core::{AppModel, Command, ProjectState, Settings, TabKind, ToastKind, WorktreeState};
-use lazecode_fs::{SearchHit, SearchOptions};
+use lazecode_core::{
+    AppModel, Command, DiffSource, DiffViewMode, ProjectState, Settings, TabKind, ToastKind,
+    WorktreeState,
+};
+use lazecode_fs::SearchHit;
 use lazecode_git::{BranchInfo, CommitDetails, CommitInfo, FileDiff, LogOptions, RepoSnapshot};
 use lazecode_terminal::Notifier;
 use lazecode_ui::UiRuntime;
@@ -86,7 +89,7 @@ pub enum JobResult {
     },
     DiffLoaded {
         root: PathBuf,
-        path: String,
+        source: DiffSource,
         result: Result<FileDiff, String>,
     },
     SearchDone {
@@ -275,19 +278,41 @@ impl JobQueue {
         });
     }
 
-    pub fn file_diff(&mut self, root: PathBuf, path: String) {
-        let key = format!("diff:{}:{path}", root.display());
+    pub fn diff_source(&mut self, root: PathBuf, source: DiffSource) {
+        let key = format!("diff:{}:{source:?}", root.display());
         let job_root = root.clone();
-        let job_path = path.clone();
+        let job_source = source.clone();
         self.spawn("diff", key, move || {
-            let result =
-                lazecode_git::file_diff(&job_root, &job_path).map_err(|err| err.to_string());
+            let result = match &job_source {
+                DiffSource::Worktree { path } => {
+                    lazecode_git::file_diff(&job_root, path).map_err(|err| err.to_string())
+                }
+                DiffSource::Commit { commit, path } => {
+                    lazecode_git::commit_file_diff(&job_root, commit, path)
+                        .map_err(|err| err.to_string())
+                }
+                DiffSource::CompareWithLocal { commit, path } => {
+                    lazecode_git::diff_ref_worktree(&job_root, commit, path)
+                        .map_err(|err| err.to_string())
+                }
+                DiffSource::CompareCommits { from, to, path } => {
+                    lazecode_git::diff_commits(&job_root, from, to, path)
+                        .map_err(|err| err.to_string())
+                }
+                DiffSource::Files { old_path, new_path } => {
+                    lazecode_git::diff_two_files(old_path, new_path).map_err(|err| err.to_string())
+                }
+            };
             JobResult::DiffLoaded {
                 root: job_root,
-                path: job_path,
+                source: job_source,
                 result,
             }
         });
+    }
+    #[allow(dead_code)]
+    pub fn file_diff(&mut self, root: PathBuf, path: String) {
+        self.diff_source(root, DiffSource::Worktree { path });
     }
 
     pub fn is_saving(&self, path: &std::path::Path) -> bool {
@@ -1438,33 +1463,138 @@ impl JobQueue {
             }
             Command::OpenDiff(path) => {
                 if let Some(project) = model.active_project_mut() {
-                    project.open_diff(path.clone());
+                    let source = DiffSource::Worktree { path };
+                    project.open_diff_source(source.clone());
                     let root = project.root.clone();
-                    self.file_diff(root, path);
+                    self.diff_source(root, source);
                 }
             }
-            Command::Search { query, request_id } => {
+            Command::OpenCommitDiff { commit, path } => {
+                if let Some(project) = model.active_project_mut() {
+                    let source = DiffSource::Commit { commit, path };
+                    project.open_diff_source(source.clone());
+                    let root = project.root.clone();
+                    self.diff_source(root, source);
+                }
+            }
+            Command::OpenCompareWithLocalDiff { commit, path } => {
+                if let Some(project) = model.active_project_mut() {
+                    let source = DiffSource::CompareWithLocal { commit, path };
+                    project.open_diff_source(source.clone());
+                    let root = project.root.clone();
+                    self.diff_source(root, source);
+                }
+            }
+            Command::OpenCompareCommitsDiff { from, to, path } => {
+                if let Some(project) = model.active_project_mut() {
+                    let source = DiffSource::CompareCommits { from, to, path };
+                    project.open_diff_source(source.clone());
+                    let root = project.root.clone();
+                    self.diff_source(root, source);
+                }
+            }
+            Command::OpenFilesDiff { old_path, new_path } => {
+                if let Some(project) = model.active_project_mut() {
+                    let source = DiffSource::Files { old_path, new_path };
+                    project.open_diff_source(source.clone());
+                    let root = project.root.clone();
+                    self.diff_source(root, source);
+                }
+            }
+            Command::ToggleDiffViewMode(tab_id) => {
+                if let Some(project) = model.active_project_mut() {
+                    if let Some(tab) = project.tab_mut_by_id(tab_id) {
+                        if let TabKind::Diff(diff) = &mut tab.kind {
+                            diff.view_mode = match diff.view_mode {
+                                DiffViewMode::Unified => DiffViewMode::SideBySide,
+                                DiffViewMode::SideBySide => DiffViewMode::Unified,
+                            };
+                        }
+                    }
+                }
+            }
+            Command::NextDiffHunk(tab_id) => {
+                if let Some(project) = model.active_project_mut() {
+                    if let Some(tab) = project.tab_mut_by_id(tab_id) {
+                        if let TabKind::Diff(diff) = &mut tab.kind {
+                            let total = diff.diff.as_ref().map(|d| d.diff.hunks.len()).unwrap_or(0);
+                            if total > 0 {
+                                diff.current_hunk = (diff.current_hunk + 1) % total;
+                            }
+                        }
+                    }
+                }
+            }
+            Command::PrevDiffHunk(tab_id) => {
+                if let Some(project) = model.active_project_mut() {
+                    if let Some(tab) = project.tab_mut_by_id(tab_id) {
+                        if let TabKind::Diff(diff) = &mut tab.kind {
+                            let total = diff.diff.as_ref().map(|d| d.diff.hunks.len()).unwrap_or(0);
+                            if total > 0 {
+                                diff.current_hunk = (diff.current_hunk + total - 1) % total;
+                            }
+                        }
+                    }
+                }
+            }
+            Command::Search {
+                query,
+                request_id,
+                options,
+            } => {
                 if let Some(project) = model.active_project() {
                     let root = project.root.clone();
                     let key = format!("search:{}:{request_id}", root.display());
                     let job_root = root.clone();
                     let job_query = query.clone();
                     self.spawn("search", key, move || {
-                        let result = lazecode_fs::search_in_files(
-                            &job_root,
-                            &job_query,
-                            &SearchOptions {
-                                max_results: 500,
-                                ..Default::default()
-                            },
-                            None,
-                        )
-                        .map_err(|err| err.to_string());
+                        let result =
+                            lazecode_fs::search_in_files(&job_root, &job_query, &options, None)
+                                .map_err(|err| err.to_string());
                         JobResult::SearchDone {
                             root: job_root,
                             request_id,
                             query: job_query,
                             result,
+                        }
+                    });
+                }
+            }
+            Command::ReplaceInFiles {
+                query,
+                replacement,
+                options,
+            } => {
+                let zh = model.settings.language.is_zh();
+                if let Some(project) = model.active_project() {
+                    let root = project.root.clone();
+                    let key = format!("replace-in-files:{}", root.display());
+                    self.spawn("replace-in-files", key, move || {
+                        let result = lazecode_fs::replace_in_files(
+                            &root,
+                            &query,
+                            &replacement,
+                            &options,
+                            None,
+                        );
+                        let (msg, ok) = match result {
+                            Ok(count) => (
+                                if zh {
+                                    format!("已完成全局替换：修改了 {count} 处匹配")
+                                } else {
+                                    format!("Replaced {count} occurrences across project")
+                                },
+                                true,
+                            ),
+                            Err(err) => (err.to_string(), false),
+                        };
+                        JobResult::OpDone {
+                            root,
+                            message: msg,
+                            ok,
+                            refresh: true,
+                            reload_files: true,
+                            clear_commit_message: false,
                         }
                     });
                 }
@@ -1857,13 +1987,17 @@ impl JobQueue {
                     }
                 }
             }
-            JobResult::DiffLoaded { root, path, result } => {
+            JobResult::DiffLoaded {
+                root,
+                source,
+                result,
+            } => {
                 if let Some(project) = model
                     .projects
                     .iter_mut()
                     .find(|project| project.root == root)
                 {
-                    project.set_diff(&path, result);
+                    project.set_diff_for_source(&source, result);
                 }
             }
             JobResult::SearchDone {

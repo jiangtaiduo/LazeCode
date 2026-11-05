@@ -353,3 +353,33 @@ pub fn resolve_take(root: &Path, path: &str, ours: bool) -> Result<()> {
     run(root, &["checkout", &format!("--{}", side), "--", path])?;
     run(root, &["add", "--", path]).map(drop)
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergeFile3Way {
+    pub path: String,
+    pub ours: String,
+    pub theirs: String,
+    pub base: Option<String>,
+    pub worktree: String,
+}
+
+pub fn merge_file_content(root: &Path, path: &str) -> Result<MergeFile3Way> {
+    let ours = run(root, &["show", &format!(":2:{path}")]).unwrap_or_default();
+    let theirs = run(root, &["show", &format!(":3:{path}")]).unwrap_or_default();
+    let base = run(root, &["show", &format!(":1:{path}")]).ok();
+    let worktree = std::fs::read_to_string(root.join(path)).unwrap_or_default();
+    Ok(MergeFile3Way {
+        path: path.to_string(),
+        ours,
+        theirs,
+        base,
+        worktree,
+    })
+}
+
+pub fn mark_conflict_resolved(root: &Path, path: &str, content: Option<&str>) -> Result<()> {
+    if let Some(content) = content {
+        std::fs::write(root.join(path), content.as_bytes())?;
+    }
+    run(root, &["add", "--", path]).map(drop)
+}

@@ -10,7 +10,7 @@ pub mod tree;
 pub mod watch;
 
 pub use file::{Eol, TextFile, MAX_FILE_BYTES, MAX_FORCE_FILE_BYTES};
-pub use search::{compile_regex, search_in_files, SearchHit, SearchOptions};
+pub use search::{compile_regex, replace_in_files, search_in_files, SearchHit, SearchOptions};
 pub use tree::{FileTree, NodeKind, TreeNode};
 pub use watch::{watch_project, ProjectWatcher, WatchBatch};
 

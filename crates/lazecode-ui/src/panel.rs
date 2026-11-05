@@ -497,6 +497,41 @@ fn draw_git_log(
             FontId::proportional(10.0),
             p.text,
         );
+        if conflict_count > 0 {
+            let res_btn = Rect::from_center_size(
+                Pos2::new(banner_rect.right() - 256.0, banner_rect.center().y),
+                Vec2::new(108.0, 18.0),
+            );
+            let r_resp = ui.interact(
+                res_btn,
+                ui.scope_id().with("resolve-conflicts-btn"),
+                Sense::click(),
+            );
+            if r_resp.hovered() {
+                ui.painter()
+                    .rect_filled(res_btn, egui::CornerRadius::same(4), p.accent_soft);
+            }
+            ui.painter().text(
+                res_btn.center(),
+                Align2::CENTER_CENTER,
+                crate::tr!(model, "⚡ Resolve…", "⚡ 解决冲突…"),
+                FontId::proportional(9.5),
+                p.accent,
+            );
+            if r_resp.clicked() {
+                if let Some(first) = model.projects[index].conflicts.first() {
+                    let root = model.projects[index].root.clone();
+                    if let Ok(c) = lazecode_git::merge_file_content(&root, &first.path) {
+                        rt.dialog = crate::runtime::DialogState::ConflictResolve {
+                            path: first.path.clone(),
+                            ours: c.ours,
+                            theirs: c.theirs,
+                            worktree: c.worktree,
+                        };
+                    }
+                }
+            }
+        }
         // Continue / Abort buttons.
         for (x, label, kind) in [
             (
@@ -1036,6 +1071,7 @@ fn draw_git_log(
         if let Some(details) = details {
             draw_commit_detail(
                 ui,
+                model,
                 theme,
                 detail_rect,
                 &details,
@@ -1436,6 +1472,7 @@ fn draw_branch_list(
 
 fn draw_commit_detail(
     ui: &mut Ui,
+    model: &mut AppModel,
     theme: &Theme,
     rect: Rect,
     details: &lazecode_git::CommitDetails,
@@ -1522,7 +1559,32 @@ fn draw_commit_detail(
     y += 14.0;
     let max_rows = (((rect.bottom() - y - 18.0) / 17.0).floor()).max(0.0) as usize;
     let shown = details.files.len().min(64).min(max_rows);
-    for file in details.files.iter().take(shown) {
+    for (row_idx, file) in details.files.iter().take(shown).enumerate() {
+        let row_rect = Rect::from_min_size(
+            Pos2::new(rect.left() + 4.0, y - 8.0),
+            Vec2::new(rect.width() - 8.0, 17.0),
+        );
+        let resp = ui.interact(
+            row_rect,
+            ui.scope_id().with(("commit-file", row_idx, &file.path)),
+            Sense::click(),
+        );
+        if resp.hovered() {
+            ui.painter()
+                .rect_filled(row_rect, egui::CornerRadius::same(3), p.hover);
+        }
+        if resp.clicked() {
+            model.queue(Command::OpenCommitDiff {
+                commit: details.info.id.clone(),
+                path: file.path.clone(),
+            });
+        }
+        if resp.secondary_clicked() {
+            model.queue(Command::OpenCompareWithLocalDiff {
+                commit: details.info.id.clone(),
+                path: file.path.clone(),
+            });
+        }
         let letter = file.kind.letter();
         ui.painter().text(
             Pos2::new(rect.left() + 16.0, y),
@@ -1543,7 +1605,7 @@ fn draw_commit_detail(
             ),
             &file.path,
             FontId::proportional(9.5),
-            p.text2,
+            if resp.hovered() { p.text } else { p.text2 },
             Align2::LEFT_CENTER,
         );
         ui.painter().text(

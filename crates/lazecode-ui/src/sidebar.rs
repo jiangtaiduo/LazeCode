@@ -387,6 +387,16 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
                         },
                     );
                 }
+                if response.secondary_clicked() {
+                    rt.menu = Some(crate::runtime::MenuState {
+                        kind: crate::runtime::MenuKind::TreeContext {
+                            project: active_index,
+                            is_dir: matches!(row.kind, NodeKind::Folder),
+                        },
+                        anchor: response.rect,
+                        payload: Some(row.path.to_string_lossy().to_string()),
+                    });
+                }
                 if response.clicked() {
                     match row.kind {
                         NodeKind::Folder => {

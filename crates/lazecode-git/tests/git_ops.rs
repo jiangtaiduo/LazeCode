@@ -283,3 +283,45 @@ fn rejects_path_traversal_in_stage_and_diff() {
     assert!(lazecode_git::stage(dir.path(), &["/tmp/outside.txt".into()]).is_err());
     assert!(lazecode_git::file_diff(dir.path(), "../outside.txt").is_err());
 }
+
+#[test]
+fn diff_sources_commit_and_ref_and_files() {
+    let dir = init();
+    let root = dir.path();
+    std::fs::write(root.join("f.txt"), "v1\n").unwrap();
+    git(root, &["add", "f.txt"]);
+    git(root, &["commit", "-q", "-m", "c1"]);
+    let c1 = git(root, &["rev-parse", "HEAD"]);
+
+    std::fs::write(root.join("f.txt"), "v2\n").unwrap();
+    git(root, &["add", "f.txt"]);
+    git(root, &["commit", "-q", "-m", "c2"]);
+    let c2 = git(root, &["rev-parse", "HEAD"]);
+
+    // commit_file_diff on c2 against parent c1
+    let d_commit = lazecode_git::commit_file_diff(root, &c2, "f.txt").unwrap();
+    assert_eq!(d_commit.old_text, "v1\n");
+    assert_eq!(d_commit.new_text, "v2\n");
+    assert_eq!(d_commit.diff.additions, 1);
+    assert_eq!(d_commit.diff.deletions, 1);
+
+    // diff_commits c1..c2
+    let d_commits = lazecode_git::diff_commits(root, &c1, &c2, "f.txt").unwrap();
+    assert_eq!(d_commits.old_text, "v1\n");
+    assert_eq!(d_commits.new_text, "v2\n");
+
+    // diff_ref_worktree against c1 when worktree is v3
+    std::fs::write(root.join("f.txt"), "v3\n").unwrap();
+    let d_local = lazecode_git::diff_ref_worktree(root, &c1, "f.txt").unwrap();
+    assert_eq!(d_local.old_text, "v1\n");
+    assert_eq!(d_local.new_text, "v3\n");
+
+    // diff_two_files
+    let f1 = root.join("f1.txt");
+    let f2 = root.join("f2.txt");
+    std::fs::write(&f1, "hello\n").unwrap();
+    std::fs::write(&f2, "world\n").unwrap();
+    let d_files = lazecode_git::diff_two_files(&f1, &f2).unwrap();
+    assert_eq!(d_files.old_text, "hello\n");
+    assert_eq!(d_files.new_text, "world\n");
+}

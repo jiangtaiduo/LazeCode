@@ -779,6 +779,14 @@ impl Document {
         matches
     }
 
+    pub fn replace_match(&mut self, start: Cursor, end: Cursor, replacement: &str) {
+        let s = self.char_index(start);
+        let e = self.char_index(end);
+        self.apply_edit(s, e, replacement, MergeKind::None);
+        self.cursor = self.cursor_at(s + replacement.chars().count());
+        self.selection = None;
+    }
+
     pub fn replace_all(&mut self, query: &str, replacement: &str, options: MatchOptions) -> usize {
         let matches = self.find_all(query, options);
         let undo_len = self.undo.len();

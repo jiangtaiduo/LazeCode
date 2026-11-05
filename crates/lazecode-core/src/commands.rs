@@ -93,9 +93,35 @@ pub enum Command {
     LogLoadMore,
     SelectCommit(String),
     OpenDiff(String),
+    OpenCommitDiff {
+        commit: String,
+        path: String,
+    },
+    OpenCompareWithLocalDiff {
+        commit: String,
+        path: String,
+    },
+    OpenCompareCommitsDiff {
+        from: String,
+        to: String,
+        path: String,
+    },
+    OpenFilesDiff {
+        old_path: std::path::PathBuf,
+        new_path: std::path::PathBuf,
+    },
+    ToggleDiffViewMode(u64),
+    NextDiffHunk(u64),
+    PrevDiffHunk(u64),
     Search {
         query: String,
         request_id: u64,
+        options: lazecode_fs::SearchOptions,
+    },
+    ReplaceInFiles {
+        query: String,
+        replacement: String,
+        options: lazecode_fs::SearchOptions,
     },
     SaveTab(u64),
     SaveAll,

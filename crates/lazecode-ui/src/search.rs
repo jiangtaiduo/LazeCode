@@ -26,9 +26,12 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         Stroke::new(1.0, p.border_strong),
         StrokeKind::Inside,
     );
+    let state = &mut rt.search;
+    let replace_open = state.replace_mode;
+    let bar_height = if replace_open { 74.0 } else { 36.0 };
     let input = Rect::from_min_size(
         Pos2::new(panel.left() + 16.0, panel.top() + 14.0),
-        Vec2::new(panel.width() - 32.0, 34.0),
+        Vec2::new(panel.width() - 32.0, bar_height),
     );
     ui.painter()
         .rect_filled(input, egui::CornerRadius::same(6), p.panel2);
@@ -38,19 +41,21 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         Stroke::new(1.0, p.border),
         StrokeKind::Inside,
     );
+
+    // Row 1: Search icon + query field + flags (Aa, ab, .*) + replace toggle + close
+    let row1 = Rect::from_min_size(input.min, Vec2::new(input.width(), 34.0));
     paint_icon(
         ui.painter(),
         Rect::from_center_size(
-            Pos2::new(input.left() + 16.0, input.center().y),
+            Pos2::new(row1.left() + 16.0, row1.center().y),
             Vec2::splat(14.0),
         ),
         Icon::Search,
         p.text3,
     );
-    let state = &mut rt.search;
     let field = Rect::from_min_max(
-        Pos2::new(input.left() + 30.0, input.top() + 4.0),
-        Pos2::new(input.right() - 12.0, input.bottom() - 4.0),
+        Pos2::new(row1.left() + 32.0, row1.top() + 4.0),
+        Pos2::new(row1.right() - 210.0, row1.bottom() - 4.0),
     );
     let response = ui.put(
         field,
@@ -67,11 +72,149 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         response.request_focus();
         state.focus_requested = false;
     }
+
+    // Flags: Aa, ab, .*
+    let mut flag_x = row1.right() - 200.0;
+    for (label, active, id) in [
+        ("Aa", state.case_sensitive, "case"),
+        ("ab", state.whole_word, "word"),
+        (".*", state.regex, "regex"),
+    ] {
+        let toggle = Rect::from_min_size(
+            Pos2::new(flag_x, row1.center().y - 11.0),
+            Vec2::new(26.0, 22.0),
+        );
+        flag_x += 28.0;
+        let t_resp = ui.interact(
+            toggle,
+            ui.scope_id().with(("search-flag", id)),
+            Sense::click(),
+        );
+        ui.painter().rect_filled(
+            toggle,
+            egui::CornerRadius::same(4),
+            if active {
+                p.accent_soft
+            } else {
+                Color32::TRANSPARENT
+            },
+        );
+        ui.painter().text(
+            toggle.center(),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::monospace(9.5),
+            if active { p.accent } else { p.text3 },
+        );
+        if t_resp.clicked() {
+            match id {
+                "case" => state.case_sensitive = !state.case_sensitive,
+                "word" => state.whole_word = !state.whole_word,
+                _ => state.regex = !state.regex,
+            }
+            run(model, state);
+        }
+    }
+
+    // Replace mode toggle button
+    let rep_btn_rect = Rect::from_min_size(
+        Pos2::new(flag_x + 6.0, row1.center().y - 11.0),
+        Vec2::new(76.0, 22.0),
+    );
+    let rep_btn_label = if state.replace_mode {
+        crate::tr!(model, "▲ Hide", "▲ 隐藏替换")
+    } else {
+        crate::tr!(model, "⇄ Replace", "⇄ 替换")
+    };
+    if secondary_button(ui, rep_btn_rect, rep_btn_label, None, theme).clicked() {
+        state.replace_mode = !state.replace_mode;
+    }
+
+    // Close button
+    let close = Rect::from_center_size(
+        Pos2::new(row1.right() - 14.0, row1.center().y),
+        Vec2::splat(18.0),
+    );
+    let close_response = ui.interact(close, ui.scope_id().with("search-close"), Sense::click());
+    paint_icon(ui.painter(), close.shrink(3.0), Icon::X, p.text3);
+    if close_response.clicked() {
+        state.open = false;
+    }
+
+    // Row 2 (if replace_mode): Replace input + File mask + [Replace all] button
+    if replace_open {
+        let row2 = Rect::from_min_size(
+            Pos2::new(input.left(), input.top() + 38.0),
+            Vec2::new(input.width(), 32.0),
+        );
+        ui.painter()
+            .hline(input.x_range(), row2.top(), Stroke::new(1.0, p.border));
+
+        let rep_field_rect = Rect::from_min_max(
+            Pos2::new(row2.left() + 14.0, row2.top() + 4.0),
+            Pos2::new(row2.left() + 240.0, row2.bottom() - 4.0),
+        );
+        ui.put(
+            rep_field_rect,
+            TextEdit::singleline(&mut state.replacement)
+                .frame(egui::Frame::NONE)
+                .hint_text(crate::tr!(model, "Replace with…", "替换为…"))
+                .font(FontId::proportional(11.5)),
+        );
+
+        let mask_field_rect = Rect::from_min_max(
+            Pos2::new(row2.left() + 250.0, row2.top() + 4.0),
+            Pos2::new(row2.right() - 110.0, row2.bottom() - 4.0),
+        );
+        let mask_resp = ui.put(
+            mask_field_rect,
+            TextEdit::singleline(&mut state.file_mask)
+                .frame(egui::Frame::NONE)
+                .hint_text(crate::tr!(
+                    model,
+                    "File mask (e.g. *.rs, *.ts)",
+                    "文件掩码 (如 *.rs)"
+                ))
+                .font(FontId::monospace(10.5)),
+        );
+        if mask_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            run(model, state);
+        }
+
+        let rep_all_rect = Rect::from_min_size(
+            Pos2::new(row2.right() - 98.0, row2.center().y - 11.0),
+            Vec2::new(90.0, 22.0),
+        );
+        if secondary_button(
+            ui,
+            rep_all_rect,
+            crate::tr!(model, "Replace all", "全部替换"),
+            None,
+            theme,
+        )
+        .clicked()
+        {
+            let options = lazecode_fs::SearchOptions {
+                case_sensitive: state.case_sensitive,
+                whole_word: state.whole_word,
+                regex: state.regex,
+                include: (!state.file_mask.trim().is_empty())
+                    .then(|| state.file_mask.trim().to_string()),
+                max_results: 5000,
+                ..Default::default()
+            };
+            model.queue(Command::ReplaceInFiles {
+                query: state.query.clone(),
+                replacement: state.replacement.clone(),
+                options,
+            });
+        }
+    }
+
     let run_search = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
     if run_search {
         run(model, state);
     }
-
     let result_area = Rect::from_min_max(
         Pos2::new(panel.left() + 10.0, input.bottom() + 8.0),
         Pos2::new(panel.right() - 10.0, panel.bottom() - 10.0),
@@ -203,9 +346,18 @@ fn run(model: &mut AppModel, state: &mut SearchState) {
     state.results.clear();
     state.selected = 0;
     state.searched = false;
+    let options = lazecode_fs::SearchOptions {
+        case_sensitive: state.case_sensitive,
+        whole_word: state.whole_word,
+        regex: state.regex,
+        include: (!state.file_mask.trim().is_empty()).then(|| state.file_mask.trim().to_string()),
+        max_results: 500,
+        ..Default::default()
+    };
     model.queue(Command::Search {
         query: state.query.clone(),
         request_id: state.request_id,
+        options,
     });
 }
 

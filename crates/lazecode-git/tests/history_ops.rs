@@ -172,3 +172,35 @@ fn revert_generates_inverse_commit() {
     revert(root, &target).unwrap();
     assert!(!root.join("b.txt").exists());
 }
+
+#[test]
+fn three_way_merge_file_content_and_resolve() {
+    let dir = repo();
+    let root = dir.path();
+    commit(root, "file.txt", "base content\n", "base");
+
+    git(root, true, &["checkout", "-qb", "theirs-branch"]);
+    commit(root, "file.txt", "theirs change\n", "theirs commit");
+
+    git(root, true, &["checkout", "-q", "main"]);
+    commit(root, "file.txt", "ours change\n", "ours commit");
+
+    // trigger merge conflict
+    git(root, false, &["merge", "--no-ff", "theirs-branch"]);
+
+    // read 3-way content
+    let m = lazecode_git::merge_file_content(root, "file.txt").unwrap();
+    assert!(m.ours.contains("ours change"));
+    assert!(m.theirs.contains("theirs change"));
+    assert!(m.worktree.contains("<<<<<<<"));
+
+    // mark resolved with clean text
+    lazecode_git::mark_conflict_resolved(root, "file.txt", Some("resolved content\n")).unwrap();
+    let clean = std::fs::read_to_string(root.join("file.txt")).unwrap();
+    assert_eq!(clean, "resolved content\n");
+    let conflicts = lazecode_git::conflict_list(root).unwrap();
+    assert!(
+        conflicts.is_empty(),
+        "conflicts should be empty after resolution"
+    );
+}

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use lazecode_core::{AppModel, PanelTab, ProjectState, Settings, SidebarView, UiState};
 use lazecode_ui::UiRuntime;
+use std::collections::HashSet;
 
 const W: f32 = 1440.0;
 const H: f32 = 900.0;
@@ -35,6 +36,7 @@ fn main() -> anyhow::Result<()> {
         notifier: None,
         should_quit: false,
         version: env!("CARGO_PKG_VERSION"),
+        favorite_branches: HashSet::new(),
     };
     if mode != "welcome" {
         let mut project = ProjectState::open(project_root.clone(), &settings, None)

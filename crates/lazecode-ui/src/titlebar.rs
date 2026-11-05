@@ -113,6 +113,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             rt.menu = Some(MenuState {
                 kind: MenuKind::Project,
                 anchor: project_rect,
+                payload: None,
             });
         } else {
             open_project_dialog = true;
@@ -220,6 +221,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             rt.menu = Some(MenuState {
                 kind: MenuKind::Branch,
                 anchor: branch_rect,
+                payload: None,
             });
         }
         // Worktree chip next to the branch chip.
@@ -269,6 +271,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             rt.menu = Some(MenuState {
                 kind: MenuKind::Worktree,
                 anchor: worktree_rect,
+                payload: None,
             });
         }
         worktree_response.on_hover_text(crate::tr!(

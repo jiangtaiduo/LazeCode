@@ -38,11 +38,23 @@ pub enum MenuKind {
     Project,
     Branch,
     Worktree,
+    LogBranchFilter {
+        project: usize,
+    },
+    LogCommitMenu {
+        project: usize,
+    },
+    /// Git log branch tree context menu (payload: name \u{1} "remote"|"local").
+    BranchContext {
+        project: usize,
+    },
 }
 
 pub struct MenuState {
     pub kind: MenuKind,
     pub anchor: egui::Rect,
+    /// Selection context (e.g. the commit a context menu targets).
+    pub payload: Option<String>,
 }
 
 pub enum DialogState {
@@ -53,6 +65,36 @@ pub enum DialogState {
     },
     DeleteBranch {
         name: String,
+        error: Option<String>,
+    },
+    RenameBranch {
+        from: String,
+        value: String,
+        error: Option<String>,
+    },
+    Push {
+        remote: String,
+        branch: String,
+        set_upstream: bool,
+        status: Option<String>,
+    },
+    Pull {
+        mode: lazecode_git::PullMode,
+        status: Option<String>,
+    },
+    Remotes {
+        remotes: Vec<lazecode_git::RemoteInfo>,
+        new_name: String,
+        new_url: String,
+        error: Option<String>,
+    },
+    Reset {
+        hash: String,
+        mode: lazecode_git::ResetMode,
+    },
+    NewTag {
+        commit: String,
+        value: String,
         error: Option<String>,
     },
     NewWorktree {
@@ -234,6 +276,12 @@ pub enum PaletteAction {
     OpenGitLog,
     RefreshGit,
     OpenSearch,
+    OpenPush,
+    OpenPull,
+    OpenRemotes,
+    FetchAll,
+    StashChanges,
+    ShelvedChanges,
     About,
     SwitchProject(usize),
     SwitchWorktree { project: usize, name: String },

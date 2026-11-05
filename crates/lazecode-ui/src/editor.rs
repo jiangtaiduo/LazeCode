@@ -1105,7 +1105,7 @@ fn draw_diff(
             .id_salt(("diff", tab_id))
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for hunk in &hunks {
+                for (hunk_index, hunk) in hunks.iter().enumerate() {
                     let (head_rect, _) = ui
                         .allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::hover());
                     ui.painter().rect_filled(head_rect, 0.0, p.panel2);
@@ -1116,6 +1116,65 @@ fn draw_diff(
                         FontId::monospace(10.0),
                         p.text3,
                     );
+                    // Hunk action buttons: stage / unstage / rollback.
+                    let project_root = model.projects[index].root.clone();
+                    let file_path = path.clone();
+                    let patch = lazecode_text::diff::unified_patch(
+                        &file_path,
+                        &lazecode_text::TextDiff {
+                            hunks: vec![hunk.clone()],
+                            ..Default::default()
+                        },
+                    );
+                    let hunk_button = |ui: &mut Ui, label: &str, x: f32| -> bool {
+                        let area = Rect::from_center_size(
+                            Pos2::new(head_rect.right() - x, head_rect.center().y),
+                            Vec2::new(56.0, 17.0),
+                        );
+                        let response = ui.interact(
+                            area,
+                            ui.scope_id().with(("hunk", hunk_index, (x * 10.0) as i64)),
+                            Sense::click(),
+                        );
+                        if response.hovered() {
+                            ui.painter()
+                                .rect_filled(area, egui::CornerRadius::same(3), p.hover);
+                        }
+                        ui.painter()
+                            .rect_filled(area, egui::CornerRadius::same(3), p.panel2);
+                        ui.painter().text(
+                            area.center(),
+                            Align2::CENTER_CENTER,
+                            label,
+                            FontId::proportional(8.5),
+                            p.text2,
+                        );
+                        response.clicked()
+                    };
+                    if hunk_button(ui, crate::tr!(model, "Stage", "暂存"), 24.0) {
+                        model.queue(Command::ApplyPatch {
+                            patch: patch.clone(),
+                            cached: true,
+                            reverse: false,
+                            root: project_root.clone(),
+                        });
+                    }
+                    if hunk_button(ui, crate::tr!(model, "Unstage", "取消暂存"), 84.0) {
+                        model.queue(Command::ApplyPatch {
+                            patch: patch.clone(),
+                            cached: true,
+                            reverse: true,
+                            root: project_root.clone(),
+                        });
+                    }
+                    if hunk_button(ui, crate::tr!(model, "Discard", "放弃修改"), 144.0) {
+                        model.queue(Command::ApplyPatch {
+                            patch: patch.clone(),
+                            cached: false,
+                            reverse: true,
+                            root: project_root.clone(),
+                        });
+                    }
                     for line in &hunk.lines {
                         let (row, _) = ui.allocate_exact_size(
                             Vec2::new(ui.available_width(), line_h),

@@ -9,6 +9,55 @@ use lazecode_git::{BranchInfo, CommitDetails, CommitInfo, FileDiff, LogOptions, 
 use lazecode_terminal::Notifier;
 use lazecode_ui::UiRuntime;
 
+/// Commit count loaded per log page. Small enough for a snappy first frame,
+/// big enough that a repo rarely needs more than a couple of pages.
+const LOG_PAGE_SIZE: usize = 300;
+
+/// Build the `gix`-crate options for one page of a filtered log query. The
+/// query keeps semantic filters; `offset` is this page's start index, which
+/// always re-walks from the same tips so layout stays prefix-stable.
+fn log_options_from_query(
+    query: &lazecode_core::LogQuery,
+    job_root: &std::path::Path,
+    limit: usize,
+    offset: usize,
+) -> LogOptions {
+    let head_ancestors = if query.all_refs || !query.branch.trim().is_empty() {
+        // Only meaningful when history carries non-HEAD commits; cheap walk.
+        lazecode_git::head_ancestors(job_root)
+    } else {
+        None
+    };
+    LogOptions {
+        limit: limit + offset,
+        first_parent: query.first_parent,
+        no_merges: query.no_merges,
+        topo_order: query.topo_order,
+        author: (!query.author.trim().is_empty()).then(|| query.author.clone()),
+        since: (query.since > 0).then_some(query.since),
+        path: (!query.path.trim().is_empty()).then(|| query.path.clone()),
+        all_refs: query.all_refs || !query.branch.trim().is_empty(),
+        branch: (!query.branch.trim().is_empty()).then(|| query.branch.clone()),
+        head_ancestors,
+        range_walk: false,
+    }
+}
+
+/// Stable key so unrelated filter edits don't clobber the in-flight dedup.
+fn log_query_fingerprint(query: &lazecode_core::LogQuery) -> String {
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}",
+        query.branch,
+        query.author,
+        query.path,
+        query.since,
+        query.all_refs,
+        query.first_parent,
+        query.no_merges,
+        query.topo_order,
+    )
+}
+
 pub enum JobResult {
     ProjectLoaded {
         path: PathBuf,
@@ -21,7 +70,10 @@ pub enum JobResult {
     LogLoaded {
         root: PathBuf,
         branch: Option<String>,
-        result: Result<Vec<CommitInfo>, String>,
+        query: lazecode_core::LogQuery,
+        /// Page offset this job loaded (0 = fresh full query).
+        offset: usize,
+        result: Result<(Vec<CommitInfo>, Vec<Option<String>>), String>,
     },
     BranchesLoaded {
         root: PathBuf,
@@ -80,7 +132,6 @@ pub struct JobQueue {
     notifier: Arc<dyn Notifier>,
     in_flight: HashSet<String>,
     pending_git: HashSet<PathBuf>,
-    pending_log: HashSet<(PathBuf, Option<String>)>,
 }
 
 impl JobQueue {
@@ -92,7 +143,6 @@ impl JobQueue {
             notifier,
             in_flight: HashSet::new(),
             pending_git: HashSet::new(),
-            pending_log: HashSet::new(),
         }
     }
 
@@ -167,27 +217,31 @@ impl JobQueue {
         });
     }
 
-    pub fn refresh_log(&mut self, root: PathBuf, branch: Option<String>) {
-        let key = format!("log:{}:{}", root.display(), branch.as_deref().unwrap_or(""));
-        if self.in_flight.contains(&key) {
-            self.pending_log.insert((root, branch));
+    pub fn refresh_log(&mut self, root: PathBuf, query: lazecode_core::LogQuery, offset: usize) {
+        let key = format!(
+            "log:{}:{}:skip={}",
+            root.display(),
+            log_query_fingerprint(&query),
+            offset
+        );
+        if !self.in_flight.insert(key.clone()) {
             return;
         }
         let job_root = root.clone();
-        let job_branch = branch.clone();
         self.spawn("log", key, move || {
-            let options = LogOptions {
-                limit: 300,
-                first_parent: false,
+            let options = log_options_from_query(&query, &job_root, LOG_PAGE_SIZE, offset);
+            let result = match lazecode_git::log(&job_root, options) {
+                Ok(commits) => {
+                    let lanes = lazecode_git::log::lanes_after(&commits);
+                    Ok((commits, lanes))
+                }
+                Err(err) => Err(err.to_string()),
             };
-            let result = match &job_branch {
-                Some(name) => lazecode_git::log_ref(&job_root, name, options),
-                None => lazecode_git::log(&job_root, options),
-            }
-            .map_err(|err| err.to_string());
             JobResult::LogLoaded {
                 root: job_root,
-                branch: job_branch,
+                branch: (!query.branch.trim().is_empty()).then(|| query.branch.clone()),
+                query,
+                offset,
                 result,
             }
         });
@@ -548,13 +602,825 @@ impl JobQueue {
                     }
                 });
             }
-            Command::RefreshLog => {
+            Command::RenameBranch { from, to } => {
+                let Some(project) = model.active_project() else {
+                    return;
+                };
+                let root = project.root.clone();
+                let zh = model.settings.language.is_zh();
+                let key = format!("rename-branch:{}:{from}", root.display());
+                let job_root = root.clone();
+                self.spawn("rename-branch", key, move || {
+                    let result = lazecode_git::rename_branch(&job_root, &from, &to);
+                    match result {
+                        Ok(_) => JobResult::OpDone {
+                            root: job_root,
+                            message: if zh {
+                                format!("已重命名分支 {from} → {to}")
+                            } else {
+                                format!("Renamed branch {from} → {to}")
+                            },
+                            ok: true,
+                            refresh: true,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        },
+                        Err(err) => JobResult::OpDone {
+                            root: job_root,
+                            message: err.to_string(),
+                            ok: false,
+                            refresh: false,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        },
+                    }
+                });
+            }
+            Command::CreateTag(name) => {
+                let Some(project) = model.active_project() else {
+                    return;
+                };
+                let root = project.root.clone();
+                let zh = model.settings.language.is_zh();
+                let key = format!("create-tag:{}:{name}", root.display());
+                let job_root = root.clone();
+                self.spawn("create-tag", key, move || {
+                    let result = lazecode_git::create_tag(&job_root, &name, "", None);
+                    match result {
+                        Ok(()) => JobResult::OpDone {
+                            root: job_root,
+                            message: if zh {
+                                format!("已创建标签 {name}")
+                            } else {
+                                format!("Created tag {name}")
+                            },
+                            ok: true,
+                            refresh: true,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        },
+                        Err(err) => JobResult::OpDone {
+                            root: job_root,
+                            message: err.to_string(),
+                            ok: false,
+                            refresh: false,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        },
+                    }
+                });
+            }
+            Command::DeleteTag(name) => {
+                let Some(project) = model.active_project() else {
+                    return;
+                };
+                let root = project.root.clone();
+                let zh = model.settings.language.is_zh();
+                let key = format!("delete-tag:{}:{name}", root.display());
+                let job_root = root.clone();
+                self.spawn("delete-tag", key, move || {
+                    let result = lazecode_git::delete_tag(&job_root, &name);
+                    match result {
+                        Ok(()) => JobResult::OpDone {
+                            root: job_root,
+                            message: if zh {
+                                format!("已删除标签 {name}")
+                            } else {
+                                format!("Deleted tag {name}")
+                            },
+                            ok: true,
+                            refresh: true,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        },
+                        Err(err) => JobResult::OpDone {
+                            root: job_root,
+                            message: err.to_string(),
+                            ok: false,
+                            refresh: false,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        },
+                    }
+                });
+            }
+            Command::FetchAll => {
+                let zh = model.settings.language.is_zh();
+                self.spawn("fetch-all", "fetch-all".to_string(), move || {
+                    JobResult::OpDone {
+                        root: PathBuf::new(),
+                        message: if zh {
+                            "fetch 也将在 M4 连接远程后生效".to_string()
+                        } else {
+                            "fetch will connect to remotes in M4".to_string()
+                        },
+                        ok: true,
+                        refresh: false,
+                        reload_files: false,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::Push {
+                remote,
+                branch,
+                set_upstream,
+                force,
+            } => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("push", format!("push:{root:?}:{branch}"), move || {
+                    let result = lazecode_git::push(&root, &remote, &branch, set_upstream, force);
+                    match result {
+                        Ok(text) => JobResult::OpDone {
+                            root: root.clone(),
+                            message: {
+                                let trimmed = text.lines().last().unwrap_or("").to_string();
+                                if trimmed.is_empty() {
+                                    if zh {
+                                        format!("已推送到 {remote}")
+                                    } else {
+                                        format!("Pushed to {remote}")
+                                    }
+                                } else {
+                                    trimmed
+                                }
+                            },
+                            ok: true,
+                            refresh: true,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        },
+                        Err(err) => JobResult::OpDone {
+                            root: root.clone(),
+                            message: err.to_string(),
+                            ok: false,
+                            refresh: false,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        },
+                    }
+                });
+            }
+            Command::Pull { mode } => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("pull", format!("pull:{root:?}:{mode:?}"), move || {
+                    let result = lazecode_git::pull(&root, mode);
+                    match result {
+                        Ok(text) => JobResult::OpDone {
+                            root: root.clone(),
+                            message: {
+                                if zh {
+                                    "已拉取最新提交".to_string()
+                                } else {
+                                    "Pulled latest commits".to_string()
+                                }
+                            },
+                            ok: true,
+                            refresh: true,
+                            reload_files: !text.is_empty(),
+                            clear_commit_message: false,
+                        },
+                        Err(err) => JobResult::OpDone {
+                            root: root.clone(),
+                            message: err.to_string(),
+                            ok: false,
+                            refresh: false,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        },
+                    }
+                });
+            }
+            Command::RemoteAdd { name, url } => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn(
+                    "remote-add",
+                    format!("remote-add:{root:?}:{name}"),
+                    move || {
+                        let result = lazecode_git::remote_add(&root, &name, &url);
+                        match result {
+                            Ok(()) => JobResult::OpDone {
+                                root: root.clone(),
+                                message: if zh {
+                                    format!("已添加远程 {name}")
+                                } else {
+                                    format!("Added remote {name}")
+                                },
+                                ok: true,
+                                refresh: true,
+                                reload_files: false,
+                                clear_commit_message: false,
+                            },
+                            Err(err) => JobResult::OpDone {
+                                root: root.clone(),
+                                message: err.to_string(),
+                                ok: false,
+                                refresh: false,
+                                reload_files: false,
+                                clear_commit_message: false,
+                            },
+                        }
+                    },
+                );
+            }
+            Command::RemoteRemove(name) => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn(
+                    "remote-remove",
+                    format!("remote-rm:{root:?}:{name}"),
+                    move || {
+                        let result = lazecode_git::remote_remove(&root, &name);
+                        match result {
+                            Ok(()) => JobResult::OpDone {
+                                root: root.clone(),
+                                message: if zh {
+                                    format!("已移除远程 {name}")
+                                } else {
+                                    format!("Removed remote {name}")
+                                },
+                                ok: true,
+                                refresh: true,
+                                reload_files: false,
+                                clear_commit_message: false,
+                            },
+                            Err(err) => JobResult::OpDone {
+                                root: root.clone(),
+                                message: err.to_string(),
+                                ok: false,
+                                refresh: false,
+                                reload_files: false,
+                                clear_commit_message: false,
+                            },
+                        }
+                    },
+                );
+            }
+            Command::RemoteRename { from, to } => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn(
+                    "remote-rename",
+                    format!("remote-rn:{root:?}:{from}"),
+                    move || {
+                        let ok = lazecode_git::remote_rename(&root, &from, &to);
+                        let message = match &ok {
+                            Ok(()) => format!("Renamed remote {from} → {to}"),
+                            Err(err) => err.to_string(),
+                        };
+                        JobResult::OpDone {
+                            root,
+                            message,
+                            ok: ok.is_ok(),
+                            refresh: true,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
+            Command::RemoteSetUrl { name, url } => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn(
+                    "remote-url",
+                    format!("remote-url:{root:?}:{name}"),
+                    move || {
+                        let ok = lazecode_git::remote_set_url(&root, &name, &url);
+                        let message = match &ok {
+                            Ok(()) => format!("Updated remote {name}"),
+                            Err(err) => err.to_string(),
+                        };
+                        JobResult::OpDone {
+                            root,
+                            message,
+                            ok: ok.is_ok(),
+                            refresh: true,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
+            Command::Merge { ref_name } => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("merge", format!("merge:{root:?}:{ref_name}"), move || {
+                    let result = lazecode_git::merge(&root, &ref_name);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => format!("Merged {ref_name}"),
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::MergeContinue => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("merge-c", format!("mc:{root:?}"), move || {
+                    let result = lazecode_git::merge_continue(&root);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => "merge finished".to_string(),
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::MergeAbort => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("merge-a", format!("ma:{root:?}"), move || {
+                    let result = lazecode_git::merge_abort(&root);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => "merge aborted".to_string(),
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::Rebase { onto } => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("rebase", format!("rb:{root:?}:{onto}"), move || {
+                    let result = lazecode_git::rebase(&root, &onto);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => format!("Rebased onto {onto}"),
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::RebaseContinue => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("rebase-c", format!("rc:{root:?}"), move || {
+                    let result = lazecode_git::rebase_continue(&root);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => "rebase continuing".to_string(),
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::RebaseAbort => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("rebase-a", format!("ra:{root:?}"), move || {
+                    let result = lazecode_git::rebase_abort(&root);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => "rebase aborted".to_string(),
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::RebaseSkip => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("rebase-s", format!("rs:{root:?}"), move || {
+                    let result = lazecode_git::rebase_skip(&root);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => "rebase skipped".to_string(),
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::CherryPick { hash } => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("cherry-pick", format!("cp:{root:?}:{hash}"), move || {
+                    let result = lazecode_git::cherry_pick(&root, &hash);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => if zh {
+                                format!("已 cherry-pick {hash}")
+                            } else {
+                                format!("Cherry-picked {hash}")
+                            }
+                            .to_string(),
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::ContinueCherryPick => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("cp-continue", format!("cpc:{root:?}"), move || {
+                    let result = lazecode_git::history::cherry_pick_continue(&root);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => "cherry-pick 继续".to_string(),
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::AbortCherryPick => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("cp-abort", format!("cpa:{root:?}"), move || {
+                    let result = lazecode_git::history::cherry_pick_abort(&root);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => "cherry-pick 已中止".to_string(),
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::RevertCommit { hash } => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("revert", format!("rv:{root:?}:{hash}"), move || {
+                    let result = lazecode_git::revert(&root, &hash);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => {
+                                if zh {
+                                    format!("已 revert {hash}")
+                                } else {
+                                    format!("Reverted {hash}")
+                                }
+                            }
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::DropCommit { hash, force } => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("drop", format!("drop:{root:?}:{hash}"), move || {
+                    let result = lazecode_git::drop_commit(&root, &hash, force);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => {
+                                if zh {
+                                    format!("已删除提交 {hash}")
+                                } else {
+                                    format!("Dropped commit {hash}")
+                                }
+                            }
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::ResetTo { hash, mode } => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn(
+                    "reset",
+                    format!("reset:{root:?}:{hash}:{mode:?}"),
+                    move || {
+                        let result = lazecode_git::reset(&root, &hash, mode);
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(_) => {
+                                    if zh {
+                                        format!("已重置到 {hash}")
+                                    } else {
+                                        format!("Reset to {hash}")
+                                    }
+                                }
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: true,
+                            reload_files: true,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
+            Command::StashPush { message } => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let message = message.clone();
+                self.spawn("stash-push", format!("stash:{root:?}"), move || {
+                    let result = lazecode_git::stash_push(&root, message.as_deref(), false);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => {
+                                if zh {
+                                    "已贮藏更改".to_string()
+                                } else {
+                                    "Changes stashed".to_string()
+                                }
+                            }
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::StashApply(stash) => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let stash = stash.clone();
+                self.spawn(
+                    "stash-apply",
+                    format!("stash-a:{root:?}:{stash}"),
+                    move || {
+                        let result = lazecode_git::stash_apply(&root, &stash);
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(_) => format!("已恢复 {stash}"),
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: true,
+                            reload_files: true,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
+            Command::StashDrop(stash) => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let stash = stash.clone();
+                self.spawn(
+                    "stash-drop",
+                    format!("stash-d:{root:?}:{stash}"),
+                    move || {
+                        let result = lazecode_git::stash_drop(&root, &stash);
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(_) => format!("已删除 {stash}"),
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: true,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
+            Command::ShelfSave(name) => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let name = name.clone();
+                self.spawn("shelf-save", format!("shelf:{root:?}:{name}"), move || {
+                    let result = lazecode_git::shelf_save(&root, &name);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => {
+                                if zh {
+                                    format!("已贮藏为 {name}")
+                                } else {
+                                    format!("Shelved as {name}")
+                                }
+                            }
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::ShelfRestore { name, delete_after } => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let name = name.clone();
+                let d_after = delete_after;
+                self.spawn(
+                    "shelf-restore",
+                    format!("shelf-r:{root:?}:{name}"),
+                    move || {
+                        let result = lazecode_git::shelf_restore(&root, &name, d_after);
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(_) => format!("已恢复 shelf {name}"),
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: true,
+                            reload_files: true,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
+            Command::ApplyPatch {
+                patch,
+                cached,
+                reverse,
+                root,
+            } => {
+                let zh = model.settings.language.is_zh();
+                self.spawn(
+                    "apply-patch",
+                    format!("apply:{}", root.display()),
+                    move || {
+                        let result = lazecode_git::apply_patch(&root, &patch, cached, reverse);
+                        match result {
+                            Ok(()) => JobResult::OpDone {
+                                root,
+                                message: if zh {
+                                    if cached {
+                                        if reverse {
+                                            "已从暂存区取消该块".to_string()
+                                        } else {
+                                            "已暂存该块".to_string()
+                                        }
+                                    } else {
+                                        "已放弃该块的修改".to_string()
+                                    }
+                                } else if cached {
+                                    if reverse {
+                                        "Hunk unstaged".to_string()
+                                    } else {
+                                        "Hunk staged".to_string()
+                                    }
+                                } else {
+                                    "Hunk rolled back".to_string()
+                                },
+                                ok: true,
+                                refresh: true,
+                                reload_files: true,
+                                clear_commit_message: false,
+                            },
+                            Err(err) => JobResult::OpDone {
+                                root,
+                                message: err.to_string(),
+                                ok: false,
+                                refresh: false,
+                                reload_files: false,
+                                clear_commit_message: false,
+                            },
+                        }
+                    },
+                );
+            }
+            Command::RefreshLog | Command::LogFilterChanged => {
+                if let Some(project) = model.active_project_mut() {
+                    project.log_loading = true;
+                    project.log_paging = false;
+                }
                 if let Some(project) = model.active_project() {
                     let root = project.root.clone();
-                    let branch = project.log_branch.clone();
-                    self.refresh_log(root.clone(), branch);
+                    let query = project.log_query.clone();
+                    self.refresh_log(root.clone(), query, 0);
                     self.refresh_branches(root);
                 }
+            }
+            Command::LogLoadMore => {
+                let Some(project) = model.active_project() else {
+                    return;
+                };
+                if project.log_paging {
+                    return;
+                }
+                let root = project.root.clone();
+                let query = project.log_query.clone();
+                let offset = project.log.len();
+                if let Some(project) = model.active_project_mut() {
+                    project.log_paging = true;
+                }
+                self.refresh_log(root, query, offset);
             }
             Command::SelectCommit(id) => {
                 if let Some(project) = model.active_project_mut() {
@@ -894,22 +1760,44 @@ impl JobQueue {
             JobResult::LogLoaded {
                 root,
                 branch,
+                query,
+                offset,
                 result,
             } => {
-                if let Some(project) = model
+                let Some(project) = model
                     .projects
                     .iter_mut()
                     .find(|project| project.root == root)
-                {
-                    if project.log_branch == branch {
-                        match result {
-                            Ok(log) => {
-                                project.log = log;
-                                project.log_error = None;
-                            }
-                            Err(err) => project.log_error = Some(err),
+                else {
+                    return;
+                };
+                // Stale completion (filters changed while the page was in
+                // flight) is dropped; the fresh query already re-spawned.
+                let stale = log_query_fingerprint(&project.log_query.clone())
+                    != log_query_fingerprint(&query);
+                if stale {
+                    return;
+                }
+                match result {
+                    Ok((mut commits, lanes)) => {
+                        project.log_error = None;
+                        if offset == 0 {
+                            project.log = commits;
+                        } else {
+                            // Dedupe the page against everything already shown:
+                            // the options always re-walk from the tips, so the
+                            // page's commits repeat the already-loaded prefix.
+                            let seen: std::collections::HashSet<&str> = project
+                                .log
+                                .iter()
+                                .map(|commit| commit.id.as_str())
+                                .collect();
+                            commits.retain(|commit| !seen.contains(commit.id.as_str()));
+                            project.log.extend(commits);
                         }
-                        project.log_loading = false;
+                        project.log_seed = lanes;
+                        project.log_loaded = project.log.len();
+                        project.log_paging = false;
                         if !project
                             .log
                             .iter()
@@ -921,10 +1809,18 @@ impl JobQueue {
                             project.commit_details_attempted = None;
                         }
                     }
+                    Err(err) => {
+                        // Diffs for detached pages report errors noisily — the
+                        // view shows the first error and stops paging.
+                        if offset == 0 {
+                            project.log_error = Some(err);
+                            project.log_loading = false;
+                        }
+                        project.log_paging = false;
+                    }
                 }
-                if self.pending_log.remove(&(root.clone(), branch.clone())) {
-                    self.refresh_log(root, branch);
-                }
+                project.log_branch = branch;
+                project.log_loading = false;
             }
             JobResult::BranchesLoaded { root, result } => {
                 if let Some(project) = model
@@ -1013,14 +1909,23 @@ impl JobQueue {
                     },
                 );
                 if refresh && !root.as_os_str().is_empty() {
-                    let log_branch = model
+                    let log_query = model
                         .projects
                         .iter()
                         .find(|project| project.root == root)
-                        .and_then(|project| project.log_branch.clone());
+                        .map(|project| project.log_query.clone())
+                        .expect("project exists");
                     self.refresh_git(root.clone(), None);
-                    self.refresh_log(root.clone(), log_branch);
+                    self.refresh_log(root.clone(), log_query, 0);
                     self.refresh_branches(root.clone());
+                    // Sequencer/conflict state follows every git op.
+                    if let Some(project) = model
+                        .projects
+                        .iter_mut()
+                        .find(|project| project.root == root)
+                    {
+                        project.refresh_conflicts();
+                    }
                     if let Some(project) = model
                         .projects
                         .iter_mut()
@@ -1094,10 +1999,17 @@ impl JobQueue {
                             path.clone(),
                             false,
                         ));
-                        self.refresh_git(path.clone(), None);
-                        self.refresh_log(path.clone(), None);
-                        self.refresh_branches(project_root.clone());
+                        project.log_loading = true;
                     }
+                    self.refresh_git(path.clone(), None);
+                    let query = model
+                        .projects
+                        .iter()
+                        .find(|project| project.root == project_root)
+                        .map(|project| project.log_query.clone())
+                        .unwrap_or_default();
+                    self.refresh_log(path.clone(), query, 0);
+                    self.refresh_branches(project_root.clone());
                     model.toast(
                         if model.settings.language.is_zh() {
                             format!("已创建工作树 {name}")
@@ -1173,6 +2085,7 @@ mod tests {
             notifier: None,
             should_quit: false,
             version: "test",
+            favorite_branches: HashSet::new(),
         }
     }
 

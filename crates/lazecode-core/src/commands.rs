@@ -13,7 +13,84 @@ pub enum Command {
     CheckoutBranch(String),
     CreateBranch(String),
     DeleteBranch(String),
+    RenameBranch {
+        from: String,
+        to: String,
+    },
+    CreateTag(String),
+    DeleteTag(String),
+    CherryPick {
+        hash: String,
+    },
+    Merge {
+        ref_name: String,
+    },
+    MergeContinue,
+    MergeAbort,
+    Rebase {
+        onto: String,
+    },
+    RebaseContinue,
+    RebaseAbort,
+    RebaseSkip,
+    ContinueCherryPick,
+    AbortCherryPick,
+    StashPush {
+        message: Option<String>,
+    },
+    StashApply(String),
+    StashDrop(String),
+    ShelfSave(String),
+    ShelfRestore {
+        name: String,
+        delete_after: bool,
+    },
+    RevertCommit {
+        hash: String,
+    },
+    DropCommit {
+        hash: String,
+        force: bool,
+    },
+    ResetTo {
+        hash: String,
+        mode: lazecode_git::ResetMode,
+    },
+    FetchAll,
+    Push {
+        remote: String,
+        branch: String,
+        set_upstream: bool,
+        force: bool,
+    },
+    Pull {
+        mode: lazecode_git::PullMode,
+    },
+    RemoteAdd {
+        name: String,
+        url: String,
+    },
+    RemoteRemove(String),
+    RemoteRename {
+        from: String,
+        to: String,
+    },
+    RemoteSetUrl {
+        name: String,
+        url: String,
+    },
+    /// Apply a unified patch to the worktree or index (hunk staging).
+    ApplyPatch {
+        patch: String,
+        cached: bool,
+        reverse: bool,
+        root: std::path::PathBuf,
+    },
     RefreshLog,
+    /// The log filter changed: re-query with the new options.
+    LogFilterChanged,
+    /// Load the next page of commits into the current log view.
+    LogLoadMore,
     SelectCommit(String),
     OpenDiff(String),
     Search {

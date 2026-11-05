@@ -150,6 +150,7 @@ pub fn commit_details(root: &Path, spec: &str) -> Result<CommitDetails> {
         email,
         time,
         parents,
+        in_head: None,
         refs: Vec::new(),
         lane: 0,
         lane_count: 1,

@@ -407,19 +407,165 @@ fn draw_git_log(
     rect: Rect,
     index: usize,
 ) {
+    // Deferred overlay-menu pick lands here (one frame later), before any
+    // borrow of `model.projects[index]` is taken below.
+    if model
+        .ui
+        .log_branch_pick
+        .as_ref()
+        .is_some_and(|(project_index, _)| *project_index == index)
+    {
+        let (_, picked) = model.ui.log_branch_pick.take().expect("checked above");
+        if let Some(project) = model.projects.get_mut(index) {
+            match picked {
+                Some(branch) if branch == "__all__" => {
+                    project.log_query.all_refs = true;
+                    project.log_query.branch.clear();
+                }
+                Some(branch) => {
+                    project.log_query.all_refs = false;
+                    project.log_query.branch = branch;
+                }
+                None => {
+                    project.log_query.all_refs = false;
+                    project.log_query.branch.clear();
+                }
+            }
+            project.log_loading = true;
+        }
+        model.queue(Command::LogFilterChanged);
+    }
     let p = theme.palette;
-    let project = &model.projects[index];
-    let log = project.log.clone();
-    let branches = project.branches.clone();
-    let current_branch = project.branch();
-    let selected = project.selected_commit.clone();
-    let details = project.commit_details.clone();
-    let log_branch = project.log_branch.clone();
-    let query = project.log_query.clone();
-    let error = project.log_error.clone();
+    // Take owned clones of everything the painter needs — the body mutates
+    // via model.projects[index] elsewhere.
+    let (log, branches, current_branch, selected, details, _log_branch, query, error) = {
+        let project = &model.projects[index];
+        (
+            project.log.clone(),
+            project.branches.clone(),
+            project.branch(),
+            project.selected_commit.clone(),
+            project.commit_details.clone(),
+            project.log_branch.clone(),
+            project.log_query.clone(),
+            project.log_error.clone(),
+        )
+    };
+
+    // Sequencer/conflict banner.
+    let banner_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 24.0));
+    let (conflict_count, sequencer) = {
+        let project = &model.projects[index];
+        (project.conflicts.len(), project.sequencer.clone())
+    };
+    let banner_visible = conflict_count > 0 || sequencer.is_some();
+    if banner_visible {
+        ui.painter()
+            .rect_filled(banner_rect, 0.0, p.amber.gamma_multiply(0.18));
+        let label = match (&sequencer, conflict_count) {
+            _ if conflict_count > 0 => {
+                if model.settings.language.is_zh() {
+                    format!(
+                        "{} 个冲突文件 — 继续/中止操作可从右上角进行",
+                        conflict_count
+                    )
+                } else {
+                    format!(
+                        "{} conflicted files — continue/abort from the right",
+                        conflict_count
+                    )
+                }
+            }
+            (Some(lazecode_git::SequencerState::Merge { .. }), 0) => {
+                crate::tr!(model, "Merge in progress", "合并进行中").to_string()
+            }
+            (Some(lazecode_git::SequencerState::Rebase), 0) => {
+                crate::tr!(model, "Rebase in progress", "变基进行中").to_string()
+            }
+            (Some(lazecode_git::SequencerState::CherryPick { .. }), 0) => {
+                crate::tr!(model, "Cherry-pick in progress", "Cherry-pick 进行中").to_string()
+            }
+            (Some(lazecode_git::SequencerState::Revert { .. }), 0) => {
+                crate::tr!(model, "Revert in progress", "Revert 进行中").to_string()
+            }
+            _ => String::new(),
+        };
+        ui.painter().text(
+            Pos2::new(banner_rect.left() + 12.0, banner_rect.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(10.0),
+            p.text,
+        );
+        // Continue / Abort buttons.
+        for (x, label, kind) in [
+            (
+                banner_rect.right() - 150.0,
+                crate::tr!(model, "Continue", "继续"),
+                0u8,
+            ),
+            (
+                banner_rect.right() - 48.0,
+                crate::tr!(model, "Abort", "中止"),
+                1u8,
+            ),
+        ] {
+            let button =
+                Rect::from_center_size(Pos2::new(x, banner_rect.center().y), Vec2::new(88.0, 18.0));
+            let response =
+                ui.interact(button, ui.scope_id().with(("seqbtn", kind)), Sense::click());
+            if response.hovered() {
+                ui.painter()
+                    .rect_filled(button, egui::CornerRadius::same(4), p.hover);
+            }
+            ui.painter().text(
+                button.center(),
+                Align2::CENTER_CENTER,
+                label,
+                FontId::proportional(9.5),
+                if kind == 1 { p.rose } else { p.accent },
+            );
+            if response.clicked() {
+                let root = model.projects[index].root.clone();
+                if kind == 0 {
+                    // Continue semantic depends on the sequencer.
+                    match sequencer {
+                        Some(lazecode_git::SequencerState::Merge { .. }) => {
+                            model.queue(Command::MergeContinue);
+                        }
+                        Some(lazecode_git::SequencerState::Rebase) => {
+                            model.queue(Command::RebaseContinue);
+                        }
+                        Some(lazecode_git::SequencerState::CherryPick { .. }) => {
+                            model.queue(Command::ContinueCherryPick);
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match sequencer {
+                        Some(lazecode_git::SequencerState::Merge { .. }) => {
+                            model.queue(Command::MergeAbort);
+                        }
+                        Some(lazecode_git::SequencerState::Rebase) => {
+                            model.queue(Command::RebaseAbort);
+                        }
+                        Some(lazecode_git::SequencerState::CherryPick { .. }) => {
+                            model.queue(Command::AbortCherryPick);
+                        }
+                        _ => {}
+                    }
+                }
+                let _ = root;
+            }
+        }
+    }
 
     // Filter bar.
-    let filter = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 30.0));
+    let filter_offset = if banner_visible { 24.0 } else { 0.0 };
+    let filter = Rect::from_min_size(
+        Pos2::new(rect.left(), rect.top() + filter_offset),
+        Vec2::new(rect.width(), 30.0),
+    );
     ui.painter().rect_filled(filter, 0.0, p.panel);
     ui.painter().hline(
         filter.x_range(),
@@ -441,7 +587,7 @@ fn draw_git_log(
         Icon::Search,
         p.text3,
     );
-    let mut query_value = query.clone();
+    let mut query_value = query.text.clone();
     let response = ui.put(
         Rect::from_min_max(
             Pos2::new(search_rect.left() + 22.0, search_rect.top() + 2.0),
@@ -457,7 +603,173 @@ fn draw_git_log(
             .font(FontId::proportional(10.5)),
     );
     if response.changed() {
-        model.projects[index].log_query = query_value;
+        model.projects[index].log_query.text = query_value;
+    }
+    // Text filter option toggles: plugin anchors right of the search box.
+    let mut button_x = search_rect.right() + 8.0;
+    let draw_toggle = |ui: &mut Ui, rect: Rect, text: &str, active: bool, tooltip: &str| -> bool {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(4), p.panel2);
+        if active {
+            ui.painter().rect_stroke(
+                rect,
+                egui::CornerRadius::same(4),
+                Stroke::new(1.0, p.accent),
+                egui::StrokeKind::Inside,
+            );
+        }
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            text,
+            FontId::monospace(9.0),
+            if active { p.accent } else { p.text3 },
+        );
+        ui.interact(
+            rect,
+            ui.scope_id().with(("logtoggle", tooltip)),
+            Sense::click(),
+        )
+        .clicked()
+    };
+    let regex_rect = Rect::from_min_size(
+        Pos2::new(button_x, filter.top() + 4.5),
+        Vec2::new(30.0, 21.0),
+    );
+    if draw_toggle(
+        ui,
+        regex_rect,
+        ".*",
+        query.use_regex,
+        if model.settings.language.is_zh() {
+            "正则匹配"
+        } else {
+            "Regular expression"
+        },
+    ) {
+        model.projects[index].log_query.use_regex = !query.use_regex;
+    }
+    button_x += 34.0;
+    let case_rect = Rect::from_min_size(
+        Pos2::new(button_x, filter.top() + 4.5),
+        Vec2::new(30.0, 21.0),
+    );
+    if draw_toggle(
+        ui,
+        case_rect,
+        "Cc",
+        query.case_sensitive,
+        if model.settings.language.is_zh() {
+            "区分大小写"
+        } else {
+            "Match case"
+        },
+    ) {
+        model.projects[index].log_query.case_sensitive = !query.case_sensitive;
+    }
+    button_x += 38.0;
+    // Branch filter menu.
+    let branch_menu_rect = Rect::from_min_size(
+        Pos2::new(button_x, filter.top() + 4.5),
+        Vec2::new(96.0, 21.0),
+    );
+    let branch_label = if query.all_refs {
+        if model.settings.language.is_zh() {
+            "全部分支".to_string()
+        } else {
+            "All branches".to_string()
+        }
+    } else if query.branch.is_empty() {
+        format!("⎇ {current_branch}")
+    } else {
+        format!("⎇ {}", query.branch)
+    };
+    ui.painter()
+        .rect_filled(branch_menu_rect, egui::CornerRadius::same(4), p.panel2);
+    ui.painter().text(
+        branch_menu_rect.center(),
+        Align2::CENTER_CENTER,
+        &branch_label,
+        FontId::proportional(9.5),
+        p.text2,
+    );
+    let branch_menu_open = ui
+        .interact(
+            branch_menu_rect,
+            ui.scope_id().with("log-branch-menu"),
+            Sense::click(),
+        )
+        .clicked();
+    if branch_menu_open {
+        rt.menu = Some(crate::runtime::MenuState {
+            kind: crate::runtime::MenuKind::LogBranchFilter { project: index },
+            anchor: branch_menu_rect,
+            payload: None,
+        });
+    }
+    // Author chip: opens the same menu kind; the overlay presents its payload
+    // rows as author names (payload format: newline-separated names).
+    let authors: Vec<String> = {
+        let mut set = std::collections::BTreeSet::new();
+        for commit in log.iter() {
+            set.insert(commit.author.clone());
+        }
+        set.into_iter().take(24).collect()
+    };
+    button_x += branch_menu_rect.width() + 6.0;
+    let author_label = if query.author.is_empty() {
+        if model.settings.language.is_zh() {
+            "👤 全部作者".to_string()
+        } else {
+            "👤 All authors".to_string()
+        }
+    } else {
+        format!("👤 {}", query.author)
+    };
+    let author_rect = Rect::from_min_size(
+        Pos2::new(button_x, filter.top() + 4.5),
+        Vec2::new(
+            (author_label.chars().count() as f32 * 7.0 + 26.0).clamp(96.0, 190.0),
+            21.0,
+        ),
+    );
+    ui.painter()
+        .rect_filled(author_rect, egui::CornerRadius::same(4), p.panel2);
+    ui.painter().text(
+        author_rect.center(),
+        Align2::CENTER_CENTER,
+        &author_label,
+        FontId::proportional(9.5),
+        if query.author.is_empty() {
+            p.text2
+        } else {
+            p.accent
+        },
+    );
+    let author_open = ui
+        .interact(
+            author_rect,
+            ui.scope_id().with("log-author-chip"),
+            Sense::click(),
+        )
+        .clicked();
+    if author_open {
+        rt.menu = Some(crate::runtime::MenuState {
+            kind: crate::runtime::MenuKind::LogBranchFilter { project: index },
+            anchor: author_rect,
+            payload: Some(authors.join("\n")),
+        });
+    }
+    // Author pick consumed one frame after the menu closes.
+    if model.ui.log_author_pick.is_some() {
+        let (pick_project, picked) = model.ui.log_author_pick.take().expect("checked above");
+        if pick_project == index {
+            if let Some(project) = model.projects.get_mut(pick_project) {
+                project.log_query.author = picked.unwrap_or_default();
+                project.log_loading = true;
+            }
+            model.queue(Command::LogFilterChanged);
+        }
     }
     ui.painter().text(
         Pos2::new(filter.right() - 14.0, filter.center().y),
@@ -484,29 +796,53 @@ fn draw_git_log(
     );
 
     if show_branches {
+        let tags = model.projects[index].tags.clone();
+        let tag_targets = model.projects[index].tag_targets.clone();
         draw_branch_list(
             ui,
             model,
+            rt,
             theme,
             branch_rect,
             index,
             &branches,
             &current_branch,
-            log_branch.as_deref(),
+            &tags,
+            &tag_targets,
         );
     }
     let filtered: Vec<CommitInfo> = log
         .into_iter()
         .filter(|commit| {
-            let query = query.to_lowercase();
-            query.is_empty()
-                || commit.message.to_lowercase().contains(&query)
-                || commit.author.to_lowercase().contains(&query)
-                || commit.id.starts_with(&query)
+            let query = if model.projects[index].log_query.case_sensitive {
+                model.projects[index].log_query.text.clone()
+            } else {
+                model.projects[index].log_query.text.to_lowercase()
+            };
+            let matches_query = |haystack: String| {
+                if query.is_empty() {
+                    return true;
+                }
+                let haystack = if model.projects[index].log_query.case_sensitive {
+                    haystack
+                } else {
+                    haystack.to_lowercase()
+                };
+                if model.projects[index].log_query.use_regex {
+                    if let Ok(re) = lazecode_fs::compile_regex(&query, false) {
+                        return !haystack.is_empty() && re.is_match(&haystack);
+                    }
+                    return false;
+                }
+                haystack.contains(&query)
+            };
+            matches_query(commit.message.clone())
+                || matches_query(commit.author.clone())
+                || (query.is_empty() || commit.id.starts_with(&query))
                 || commit
                     .refs
                     .iter()
-                    .any(|label| label.label.to_lowercase().contains(&query))
+                    .any(|label| matches_query(label.label.clone()))
         })
         .collect();
 
@@ -542,6 +878,7 @@ fn draw_git_log(
                         Vec2::new(ui.available_width(), row_h),
                         Sense::click(),
                     );
+                    let out_of_head = commit.in_head == Some(false);
                     let is_selected = selected.as_deref() == Some(commit.id.as_str());
                     if is_selected {
                         ui.painter()
@@ -550,6 +887,8 @@ fn draw_git_log(
                         ui.painter()
                             .rect_filled(row, egui::CornerRadius::ZERO, p.hover);
                     }
+                    // Projection: font dimming for out-of-HEAD commits.
+                    let dim = out_of_head && !is_selected;
                     // Graph lanes.
                     let graph_x = row.left() + 18.0;
                     let lane_gap = 12.0;
@@ -603,7 +942,13 @@ fn draw_git_log(
                         ),
                         &commit.message,
                         FontId::proportional(11.0),
-                        if is_selected { p.text } else { p.text2 },
+                        if dim {
+                            p.text3.gamma_multiply(0.65)
+                        } else if is_selected {
+                            p.text
+                        } else {
+                            p.text2
+                        },
                         Align2::LEFT_CENTER,
                     );
                     // Refs near the end of the message column.
@@ -653,12 +998,38 @@ fn draw_git_log(
                     if response.clicked() {
                         select_commit = Some(commit.id.clone());
                     }
+                    if response.secondary_clicked() {
+                        rt.menu = Some(crate::runtime::MenuState {
+                            kind: crate::runtime::MenuKind::LogCommitMenu { project: index },
+                            anchor: row,
+                            payload: Some(commit.id.clone()),
+                        });
+                    }
                 }
             });
     });
     if let Some(id) = select_commit {
         model.projects[index].selected_commit = Some(id.clone());
         model.queue(Command::SelectCommit(id));
+    }
+
+    // Auto-paging: request the next page when the scroll tail is reached and
+    // every page still filled to capacity (a short page = history end).
+    let tailed = ui.input(|input| {
+        input
+            .pointer
+            .latest_pos()
+            .is_some_and(|pos| list_rect.contains(pos) && pos.y > list_rect.bottom() - 240.0)
+    });
+    let full_page = model.projects[index].log.len() >= 300;
+    if tailed
+        && full_page
+        && !model.projects[index].log_paging
+        && !model.projects[index].log_loading
+    {
+        model.projects[index].log_paging = true;
+        model.queue(Command::LogLoadMore);
+        log::debug!("git log tail paged at {}", model.projects[index].log.len());
     }
 
     if show_detail {
@@ -679,12 +1050,14 @@ fn draw_git_log(
 fn draw_branch_list(
     ui: &mut Ui,
     model: &mut AppModel,
+    rt: &mut UiRuntime,
     theme: &Theme,
     rect: Rect,
     index: usize,
     branches: &[lazecode_git::BranchInfo],
     current: &str,
-    filter: Option<&str>,
+    tags: &[String],
+    tag_targets: &[(String, String)],
 ) {
     let p = theme.palette;
     ui.painter().rect_filled(rect, 0.0, p.panel);
@@ -693,138 +1066,371 @@ fn draw_branch_list(
         rect.y_range(),
         Stroke::new(1.0, p.border_soft),
     );
-    ui.painter().text(
-        Pos2::new(rect.left() + 12.0, rect.top() + 16.0),
+
+    // Search field of the branch pane.
+    let search_rect = Rect::from_min_size(
+        Pos2::new(rect.left() + 6.0, rect.top() + 6.0),
+        Vec2::new(rect.width() - 12.0, 24.0),
+    );
+    ui.painter()
+        .rect_filled(search_rect, egui::CornerRadius::same(5), p.panel2);
+    paint_icon(
+        ui.painter(),
+        Rect::from_center_size(
+            Pos2::new(search_rect.left() + 12.0, search_rect.center().y),
+            Vec2::splat(11.0),
+        ),
+        Icon::Search,
+        p.text3,
+    );
+    let mut query_value = model.projects[index].branch_query.clone();
+    let response = ui.put(
+        Rect::from_min_max(
+            Pos2::new(search_rect.left() + 24.0, search_rect.top() + 2.0),
+            Pos2::new(search_rect.right() - 6.0, search_rect.bottom() - 2.0),
+        ),
+        TextEdit::singleline(&mut query_value)
+            .frame(egui::Frame::NONE)
+            .hint_text(crate::tr!(model, "Filter branches", "过滤分支"))
+            .font(FontId::proportional(10.0)),
+    );
+    if response.changed() {
+        model.projects[index].branch_query = query_value;
+    }
+    let needle = model.projects[index].branch_query.to_lowercase();
+    let matches = |name: &str| needle.is_empty() || name.to_lowercase().contains(&needle);
+
+    // Build the ref tree from the branches that pass the filter.
+    let local: Vec<lazecode_git::BranchInfo> = branches
+        .iter()
+        .filter(|branch| !branch.remote && matches(&branch.name))
+        .cloned()
+        .collect();
+    let remote: Vec<lazecode_git::BranchInfo> = branches
+        .iter()
+        .filter(|branch| branch.remote && matches(&branch.name))
+        .cloned()
+        .collect();
+    let tags: Vec<String> = tags.iter().filter(|tag| matches(tag)).cloned().collect();
+
+    let rows_rect = Rect::from_min_max(
+        Pos2::new(rect.left(), search_rect.bottom() + 4.0),
+        Pos2::new(rect.right(), rect.bottom()),
+    );
+    let painter = ui.painter().with_clip_rect(rows_rect);
+    let row_h = 22.0;
+    let mut y = rows_rect.top() + 6.0;
+
+    // Sections: Local / Remote / Tags; the roots are pre-built above.
+    let expanded_dirs: std::collections::HashSet<String> =
+        model.projects[index].ref_dirs_expanded.clone();
+    let mut toggle_dir: Option<String> = None;
+    let mut pick_ref: Option<(String, bool)> = None; // (name, remote)
+    let mut open_menu: Option<(String, bool)> = None; // branch name + remote flag
+
+    let draw_dir_row = |painter: &egui::Painter,
+                        ui: &mut Ui,
+                        label: &str,
+                        path: &str,
+                        expanded: bool,
+                        y: &mut f32|
+     -> bool {
+        let row = Rect::from_min_size(
+            Pos2::new(rows_rect.left() + 4.0, *y),
+            Vec2::new(rows_rect.width() - 8.0, 20.0),
+        );
+        let response = ui.interact(
+            row,
+            ui.scope_id().with(("refdir", path.to_string())),
+            Sense::click(),
+        );
+        if response.hovered() {
+            painter.rect_filled(row, egui::CornerRadius::same(3), p.hover);
+        }
+        // chevron.
+        let cx = row.left() + 12.0;
+        let cy = row.center().y;
+        let color = p.text3;
+        let (dy, dx) = if expanded { (0.0, 3.0) } else { (-3.0, 0.0) };
+        painter.line_segment(
+            [
+                Pos2::new(cx - 3.5 + dx, cy - 3.5 + dy),
+                Pos2::new(cx + 3.5 + dx, cy + 3.5 + dy),
+            ],
+            Stroke::new(1.4, color),
+        );
+        painter.line_segment(
+            [
+                Pos2::new(cx + 3.5 + dx, cy + 3.5 + dy),
+                Pos2::new(cx - 3.5 + dx * 2.0, cy - 3.5 + dy * 2.0),
+            ],
+            Stroke::new(1.4, color),
+        );
+        painter.text(
+            Pos2::new(row.left() + 26.0, row.center().y),
+            Align2::LEFT_CENTER,
+            label,
+            FontId::proportional(10.5),
+            p.text2,
+        );
+        *y += row_h;
+        response.clicked()
+    };
+
+    // Local tree.
+    painter.text(
+        Pos2::new(rows_rect.left() + 12.0, y + 8.0),
         Align2::LEFT_CENTER,
-        crate::tr!(model, "Branches", "分支"),
+        crate::tr!(model, "Local", "本地"),
         FontId::proportional(9.5),
         p.text3,
     );
-    let mut y = rect.top() + 30.0;
-    let all_rect = Rect::from_min_size(
-        Pos2::new(rect.left() + 6.0, y),
-        Vec2::new(rect.width() - 12.0, 24.0),
-    );
-    let response = ui.interact(
-        all_rect,
-        ui.scope_id().with("log-all-branches"),
-        Sense::click(),
-    );
-    if filter.is_none() {
-        ui.painter()
-            .rect_filled(all_rect, egui::CornerRadius::same(4), p.active);
-    } else if response.hovered() {
-        ui.painter()
-            .rect_filled(all_rect, egui::CornerRadius::same(4), p.hover);
-    }
-    ui.painter().text(
-        Pos2::new(all_rect.left() + 10.0, all_rect.center().y),
-        Align2::LEFT_CENTER,
-        crate::tr!(model, "All branches", "所有分支"),
-        FontId::proportional(10.5),
-        p.text2,
-    );
-    if response.clicked() {
-        model.projects[index].log_branch = None;
-        model.queue(Command::RefreshLog);
-    }
-    y += 26.0;
-    let mut pending_branch: Option<Option<String>> = None;
-    for branch in branches.iter().filter(|branch| !branch.remote) {
-        let row = Rect::from_min_size(
-            Pos2::new(rect.left() + 6.0, y),
-            Vec2::new(rect.width() - 12.0, 22.0),
-        );
-        let active = filter == Some(branch.name.as_str());
-        let response = ui.interact(
-            row,
-            ui.scope_id().with(("log-branch", branch.name.clone())),
-            Sense::click(),
-        );
-        if active {
-            ui.painter()
-                .rect_filled(row, egui::CornerRadius::same(4), p.active);
-        } else if response.hovered() {
-            ui.painter()
-                .rect_filled(row, egui::CornerRadius::same(4), p.hover);
-        }
-        let is_current = branch.name == current;
-        ui.painter().circle_stroke(
-            Pos2::new(row.left() + 9.0, row.center().y),
-            2.4,
-            Stroke::new(1.2, if is_current { p.accent } else { p.text3 }),
-        );
-        if is_current {
-            ui.painter()
-                .circle_filled(Pos2::new(row.left() + 9.0, row.center().y), 1.4, p.accent);
-        }
-        text_clipped(
-            ui.painter(),
-            Rect::from_min_max(
-                Pos2::new(row.left() + 18.0, row.top()),
-                Pos2::new(row.right() - 6.0, row.bottom()),
-            ),
-            &branch.name,
-            FontId::proportional(10.5),
-            if active { p.text } else { p.text2 },
-            Align2::LEFT_CENTER,
-        );
-        if response.clicked() {
-            pending_branch = Some(if active {
-                None
-            } else {
-                Some(branch.name.clone())
-            });
-        }
-        y += 23.0;
-    }
-    if !branches.iter().any(|branch| branch.remote) {
-        // no remote rows
-    }
-    for branch in branches.iter().filter(|branch| branch.remote) {
-        let row = Rect::from_min_size(
-            Pos2::new(rect.left() + 6.0, y),
-            Vec2::new(rect.width() - 12.0, 22.0),
-        );
-        let active = filter == Some(branch.name.as_str());
-        let response = ui.interact(
-            row,
-            ui.scope_id().with(("log-rbranch", branch.name.clone())),
-            Sense::click(),
-        );
-        if active {
-            ui.painter()
-                .rect_filled(row, egui::CornerRadius::same(4), p.active);
-        } else if response.hovered() {
-            ui.painter()
-                .rect_filled(row, egui::CornerRadius::same(4), p.hover);
-        }
-        text_clipped(
-            ui.painter(),
-            Rect::from_min_max(
-                Pos2::new(row.left() + 18.0, row.top()),
-                Pos2::new(row.right() - 6.0, row.bottom()),
-            ),
-            &branch.name,
-            FontId::proportional(10.0),
-            p.text3,
-            Align2::LEFT_CENTER,
-        );
-        if response.clicked() {
-            pending_branch = Some(if active {
-                None
-            } else {
-                Some(branch.name.clone())
-            });
-        }
-        y += 23.0;
-        if y > rect.bottom() - 10.0 {
+    y += 24.0;
+    let local_tree = lazecode_core::gitref::build_ref_tree(&local);
+    let flat = lazecode_core::gitref::flatten_ref_tree(&local_tree, &expanded_dirs);
+    for row_ref in flat.iter() {
+        if y > rows_rect.bottom() - 8.0 {
             break;
         }
+        if row_ref.dir {
+            if draw_dir_row(
+                &painter,
+                ui,
+                &row_ref.label,
+                &row_ref.path,
+                expanded_dirs.contains(&row_ref.path),
+                &mut y,
+            ) {
+                toggle_dir = Some(row_ref.path.clone());
+            }
+        } else if row_ref.is_tag {
+            // Tags live in their own section below.
+        } else if let Some(branch) = row_ref.branch.as_ref() {
+            let row = Rect::from_min_size(
+                Pos2::new(rows_rect.left() + 4.0, y),
+                Vec2::new(rows_rect.width() - 8.0, 20.0),
+            );
+            let indent = 18.0 + 14.0 * row_ref.depth as f32;
+            let is_current = branch.name == current;
+            let is_fav = model.favorite_branches.contains(&branch.name);
+            let response = ui.interact(
+                row,
+                ui.scope_id().with(("refrow", branch.name.clone())),
+                Sense::click(),
+            );
+            if response.hovered() {
+                painter.rect_filled(row, egui::CornerRadius::same(3), p.hover);
+            }
+            // Branch knob: filled dot for HEAD.
+            if is_current {
+                painter.circle_filled(
+                    Pos2::new(row.left() + indent, row.center().y),
+                    3.0,
+                    p.accent,
+                );
+            } else {
+                painter.circle_stroke(
+                    Pos2::new(row.left() + indent, row.center().y),
+                    3.0,
+                    Stroke::new(1.3, p.text3),
+                );
+            }
+            let name_label = row_ref.label.clone();
+            painter.text(
+                Pos2::new(row.left() + indent + 8.0, row.center().y),
+                Align2::LEFT_CENTER,
+                &name_label,
+                FontId::proportional(10.5),
+                if is_current { p.text } else { p.text2 },
+            );
+            // ahead/behind badge.
+            if branch.ahead > 0 || branch.behind > 0 {
+                let badge = format!("↑{} ↓{}", branch.ahead, branch.behind);
+                painter.text(
+                    Pos2::new(row.right() - 8.0, row.center().y),
+                    Align2::RIGHT_CENTER,
+                    badge,
+                    FontId::monospace(8.5),
+                    p.text3,
+                );
+            }
+            // Favorite star.
+            if is_fav {
+                painter.text(
+                    Pos2::new(
+                        row.right()
+                            - (if branch.ahead > 0 || branch.behind > 0 {
+                                56.0
+                            } else {
+                                10.0
+                            }),
+                        row.center().y,
+                    ),
+                    Align2::RIGHT_CENTER,
+                    "★",
+                    FontId::proportional(10.0),
+                    p.amber,
+                );
+            }
+            if response.secondary_clicked() {
+                open_menu = Some((branch.name.clone(), branch.remote));
+            }
+            if response.clicked() {
+                pick_ref = Some((branch.name.clone(), branch.remote));
+            }
+            y += row_h;
+        }
     }
-    if let Some(branch) = pending_branch {
-        model.projects[index].log_branch = branch;
-        model.queue(Command::RefreshLog);
+
+    // Remote section.
+    if !remote.is_empty() {
+        painter.text(
+            Pos2::new(rows_rect.left() + 12.0, y + 8.0),
+            Align2::LEFT_CENTER,
+            crate::tr!(model, "Remote", "远程"),
+            FontId::proportional(9.5),
+            p.text3,
+        );
+        y += 24.0;
+        let remote_tree = lazecode_core::gitref::build_ref_tree(&remote);
+        let flat = lazecode_core::gitref::flatten_ref_tree(&remote_tree, &expanded_dirs);
+        for row_ref in flat.iter() {
+            if y > rows_rect.bottom() - 8.0 {
+                break;
+            }
+            if row_ref.dir {
+                if draw_dir_row(
+                    &painter,
+                    ui,
+                    &row_ref.label,
+                    &row_ref.path,
+                    expanded_dirs.contains(&row_ref.path),
+                    &mut y,
+                ) {
+                    toggle_dir = Some(row_ref.path.clone());
+                }
+            } else if let Some(branch) = row_ref.branch.as_ref() {
+                let row = Rect::from_min_size(
+                    Pos2::new(rows_rect.left() + 4.0, y),
+                    Vec2::new(rows_rect.width() - 8.0, 20.0),
+                );
+                let indent = 18.0 + 14.0 * row_ref.depth as f32;
+                let response = ui.interact(
+                    row,
+                    ui.scope_id().with(("refrow", branch.name.clone())),
+                    Sense::click(),
+                );
+                if response.hovered() {
+                    painter.rect_filled(row, egui::CornerRadius::same(3), p.hover);
+                }
+                painter.circle_stroke(
+                    Pos2::new(row.left() + indent, row.center().y),
+                    3.0,
+                    Stroke::new(1.3, p.blue),
+                );
+                painter.text(
+                    Pos2::new(row.left() + indent + 8.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    &row_ref.label,
+                    FontId::proportional(10.5),
+                    p.text2,
+                );
+                if response.secondary_clicked() {
+                    open_menu = Some((branch.name.clone(), true));
+                }
+                if response.clicked() {
+                    pick_ref = Some((branch.name.clone(), true));
+                }
+                y += row_h;
+            }
+        }
+    }
+
+    // Tags section.
+    if !tags.is_empty() {
+        painter.text(
+            Pos2::new(rows_rect.left() + 12.0, y + 8.0),
+            Align2::LEFT_CENTER,
+            crate::tr!(model, "Tags", "标签"),
+            FontId::proportional(9.5),
+            p.text3,
+        );
+        y += 24.0;
+        for tag in tags.iter() {
+            if y > rows_rect.bottom() - 8.0 {
+                break;
+            }
+            let tag_target = tag_targets
+                .iter()
+                .find(|(name, _)| name == tag)
+                .map(|(_, target)| target.clone())
+                .unwrap_or_default();
+            let row = Rect::from_min_size(
+                Pos2::new(rows_rect.left() + 4.0, y),
+                Vec2::new(rows_rect.width() - 8.0, 20.0),
+            );
+            let response = ui.interact(
+                row,
+                ui.scope_id().with(("tagrow", tag.clone())),
+                Sense::click(),
+            );
+            if response.hovered() {
+                painter.rect_filled(row, egui::CornerRadius::same(3), p.hover);
+            }
+            painter.text(
+                Pos2::new(row.left() + 18.0, row.center().y),
+                Align2::LEFT_CENTER,
+                "◇",
+                FontId::proportional(10.0),
+                p.amber,
+            );
+            painter.text(
+                Pos2::new(row.left() + 32.0, row.center().y),
+                Align2::LEFT_CENTER,
+                tag,
+                FontId::proportional(10.5),
+                p.text2,
+            );
+            if !tag_target.is_empty() {
+                painter.text(
+                    Pos2::new(row.right() - 8.0, row.center().y),
+                    Align2::RIGHT_CENTER,
+                    &tag_target,
+                    FontId::monospace(8.5),
+                    p.text3,
+                );
+            }
+            y += row_h;
+        }
+    }
+
+    // Apply deferred actions.
+    if let Some(dir) = toggle_dir {
+        if expanded_dirs.contains(&dir) {
+            model.projects[index].ref_dirs_expanded.remove(&dir);
+        } else {
+            model.projects[index].ref_dirs_expanded.insert(dir);
+        }
+    }
+    if let Some((name, remote)) = pick_ref {
+        // Click sets the log branch filter (keep multi-select for M5 batch ops).
+        let query = name.clone();
+        if let Some(project) = model.projects.get_mut(index) {
+            project.log_query.branch = query;
+            project.log_query.all_refs = false;
+        }
+        model.queue(Command::LogFilterChanged);
+        let _ = remote;
+    }
+    if let Some((name, remote)) = open_menu {
+        rt.menu = Some(crate::runtime::MenuState {
+            kind: crate::runtime::MenuKind::BranchContext { project: index },
+            anchor: rect,
+            payload: Some(format!(
+                "{name}\u{1}{}",
+                if remote { "remote" } else { "local" }
+            )),
+        });
     }
 }
 

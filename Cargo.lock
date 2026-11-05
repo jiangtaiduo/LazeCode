@@ -3342,6 +3342,8 @@ dependencies = [
  "lazecode-text",
  "log",
  "parking_lot",
+ "serde",
+ "serde_json",
  "similar",
  "tempfile",
  "thiserror 2.0.21",

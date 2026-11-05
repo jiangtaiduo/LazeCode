@@ -163,6 +163,8 @@ pub struct WorkspaceFile {
     pub panel_height: Option<f32>,
     pub open_tabs: std::collections::BTreeMap<PathBuf, Vec<PathBuf>>,
     pub active_tabs: std::collections::BTreeMap<PathBuf, PathBuf>,
+    /// Favorite branches, decorated in the Git log branch tree.
+    pub favorite_branches: Vec<String>,
 }
 
 impl WorkspaceFile {

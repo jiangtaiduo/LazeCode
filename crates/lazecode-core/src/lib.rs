@@ -2,12 +2,14 @@
 //! and Git snapshots. This crate contains no UI and no winit/egui types.
 
 pub mod commands;
+pub mod gitref;
 pub mod model;
 pub mod settings;
 
 pub use commands::Command;
+pub use gitref::{FlatRefRow, RefTreeEntry, RefTreeNode};
 pub use model::{
-    AppModel, DiffTab, FileTab, PanelTab, ProjectState, SidebarView, Tab, TabKind, TerminalTab,
-    Toast, ToastKind, UiState, WorktreeState,
+    AppModel, DatePreset, DiffTab, FileTab, LogQuery, PanelTab, ProjectState, SidebarView, Tab,
+    TabKind, TerminalTab, Toast, ToastKind, UiState, WorktreeState,
 };
 pub use settings::{Language, Settings, ThemeMode, WorkspaceFile};

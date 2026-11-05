@@ -264,6 +264,57 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
         PaletteAction::OpenGitLog,
     );
     action(
+        Icon::GitLog,
+        crate::tr!(model, "Push branch…", "推送分支…"),
+        crate::tr!(
+            model,
+            "Publish current branch to a remote",
+            "将当前分支推送到远程"
+        ),
+        None,
+        PaletteAction::OpenPush,
+    );
+    action(
+        Icon::GitLog,
+        crate::tr!(model, "Pull…", "拉取…"),
+        crate::tr!(
+            model,
+            "Merge/rebase/ff-only upstream integration",
+            "合并/变基/仅快进集成上游"
+        ),
+        None,
+        PaletteAction::OpenPull,
+    );
+    action(
+        Icon::GitLog,
+        crate::tr!(model, "Fetch all remotes", "拉取所有远程"),
+        crate::tr!(model, "git fetch --all --prune", "git fetch --all --prune"),
+        None,
+        PaletteAction::FetchAll,
+    );
+    action(
+        Icon::GitLog,
+        crate::tr!(model, "Manage remotes…", "管理远程…"),
+        crate::tr!(
+            model,
+            "Add, rename, re-point, delete",
+            "添加、重命名、修改、删除"
+        ),
+        None,
+        PaletteAction::OpenRemotes,
+    );
+    action(
+        Icon::GitLog,
+        crate::tr!(model, "Stash changes…", "贮藏更改…"),
+        crate::tr!(
+            model,
+            "Set tracked changes aside; restore them later",
+            "暂存已跟踪更改，稍后可恢复"
+        ),
+        None,
+        PaletteAction::StashChanges,
+    );
+    action(
         Icon::Search,
         crate::tr!(model, "Find in files", "在文件中查找"),
         crate::tr!(model, "Search file contents", "搜索文件内容"),
@@ -510,6 +561,57 @@ fn execute(action: PaletteAction, model: &mut AppModel, rt: &mut UiRuntime) {
         PaletteAction::OpenSearch => {
             rt.search.open = true;
             rt.search.focus_requested = true;
+        }
+        PaletteAction::OpenPush => {
+            let Some(project) = model.active_project() else {
+                return;
+            };
+            let branch = project.branch();
+            let remote = project
+                .remotes
+                .first()
+                .map(|info| info.name.clone())
+                .unwrap_or_else(|| "origin".to_string());
+            rt.dialog = crate::runtime::DialogState::Push {
+                remote,
+                branch,
+                set_upstream: false,
+                status: None,
+            };
+        }
+        PaletteAction::OpenPull => {
+            rt.dialog = crate::runtime::DialogState::Pull {
+                mode: lazecode_git::PullMode::Merge,
+                status: None,
+            };
+        }
+        PaletteAction::OpenRemotes => {
+            let Some(project) = model.active_project() else {
+                return;
+            };
+            let remotes = project.remotes.clone();
+            rt.dialog = crate::runtime::DialogState::Remotes {
+                remotes,
+                new_name: String::new(),
+                new_url: String::new(),
+                error: None,
+            };
+        }
+        PaletteAction::FetchAll => model.queue(Command::FetchAll),
+        PaletteAction::StashChanges => {
+            model.queue(Command::StashPush { message: None });
+        }
+        PaletteAction::ShelvedChanges => {
+            // Shelved list is surfaced from the source-control sidebar; keep
+            // the palette hook minimal until the shelf picker dialog lands.
+            model.toast(
+                if model.settings.language.is_zh() {
+                    "Shelf 列表在版本控制侧栏的 Changes 菜单里".to_string()
+                } else {
+                    "Shelves live in the Source Control sidebar's Changes menu".to_string()
+                },
+                lazecode_core::ToastKind::Info,
+            );
         }
         PaletteAction::About => {
             rt.settings_open = true;

@@ -62,6 +62,12 @@ pub struct UiState {
     pub show_minimap: bool,
     pub focus_editor: bool,
     pub focus_terminal: bool,
+    /// Deferred (project, branch) log filter pick from the overlay menu.
+    /// `None` branch = current HEAD; `__all__` = all-refs.
+    pub log_branch_pick: Option<(usize, Option<String>)>,
+    /// Deferred (project, author) author-filter pick from the overlay menu.
+    /// `None` = all authors.
+    pub log_author_pick: Option<(usize, Option<String>)>,
 }
 
 impl Default for UiState {
@@ -84,6 +90,8 @@ impl Default for UiState {
             show_minimap: true,
             focus_editor: false,
             focus_terminal: false,
+            log_branch_pick: None,
+            log_author_pick: None,
         }
     }
 }
@@ -211,6 +219,78 @@ impl WorktreeState {
     }
 }
 
+/// Filter state of the Git log view (persisted per project until changed).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LogQuery {
+    /// Substring/`.*/Cc` commit search (client-side).
+    pub text: String,
+    /// Show only commits of this branch/tag; empty = current HEAD.
+    pub branch: String,
+    /// Server-side author filter (`--author`).
+    pub author: String,
+    /// Server-side path filter (`-- <path>`).
+    pub path: String,
+    /// Only commits after this Unix timestamp (0 = no filter).
+    pub since: i64,
+    /// Date filter preset: all/today/week/month.
+    pub date: DatePreset,
+    /// All refs instead of the current branch's history.
+    pub all_refs: bool,
+    pub first_parent: bool,
+    pub no_merges: bool,
+    /// Sort by topo order (true) or commit date (false).
+    pub topo_order: bool,
+    /// Case sensitivity of `text`; and regex flag.
+    pub use_regex: bool,
+    pub case_sensitive: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DatePreset {
+    #[default]
+    All,
+    Today,
+    Week,
+    Month,
+}
+
+impl DatePreset {
+    pub fn seconds_back(self, now: i64) -> i64 {
+        match self {
+            Self::All => 0,
+            Self::Today => now - now.rem_euclid(86_400),
+            Self::Week => now - 7 * 86_400,
+            Self::Month => now - 30 * 86_400,
+        }
+    }
+}
+
+/// Commits reachable from the project's HEAD (including HEAD itself), for
+/// dimming out-of-HEAD log rows. `None` = unborn HEAD / not a repo.
+fn log_ancestor_set(root: &Path) -> Option<std::collections::HashSet<String>> {
+    lazecode_git::head_ancestors(root)
+}
+
+/// All directory prefixes of the given branch names.
+fn expanded_ref_dirs(branches: &[lazecode_git::BranchInfo]) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    for branch in branches {
+        if !branch.name.contains('/') {
+            continue;
+        }
+        let mut path = String::new();
+        for part in branch.name.split('/').filter(|part| !part.is_empty()) {
+            path = if path.is_empty() {
+                part.to_string()
+            } else {
+                format!("{path}/{part}")
+            };
+            set.insert(path.clone());
+        }
+    }
+    set
+}
+
 pub struct ProjectState {
     /// The registered project root (the main checkout).
     pub root: PathBuf,
@@ -225,7 +305,32 @@ pub struct ProjectState {
     pub log_error: Option<String>,
     pub branches: Vec<BranchInfo>,
     pub branch_query: String,
-    pub log_query: String,
+    /// Expanded directory paths of the Git log branch tree.
+    pub ref_dirs_expanded: std::collections::HashSet<String>,
+    /// Multi-selection of the branch tree (full ref names).
+    pub ref_selection: std::collections::HashSet<String>,
+    /// Snapshot of tag names for the branch tree's Tags section.
+    pub tags: Vec<String>,
+    /// HEAD anchor of each tag (short hash), for the tags rows.
+    pub tag_targets: Vec<(String, String)>,
+    /// Cached remotes (name, url) of the project, refreshed on `refresh_branches`.
+    pub remotes: Vec<lazecode_git::RemoteInfo>,
+    /// Commits the current branch has that `origin/<branch>` does not.
+    /// Remains 0 when no upstream is configured.
+    pub pending_push: usize,
+    /// Conflicted paths while a sequencer operation (merge/rebase/cherry-
+    /// pick/revert) is in flight; empty otherwise.
+    pub conflicts: Vec<lazecode_git::ConflictEntry>,
+    /// The sequencer's subject line, for the conflict banner.
+    pub sequencer: Option<lazecode_git::SequencerState>,
+    /// The Git log filter state (text filter lives here; branch mirrors log_branch).
+    pub log_query: LogQuery,
+    /// Continuation state of the pager: the offset the next page starts at.
+    pub log_loaded: usize,
+    /// The final lane state of the loaded prefix (the next page's seed).
+    pub log_seed: Vec<Option<String>>,
+    /// True while another page fetch is in flight.
+    pub log_paging: bool,
     pub log_branch: Option<String>,
     pub selected_commit: Option<String>,
     pub commit_details: Option<CommitDetails>,
@@ -276,21 +381,23 @@ impl ProjectState {
         };
         let (log, branches, log_error) = if git.is_some() {
             match (
-                lazecode_git::log(
-                    &root,
-                    LogOptions {
-                        limit: 300,
-                        first_parent: false,
-                    },
-                ),
+                lazecode_git::log(&root, LogOptions::default()),
                 lazecode_git::branches(&root),
             ) {
-                (Ok(log), Ok(branches)) => (log, branches, None),
+                (Ok(mut log), Ok(branches)) => {
+                    let head_ancestors = log_ancestor_set(&root);
+                    for commit in log.iter_mut() {
+                        commit.in_head =
+                            head_ancestors.as_ref().map(|set| set.contains(&commit.id));
+                    }
+                    (log, branches, None)
+                }
                 (Err(err), _) | (_, Err(err)) => (Vec::new(), Vec::new(), Some(err.to_string())),
             }
         } else {
             (Vec::new(), Vec::new(), None)
         };
+        let init_dirs = expanded_ref_dirs(&branches);
         let mut project = Self {
             root,
             name,
@@ -304,7 +411,19 @@ impl ProjectState {
             log_error,
             branches,
             branch_query: String::new(),
-            log_query: String::new(),
+            // The branch tree starts fully expanded (PyCharm default):
+            ref_dirs_expanded: init_dirs,
+            ref_selection: std::collections::HashSet::new(),
+            tags: Vec::new(),
+            tag_targets: Vec::new(),
+            remotes: Vec::new(),
+            pending_push: 0,
+            conflicts: Vec::new(),
+            sequencer: None,
+            log_query: LogQuery::default(),
+            log_loaded: 0,
+            log_seed: Vec::new(),
+            log_paging: false,
             log_branch: None,
             selected_commit: None,
             commit_details: None,
@@ -417,13 +536,7 @@ impl ProjectState {
             return;
         }
         self.log_loading = true;
-        match lazecode_git::log(
-            &self.root,
-            LogOptions {
-                limit: 300,
-                first_parent: false,
-            },
-        ) {
+        match lazecode_git::log(&self.root, LogOptions::default()) {
             Ok(log) => {
                 if let Some(branch) = &self.log_branch {
                     self.log = log
@@ -450,7 +563,52 @@ impl ProjectState {
 
     pub fn refresh_branches(&mut self) {
         if let Ok(branches) = lazecode_git::branches(&self.root) {
+            // Expand any new directories the refresh brought in.
+            let new_dirs = expanded_ref_dirs(&branches);
+            let dirs: Vec<String> = new_dirs.into_iter().collect();
+            self.ref_dirs_expanded.extend(dirs);
             self.branches = branches;
+        }
+        if let Ok(remotes) = lazecode_git::remote_list(&self.root) {
+            self.remotes = remotes;
+        }
+        self.pending_push = self
+            .remotes
+            .first()
+            .and(Some(
+                lazecode_git::pending_count(&self.root, &self.branch()).unwrap_or(0),
+            ))
+            .unwrap_or(0);
+        if let Ok(tags) = lazecode_git::tags(&self.root) {
+            self.tags = tags;
+        }
+        // Target of each tag => short-commit-id rows.
+        let mut targets = Vec::new();
+        for tag in &self.tags {
+            let target = lazecode_git::log_ref(
+                &self.root,
+                tag,
+                lazecode_git::LogOptions {
+                    limit: 1,
+                    ..Default::default()
+                },
+            )
+            .ok()
+            .and_then(|commits| commits.first().map(|commit| commit.short.clone()))
+            .unwrap_or_default();
+            targets.push((tag.clone(), target));
+        }
+        self.tag_targets = targets;
+    }
+
+    pub fn refresh_conflicts(&mut self) {
+        if self.git.is_none() {
+            return;
+        }
+        self.conflicts = lazecode_git::conflict_list(&self.root).unwrap_or_default();
+        self.sequencer = lazecode_git::sequencer_state(&self.root).ok();
+        if self.conflicts.is_empty() && self.sequencer == Some(lazecode_git::SequencerState::None) {
+            self.sequencer = None;
         }
     }
 
@@ -783,6 +941,8 @@ pub struct AppModel {
     pub notifier: Option<Arc<dyn Notifier>>,
     pub should_quit: bool,
     pub version: &'static str,
+    /// Favorite local branches the branch tree decorates/pins.
+    pub favorite_branches: HashSet<String>,
 }
 
 impl AppModel {
@@ -811,6 +971,7 @@ impl AppModel {
             notifier,
             should_quit: false,
             version: env!("CARGO_PKG_VERSION"),
+            favorite_branches: workspace.favorite_branches.iter().cloned().collect(),
         };
         model.restore_workspace(workspace);
         if model.projects.is_empty() {
@@ -1038,6 +1199,7 @@ impl AppModel {
             open_tabs: BTreeMap::new(),
             active_tabs: BTreeMap::new(),
             active_worktrees: BTreeMap::new(),
+            favorite_branches: self.favorite_branches.iter().cloned().collect(),
         };
         for project in &self.projects {
             let files: Vec<PathBuf> = project

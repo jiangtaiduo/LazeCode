@@ -730,34 +730,146 @@ fn source_control(
             let paths: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
             model.queue(Command::Unstage(paths));
         }
+        let stash_rect = Rect::from_min_size(
+            Pos2::new(unstage_rect.right() + 6.0, unstage_rect.top()),
+            Vec2::new(70.0, 21.0),
+        );
+        if crate::widgets::secondary_button(
+            ui,
+            stash_rect,
+            crate::tr!(model, "Stash", "贮藏"),
+            None,
+            theme,
+        )
+        .clicked()
+        {
+            model.queue(Command::StashPush { message: None });
+        }
+        let shelf_rect = Rect::from_min_size(
+            Pos2::new(stash_rect.right() + 6.0, stash_rect.top()),
+            Vec2::new(84.0, 21.0),
+        );
+        if crate::widgets::secondary_button(
+            ui,
+            shelf_rect,
+            crate::tr!(model, "Shelve…", "贮藏架…"),
+            None,
+            theme,
+        )
+        .clicked()
+        {
+            model.queue(Command::ShelfSave(format!(
+                "shelf-{}",
+                chrono_days_since_epoch()
+            )));
+        }
         let header_bottom = stage_rect.bottom() + 4.0;
         let rows_rect = Rect::from_min_max(Pos2::new(list.left(), header_bottom), list.max);
         let mut toggled: Option<(String, bool)> = None;
         let mut open_diff: Option<String> = None;
+        // Project's change-list assignment for each path. Re-loaded per frame
+        // from the JSON store; cheap even for hundreds of entries.
+        let lists = lazecode_git::Changelists::open(&model.active_project().unwrap().root);
+        let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+        {
+            let mut ordered_names: Vec<String> = lists.lists().to_vec();
+            ordered_names.retain(|name| !name.is_empty());
+            for name in &ordered_names {
+                let assigned: std::collections::HashSet<String> =
+                    lists.files_of(name).into_iter().collect();
+                let matched: Vec<usize> = changes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, change)| assigned.contains(&change.path).then_some(index))
+                    .collect();
+                if !matched.is_empty() {
+                    groups.push((name.clone(), matched));
+                }
+            }
+            // Files not explicitly listed belong to the Default group.
+            let grouped: std::collections::HashSet<usize> = groups
+                .iter()
+                .flat_map(|(_, indices)| indices.iter().copied())
+                .collect();
+            let default_indices: Vec<usize> = changes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, _)| (!grouped.contains(&index)).then_some(index))
+                .collect();
+            if !default_indices.is_empty() {
+                groups.insert(0, (ordered_names[0].clone(), default_indices));
+            }
+        }
+        let displayed: Vec<(String, Vec<usize>)> = groups;
+        let row_total = displayed
+            .iter()
+            .map(|(_, indices)| indices.len() + 1)
+            .sum::<usize>();
         super::app_ui::region(ui, rows_rect, "sc-rows", |ui| {
             egui::ScrollArea::vertical()
                 .id_salt("changes")
                 .auto_shrink([false, false])
-                .show_rows(ui, 38.0, changes.len(), |ui, range| {
-                    for index in range {
-                        let change = &changes[index];
-                        let (rect, _) = ui.allocate_exact_size(
-                            Vec2::new(ui.available_width(), 38.0),
-                            Sense::hover(),
-                        );
-                        let checked = !unchecked.contains(&change.path);
-                        let (new_checked, open) = change_row(
-                            ui,
-                            theme,
-                            rect.shrink2(Vec2::new(4.0, 1.0)),
-                            change,
-                            checked,
-                        );
-                        if new_checked != checked {
-                            toggled = Some((change.path.clone(), new_checked));
+                .show_rows(ui, 38.0, row_total, |ui, range| {
+                    // Virtualized groups: rebuild a running cursor.
+                    let mut cursor = 0usize;
+                    for (name, indices) in &displayed {
+                        let group_len = indices.len() + 1;
+                        let group_range = cursor..cursor + group_len;
+                        cursor += group_len;
+                        if range.end <= group_range.start || range.start >= group_range.end {
+                            continue;
                         }
-                        if open {
-                            open_diff = Some(change.path.clone());
+                        // Group header row (when visible).
+                        if range.contains(&group_range.start) {
+                            let (rect, _) = ui.allocate_exact_size(
+                                Vec2::new(ui.available_width(), 38.0),
+                                Sense::hover(),
+                            );
+                            let total = indices.len();
+                            ui.painter().text(
+                                Pos2::new(rect.left() + 12.0, rect.center().y - 6.0),
+                                Align2::LEFT_CENTER,
+                                format!("▾ {name}"),
+                                FontId::proportional(10.5),
+                                p.text2,
+                            );
+                            ui.painter().text(
+                                Pos2::new(rect.right() - 12.0, rect.center().y - 6.0),
+                                Align2::RIGHT_CENTER,
+                                total.to_string(),
+                                FontId::monospace(9.0),
+                                p.text3,
+                            );
+                        }
+                        for offset in indices.iter() {
+                            let row_index = group_range.start
+                                + 1
+                                + indices
+                                    .iter()
+                                    .position(|probe| probe == offset)
+                                    .expect("offset came from indices");
+                            if !range.contains(&row_index) {
+                                continue;
+                            }
+                            let change = &changes[*offset];
+                            let (rect, _) = ui.allocate_exact_size(
+                                Vec2::new(ui.available_width(), 38.0),
+                                Sense::hover(),
+                            );
+                            let checked = !unchecked.contains(&change.path);
+                            let (new_checked, open) = change_row(
+                                ui,
+                                theme,
+                                rect.shrink2(Vec2::new(4.0, 1.0)),
+                                change,
+                                checked,
+                            );
+                            if new_checked != checked {
+                                toggled = Some((change.path.clone(), new_checked));
+                            }
+                            if open {
+                                open_diff = Some(change.path.clone());
+                            }
                         }
                     }
                 });
@@ -1239,3 +1351,10 @@ fn format_elapsed(seconds: u64) -> String {
 
 #[allow(dead_code)]
 fn _unused(_: &ProjectState, _: &PathBuf, _: TabKind) {}
+
+fn chrono_days_since_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() / 86_400)
+        .unwrap_or(0)
+}

@@ -5,21 +5,47 @@
 //! index lock and explicitly refuse index formats whose extensions `gix-index`
 //! cannot preserve.
 
+pub mod changelists;
 pub mod diff;
+pub mod history;
+pub mod introspect;
 pub mod log;
 pub mod model;
 pub mod ops;
+pub mod shelf;
 pub mod status;
+pub mod sync;
 pub mod tree;
 pub mod worktree;
 
+pub use changelists::Changelists;
 pub use diff::{commit_details, file_diff};
-pub use log::{branches, log, log_ref, tags};
+pub use history::{
+    cherry_pick, cherry_pick_abort, cherry_pick_continue, conflict_list, drop_commit, merge,
+    merge_abort, merge_continue, rebase, rebase_abort, rebase_continue, rebase_skip, require_clean,
+    reset, resolve_take, revert, sequencer_state, squash_commits, ConflictEntry, ResetMode,
+    SequencerState,
+};
+pub use introspect::{
+    blame, compare_branches, compare_commits, file_history, lfs_pull, lfs_status, lfs_track,
+    submodule_list, BlameLine, CompareSide, HistoryEntry, LfsStatus, SubmoduleEntry,
+};
+pub use log::{branches, head_ancestors, log, log_ref, tags};
 pub use model::*;
 pub use ops::{
-    checkout_branch, commit, commit_checked, create_branch, delete_branch, stage, unstage,
+    apply_patch, checkout_branch, commit, commit_checked, create_branch, create_tag, delete_branch,
+    delete_tag, rename_branch, stage, unstage,
+};
+pub use shelf::{
+    shelf_delete, shelf_list, shelf_patch, shelf_restore, shelf_restore_partial, shelf_save,
+    stash_apply, stash_drop, stash_files, stash_list, stash_pop, stash_push, ShelfEntry,
+    StashEntry,
 };
 pub use status::snapshot;
+pub use sync::{
+    clone, fetch_all, pending_count, pull, push, remote_add, remote_list, remote_remove,
+    remote_rename, remote_set_url, PullMode, RemoteInfo,
+};
 pub use worktree::{
     add_worktree, add_worktree_detached_at_head, is_linked_worktree, list_worktrees, main_worktree,
     prune_worktrees, remove_worktree,

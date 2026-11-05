@@ -37,6 +37,15 @@ pub struct SearchHit {
     pub line_text: String,
 }
 
+/// Compile a text filter into a regex, honouring the search flags.
+pub fn compile_regex(query: &str, case_sensitive: bool) -> Result<regex::Regex, FsError> {
+    regex::RegexBuilder::new(query)
+        .case_insensitive(!case_sensitive)
+        .size_limit(4 * 1024 * 1024)
+        .build()
+        .map_err(|err| FsError::Pattern(err.to_string()))
+}
+
 /// Search file contents under `root`. The walk respects `.gitignore`.
 ///
 /// Cancellation is cooperative: pass `Some(&flag)` and set it to true to stop.

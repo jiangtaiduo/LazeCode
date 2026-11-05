@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use lazecode_core::{AppModel, PanelTab, ProjectState, Settings, SidebarView, TabKind, UiState};
+use std::collections::HashSet;
 
 fn model() -> AppModel {
     AppModel {
@@ -14,6 +15,7 @@ fn model() -> AppModel {
         notifier: None,
         should_quit: false,
         version: "test",
+        favorite_branches: HashSet::new(),
     }
 }
 

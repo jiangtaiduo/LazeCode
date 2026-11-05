@@ -121,6 +121,10 @@ pub struct BranchInfo {
     pub remote: bool,
     pub current: bool,
     pub target: String,
+    /// upstream branch (local heads only), e.g. `origin/main`.
+    pub tracking: Option<String>,
+    pub ahead: usize,
+    pub behind: usize,
 }
 
 /// One registered worktree of a repository. The main worktree is a member of
@@ -156,6 +160,9 @@ pub struct CommitInfo {
     pub email: String,
     pub time: i64,
     pub parents: Vec<String>,
+    /// `Some(false)` = commit not reachable from the current HEAD (dimmed in
+    /// the log view). `None` = unknown/not applicable.
+    pub in_head: Option<bool>,
     pub refs: Vec<RefLabel>,
     pub lane: usize,
     pub lane_count: usize,
@@ -193,8 +200,31 @@ pub struct FileDiff {
     pub binary: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+/// Log query options, mirroring `git log` flags exposed by the Git log view.
+#[derive(Clone, Debug, Default)]
 pub struct LogOptions {
+    /// Maximum number of commits to return (0 = default 300, capped at 5000).
     pub limit: usize,
     pub first_parent: bool,
+    /// Hide merge commits (`--no-merges`).
+    pub no_merges: bool,
+    /// Topological order (parents before children). `false` = date order.
+    pub topo_order: bool,
+    /// Only commits whose matching author name equals this string
+    /// (`--author`, exact regex-escaped match by the caller).
+    pub author: Option<String>,
+    /// Only commits after this Unix timestamp in seconds (`--since`).
+    pub since: Option<i64>,
+    /// Only commits touching this path (`-- <path>`).
+    pub path: Option<String>,
+    /// Include local and remote branches, not just the tip's history.
+    /// `refs/stash` is deliberately excluded (matches `--branches --remotes`).
+    pub all_refs: bool,
+    /// Walk only this branch/tag/ref (`Some("main")`), the caller's filter.
+    pub branch: Option<String>,
+    /// `branch` holds a `left..right` range: tips[1] is never emitted and
+    /// its ancestry is hidden from the walk.
+    pub range_walk: bool,
+    /// Commits reachable from these ids are not part of HEAD's history.
+    pub head_ancestors: Option<std::collections::HashSet<String>>,
 }

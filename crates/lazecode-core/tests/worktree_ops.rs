@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use lazecode_core::{AppModel, ProjectState, Settings, UiState, WorktreeState};
 use lazecode_terminal::Notifier;
+use std::collections::HashSet;
 
 struct Noop;
 
@@ -53,6 +54,7 @@ fn model(project: ProjectState) -> (AppModel, usize) {
         notifier: None,
         should_quit: false,
         version: "test",
+        favorite_branches: HashSet::new(),
     };
     let index = model.add_loaded_project(project);
     (model, index)

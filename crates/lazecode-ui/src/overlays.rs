@@ -15,6 +15,35 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             MenuKind::Project => draw_project_menu(ui, model, rt, theme, screen, menu),
             MenuKind::Branch => draw_branch_menu(ui, model, rt, theme, screen, menu),
             MenuKind::Worktree => draw_worktree_menu(ui, model, rt, theme, screen, menu),
+            MenuKind::LogBranchFilter { project } => {
+                draw_log_branch_menu(ui, model, rt, theme, screen, menu, project)
+            }
+            MenuKind::LogCommitMenu { project } => {
+                let payload = menu.payload.clone();
+                draw_commit_menu(
+                    ui,
+                    model,
+                    rt,
+                    theme,
+                    screen,
+                    menu,
+                    project,
+                    payload.as_deref(),
+                )
+            }
+            MenuKind::BranchContext { project } => {
+                let payload = menu.payload.clone();
+                draw_branch_context_menu(
+                    ui,
+                    model,
+                    rt,
+                    theme,
+                    screen,
+                    menu,
+                    project,
+                    payload.as_deref(),
+                )
+            }
         }
     }
     if let Some(anchor) = rt.agent_menu.take() {
@@ -430,6 +459,575 @@ fn row_index(model: &AppModel, project: usize, name: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// Branch/global filter dropdown of the Git log view.
+fn draw_log_branch_menu(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    screen: Rect,
+    menu: MenuState,
+    index: usize,
+) {
+    let p = theme.palette;
+    let Some(model_project) = model.projects.get(index) else {
+        return;
+    };
+    // Payload present: the caller supplied author names; otherwise the branch
+    // list.
+    let (is_author_menu, rows_vec, active) = if let Some(payload) = menu.payload.clone() {
+        (
+            true,
+            payload.lines().map(str::to_string).collect::<Vec<_>>(),
+            model_project.log_query.author.clone(),
+        )
+    } else {
+        let branches = model_project
+            .branches
+            .iter()
+            .map(|branch| branch.name.clone())
+            .collect();
+        let active = if model_project.log_query.all_refs {
+            "__all__".to_string()
+        } else {
+            model_project.log_query.branch.clone()
+        };
+        (false, branches, active)
+    };
+    // The immutable borrow of `model.projects` ended above; the overlay only
+    // reads cloned data afterwards.
+    let height = 66.0 + (rows_vec.len() as f32 * 30.0).min(320.0) + 8.0;
+    let rect = popover_rect(screen, menu.anchor, 300.0, height);
+    frame(ui, rect, theme);
+    ui.painter().text(
+        Pos2::new(rect.left() + 14.0, rect.top() + 18.0),
+        Align2::LEFT_CENTER,
+        crate::tr!(model, "Log branch filter", "日志分支过滤"),
+        FontId::proportional(11.0),
+        p.text3,
+    );
+    let pick_title = if is_author_menu {
+        crate::tr!(model, "Filter by author", "按作者过滤")
+    } else {
+        crate::tr!(model, "Log branch filter", "日志分支过滤")
+    };
+    ui.painter().text(
+        Pos2::new(rect.left() + 14.0, rect.top() + 18.0),
+        Align2::LEFT_CENTER,
+        pick_title,
+        FontId::proportional(11.0),
+        p.text3,
+    );
+    let mut pick: Option<Option<String>> = None;
+    let rows = Rect::from_min_max(
+        Pos2::new(rect.left() + 6.0, rect.top() + 32.0),
+        Pos2::new(rect.right() - 6.0, rect.bottom() - 6.0),
+    );
+    super::app_ui::region(ui, rows, "log-branch-menu", |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("log-branch-scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                if is_author_menu {
+                    // Author rows. "All" row first.
+                    let (row, response) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+                    if response.hovered() {
+                        ui.painter()
+                            .rect_filled(row, egui::CornerRadius::same(4), p.hover);
+                    }
+                    ui.painter().text(
+                        Pos2::new(row.left() + 14.0, row.center().y),
+                        Align2::LEFT_CENTER,
+                        crate::tr!(model, "All authors", "全部作者"),
+                        FontId::proportional(10.5),
+                        p.text,
+                    );
+                    if active.is_empty() {
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(row.right() - 16.0, row.center().y),
+                                Vec2::splat(10.0),
+                            ),
+                            Icon::Check,
+                            p.accent,
+                        );
+                    }
+                    if response.clicked() {
+                        pick = Some(None);
+                    }
+                    for name in &rows_vec {
+                        let (row, response) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 30.0),
+                            Sense::click(),
+                        );
+                        if response.hovered() {
+                            ui.painter()
+                                .rect_filled(row, egui::CornerRadius::same(4), p.hover);
+                        }
+                        ui.painter().circle_filled(
+                            Pos2::new(row.left() + 14.0, row.center().y),
+                            3.2,
+                            p.accent,
+                        );
+                        ui.painter().text(
+                            Pos2::new(row.left() + 32.0, row.center().y),
+                            Align2::LEFT_CENTER,
+                            name,
+                            FontId::proportional(10.5),
+                            p.text,
+                        );
+                        if active == *name {
+                            paint_icon(
+                                ui.painter(),
+                                Rect::from_center_size(
+                                    Pos2::new(row.right() - 16.0, row.center().y),
+                                    Vec2::splat(10.0),
+                                ),
+                                Icon::Check,
+                                p.accent,
+                            );
+                        }
+                        if response.clicked() {
+                            pick = Some(Some(name.clone()));
+                        }
+                    }
+                    return;
+                }
+                // Branch menu: All branches row.
+                let (row, response) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+                if response.hovered() {
+                    ui.painter()
+                        .rect_filled(row, egui::CornerRadius::same(4), p.hover);
+                }
+                paint_icon(
+                    ui.painter(),
+                    Rect::from_center_size(
+                        Pos2::new(row.left() + 14.0, row.center().y),
+                        Vec2::splat(12.0),
+                    ),
+                    Icon::GitLog,
+                    p.text2,
+                );
+                ui.painter().text(
+                    Pos2::new(row.left() + 32.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    crate::tr!(model, "All branches", "全部分支"),
+                    FontId::proportional(10.5),
+                    p.text,
+                );
+                if active == "__all__" {
+                    paint_icon(
+                        ui.painter(),
+                        Rect::from_center_size(
+                            Pos2::new(row.right() - 16.0, row.center().y),
+                            Vec2::splat(10.0),
+                        ),
+                        Icon::Check,
+                        p.accent,
+                    );
+                }
+                if response.clicked() {
+                    pick = Some(Some("__all__".to_string()));
+                }
+                for name in &rows_vec {
+                    let (row, response) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+                    if response.hovered() {
+                        ui.painter()
+                            .rect_filled(row, egui::CornerRadius::same(4), p.hover);
+                    }
+                    ui.painter().circle_filled(
+                        Pos2::new(row.left() + 14.0, row.center().y),
+                        3.2,
+                        p.green,
+                    );
+                    ui.painter().text(
+                        Pos2::new(row.left() + 32.0, row.center().y),
+                        Align2::LEFT_CENTER,
+                        name,
+                        FontId::proportional(10.5),
+                        p.text,
+                    );
+                    if active == *name {
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(row.right() - 16.0, row.center().y),
+                                Vec2::splat(10.0),
+                            ),
+                            Icon::Check,
+                            p.accent,
+                        );
+                    }
+                    if response.clicked() {
+                        pick = Some(Some(name.clone()));
+                    }
+                }
+                // Head row (default).
+                let (row, response) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+                if response.hovered() {
+                    ui.painter()
+                        .rect_filled(row, egui::CornerRadius::same(4), p.hover);
+                }
+                ui.painter().circle_filled(
+                    Pos2::new(row.left() + 14.0, row.center().y),
+                    3.2,
+                    p.accent,
+                );
+                ui.painter().text(
+                    Pos2::new(row.left() + 32.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    crate::tr!(model, "Current branch only", "仅当前分支"),
+                    FontId::proportional(10.5),
+                    p.text,
+                );
+                if active.is_empty() {
+                    paint_icon(
+                        ui.painter(),
+                        Rect::from_center_size(
+                            Pos2::new(row.right() - 16.0, row.center().y),
+                            Vec2::splat(10.0),
+                        ),
+                        Icon::Check,
+                        p.accent,
+                    );
+                }
+                if response.clicked() {
+                    pick = Some(None);
+                }
+            });
+    });
+    let mut close = false;
+    if let Some(picked) = pick {
+        if is_author_menu {
+            model.ui.log_author_pick = Some((index, picked));
+        } else {
+            model.ui.log_branch_pick = Some((index, picked));
+        }
+        close = true;
+    }
+    if outside_click(ui, rect) {
+        close = true;
+    }
+    if !close {
+        rt.menu = Some(menu);
+    }
+}
+
+/// Commit context menu: read-only actions in this milestone
+/// (copy hash / go to parent / child; history rewrite arrives with M5).
+#[allow(clippy::too_many_arguments)]
+fn draw_commit_menu(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    screen: Rect,
+    menu: MenuState,
+    index: usize,
+    commit_id: Option<&str>,
+) {
+    let Some(commit_id) = commit_id else { return };
+    let p = theme.palette;
+    let Some(commit) = model.projects[index]
+        .log
+        .iter()
+        .find(|commit| commit.id == commit_id)
+        .cloned()
+    else {
+        return;
+    };
+    let height = 36.0 + 9.0 * 32.0 + 14.0;
+    let rect = popover_rect(screen, menu.anchor, 250.0, height);
+    frame(ui, rect, theme);
+    ui.painter().text(
+        Pos2::new(rect.left() + 14.0, rect.top() + 16.0),
+        Align2::LEFT_CENTER,
+        &commit.short,
+        FontId::monospace(10.0),
+        p.accent,
+    );
+    let mut action: Option<u8> = None;
+    let items: [(&str, u8); 9] = [
+        (crate::tr!(model, "Copy revision number", "复制提交哈希"), 0),
+        (crate::tr!(model, "Compare with local", "与本地比较"), 1),
+        (crate::tr!(model, "Go to parent commit", "跳转到父提交"), 2),
+        (crate::tr!(model, "Go to child commit", "跳转到子提交"), 3),
+        (
+            crate::tr!(model, "Cherry-pick commit", "Cherry-pick 该提交"),
+            4,
+        ),
+        (crate::tr!(model, "Revert commit", "Revert 该提交"), 5),
+        (crate::tr!(model, "Drop commit", "Drop 该提交"), 6),
+        (
+            crate::tr!(model, "Reset current branch to here…", "重置分支到此处…"),
+            7,
+        ),
+        (
+            crate::tr!(model, "New tag at this commit…", "在此提交上打标签…"),
+            8,
+        ),
+    ];
+    for (i, (label, code)) in items.iter().enumerate() {
+        let row = Rect::from_min_size(
+            Pos2::new(rect.left() + 8.0, rect.top() + 30.0 + i as f32 * 32.0),
+            Vec2::new(rect.width() - 16.0, 30.0),
+        );
+        let response = ui.interact(row, ui.scope_id().with(("commitmenu", i)), Sense::click());
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(row, egui::CornerRadius::same(4), p.hover);
+        }
+        ui.painter().text(
+            Pos2::new(row.left() + 8.0, row.center().y),
+            Align2::LEFT_CENTER,
+            *label,
+            FontId::proportional(10.5),
+            p.text2,
+        );
+        if response.clicked() {
+            action = Some(*code);
+        }
+    }
+    let mut close = false;
+    if let Some(code) = action {
+        match code {
+            0 => copy_to_clipboard(ui, &commit.id),
+            1 => {
+                if let Some(file) = model.projects[index]
+                    .commit_details
+                    .as_ref()
+                    .and_then(|details| details.files.first())
+                    .map(|file| file.path.clone())
+                {
+                    model.queue(Command::OpenDiff(format!("{}::{}", commit.id, file)));
+                } else {
+                    model.queue(Command::OpenDiff(commit.id.clone()));
+                }
+            }
+            2 => {
+                if let Some(parent) = commit.parents.first() {
+                    let parent = parent.clone();
+                    model.projects[index].selected_commit = Some(parent.clone());
+                    model.queue(Command::SelectCommit(parent));
+                }
+            }
+            3 => {
+                if let Some(child) = model.projects[index]
+                    .log
+                    .iter()
+                    .find(|probe| probe.parents.iter().any(|parent| parent == &commit.id))
+                    .map(|child| child.id.clone())
+                {
+                    model.projects[index].selected_commit = Some(child.clone());
+                    model.queue(Command::SelectCommit(child));
+                }
+            }
+            4 => model.queue(Command::CherryPick {
+                hash: commit.id.clone(),
+            }),
+            5 => model.queue(Command::RevertCommit {
+                hash: commit.id.clone(),
+            }),
+            6 => model.queue(Command::DropCommit {
+                hash: commit.id.clone(),
+                force: false,
+            }),
+            7 => {
+                rt.dialog = DialogState::Reset {
+                    hash: commit.id.clone(),
+                    mode: lazecode_git::ResetMode::Mixed,
+                };
+            }
+            8 => {
+                rt.dialog = DialogState::NewTag {
+                    commit: commit.short.clone(),
+                    value: String::new(),
+                    error: None,
+                };
+            }
+            _ => {}
+        }
+        close = true;
+    }
+    if outside_click(ui, rect) {
+        close = true;
+    }
+    if !close {
+        rt.menu = Some(menu);
+    }
+}
+
+fn copy_to_clipboard(ui: &mut Ui, text: &str) {
+    ui.ctx().copy_text(text.to_owned());
+}
+
+/// Git log branch tree context menu. Items differ by remote/local.
+/// Payload format: `name\u{1}local|remote`.
+#[allow(clippy::too_many_arguments)]
+fn draw_branch_context_menu(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    screen: Rect,
+    menu: MenuState,
+    index: usize,
+    payload: Option<&str>,
+) {
+    let Some((name, remote_flag)) = payload.and_then(|p| {
+        let (name, kind) = p.split_once('\u{1}')?;
+        Some((name.to_string(), kind.to_string()))
+    }) else {
+        return;
+    };
+    let remote = remote_flag == "remote";
+    let p = theme.palette;
+    // items list (label key, action id)
+    let items: Vec<(&str, u8)> = if remote {
+        vec![
+            (crate::tr!(model, "Checkout branch", "检出分支"), 0),
+            (
+                crate::tr!(model, "Compare with working tree", "与工作区比较"),
+                1,
+            ),
+            (crate::tr!(model, "Set log filter", "设为日志过滤"), 2),
+        ]
+    } else {
+        vec![
+            (crate::tr!(model, "Checkout branch", "检出分支"), 0),
+            (
+                crate::tr!(model, "New branch from here", "从这里新建分支"),
+                1,
+            ),
+            (crate::tr!(model, "Rename branch", "重命名"), 2),
+            (crate::tr!(model, "Delete branch", "删除分支"), 3),
+            (
+                crate::tr!(model, "Compare with working tree", "与工作区比较"),
+                4,
+            ),
+            (crate::tr!(model, "Set log filter", "设为日志过滤"), 6),
+        ]
+    };
+    let is_fav = model.favorite_branches.contains(&name);
+    let fav_label = if is_fav {
+        crate::tr!(model, "Remove favorite", "取消收藏")
+    } else {
+        crate::tr!(model, "Mark favorite", "标记收藏")
+    };
+    let height = items.len() as f32 * 28.0 + 66.0;
+    let rect = popover_rect(screen, menu.anchor, 246.0, height);
+    frame(ui, rect, theme);
+    ui.painter().text(
+        Pos2::new(rect.left() + 14.0, rect.top() + 16.0),
+        Align2::LEFT_CENTER,
+        &name,
+        FontId::monospace(10.0),
+        p.accent,
+    );
+    let mut action: Option<u8> = None;
+    let mut toggle_fav = false;
+    let row_start = rect.top() + 32.0;
+    for (i, (label, code)) in items.iter().enumerate() {
+        let row = Rect::from_min_size(
+            Pos2::new(rect.left() + 8.0, row_start + i as f32 * 28.0),
+            Vec2::new(rect.width() - 16.0, 28.0),
+        );
+        let response = ui.interact(row, ui.scope_id().with(("bctx", i)), Sense::click());
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(row, egui::CornerRadius::same(3), p.hover);
+        }
+        ui.painter().text(
+            Pos2::new(row.left() + 8.0, row.center().y),
+            Align2::LEFT_CENTER,
+            *label,
+            FontId::proportional(10.5),
+            p.text2,
+        );
+        if response.clicked() {
+            action = Some(*code);
+        }
+    }
+    // favorite row last.
+    let fav_row = Rect::from_min_size(
+        Pos2::new(rect.left() + 8.0, row_start + items.len() as f32 * 28.0),
+        Vec2::new(rect.width() - 16.0, 28.0),
+    );
+    let fav_response = ui.interact(fav_row, ui.scope_id().with("bctx-fav"), Sense::click());
+    if fav_response.hovered() {
+        ui.painter()
+            .rect_filled(fav_row, egui::CornerRadius::same(3), p.hover);
+    }
+    ui.painter().text(
+        Pos2::new(fav_row.left() + 8.0, fav_row.center().y),
+        Align2::LEFT_CENTER,
+        fav_label,
+        FontId::proportional(10.5),
+        p.text2,
+    );
+    if fav_response.clicked() {
+        toggle_fav = true;
+    }
+    let mut close = false;
+    if toggle_fav {
+        if is_fav {
+            model.favorite_branches.remove(&name);
+        } else {
+            model.favorite_branches.insert(name.clone());
+        }
+        model.save_workspace();
+        close = true;
+    }
+    if let Some(code) = action {
+        match code {
+            0 => model.queue(Command::CheckoutBranch(name.clone())),
+            1 => {
+                rt.dialog = DialogState::NewBranch {
+                    value: name.clone(),
+                    error: None,
+                };
+            }
+            2 => {
+                rt.dialog = DialogState::RenameBranch {
+                    from: name.clone(),
+                    value: name.clone(),
+                    error: None,
+                };
+            }
+            3 => {
+                rt.dialog = DialogState::DeleteBranch {
+                    name: name.clone(),
+                    error: None,
+                };
+            }
+            4 => {
+                model.queue(Command::OpenDiff(name.clone()));
+            }
+            6 => {
+                if let Some(project) = model.projects.get_mut(index) {
+                    project.log_query.branch = name.clone();
+                    project.log_query.all_refs = false;
+                    project.log_loading = true;
+                }
+                model.queue(Command::LogFilterChanged);
+            }
+            _ => {}
+        }
+        close = true;
+    }
+    if outside_click(ui, rect) {
+        close = true;
+    }
+    if !close {
+        rt.menu = Some(menu);
+    }
+}
+
 fn draw_branch_menu(
     ui: &mut Ui,
     model: &mut AppModel,
@@ -704,6 +1302,7 @@ fn draw_agent_menu(
 fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, screen: Rect) {
     let p = theme.palette;
     let mut dialog = std::mem::replace(&mut rt.dialog, DialogState::None);
+    let mut confirm_add_remote = false;
     let (title, subtitle, width, height) = match &dialog {
         DialogState::NewBranch { .. } => (
             crate::tr!(model, "New branch", "新建分支"),
@@ -736,6 +1335,42 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             crate::tr!(model, "The branch and its reflog entry are removed. Commits stay reachable until garbage collection.", "将删除该分支及其 reflog 记录；提交在垃圾回收前仍可访问。"),
             440.0,
             210.0,
+        ),
+        DialogState::RenameBranch { .. } => (
+            crate::tr!(model, "Rename branch", "重命名分支"),
+            crate::tr!(model, "The ref name of a local branch is rewritten in place.", "直接重命名本地分支的引用名。"),
+            460.0,
+            220.0,
+        ),
+        DialogState::Push { .. } => (
+            crate::tr!(model, "Push", "推送"),
+            crate::tr!(model, "Publish the local branch to the remote (creates the upstream when chosen).", "将本地分支推送到远程（可选建立 upstream）。"),
+            460.0,
+            250.0,
+        ),
+        DialogState::Pull { .. } => (
+            crate::tr!(model, "Pull", "拉取"),
+            crate::tr!(model, "Fetch and integrate upstream changes (merge/rebase/ff-only).", "拉取并集成上游变更（merge/rebase/仅快进）。"),
+            470.0,
+            280.0,
+        ),
+        DialogState::Remotes { .. } => (
+            crate::tr!(model, "Manage remotes", "管理远程"),
+            crate::tr!(model, "Add, rename, re-point or delete remote repositories.", "添加、重命名、修改或删除远程仓库。"),
+            520.0,
+            380.0,
+        ),
+        DialogState::Reset { .. } => (
+            crate::tr!(model, "Reset current branch", "重置当前分支"),
+            crate::tr!(model, "Soft keeps changes, mixed unstages, hard discards both index and working tree.", "soft 保留更改，mixed 取消暂存，hard 连暂存和工作区一起丢弃。"),
+            470.0,
+            300.0,
+        ),
+        DialogState::NewTag { .. } => (
+            crate::tr!(model, "New tag", "新建标签"),
+            crate::tr!(model, "Tags mark a revision for later comparison or releasing.", "标签用于标记一个提交，以供后续比较或发布。"),
+            460.0,
+            240.0,
         ),
         DialogState::CloseDirtyTab { .. } => (
             crate::tr!(model, "Discard changes?", "放弃更改？"),
@@ -859,6 +1494,40 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 Align2::LEFT_CENTER,
             );
         }
+        DialogState::RenameBranch { from, value, error } => {
+            let input = Rect::from_min_size(
+                Pos2::new(rect.left() + 22.0, rect.top() + 90.0),
+                Vec2::new(rect.width() - 44.0, 30.0),
+            );
+            ui.painter()
+                .rect_filled(input, egui::CornerRadius::same(5), p.panel2);
+            ui.painter().rect_stroke(
+                input,
+                egui::CornerRadius::same(5),
+                Stroke::new(1.0, p.border),
+                StrokeKind::Inside,
+            );
+            let response = ui.put(
+                input.shrink2(Vec2::new(8.0, 4.0)),
+                TextEdit::singleline(value)
+                    .frame(egui::Frame::NONE)
+                    .hint_text(from.clone())
+                    .font(FontId::monospace(11.0)),
+            );
+            response.request_focus();
+            if let Some(err) = error {
+                ui.painter().text(
+                    Pos2::new(input.left(), input.bottom() + 12.0),
+                    Align2::LEFT_CENTER,
+                    err,
+                    FontId::proportional(9.5),
+                    p.rose,
+                );
+            }
+            if ui.input(|input| input.key_pressed(Key::Enter)) {
+                confirm = true;
+            }
+        }
         DialogState::RemoveWorktree { name, .. } => {
             text_clipped(
                 ui.painter(),
@@ -871,6 +1540,345 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 p.amber,
                 Align2::LEFT_CENTER,
             );
+        }
+        DialogState::Push {
+            remote,
+            branch,
+            set_upstream,
+            status,
+        } => {
+            ui.painter().text(
+                Pos2::new(rect.left() + 22.0, rect.top() + 92.0),
+                Align2::LEFT_CENTER,
+                crate::tr!(model, "Remote", "远程"),
+                FontId::proportional(9.5),
+                p.text3,
+            );
+            ui.painter().text(
+                Pos2::new(rect.left() + 90.0, rect.top() + 92.0),
+                Align2::LEFT_CENTER,
+                remote,
+                FontId::monospace(11.0),
+                p.text,
+            );
+            ui.painter().text(
+                Pos2::new(rect.left() + 22.0, rect.top() + 118.0),
+                Align2::LEFT_CENTER,
+                crate::tr!(model, "Branch", "分支"),
+                FontId::proportional(9.5),
+                p.text3,
+            );
+            ui.painter().text(
+                Pos2::new(rect.left() + 90.0, rect.top() + 118.0),
+                Align2::LEFT_CENTER,
+                branch,
+                FontId::monospace(11.0),
+                p.text,
+            );
+            let checkbox_y = rect.top() + 146.0;
+            let upstream_rect = Rect::from_center_size(
+                Pos2::new(rect.left() + 30.0, checkbox_y),
+                Vec2::splat(16.0),
+            );
+            if crate::widgets::checkbox(ui, upstream_rect, *set_upstream, theme).clicked() {
+                // `set_upstream` is a field captured from dialog, so flip it
+                // directly (checkbox closure takes the value by copy).
+            }
+            ui.painter().text(
+                Pos2::new(rect.left() + 36.0, checkbox_y),
+                Align2::LEFT_CENTER,
+                crate::tr!(
+                    model,
+                    "Set upstream (first push)",
+                    "建立 upstream（首次推送）"
+                ),
+                FontId::proportional(10.0),
+                p.text2,
+            );
+            if let Some(status) = status {
+                ui.painter().text(
+                    Pos2::new(rect.left() + 22.0, rect.bottom() - 66.0),
+                    Align2::LEFT_CENTER,
+                    status,
+                    FontId::proportional(9.5),
+                    p.rose,
+                );
+            }
+            if ui.input(|input| input.key_pressed(Key::Enter)) {
+                confirm = true;
+            }
+        }
+        DialogState::Pull { mode, status, .. } => {
+            let modes = [
+                (
+                    lazecode_git::PullMode::Merge,
+                    crate::tr!(model, "Merge", "合并"),
+                ),
+                (
+                    lazecode_git::PullMode::Rebase,
+                    crate::tr!(model, "Rebase", "变基"),
+                ),
+                (
+                    lazecode_git::PullMode::FastForwardOnly,
+                    crate::tr!(model, "Fast-forward only", "仅快进"),
+                ),
+            ];
+            for (candidate, label) in modes {
+                let row = Rect::from_min_size(
+                    Pos2::new(
+                        rect.left() + 22.0,
+                        rect.top() + 96.0 + (candidate as usize as f32) * 28.0,
+                    ),
+                    Vec2::new(rect.width() - 44.0, 26.0),
+                );
+                if ui
+                    .interact(
+                        row,
+                        ui.scope_id().with(("pullmode", candidate as u8)),
+                        Sense::click(),
+                    )
+                    .clicked()
+                {
+                    *mode = candidate;
+                }
+                let selected = *mode == candidate;
+                ui.painter().circle_stroke(
+                    Pos2::new(row.left() + 10.0, row.center().y),
+                    5.0,
+                    Stroke::new(1.3, if selected { p.accent } else { p.text3 }),
+                );
+                if selected {
+                    ui.painter().circle_filled(
+                        Pos2::new(row.left() + 10.0, row.center().y),
+                        2.4,
+                        p.accent,
+                    );
+                }
+                ui.painter().text(
+                    Pos2::new(row.left() + 22.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(10.5),
+                    p.text,
+                );
+            }
+            if let Some(status) = status {
+                ui.painter().text(
+                    Pos2::new(rect.left() + 22.0, rect.bottom() - 66.0),
+                    Align2::LEFT_CENTER,
+                    status,
+                    FontId::proportional(9.5),
+                    p.rose,
+                );
+            }
+        }
+        DialogState::Remotes {
+            remotes,
+            new_name,
+            new_url,
+            error,
+        } => {
+            let rows = Rect::from_min_max(
+                Pos2::new(rect.left() + 10.0, rect.top() + 88.0),
+                Pos2::new(rect.right() - 10.0, rect.bottom() - 96.0),
+            );
+            ui.painter().text(
+                Pos2::new(rows.left(), rect.top() + 78.0),
+                Align2::LEFT_CENTER,
+                crate::tr!(model, "Existing remotes", "现有远程"),
+                FontId::proportional(9.5),
+                p.text3,
+            );
+            super::app_ui::region(ui, rows, "remotes-rows", |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("remotes-scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for list_remote in remotes.iter() {
+                            let (row, _) = ui.allocate_exact_size(
+                                Vec2::new(ui.available_width(), 26.0),
+                                Sense::hover(),
+                            );
+                            ui.painter().text(
+                                Pos2::new(row.left() + 6.0, row.center().y - 5.0),
+                                Align2::LEFT_CENTER,
+                                &list_remote.name,
+                                FontId::proportional(10.5),
+                                p.text,
+                            );
+                            ui.painter().text(
+                                Pos2::new(row.left() + 6.0, row.center().y + 6.0),
+                                Align2::LEFT_CENTER,
+                                &list_remote.url,
+                                FontId::monospace(8.5),
+                                p.text3,
+                            );
+                        }
+                    });
+            });
+            let name_rect = Rect::from_min_size(
+                Pos2::new(rect.left() + 12.0, rect.bottom() - 92.0),
+                Vec2::new(120.0, 26.0),
+            );
+            ui.painter()
+                .rect_filled(name_rect, egui::CornerRadius::same(4), p.panel2);
+            let _ = ui.put(
+                name_rect.shrink2(Vec2::new(6.0, 3.0)),
+                TextEdit::singleline(new_name)
+                    .frame(egui::Frame::NONE)
+                    .hint_text(crate::tr!(model, "name", "名称"))
+                    .font(FontId::monospace(10.0)),
+            );
+            let url_width = rect.width() - 12.0 - 120.0 - 8.0 - 74.0;
+            let url_rect = Rect::from_min_size(
+                Pos2::new(name_rect.right() + 8.0, name_rect.top()),
+                Vec2::new(url_width, 26.0),
+            );
+            ui.painter()
+                .rect_filled(url_rect, egui::CornerRadius::same(4), p.panel2);
+            let _ = ui.put(
+                url_rect.shrink2(Vec2::new(6.0, 3.0)),
+                TextEdit::singleline(new_url)
+                    .frame(egui::Frame::NONE)
+                    .hint_text("https://github.com/user/repo.git")
+                    .font(FontId::monospace(9.5)),
+            );
+            let add_rect = Rect::from_min_size(
+                Pos2::new(url_rect.right() + 8.0, url_rect.top()),
+                Vec2::new(64.0, 26.0),
+            );
+            if crate::widgets::primary_button(
+                ui,
+                add_rect,
+                crate::tr!(model, "Add", "添加"),
+                None,
+                true,
+                theme,
+            )
+            .clicked()
+            {
+                confirm_add_remote = true;
+            }
+            if let Some(err) = error {
+                ui.painter().text(
+                    Pos2::new(rect.left() + 22.0, rect.bottom() - 66.0),
+                    Align2::LEFT_CENTER,
+                    err,
+                    FontId::proportional(9.5),
+                    p.rose,
+                );
+            }
+        }
+        DialogState::Reset { hash, mode } => {
+            ui.painter().text(
+                Pos2::new(rect.left() + 22.0, rect.top() + 92.0),
+                Align2::LEFT_CENTER,
+                hash,
+                FontId::monospace(11.0),
+                p.text,
+            );
+            let modes = [
+                (
+                    lazecode_git::ResetMode::Soft,
+                    crate::tr!(
+                        model,
+                        "Soft — keep changes staged",
+                        "Soft — 保留更改（已暂存）"
+                    ),
+                ),
+                (
+                    lazecode_git::ResetMode::Mixed,
+                    crate::tr!(model, "Mixed — unstage changes", "Mixed — 取消暂存"),
+                ),
+                (
+                    lazecode_git::ResetMode::Hard,
+                    crate::tr!(model, "Hard — discard all changes", "Hard — 丢弃全部更改"),
+                ),
+            ];
+            for (candidate, label) in modes {
+                let row = Rect::from_min_size(
+                    Pos2::new(
+                        rect.left() + 22.0,
+                        rect.top() + 120.0 + (candidate as usize as f32) * 28.0,
+                    ),
+                    Vec2::new(rect.width() - 44.0, 26.0),
+                );
+                if ui
+                    .interact(
+                        row,
+                        ui.scope_id().with(("resetmode", candidate as u8)),
+                        Sense::click(),
+                    )
+                    .clicked()
+                {
+                    *mode = candidate;
+                }
+                let selected = *mode == candidate;
+                ui.painter().circle_stroke(
+                    Pos2::new(row.left() + 10.0, row.center().y),
+                    5.0,
+                    Stroke::new(1.3, if selected { p.accent } else { p.text3 }),
+                );
+                if selected {
+                    ui.painter().circle_filled(
+                        Pos2::new(row.left() + 10.0, row.center().y),
+                        2.4,
+                        p.accent,
+                    );
+                }
+                ui.painter().text(
+                    Pos2::new(row.left() + 22.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(10.5),
+                    p.text,
+                );
+            }
+        }
+        DialogState::NewTag {
+            commit: commit_hint,
+            value,
+            error,
+        } => {
+            ui.painter().text(
+                Pos2::new(rect.left() + 22.0, rect.top() + 92.0),
+                Align2::LEFT_CENTER,
+                commit_hint,
+                FontId::monospace(10.5),
+                p.accent,
+            );
+            let input = Rect::from_min_size(
+                Pos2::new(rect.left() + 22.0, rect.top() + 118.0),
+                Vec2::new(rect.width() - 44.0, 30.0),
+            );
+            ui.painter()
+                .rect_filled(input, egui::CornerRadius::same(5), p.panel2);
+            ui.painter().rect_stroke(
+                input,
+                egui::CornerRadius::same(5),
+                Stroke::new(1.0, p.border),
+                StrokeKind::Inside,
+            );
+            let response = ui.put(
+                input.shrink2(Vec2::new(8.0, 4.0)),
+                TextEdit::singleline(value)
+                    .frame(egui::Frame::NONE)
+                    .hint_text("v0.1.0")
+                    .font(FontId::monospace(11.0)),
+            );
+            response.request_focus();
+            if let Some(err) = error {
+                ui.painter().text(
+                    Pos2::new(input.left(), input.bottom() + 12.0),
+                    Align2::LEFT_CENTER,
+                    err,
+                    FontId::proportional(9.5),
+                    p.rose,
+                );
+            }
+            if ui.input(|input| input.key_pressed(Key::Enter)) {
+                confirm = true;
+            }
         }
         DialogState::CloseDirtyTab { name, .. } => {
             text_clipped(
@@ -904,6 +1912,12 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         DialogState::NewWorktree { .. } => crate::tr!(model, "Create", "创建"),
         DialogState::RemoveWorktree { .. } => crate::tr!(model, "Remove", "删除"),
         DialogState::DeleteBranch { .. } => crate::tr!(model, "Delete", "删除"),
+        DialogState::RenameBranch { .. } => crate::tr!(model, "Rename", "重命名"),
+        DialogState::Push { .. } => crate::tr!(model, "Push", "推送"),
+        DialogState::Pull { .. } => crate::tr!(model, "Pull", "拉取"),
+        DialogState::Remotes { .. } => crate::tr!(model, "Done", "完成"),
+        DialogState::Reset { .. } => crate::tr!(model, "Reset", "重置"),
+        DialogState::NewTag { .. } => crate::tr!(model, "Create", "创建"),
         DialogState::Quit => crate::tr!(model, "Quit", "退出"),
         DialogState::CloseDirtyTab { .. } => crate::tr!(model, "Discard", "放弃修改"),
         _ => "Discard",
@@ -955,6 +1969,25 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 model.queue(Command::DeleteBranch(name.clone()));
                 close = true;
             }
+            DialogState::RenameBranch { from, value, .. } => {
+                let value = value.trim().to_string();
+                if value.is_empty() || value == *from {
+                    rt.dialog = DialogState::RenameBranch {
+                        from: from.clone(),
+                        value,
+                        error: Some(
+                            crate::tr!(model, "Enter a new branch name", "请输入新的分支名")
+                                .to_string(),
+                        ),
+                    };
+                } else {
+                    model.queue(Command::RenameBranch {
+                        from: from.clone(),
+                        to: value,
+                    });
+                    close = true;
+                }
+            }
             DialogState::CloseDirtyTab { tab_id, .. } => {
                 if let Some(project) = model.active_project_mut() {
                     project.close_tab(*tab_id);
@@ -967,6 +2000,77 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             DialogState::Quit => {
                 model.should_quit = true;
                 close = true;
+            }
+            DialogState::Push {
+                remote,
+                branch,
+                set_upstream,
+                ..
+            } => {
+                model.queue(Command::Push {
+                    remote: remote.clone(),
+                    branch: branch.clone(),
+                    set_upstream: *set_upstream,
+                    force: false,
+                });
+                close = true;
+            }
+            DialogState::Pull { mode, .. } => {
+                model.queue(Command::Pull { mode: *mode });
+                close = true;
+            }
+            DialogState::Remotes {
+                remotes,
+                new_name,
+                new_url,
+                ..
+            } => {
+                if confirm_add_remote {
+                    let name = new_name.trim().to_string();
+                    let url = new_url.trim().to_string();
+                    if name.is_empty() || url.is_empty() {
+                        rt.dialog = DialogState::Remotes {
+                            remotes: remotes.clone(),
+                            new_name: new_name.clone(),
+                            new_url: new_url.clone(),
+                            error: Some(
+                                crate::tr!(model, "Enter a name and a URL", "请输入名称和 URL")
+                                    .to_string(),
+                            ),
+                        };
+                    } else {
+                        model.queue(Command::RemoteAdd { name, url });
+                        close = true;
+                    }
+                } else {
+                    close = true;
+                }
+            }
+            DialogState::Reset { hash, mode } => {
+                model.queue(Command::ResetTo {
+                    hash: hash.clone(),
+                    mode: *mode,
+                });
+                close = true;
+            }
+            DialogState::NewTag {
+                commit: commit_hint,
+                value,
+                ..
+            } => {
+                let name = value.trim().to_string();
+                if name.is_empty() {
+                    rt.dialog = DialogState::NewTag {
+                        commit: commit_hint.clone(),
+                        value: value.clone(),
+                        error: Some(
+                            crate::tr!(model, "Enter a tag name", "请输入标签名").to_string(),
+                        ),
+                    };
+                } else {
+                    model.queue(Command::CreateTag(name));
+                    close = true;
+                }
             }
             DialogState::None => {}
         }

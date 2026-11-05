@@ -505,3 +505,154 @@ pub fn checkout_branch(root: &Path, name: &str) -> Result<()> {
 fn _blob(repo: &gix::Repository, id: ObjectId) -> Vec<u8> {
     blob_bytes(repo, id).unwrap_or_default()
 }
+
+/// Rename a local branch in place (`branch -m`). Refuses if the target exists.
+pub fn rename_branch(root: &Path, from: &str, to: &str) -> Result<String> {
+    let from = from.trim();
+    let to = to.trim();
+    if to.is_empty() {
+        anyhow::bail!("new branch name is empty");
+    }
+    let from_full: FullName = format!("refs/heads/{from}").as_str().try_into()?;
+    let to_full: FullName = format!("refs/heads/{to}").as_str().try_into()?;
+    let repo = discover(root)?;
+    let reference = repo
+        .find_reference(from_full.as_bstr())
+        .map_err(|_| anyhow::anyhow!("branch '{from}' does not exist"))?;
+    if repo.try_find_reference(to_full.as_bstr())?.is_some() {
+        anyhow::bail!("branch '{to}' already exists");
+    }
+    let target = reference
+        .target()
+        .try_id()
+        .map(|id| id.to_owned())
+        .ok_or_else(|| anyhow::anyhow!("branch '{from}' has no target"))?;
+    let log = format!("branch: renamed {from} to {to}");
+    repo.edit_reference(RefEdit::update(
+        to_full.clone(),
+        target,
+        PreviousValue::MustNotExist,
+        log.as_str(),
+    ))?;
+    repo.edit_reference(RefEdit::delete(from_full, PreviousValue::MustExist))?;
+    // HEAD points at the old branch name; retarget it when we renamed the
+    // currently checked-out branch.
+    if head_branch_name(&repo).as_deref() == Some(from) {
+        let head_ref: FullName = "HEAD".try_into()?;
+        let mut edit = RefEdit::update(
+            head_ref,
+            Target::Symbolic(to_full),
+            PreviousValue::Any,
+            format!("branch: updated HEAD to {to}").as_str(),
+        );
+        edit.deref = false;
+        repo.edit_reference(edit)?;
+    }
+    Ok(to.to_string())
+}
+
+/// Create a tag at `commit` (HEAD when empty). Only lightweight tags are
+/// written in this pass; annotated tags are a M6 item.
+pub fn create_tag(root: &Path, name: &str, commit: &str, _message: Option<&str>) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        anyhow::bail!("tag name is empty");
+    }
+    if name.contains("..") || name.starts_with('-') {
+        anyhow::bail!("unsuitable tag name '{name}'");
+    }
+    let repo = discover(root)?;
+    let target = if commit.trim().is_empty() {
+        repo.head_id()?.detach()
+    } else {
+        crate::resolve_commit(&repo, commit.trim())?
+    };
+    let full: FullName = format!("refs/tags/{name}").as_str().try_into()?;
+    if repo.try_find_reference(full.as_bstr())?.is_some() {
+        anyhow::bail!("tag '{name}' already exists");
+    }
+    repo.edit_reference(RefEdit::update(
+        full,
+        target,
+        PreviousValue::MustNotExist,
+        "tag: created (lightweight)",
+    ))?;
+    Ok(())
+}
+
+/// Delete a tag ref in the local repository.
+pub fn delete_tag(root: &Path, name: &str) -> Result<()> {
+    let name = name.trim();
+    let full: FullName = format!("refs/tags/{name}").as_str().try_into()?;
+    let repo = discover(root)?;
+    repo.edit_reference(RefEdit::delete(full, PreviousValue::MustExist))?;
+    Ok(())
+}
+
+/// Apply a unified patch to the worktree (or the index with `cached`).
+/// Runs `git apply --check` first so a dry-run failure never half-applies.
+/// The porcelain binary is the compatibility surface for `add -p`-style
+/// hunk staging, which gix does not expose.
+pub fn apply_patch(root: &Path, patch: &str, cached: bool, reverse: bool) -> Result<()> {
+    if patch.trim().is_empty() {
+        anyhow::bail!("empty patch");
+    }
+    if patch.len() > 16 * 1024 * 1024 {
+        anyhow::bail!("patch larger than 16 MiB");
+    }
+    // The porcelain runner trims stdout; `git apply` needs the trailing
+    // newline to close the final hunk, so restore it if it was stripped.
+    let patch = if patch.ends_with('\n') {
+        patch.to_string()
+    } else {
+        format!("{patch}\n")
+    };
+    let repo = discover(root)?;
+    let worktree = workdir(&repo)?;
+    let mut base = vec!["apply".to_string(), "--whitespace=nowarn".to_string()];
+    if cached {
+        base.push("--cached".into());
+    }
+    if reverse {
+        base.push("--reverse".into());
+    }
+    let run = |extra: &[&str]| -> Result<std::process::Output> {
+        let mut cmd = std::process::Command::new("git");
+        cmd.current_dir(&worktree).args(&base);
+        for arg in extra {
+            cmd.arg(arg);
+        }
+        let temp = std::env::temp_dir().join(format!(
+            "lazecode-apply-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&temp, patch.as_bytes())?;
+        cmd.arg(&temp);
+        let result = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .map_err(|err| anyhow::anyhow!("git apply failed: {err}"));
+        let _ = std::fs::remove_file(&temp);
+        result
+    };
+    let check = run(&["--check"])?;
+    if !check.status.success() {
+        anyhow::bail!(
+            "patch check failed: {}",
+            String::from_utf8_lossy(&check.stderr).trim()
+        );
+    }
+    let output = run(&[])?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git apply failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}

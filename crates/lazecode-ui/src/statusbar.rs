@@ -164,6 +164,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         rt.menu = Some(crate::runtime::MenuState {
             kind: crate::runtime::MenuKind::Branch,
             anchor: branch_rect,
+            payload: None,
         });
     }
 

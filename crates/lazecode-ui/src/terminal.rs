@@ -40,6 +40,13 @@ pub fn draw(
             .request_repaint_after(std::time::Duration::from_millis(500));
     }
     session.snapshot_into(snapshot);
+    // Cap repaint rate for output-heavy sessions: the notifier wakes the UI
+    // for every PTY batch; this repaint cap keeps the frame budget at 60fps
+    // maximum so a `cat` of a 100MB file cannot starve input handling.
+    if session.last_output_ms().is_some() && focus {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(16));
+    }
     let line_h = (font_size * 1.36).round().max(12.0);
     let char_w = mono_char_width(ui.ctx(), font_size).max(5.0);
     let inner = Rect::from_min_max(

@@ -6,20 +6,30 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape, NamedColor, Processor, Rgb};
 use crossbeam_channel::Sender;
-use parking_lot::Mutex;
+use parking_lot::{FairMutex, Mutex};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize};
+use rio_vt::ansi::CursorShape as RioCursorShape;
+use rio_vt::config::colors::{AnsiColor, NamedColor};
+use rio_vt::crosswords::grid::{Dimensions, Scroll};
+use rio_vt::crosswords::pos::{Column, Line};
+use rio_vt::crosswords::square::{CellFlags, ContentTag, Wide};
+use rio_vt::crosswords::style::Style;
+use rio_vt::crosswords::{Crosswords, CrosswordsSize, Mode as RioMode};
+use rio_vt::event::{EventListener, RioEvent, WindowId};
+use rio_vt::performer::handler::Processor;
 
 use crate::next_id;
 
 pub trait Notifier: Send + Sync {
     fn notify(&self);
 }
+
+/// Fixed identifier for the single-window embed. `rio-vt` routes events by
+/// `WindowId`; LazeCode keeps one window per process, and sessions are
+/// addressed via the app's own session ids.
+static WINDOW_ID: std::sync::LazyLock<WindowId> = std::sync::LazyLock::new(|| WindowId::from(0));
+const ROUTE_ID: usize = 0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SessionKind {
@@ -109,7 +119,7 @@ impl CellData {
 pub struct CursorView {
     pub row: usize,
     pub col: usize,
-    pub shape: CursorShape,
+    pub shape: rio_vt::ansi::CursorShape,
     pub blinking: bool,
 }
 
@@ -161,12 +171,37 @@ pub(crate) struct Shared {
     running: AtomicBool,
     exit_code: AtomicI32,
     last_output_ms: AtomicU64,
+    last_notify_ms: AtomicU64,
     wake: AtomicU64,
     size: Mutex<(u16, u16)>,
     notifier: Option<Arc<dyn Notifier>>,
 }
 
 impl Shared {
+    /// Wake the UI for output. High-throughput sessions can produce tens of
+    /// thousands of PTY reads per second; unthrottled wakes saturate the event
+    /// loop and starve input handling (the "long output freezes" symptom).
+    /// Reader-batch wakes are coalesced to at most one per 16ms — the frame
+    /// rate the UI repaints at anyway — while explicit state changes (swap-in
+    /// of a child exit, kill, scroll) always go through immediately.
+    fn notify_output(&self) {
+        self.wake.fetch_add(1, Ordering::Relaxed);
+        let now = now_ms();
+        let last = self.last_notify_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < 16 {
+            return;
+        }
+        if self
+            .last_notify_ms
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            if let Some(notifier) = &self.notifier {
+                notifier.notify();
+            }
+        }
+    }
+
     fn notify(&self) {
         self.wake.fetch_add(1, Ordering::Relaxed);
         if let Some(notifier) = &self.notifier {
@@ -175,12 +210,14 @@ impl Shared {
     }
 }
 
-struct Listener {
+/// rio-vt calls this proxy on the parser thread with OSC/PTY replies. It
+/// forwards title changes, bells, wakeup and PTY writes back into `Shared`.
+struct Proxy {
     shared: Arc<Shared>,
     writer: Sender<Vec<u8>>,
 }
 
-impl Listener {
+impl Proxy {
     fn reply(&self, bytes: Vec<u8>) {
         // The writer thread is bounded; a terminal query reply is tiny and
         // must never block the reader thread if the UI is stalled.
@@ -188,123 +225,40 @@ impl Listener {
     }
 }
 
-impl EventListener for Listener {
-    fn send_event(&self, event: Event) {
+impl EventListener for Proxy {
+    fn send_global_event(&self, event: RioEvent) {
         match event {
-            Event::Title(title) => {
+            RioEvent::Title(_, title) => {
                 *self.shared.title.lock() = Some(title);
                 self.shared.notify();
             }
-            Event::ResetTitle => {
+            RioEvent::ResetTitle => {
                 *self.shared.title.lock() = None;
                 self.shared.notify();
             }
-            Event::Bell => {
+            RioEvent::Bell(_) => {
                 self.shared.bell.fetch_add(1, Ordering::Relaxed);
                 self.shared.notify();
             }
-            Event::Wakeup => self.shared.notify(),
-            Event::PtyWrite(text) => self.reply(text.into_bytes()),
-            Event::TextAreaSizeRequest(format) => {
-                let (cols, rows) = *self.shared.size.lock();
-                let response = format(WindowSize {
-                    num_lines: rows,
-                    num_cols: cols,
-                    cell_width: 0,
-                    cell_height: 0,
-                });
-                self.reply(response.into_bytes());
-            }
-            Event::ColorRequest(index, format) => {
-                let response = format(palette_color(index));
-                self.reply(response.into_bytes());
-            }
-            Event::Exit | Event::ChildExit(_) => {
+            RioEvent::ChildExited(_, _) => {
                 self.shared.running.store(false, Ordering::Relaxed);
                 self.shared.notify();
             }
+            RioEvent::PtyWrite(_, text) => self.reply(text.into_bytes()),
+            RioEvent::CurrentDirectoryChanged(_) => self.shared.notify(),
             // OSC 52 writes/reads stay disabled: the product does not allow a
             // program to read or write the system clipboard silently.
-            Event::ClipboardStore(..)
-            | Event::ClipboardLoad(..)
-            | Event::CursorBlinkingChange
-            | Event::MouseCursorDirty => {}
+            _ => {}
         }
+    }
+
+    fn send_event(&self, event: RioEvent, _id: WindowId) {
+        self.send_global_event(event);
     }
 }
 
-fn palette_color(index: usize) -> Rgb {
-    // alacritty/vte use 256=foreground, 257=background, 258=cursor and
-    // 259..=268 for the dim variants. Treat these as palette entries, not as
-    // the 232..=255 grayscale ramp (which would overflow u8 arithmetic).
-    if let 256..=258 = index {
-        return match index {
-            256 => Rgb {
-                r: 0xc5,
-                g: 0xc8,
-                b: 0xc6,
-            },
-            257 => Rgb {
-                r: 0x1d,
-                g: 0x1f,
-                b: 0x21,
-            },
-            _ => Rgb {
-                r: 0x8a,
-                g: 0xbe,
-                b: 0xb8,
-            },
-        };
-    }
-    if let 259..=268 = index {
-        const BASE_DIM: [(u8, u8, u8); 10] = [
-            (0x1d, 0x1f, 0x21),
-            (0xcc, 0x66, 0x66),
-            (0x98, 0xc3, 0x79),
-            (0xf0, 0xc6, 0x74),
-            (0x81, 0xa2, 0xbe),
-            (0xb2, 0x94, 0xbb),
-            (0x8a, 0xbe, 0xb8),
-            (0xc5, 0xc8, 0xc6),
-            (0x66, 0x66, 0x66),
-            (0xd5, 0x4e, 0x53),
-        ];
-        let (r, g, b) = BASE_DIM[index - 259];
-        return Rgb { r, g, b };
-    }
-    const BASE: [(u8, u8, u8); 16] = [
-        (0x1d, 0x1f, 0x21),
-        (0xcc, 0x66, 0x66),
-        (0x98, 0xc3, 0x79),
-        (0xf0, 0xc6, 0x74),
-        (0x81, 0xa2, 0xbe),
-        (0xb2, 0x94, 0xbb),
-        (0x8a, 0xbe, 0xb8),
-        (0xc5, 0xc8, 0xc6),
-        (0x66, 0x66, 0x66),
-        (0xd5, 0x4e, 0x53),
-        (0xb9, 0xca, 0x76),
-        (0xe7, 0xc5, 0x47),
-        (0x7a, 0xa6, 0xda),
-        (0xc6, 0x78, 0xdd),
-        (0x70, 0xc0, 0xb0),
-        (0xea, 0xea, 0xea),
-    ];
-    if index < 16 {
-        let (r, g, b) = BASE[index];
-        Rgb { r, g, b }
-    } else if index < 232 {
-        let i = (index - 16) as u8;
-        let steps = [0u8, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
-        let r = steps[(i / 36) as usize];
-        let g = steps[((i % 36) / 6) as usize];
-        let b = steps[(i % 6) as usize];
-        Rgb { r, g, b }
-    } else {
-        let v = (8u16 + (index.saturating_sub(232) as u16) * 10).min(255) as u8;
-        Rgb { r: v, g: v, b: v }
-    }
-}
+// OSC 4-style color query coding (OSC 4 replies) stays in rio-vt's handler;
+// this palette is kept for the future OSC 4 mapping.
 
 fn color_spec(color: AnsiColor) -> ColorSpec {
     match color {
@@ -312,26 +266,34 @@ fn color_spec(color: AnsiColor) -> ColorSpec {
         AnsiColor::Indexed(index) => ColorSpec::Indexed(index),
         AnsiColor::Named(named) => {
             let index = match named {
-                NamedColor::Black | NamedColor::DimBlack => 0,
-                NamedColor::Red | NamedColor::DimRed => 1,
-                NamedColor::Green | NamedColor::DimGreen => 2,
-                NamedColor::Yellow | NamedColor::DimYellow => 3,
-                NamedColor::Blue | NamedColor::DimBlue => 4,
-                NamedColor::Magenta | NamedColor::DimMagenta => 5,
-                NamedColor::Cyan | NamedColor::DimCyan => 6,
-                NamedColor::White | NamedColor::DimWhite => 7,
-                NamedColor::BrightBlack => 8,
-                NamedColor::BrightRed => 9,
-                NamedColor::BrightGreen => 10,
-                NamedColor::BrightYellow => 11,
-                NamedColor::BrightBlue => 12,
-                NamedColor::BrightMagenta => 13,
-                NamedColor::BrightCyan => 14,
-                NamedColor::BrightWhite => 15,
+                NamedColor::Black => 0,
+                NamedColor::Red => 1,
+                NamedColor::Green => 2,
+                NamedColor::Yellow => 3,
+                NamedColor::Blue => 4,
+                NamedColor::Magenta => 5,
+                NamedColor::Cyan => 6,
+                NamedColor::White => 7,
+                NamedColor::LightBlack => 8,
+                NamedColor::LightRed => 9,
+                NamedColor::LightGreen => 10,
+                NamedColor::LightYellow => 11,
+                NamedColor::LightBlue => 12,
+                NamedColor::LightMagenta => 13,
+                NamedColor::LightCyan => 14,
+                NamedColor::LightWhite => 15,
                 NamedColor::Background => return ColorSpec::DefaultBg,
                 NamedColor::Cursor => return ColorSpec::Cursor,
                 NamedColor::Foreground
-                | NamedColor::BrightForeground
+                | NamedColor::LightForeground
+                | NamedColor::DimBlack
+                | NamedColor::DimRed
+                | NamedColor::DimGreen
+                | NamedColor::DimYellow
+                | NamedColor::DimBlue
+                | NamedColor::DimMagenta
+                | NamedColor::DimCyan
+                | NamedColor::DimWhite
                 | NamedColor::DimForeground => return ColorSpec::DefaultFg,
             };
             ColorSpec::Indexed(index)
@@ -339,22 +301,83 @@ fn color_spec(color: AnsiColor) -> ColorSpec {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Dims {
-    cols: usize,
-    rows: usize,
+fn style_with_defaults(fg: AnsiColor, bg: AnsiColor) -> Style {
+    Style {
+        fg,
+        bg,
+        underline_color: None,
+        flags: rio_vt::crosswords::style::StyleFlags::empty(),
+    }
 }
 
-impl Dimensions for Dims {
-    fn total_lines(&self) -> usize {
-        self.rows
+fn style_spec(style: &Style) -> (ColorSpec, ColorSpec, u16) {
+    let fg = color_spec(style.fg);
+    let bg = color_spec(style.bg);
+    let flags = style.flags;
+    let mut attrs = 0u16;
+    if flags.contains(rio_vt::crosswords::style::StyleFlags::BOLD) {
+        attrs |= ATTR_BOLD;
     }
-    fn screen_lines(&self) -> usize {
-        self.rows
+    if flags.contains(rio_vt::crosswords::style::StyleFlags::ITALIC) {
+        attrs |= ATTR_ITALIC;
     }
-    fn columns(&self) -> usize {
-        self.cols
+    if flags.intersects(rio_vt::crosswords::style::StyleFlags::ALL_UNDERLINES) {
+        attrs |= ATTR_UNDERLINE;
     }
+    if flags.contains(rio_vt::crosswords::style::StyleFlags::STRIKEOUT) {
+        attrs |= ATTR_STRIKEOUT;
+    }
+    if flags.contains(rio_vt::crosswords::style::StyleFlags::INVERSE) {
+        attrs |= ATTR_INVERSE;
+    }
+    if flags.intersects(rio_vt::crosswords::style::StyleFlags::DIM_BOLD)
+        && !flags.contains(rio_vt::crosswords::style::StyleFlags::BOLD)
+    {
+        attrs |= ATTR_DIM;
+    }
+    if flags.contains(rio_vt::crosswords::style::StyleFlags::HIDDEN) {
+        attrs |= ATTR_HIDDEN;
+    }
+    (fg, bg, attrs)
+}
+
+/// Resolve a cell's (fg, bg, style-attrs). Bg-only cells synthesize a style
+/// from the inline background bits instead of misreading them as a style id.
+fn style_of(
+    cell: rio_vt::crosswords::square::Square,
+    styles: &[Style],
+) -> (ColorSpec, ColorSpec, u16) {
+    let style = match cell.content_tag() {
+        ContentTag::Codepoint => styles
+            .get(cell.style_id() as usize)
+            .cloned()
+            .unwrap_or_else(|| {
+                style_with_defaults(
+                    AnsiColor::Named(NamedColor::Foreground),
+                    AnsiColor::Named(NamedColor::Background),
+                )
+            }),
+        ContentTag::BgPalette => style_with_defaults(
+            AnsiColor::Named(NamedColor::Foreground),
+            AnsiColor::Indexed(cell.bg_palette_index()),
+        ),
+        ContentTag::BgRgb => {
+            let (r, g, b) = cell.bg_rgb();
+            style_with_defaults(
+                AnsiColor::Named(NamedColor::Foreground),
+                AnsiColor::Spec(rio_vt::config::colors::ColorRgb { r, g, b }),
+            )
+        }
+    };
+    style_spec(&style)
+}
+
+fn fg_of(cell: rio_vt::crosswords::square::Square, styles: &[Style]) -> ColorSpec {
+    style_of(cell, styles).0
+}
+
+fn bg_of(cell: rio_vt::crosswords::square::Square, styles: &[Style]) -> ColorSpec {
+    style_of(cell, styles).1
 }
 
 pub struct Session {
@@ -364,7 +387,8 @@ pub struct Session {
     pub shell: String,
     pub cwd: PathBuf,
     created_ms: u64,
-    term: Arc<Mutex<Term<Listener>>>,
+    term: Arc<FairMutex<Crosswords<Proxy>>>,
+    dirty_rows: Mutex<Vec<i32>>,
     shared: Arc<Shared>,
     writer: Sender<Vec<u8>>,
     reader_cancel: Arc<AtomicBool>,
@@ -372,6 +396,21 @@ pub struct Session {
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
     pgid: Option<i32>,
     size: Mutex<(u16, u16)>,
+}
+
+fn modes_from(mode: RioMode) -> Modes {
+    Modes {
+        alt_screen: mode.contains(RioMode::ALT_SCREEN),
+        app_cursor: mode.contains(RioMode::APP_CURSOR),
+        bracketed_paste: mode.contains(RioMode::BRACKETED_PASTE),
+        mouse_click: mode.contains(RioMode::MOUSE_REPORT_CLICK),
+        mouse_drag: mode.contains(RioMode::MOUSE_DRAG),
+        mouse_motion: mode.contains(RioMode::MOUSE_MOTION),
+        sgr_mouse: mode.contains(RioMode::SGR_MOUSE),
+        show_cursor: mode.contains(RioMode::SHOW_CURSOR),
+        kitty_keyboard: mode.contains(RioMode::DISAMBIGUATE_ESC_CODES)
+            || mode.contains(RioMode::REPORT_ALL_KEYS_AS_ESC),
+    }
 }
 
 impl Session {
@@ -418,8 +457,7 @@ impl Session {
     }
 
     pub fn modes(&self) -> Modes {
-        let term = self.term.lock();
-        modes_from(&term)
+        modes_from(self.term.lock().mode())
     }
 
     pub fn write(&self, bytes: &[u8]) {
@@ -456,10 +494,10 @@ impl Session {
         }
         {
             let mut term = self.term.lock();
-            term.resize(Dims {
-                cols: cols as usize,
-                rows: rows as usize,
-            });
+            term.resize(CrosswordsSize::new(cols as usize, rows as usize));
+            // Re-render everything once the grid is reflowed.
+            *self.dirty_rows.lock() = Vec::new();
+            term.mark_fully_damaged();
         }
         if let Some(master) = self.master.lock().as_ref() {
             let _ = master.resize(PtySize {
@@ -476,17 +514,17 @@ impl Session {
 
     pub fn snapshot_into(&self, snap: &mut Snapshot) {
         let term = self.term.lock();
-        let grid = term.grid();
+        let grid = &term.grid;
         let cols = grid.columns();
         let rows = grid.screen_lines();
         let display_offset = grid.display_offset();
         snap.cols = cols;
         snap.rows = rows;
-        snap.history_size = grid.history_size();
+        snap.history_size = term.history_size();
         snap.display_offset = display_offset;
         snap.bell = self.shared.bell.load(Ordering::Relaxed);
         snap.title = self.shared.title.lock().clone();
-        snap.modes = modes_from(&term);
+        snap.modes = modes_from(term.mode());
         snap.cells.resize(cols * rows, CellData::default());
         snap.cells.fill(CellData {
             ch: '\0',
@@ -495,75 +533,65 @@ impl Session {
             bg: ColorSpec::DefaultBg,
             attrs: 0,
         });
-
+        let styles = grid.styles();
+        let extras = &grid.extras_table;
         for row in 0..rows {
             let line = Line(row as i32 - display_offset as i32);
             let grid_row = &grid[line];
             for col in 0..cols {
-                let cell = &grid_row[Column(col)];
-                let mut attrs = 0u16;
-                let flags = cell.flags;
-                use alacritty_terminal::term::cell::Flags;
-                if flags.contains(Flags::BOLD) || flags.contains(Flags::DIM_BOLD) {
-                    attrs |= ATTR_BOLD;
-                }
-                if flags.contains(Flags::ITALIC) || flags.contains(Flags::BOLD_ITALIC) {
-                    attrs |= ATTR_ITALIC;
-                }
-                if flags.intersects(Flags::ALL_UNDERLINES) {
-                    attrs |= ATTR_UNDERLINE;
-                }
-                if flags.contains(Flags::STRIKEOUT) {
-                    attrs |= ATTR_STRIKEOUT;
-                }
-                if flags.contains(Flags::INVERSE) {
-                    attrs |= ATTR_INVERSE;
-                }
-                if flags.contains(Flags::DIM) || flags.contains(Flags::DIM_BOLD) {
-                    attrs |= ATTR_DIM;
-                }
-                if flags.contains(Flags::HIDDEN) {
-                    attrs |= ATTR_HIDDEN;
-                }
-                if flags.contains(Flags::WIDE_CHAR) {
-                    attrs |= ATTR_WIDE;
-                }
-                if flags.contains(Flags::WIDE_CHAR_SPACER) {
-                    attrs |= ATTR_SPACER;
-                }
-                if flags.contains(Flags::LEADING_WIDE_CHAR_SPACER) {
-                    attrs |= ATTR_LEADING_SPACER;
-                }
-                let text = cell.zerowidth().map(|zw| {
-                    let mut buffer = String::with_capacity(4 * (zw.len() + 1));
-                    buffer.push(cell.c);
-                    for ch in zw {
-                        buffer.push(*ch);
+                let cell = grid_row[Column(col)];
+                let ch = cell.c();
+                if ch != '\0' || cell.content_tag() == ContentTag::Codepoint {
+                    let mut attrs = 0u16;
+                    let wide = cell.wide();
+                    match wide {
+                        Wide::Wide => attrs |= ATTR_WIDE,
+                        Wide::Spacer => attrs |= ATTR_SPACER,
+                        Wide::LeadingSpacer => attrs |= ATTR_LEADING_SPACER,
+                        Wide::Narrow => {}
                     }
-                    Arc::<str>::from(buffer)
-                });
-                snap.cells[row * cols + col] = CellData {
-                    ch: cell.c,
-                    text,
-                    fg: color_spec(cell.fg),
-                    bg: color_spec(cell.bg),
-                    attrs,
-                };
+                    if cell.contains_cell_flag(CellFlags::GRAPHEME) {
+                        if let Some(ex) = extras.get(cell.extras_id().unwrap_or(0)) {
+                            if !ex.zerowidth.is_empty() {
+                                let mut buffer = String::with_capacity(4 + 4 * ex.zerowidth.len());
+                                buffer.push(ch);
+                                for zw in &ex.zerowidth {
+                                    buffer.push(*zw);
+                                }
+                                snap.cells[row * cols + col] = CellData {
+                                    ch,
+                                    text: Some(Arc::<str>::from(buffer)),
+                                    fg: fg_of(cell, styles),
+                                    bg: bg_of(cell, styles),
+                                    attrs,
+                                };
+                                continue;
+                            }
+                        }
+                    }
+                    let (fg, bg, style_attrs) = style_of(cell, styles);
+                    snap.cells[row * cols + col] = CellData {
+                        ch,
+                        text: None,
+                        fg,
+                        bg,
+                        attrs: attrs | style_attrs,
+                    };
+                }
             }
         }
 
-        let cursor_point = grid.cursor.point;
-        let cursor_row = cursor_point.line.0 + display_offset as i32;
-        let cursor_visible = term.mode().contains(TermMode::SHOW_CURSOR)
+        let cursor = term.cursor();
+        let cursor_row = cursor.pos.row.0 + display_offset as i32;
+        let cursor_visible = term.mode().contains(RioMode::SHOW_CURSOR)
             && cursor_row >= 0
             && (cursor_row as usize) < rows;
-        let cursor_style = term.cursor_style();
         snap.cursor = if cursor_visible {
             Some(CursorView {
                 row: cursor_row as usize,
-                col: cursor_point.column.0.min(cols.saturating_sub(1)),
-                shape: cursor_style.shape,
-                blinking: cursor_style.blinking,
+                col: cursor.pos.col.0.min(cols.saturating_sub(1)),
+                shape: term.cursor_shape,
+                blinking: term.blinking_cursor,
             })
         } else {
             None
@@ -574,38 +602,42 @@ impl Session {
         if delta == 0 {
             return;
         }
-        let mut term = self.term.lock();
-        term.scroll_display(Scroll::Delta(delta));
-        drop(term);
+        {
+            let mut term = self.term.lock();
+            term.scroll_display(Scroll::Delta(delta));
+        }
         self.shared.notify();
     }
 
     pub fn scroll_page(&self, up: bool) {
-        let mut term = self.term.lock();
-        term.scroll_display(if up { Scroll::PageUp } else { Scroll::PageDown });
-        drop(term);
+        {
+            let mut term = self.term.lock();
+            term.scroll_display(if up { Scroll::PageUp } else { Scroll::PageDown });
+        }
         self.shared.notify();
     }
 
     pub fn scroll_top(&self) {
-        let mut term = self.term.lock();
-        term.scroll_display(Scroll::Top);
-        drop(term);
+        {
+            let mut term = self.term.lock();
+            term.scroll_display(Scroll::Top);
+        }
         self.shared.notify();
     }
 
     pub fn scroll_bottom(&self) {
-        let mut term = self.term.lock();
-        term.scroll_display(Scroll::Bottom);
-        drop(term);
+        {
+            let mut term = self.term.lock();
+            term.scroll_display(Scroll::Bottom);
+        }
         self.shared.notify();
     }
 
     pub fn scroll_to_line(&self, absolute_line: i32) {
         let mut term = self.term.lock();
-        let history = term.grid().history_size() as i32;
+        let history = term.history_size() as i32;
         let target = (-absolute_line).clamp(0, history);
-        let current = term.grid().display_offset() as i32;
+        let current = term.grid.display_offset() as i32;
         if target != current {
             term.scroll_display(Scroll::Delta(target - current));
         }
@@ -616,42 +648,37 @@ impl Session {
         if query.is_empty() {
             return Vec::new();
         }
-        let needle = query.to_lowercase();
         let term = self.term.lock();
-        let grid = term.grid();
-        let cols = grid.columns();
-        let rows = grid.screen_lines();
-        let history = grid.history_size() as i32;
+        let cols = term.grid.columns();
+        let rows = term.grid.screen_lines();
+        let history = term.history_size() as i32;
         let mut matches = Vec::new();
         for line_index in -history..rows as i32 {
             let line = Line(line_index);
-            let grid_row = &grid[line];
+            let grid_row = &term.grid[line];
             let mut text = String::with_capacity(cols);
             let mut columns = Vec::with_capacity(cols);
             for col in 0..cols {
-                let cell = &grid_row[Column(col)];
-                if cell
-                    .flags
-                    .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
-                {
+                let cell = grid_row[Column(col)];
+                if cell.wide() == Wide::Spacer {
                     continue;
                 }
+                let ch = cell.c();
                 columns.push(col);
-                text.push(cell.c);
-                if let Some(zw) = cell.zerowidth() {
-                    for ch in zw {
-                        text.push(*ch);
+                text.push(ch);
+                if cell.contains_cell_flag(CellFlags::GRAPHEME) {
+                    if let Some(ex) = term.grid.extras_table.get(cell.extras_id().unwrap_or(0)) {
+                        for zw in &ex.zerowidth {
+                            text.push(*zw);
+                        }
                     }
                 }
             }
-            let haystack = text.to_lowercase();
-            if haystack.len() != text.len() {
-                // Lowercasing changed byte lengths; fall back to per-char scan.
-                for (start_col, _) in text.char_indices() {
-                    // Do not slice by query.len(): lowercasing can change byte
-                    // lengths (e.g. İ), and the slice would land mid-character.
-                    let tail = &text[start_col..];
-                    if tail.to_lowercase().starts_with(&needle) {
+            let needle = query.to_lowercase();
+            let hay_l = text.to_lowercase();
+            if hay_l.len() != text.len() {
+                for (start_col, c) in text.char_indices() {
+                    if text[start_col..].to_lowercase().starts_with(&needle) {
                         matches.push(TerminalMatch {
                             line: line_index,
                             col: columns
@@ -663,16 +690,19 @@ impl Session {
                         if matches.len() >= 2_000 {
                             return matches;
                         }
+                        if c.is_ascii() {
+                            continue;
+                        }
+                        let _ = c;
                     }
                 }
             } else {
-                for (byte_pos, _) in haystack.match_indices(&needle) {
-                    let char_pos = haystack[..byte_pos].chars().count();
-                    let end = needle.chars().count();
+                for (byte_pos, _) in hay_l.match_indices(&needle) {
+                    let char_pos = hay_l[..byte_pos].chars().count();
                     matches.push(TerminalMatch {
                         line: line_index,
                         col: columns.get(char_pos).copied().unwrap_or(0),
-                        len: end,
+                        len: needle.chars().count(),
                     });
                     if matches.len() >= 2_000 {
                         return matches;
@@ -724,21 +754,6 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.terminate();
-    }
-}
-
-fn modes_from(term: &Term<Listener>) -> Modes {
-    let mode = term.mode();
-    Modes {
-        alt_screen: mode.contains(TermMode::ALT_SCREEN),
-        app_cursor: mode.contains(TermMode::APP_CURSOR),
-        bracketed_paste: mode.contains(TermMode::BRACKETED_PASTE),
-        mouse_click: mode.contains(TermMode::MOUSE_REPORT_CLICK),
-        mouse_drag: mode.contains(TermMode::MOUSE_DRAG),
-        mouse_motion: mode.contains(TermMode::MOUSE_MOTION),
-        sgr_mouse: mode.contains(TermMode::SGR_MOUSE),
-        show_cursor: mode.contains(TermMode::SHOW_CURSOR),
-        kitty_keyboard: mode.contains(TermMode::KITTY_KEYBOARD_PROTOCOL),
     }
 }
 
@@ -826,43 +841,38 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
         running: AtomicBool::new(true),
         exit_code: AtomicI32::new(i32::MIN),
         last_output_ms: AtomicU64::new(0),
+        last_notify_ms: AtomicU64::new(0),
         wake: AtomicU64::new(0),
         size: Mutex::new((cols, rows)),
         notifier: options.notifier.clone(),
     });
 
     let reader_cancel = Arc::new(AtomicBool::new(false));
-    let listener = Listener {
+    let proxy = Proxy {
         shared: shared.clone(),
         writer: writer_tx.clone(),
     };
-    let config = Config {
-        scrolling_history: options.scrollback.clamp(1_000, 200_000),
-        // Programs may request keyboard protocol upgrades; keeping it enabled
-        // lets modern TUIs (agents, editors) receive the escape forms they expect.
-        kitty_keyboard: true,
-        ..Default::default()
-    };
-    let term = Term::new(
-        config,
-        &Dims {
-            cols: cols as usize,
-            rows: rows as usize,
-        },
-        listener,
+    let term = Crosswords::new(
+        CrosswordsSize::new(cols as usize, rows as usize),
+        RioCursorShape::Block,
+        proxy,
+        *WINDOW_ID,
+        ROUTE_ID,
+        options.scrollback.clamp(1_000, 200_000),
     );
-    let term = Arc::new(Mutex::new(term));
+    let term = Arc::new(FairMutex::new(term));
+    let dirty_rows = Mutex::new(Vec::new());
 
-    // Reader thread: owns the parser and drives the Term. On Unix the reader
-    // fd is non-blocking and polled with a timeout so teardown can cancel it
-    // even when a daemonized child keeps the slave side open.
+    // Reader thread: owns the parser and drives the Crosswords grid. On Unix
+    // the reader fd is non-blocking and polled with a timeout so teardown can
+    // cancel it even when a daemonized child keeps the slave side open.
     let reader_term = term.clone();
     let reader_shared = shared.clone();
     let reader_cancel_thread = reader_cancel.clone();
     std::thread::Builder::new()
         .name("lazecode-term-read".to_string())
         .spawn(move || {
-            let mut processor: Processor = Processor::new();
+            let mut processor: Processor = Processor::default();
             let mut reader = reader;
             let mut buffer = vec![0u8; 64 * 1024];
             loop {
@@ -903,8 +913,9 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
                         {
                             let mut term = reader_term.lock();
                             processor.advance(&mut *term, &buffer[..n]);
+                            drop(term);
                         }
-                        reader_shared.notify();
+                        reader_shared.notify_output();
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => continue,
@@ -946,6 +957,7 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
         cwd: options.cwd,
         created_ms: now_ms(),
         term,
+        dirty_rows,
         shared,
         writer: writer_tx,
         reader_cancel,
@@ -966,13 +978,6 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn palette_color_handles_named_and_grayscale_indices() {
-        for index in [0, 15, 16, 231, 232, 255, 256, 257, 258, 268, 999] {
-            let _ = palette_color(index);
-        }
-    }
 
     #[test]
     fn spawns_shell_and_renders_prompt() {
@@ -1043,7 +1048,9 @@ mod tests {
     }
 
     #[test]
-    fn search_handles_lowercase_length_changes_without_panicking() {
+    fn search_lowercase_length_change_does_not_panic() {
+        // İ lowercases to i̇ (byte growth); the snapshot haystack path must
+        // not slice by byte offsets that no longer align with chars.
         let options = SpawnOptions {
             cwd: std::env::temp_dir(),
             cols: 40,

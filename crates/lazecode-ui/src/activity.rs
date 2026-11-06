@@ -159,7 +159,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     ui.painter().vline(
         rect.right() - 0.5,
         rect.y_range(),
-        Stroke::new(1.0, p.border_soft),
+        Stroke::new(1.0, p.border),
     );
     ui.painter().rect_stroke(
         rect,

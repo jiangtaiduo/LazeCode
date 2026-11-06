@@ -53,6 +53,12 @@ fn main() -> anyhow::Result<()> {
         if docs.exists() {
             let _ = project.open_file(docs, &settings);
         }
+        if mode == "diff" {
+            project.open_diff_source(lazecode_core::DiffSource::Commit {
+                commit: "e338822".to_string(),
+                path: "images.py".to_string(),
+            });
+        }
         if let Some(commit) = project.log.first() {
             let id = commit.id.clone();
             project.selected_commit = Some(id.clone());

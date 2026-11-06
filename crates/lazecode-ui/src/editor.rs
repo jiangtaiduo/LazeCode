@@ -112,7 +112,8 @@ fn draw_tabbar(
     let mut pending: Option<Command> = None;
     let mut close: Option<u64> = None;
     for (id, title, path, dirty, badge) in tabs {
-        let width = (title.chars().count() as f32 * 6.6 + 62.0).clamp(96.0, 196.0);
+        let extra = if badge { 36.0 } else { 0.0 };
+        let width = (title.chars().count() as f32 * 6.8 + 62.0 + extra).clamp(96.0, 240.0);
         let tab_rect =
             Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(width, rect.height()));
         if tab_rect.right() > rect.right() - 4.0 {
@@ -138,8 +139,12 @@ fn draw_tabbar(
                 .rect_filled(tab_rect, egui::CornerRadius::ZERO, p.tabstrip);
             ui.painter()
                 .rect_filled(tab_rect, egui::CornerRadius::ZERO, p.editor);
+            // Current file status line at the bottom of the tab
             ui.painter().rect_filled(
-                Rect::from_min_size(tab_rect.min, Vec2::new(tab_rect.width(), 2.0)),
+                Rect::from_min_size(
+                    Pos2::new(tab_rect.left(), tab_rect.bottom() - 2.0),
+                    Vec2::new(tab_rect.width(), 2.0),
+                ),
                 egui::CornerRadius::ZERO,
                 p.accent,
             );
@@ -167,9 +172,16 @@ fn draw_tabbar(
                 tone.gamma_multiply(0.8)
             },
         );
+        let text_right = if badge {
+            close_rect.left() - 38.0
+        } else if dirty {
+            close_rect.left() - 18.0
+        } else {
+            close_rect.left() - 4.0
+        };
         let text_rect = Rect::from_min_max(
             Pos2::new(tab_rect.left() + 24.0, tab_rect.top()),
-            Pos2::new(close_rect.left() - 4.0, tab_rect.bottom()),
+            Pos2::new(text_right, tab_rect.bottom()),
         );
         text_clipped(
             ui.painter(),
@@ -181,7 +193,7 @@ fn draw_tabbar(
         );
         if badge {
             let badge_rect = Rect::from_center_size(
-                Pos2::new(close_rect.left() - 30.0, tab_rect.center().y),
+                Pos2::new(close_rect.left() - 20.0, tab_rect.center().y),
                 Vec2::new(30.0, 14.0),
             );
             ui.painter()
@@ -195,7 +207,7 @@ fn draw_tabbar(
             );
         } else if dirty {
             ui.painter().circle_filled(
-                Pos2::new(close_rect.left() - 30.0, tab_rect.center().y),
+                Pos2::new(close_rect.left() - 10.0, tab_rect.center().y),
                 2.6,
                 p.accent,
             );

@@ -1393,7 +1393,8 @@ fn draw_git_log(
             ui.scope_id().with("branch-col-splitter"),
             Sense::drag(),
         );
-        if resp.hovered() || resp.dragged() {
+        let is_active_split = resp.hovered() || resp.dragged();
+        if is_active_split {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
         }
         if resp.dragged() {
@@ -1414,6 +1415,15 @@ fn draw_git_log(
             &tags,
             &tag_targets,
         );
+        ui.painter().vline(
+            branch_rect.right() - 0.5,
+            area.y_range(),
+            if is_active_split {
+                Stroke::new(2.0, p.accent)
+            } else {
+                Stroke::new(1.0, p.border)
+            },
+        );
     }
 
     if show_detail {
@@ -1426,7 +1436,8 @@ fn draw_git_log(
             ui.scope_id().with("detail-col-splitter"),
             Sense::drag(),
         );
-        if resp.hovered() || resp.dragged() {
+        let is_active_split = resp.hovered() || resp.dragged();
+        if is_active_split {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
         }
         if resp.dragged() {
@@ -1445,6 +1456,15 @@ fn draw_git_log(
                 index,
             );
         }
+        ui.painter().vline(
+            detail_rect.left() + 0.5,
+            area.y_range(),
+            if is_active_split {
+                Stroke::new(2.0, p.accent)
+            } else {
+                Stroke::new(1.0, p.border)
+            },
+        );
     }
 
     let filtered: Vec<CommitInfo> = log
@@ -1504,12 +1524,7 @@ fn draw_git_log(
     let mut jump_to = None;
     let mut request_more = false;
     let has_more = !model.projects[index].log_reached_end;
-    let total_rows = filtered.len()
-        + if has_more || model.projects[index].log_paging {
-            1
-        } else {
-            0
-        };
+    let total_rows = filtered.len();
 
     super::app_ui::region(ui, list_rect, "log-list", |ui| {
         if let Some(ref target) = jump_target {
@@ -1528,50 +1543,11 @@ fn draw_git_log(
             .id_salt("git-log")
             .auto_shrink([false, false])
             .show_rows(ui, row_h, total_rows, |ui, range| {
-                if has_more && range.end >= filtered.len().saturating_sub(15) {
+                // Pure auto-scroll pagination matching main: trigger next page when scrolling within 25 rows of tail
+                if has_more && !filtered.is_empty() && range.end + 25 >= filtered.len() {
                     request_more = true;
                 }
                 for row_index in range {
-                    if row_index >= filtered.len() {
-                        // Paging / Load more footer row
-                        let (row, response) = ui.allocate_exact_size(
-                            Vec2::new(ui.available_width(), row_h),
-                            Sense::click(),
-                        );
-                        if model.projects[index].log_paging {
-                            ui.painter().text(
-                                row.center(),
-                                Align2::CENTER_CENTER,
-                                crate::tr!(
-                                    model,
-                                    "⏳ Loading more commits...",
-                                    "⏳ 正在加载更多提交..."
-                                ),
-                                FontId::proportional(11.5),
-                                p.text3,
-                            );
-                        } else {
-                            if response.hovered() {
-                                ui.painter()
-                                    .rect_filled(row, egui::CornerRadius::same(3), p.hover);
-                            }
-                            ui.painter().text(
-                                row.center(),
-                                Align2::CENTER_CENTER,
-                                crate::tr!(
-                                    model,
-                                    "↓ Click to load more commits",
-                                    "↓ 点击加载更多提交"
-                                ),
-                                FontId::proportional(11.5),
-                                p.accent,
-                            );
-                            if response.clicked() {
-                                request_more = true;
-                            }
-                        }
-                        continue;
-                    }
                     let commit = &filtered[row_index];
                     let (row, response) = ui.allocate_exact_size(
                         Vec2::new(ui.available_width(), row_h),
@@ -1731,7 +1707,7 @@ fn draw_git_log(
         model.projects[index].selected_commit = Some(id.clone());
         model.queue(Command::SelectCommit(id));
     }
-    // Auto-paging: trigger next page when scrolled near tail or clicked footer
+    // Auto-paging: trigger next page automatically on scroll
     if request_more
         && !model.projects[index].log_paging
         && !model.projects[index].log_loading
@@ -1740,6 +1716,9 @@ fn draw_git_log(
         model.projects[index].log_paging = true;
         model.queue(Command::LogLoadMore);
         log::debug!("git log tail paged at {}", model.projects[index].log.len());
+    }
+    if model.projects[index].log_paging {
+        ui.ctx().request_repaint();
     }
 }
 

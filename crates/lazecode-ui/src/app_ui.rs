@@ -155,11 +155,11 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     crate::activity::draw(ui, model, rt, &theme, layout.activity);
     if let Some(sidebar) = layout.sidebar {
         crate::sidebar::draw(ui, model, rt, &theme, sidebar);
-        splitter_vertical(ui, model, rt, sidebar.right());
+        splitter_vertical(ui, model, rt, &theme, sidebar.right());
     }
     crate::editor::draw(ui, model, rt, &theme, layout.editor);
     if let Some(panel) = layout.panel {
-        splitter_horizontal(ui, model, rt, panel.top() - SPLITTER * 0.5);
+        splitter_horizontal(ui, model, rt, &theme, panel.top() - SPLITTER * 0.5);
         crate::panel::draw(ui, model, rt, &theme, panel);
     }
     crate::statusbar::draw(ui, model, rt, &theme, layout.status);
@@ -179,18 +179,24 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     rt.last_frame = std::time::Instant::now();
 }
 
-fn splitter_vertical(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, x: f32) {
+fn splitter_vertical(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, x: f32) {
     let rect = Rect::from_min_max(
-        pos2(x - 2.0, ui.max_rect().top()),
-        pos2(x + 2.0, ui.max_rect().bottom()),
+        pos2(x - 3.0, ui.max_rect().top()),
+        pos2(x + 3.0, ui.max_rect().bottom()),
     );
     let response = ui.interact(
         rect,
         ui.scope_id().with("sidebar-splitter"),
         egui::Sense::drag(),
     );
-    if response.hovered() || response.dragged() {
+    let active = response.hovered() || response.dragged();
+    if active {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        ui.painter().vline(
+            x - 0.5,
+            ui.max_rect().y_range(),
+            egui::Stroke::new(2.0, theme.palette.accent),
+        );
     }
     if response.dragged() {
         model.ui.sidebar_width =
@@ -203,18 +209,30 @@ fn splitter_vertical(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, x: f
     }
 }
 
-fn splitter_horizontal(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, y: f32) {
+fn splitter_horizontal(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    y: f32,
+) {
     let rect = Rect::from_min_max(
-        pos2(ui.max_rect().left(), y),
-        pos2(ui.max_rect().right(), y + SPLITTER),
+        pos2(ui.max_rect().left(), y - 2.0),
+        pos2(ui.max_rect().right(), y + SPLITTER + 2.0),
     );
     let response = ui.interact(
         rect,
         ui.scope_id().with("panel-splitter"),
         egui::Sense::drag(),
     );
-    if response.hovered() || response.dragged() {
+    let active = response.hovered() || response.dragged();
+    if active {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        ui.painter().hline(
+            ui.max_rect().x_range(),
+            y + SPLITTER * 0.5,
+            egui::Stroke::new(2.0, theme.palette.accent),
+        );
     }
     if response.dragged() {
         model.ui.panel_height =

@@ -80,7 +80,7 @@ fn draw_console(
         Pos2::new(head.left() + 28.0, head.center().y),
         Align2::LEFT_CENTER,
         crate::tr!(model, "Consoles", "控制台"),
-        FontId::proportional(11.0),
+        FontId::proportional(12.5),
         p.text2,
     );
     if count > 0 {
@@ -94,7 +94,7 @@ fn draw_console(
             badge.center(),
             Align2::CENTER_CENTER,
             count.to_string(),
-            FontId::monospace(8.5),
+            FontId::monospace(10.5),
             p.text3,
         );
     }
@@ -148,7 +148,7 @@ fn draw_console(
     rx -= 26.0;
     let spark_rect = Rect::from_min_size(Pos2::new(rx - 24.0, head.top() + 4.0), Vec2::splat(24.0));
     if icon_button(ui, spark_rect, Icon::Spark, false, theme).clicked() {
-        rt.agent_menu = Some(spark_rect);
+        rt.toggle_agent_menu(spark_rect);
     }
     rx -= 26.0;
     let search_rect =
@@ -204,7 +204,7 @@ fn draw_console(
                 Pos2::new(tab.right() - 22.0, tab.bottom()),
             ),
             title,
-            FontId::proportional(10.5),
+            FontId::proportional(12.5),
             if *is_active { p.text } else { p.text2 },
             Align2::LEFT_CENTER,
         );
@@ -336,7 +336,7 @@ fn draw_git_panel(
         Pos2::new(head.left() + 28.0, head.center().y),
         Align2::LEFT_CENTER,
         crate::tr!(model, "Git Log", "Git 日志"),
-        FontId::proportional(11.0),
+        FontId::proportional(12.5),
         p.text2,
     );
     let scope = model
@@ -635,7 +635,7 @@ fn draw_git_log(
                 "Filter commits, authors, refs",
                 "过滤提交、作者、引用"
             ))
-            .font(FontId::proportional(10.5)),
+            .font(FontId::proportional(12.5)),
     );
     if response.changed() {
         model.projects[index].log_query.text = query_value;
@@ -657,7 +657,7 @@ fn draw_git_log(
             rect.center(),
             Align2::CENTER_CENTER,
             text,
-            FontId::monospace(9.0),
+            FontId::monospace(11.0),
             if active { p.accent } else { p.text3 },
         );
         ui.interact(
@@ -725,7 +725,7 @@ fn draw_git_log(
         branch_menu_rect.center(),
         Align2::CENTER_CENTER,
         &branch_label,
-        FontId::proportional(9.5),
+        FontId::proportional(12.0),
         p.text2,
     );
     let branch_menu_open = ui
@@ -736,11 +736,11 @@ fn draw_git_log(
         )
         .clicked();
     if branch_menu_open {
-        rt.menu = Some(crate::runtime::MenuState {
-            kind: crate::runtime::MenuKind::LogBranchFilter { project: index },
-            anchor: branch_menu_rect,
-            payload: None,
-        });
+        rt.toggle_menu(
+            crate::runtime::MenuKind::LogBranchFilter { project: index },
+            branch_menu_rect,
+            None,
+        );
     }
     // Author chip: opens the same menu kind; the overlay presents its payload
     // rows as author names (payload format: newline-separated names).
@@ -774,7 +774,7 @@ fn draw_git_log(
         author_rect.center(),
         Align2::CENTER_CENTER,
         &author_label,
-        FontId::proportional(9.5),
+        FontId::proportional(12.0),
         if query.author.is_empty() {
             p.text2
         } else {
@@ -789,11 +789,11 @@ fn draw_git_log(
         )
         .clicked();
     if author_open {
-        rt.menu = Some(crate::runtime::MenuState {
-            kind: crate::runtime::MenuKind::LogBranchFilter { project: index },
-            anchor: author_rect,
-            payload: Some(authors.join("\n")),
-        });
+        rt.toggle_menu(
+            crate::runtime::MenuKind::LogBranchFilter { project: index },
+            author_rect,
+            Some(authors.join("\n")),
+        );
     }
     // Author pick consumed one frame after the menu closes.
     if model.ui.log_author_pick.is_some() {
@@ -964,7 +964,7 @@ fn draw_git_log(
                         Pos2::new(row.left() + 62.0, row.center().y),
                         Align2::LEFT_CENTER,
                         &commit.short,
-                        FontId::monospace(9.5),
+                        FontId::monospace(11.5),
                         p.accent,
                     );
                     // Message.
@@ -976,7 +976,7 @@ fn draw_git_log(
                             Pos2::new(row.right() - 250.0, row.bottom()),
                         ),
                         &commit.message,
-                        FontId::proportional(11.0),
+                        FontId::proportional(13.0),
                         if dim {
                             p.text3.gamma_multiply(0.65)
                         } else if is_selected {
@@ -1012,7 +1012,7 @@ fn draw_git_log(
                             ref_rect.center(),
                             Align2::CENTER_CENTER,
                             &label.label,
-                            FontId::monospace(8.0),
+                            FontId::monospace(10.5),
                             color,
                         );
                     }
@@ -1020,25 +1020,25 @@ fn draw_git_log(
                         Pos2::new(row.right() - 160.0, row.center().y),
                         Align2::LEFT_CENTER,
                         &commit.author,
-                        FontId::proportional(10.0),
+                        FontId::proportional(11.5),
                         p.text3,
                     );
                     ui.painter().text(
                         Pos2::new(row.right() - 16.0, row.center().y),
                         Align2::RIGHT_CENTER,
                         time_ago(commit.time, model.settings.language.is_zh()),
-                        FontId::monospace(9.0),
+                        FontId::monospace(11.0),
                         p.text3,
                     );
                     if response.clicked() {
                         select_commit = Some(commit.id.clone());
                     }
                     if response.secondary_clicked() {
-                        rt.menu = Some(crate::runtime::MenuState {
-                            kind: crate::runtime::MenuKind::LogCommitMenu { project: index },
-                            anchor: row,
-                            payload: Some(commit.id.clone()),
-                        });
+                        rt.open_menu(
+                            crate::runtime::MenuKind::LogCommitMenu { project: index },
+                            row,
+                            Some(commit.id.clone()),
+                        );
                     }
                 }
             });
@@ -1128,7 +1128,7 @@ fn draw_branch_list(
         TextEdit::singleline(&mut query_value)
             .frame(egui::Frame::NONE)
             .hint_text(crate::tr!(model, "Filter branches", "过滤分支"))
-            .font(FontId::proportional(10.0)),
+            .font(FontId::proportional(12.0)),
     );
     if response.changed() {
         model.projects[index].branch_query = query_value;
@@ -1206,7 +1206,7 @@ fn draw_branch_list(
             Pos2::new(row.left() + 26.0, row.center().y),
             Align2::LEFT_CENTER,
             label,
-            FontId::proportional(10.5),
+            FontId::proportional(12.5),
             p.text2,
         );
         *y += row_h;
@@ -1218,7 +1218,7 @@ fn draw_branch_list(
         Pos2::new(rows_rect.left() + 12.0, y + 8.0),
         Align2::LEFT_CENTER,
         crate::tr!(model, "Local", "本地"),
-        FontId::proportional(9.5),
+        FontId::proportional(11.5),
         p.text3,
     );
     y += 24.0;
@@ -1276,7 +1276,7 @@ fn draw_branch_list(
                 Pos2::new(row.left() + indent + 8.0, row.center().y),
                 Align2::LEFT_CENTER,
                 &name_label,
-                FontId::proportional(10.5),
+                FontId::proportional(12.5),
                 if is_current { p.text } else { p.text2 },
             );
             // ahead/behind badge.
@@ -1286,7 +1286,7 @@ fn draw_branch_list(
                     Pos2::new(row.right() - 8.0, row.center().y),
                     Align2::RIGHT_CENTER,
                     badge,
-                    FontId::monospace(8.5),
+                    FontId::monospace(11.0),
                     p.text3,
                 );
             }
@@ -1459,14 +1459,14 @@ fn draw_branch_list(
         let _ = remote;
     }
     if let Some((name, remote)) = open_menu {
-        rt.menu = Some(crate::runtime::MenuState {
-            kind: crate::runtime::MenuKind::BranchContext { project: index },
-            anchor: rect,
-            payload: Some(format!(
+        rt.open_menu(
+            crate::runtime::MenuKind::BranchContext { project: index },
+            rect,
+            Some(format!(
                 "{name}\u{1}{}",
                 if remote { "remote" } else { "local" }
             )),
-        });
+        );
     }
 }
 
@@ -1491,7 +1491,7 @@ fn draw_commit_detail(
         Pos2::new(rect.left() + 14.0, y),
         Align2::LEFT_CENTER,
         &details.info.short,
-        FontId::monospace(10.0),
+        FontId::monospace(11.5),
         p.accent,
     );
     y += 22.0;
@@ -1502,7 +1502,7 @@ fn draw_commit_detail(
             Vec2::new(rect.width() - 28.0, 18.0),
         ),
         &details.info.message,
-        FontId::proportional(12.0),
+        FontId::proportional(13.5),
         p.text,
         Align2::LEFT_CENTER,
     );
@@ -1516,7 +1516,7 @@ fn draw_commit_detail(
                     Vec2::new(rect.width() - 28.0, 16.0),
                 ),
                 line,
-                FontId::proportional(10.0),
+                FontId::proportional(11.5),
                 p.text3,
                 Align2::LEFT_CENTER,
             );
@@ -1604,7 +1604,7 @@ fn draw_commit_detail(
                 Pos2::new(rect.right() - 56.0, y + 8.0),
             ),
             &file.path,
-            FontId::proportional(9.5),
+            FontId::proportional(12.0),
             if resp.hovered() { p.text } else { p.text2 },
             Align2::LEFT_CENTER,
         );
@@ -1612,7 +1612,7 @@ fn draw_commit_detail(
             Pos2::new(rect.right() - 14.0, y),
             Align2::RIGHT_CENTER,
             format!("+{} −{}", file.additions, file.deletions),
-            FontId::monospace(8.5),
+            FontId::monospace(10.5),
             p.text3,
         );
         y += 17.0;

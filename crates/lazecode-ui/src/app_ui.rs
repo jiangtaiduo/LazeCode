@@ -94,6 +94,7 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
 }
 
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
+    rt.frame_count = rt.frame_count.wrapping_add(1);
     let theme = Theme::for_mode(model.settings.theme);
     if rt.applied_theme != Some(model.settings.theme) {
         theme.apply(ui.ctx());

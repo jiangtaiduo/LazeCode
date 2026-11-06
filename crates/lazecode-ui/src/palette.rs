@@ -61,7 +61,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 "Search files, projects, commands",
                 "搜索文件、项目与命令"
             ))
-            .font(FontId::proportional(13.0)),
+            .font(FontId::proportional(14.0)),
     );
     if rt.palette.focus_requested {
         response.request_focus();
@@ -87,7 +87,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 "No matching commands or files",
                 "没有匹配的命令或文件"
             ),
-            FontId::proportional(11.5),
+            FontId::proportional(12.5),
             p.text3,
         );
         if ui.input(|input| input.key_pressed(Key::Escape)) {
@@ -142,7 +142,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 Pos2::new(row.right() - 90.0, row.top() + 21.0),
             ),
             &item.title,
-            FontId::proportional(12.0),
+            FontId::proportional(13.0),
             if selected { p.text } else { p.text2 },
             Align2::LEFT_CENTER,
         );
@@ -154,7 +154,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                     Pos2::new(row.right() - 90.0, row.bottom() - 1.0),
                 ),
                 &item.subtitle,
-                FontId::proportional(9.5),
+                FontId::proportional(11.0),
                 p.text3,
                 Align2::LEFT_CENTER,
             );

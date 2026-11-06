@@ -39,7 +39,7 @@ pub struct EditorSettings {
 impl Default for EditorSettings {
     fn default() -> Self {
         Self {
-            font_size: 12.5,
+            font_size: 13.5,
             tab_width: 4,
             use_spaces: true,
             show_line_numbers: true,
@@ -62,7 +62,7 @@ pub struct TerminalSettings {
 impl Default for TerminalSettings {
     fn default() -> Self {
         Self {
-            font_size: 12.0,
+            font_size: 13.0,
             scrollback: 10_000,
             shell: None,
         }

@@ -4,7 +4,7 @@ use egui::{
 use lazecode_core::{AppModel, Command, PanelTab};
 
 use crate::icons::{paint as paint_icon, Icon};
-use crate::runtime::{MenuKind, MenuState, UiRuntime};
+use crate::runtime::{MenuKind, UiRuntime};
 use crate::theme::Theme;
 use crate::widgets::{icon_button, live_dot, text_clipped};
 
@@ -71,7 +71,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             badge.center(),
             Align2::CENTER_CENTER,
             &initials,
-            FontId::proportional(9.5),
+            FontId::proportional(11.0),
             tone,
         );
     } else {
@@ -84,7 +84,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             Pos2::new(x + 150.0, top + 22.0),
         ),
         &project_name,
-        FontId::proportional(12.5),
+        FontId::proportional(13.5),
         p.text,
         Align2::LEFT_CENTER,
     );
@@ -95,7 +95,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             Pos2::new(x + 198.0, top + 34.0),
         ),
         &project_path,
-        FontId::proportional(9.5),
+        FontId::proportional(11.0),
         p.text3,
         Align2::LEFT_CENTER,
     );
@@ -110,11 +110,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     );
     if response.clicked() {
         if has_project {
-            rt.menu = Some(MenuState {
-                kind: MenuKind::Project,
-                anchor: project_rect,
-                payload: None,
-            });
+            rt.toggle_menu(MenuKind::Project, project_rect, None);
         } else {
             open_project_dialog = true;
         }
@@ -184,7 +180,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 Pos2::new(branch_rect.right() - 36.0, branch_rect.bottom()),
             ),
             &branch,
-            FontId::proportional(11.5),
+            FontId::proportional(13.0),
             p.text2,
             Align2::LEFT_CENTER,
         );
@@ -194,7 +190,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 Pos2::new(bx, branch_rect.center().y),
                 Align2::LEFT_CENTER,
                 format!("↑{ahead}"),
-                FontId::monospace(9.0),
+                FontId::monospace(11.0),
                 p.green,
             );
             bx += 20.0;
@@ -204,7 +200,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 Pos2::new(bx, branch_rect.center().y),
                 Align2::LEFT_CENTER,
                 format!("↓{behind}"),
-                FontId::monospace(9.0),
+                FontId::monospace(11.0),
                 p.orange,
             );
         }
@@ -218,11 +214,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             p.text3,
         );
         if response.clicked() && has_project {
-            rt.menu = Some(MenuState {
-                kind: MenuKind::Branch,
-                anchor: branch_rect,
-                payload: None,
-            });
+            rt.toggle_menu(MenuKind::Branch, branch_rect, None);
         }
         // Worktree chip next to the branch chip.
         let wt_width = 66.0;
@@ -263,16 +255,12 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 Pos2::new(worktree_rect.right() - 6.0, worktree_rect.bottom()),
             ),
             &worktree_name,
-            FontId::proportional(10.5),
+            FontId::proportional(12.5),
             p.text2,
             Align2::LEFT_CENTER,
         );
         if worktree_response.clicked() && has_project {
-            rt.menu = Some(MenuState {
-                kind: MenuKind::Worktree,
-                anchor: worktree_rect,
-                payload: None,
-            });
+            rt.toggle_menu(MenuKind::Worktree, worktree_rect, None);
         }
         worktree_response.on_hover_text(crate::tr!(
             model,
@@ -334,7 +322,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         } else {
             format!("{total} running")
         },
-        FontId::proportional(11.0),
+        FontId::proportional(12.0),
         if total > 0 { p.text2 } else { p.text3 },
     );
     if response.clicked() {
@@ -391,7 +379,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 "Search files, projects, commands",
                 "搜索文件、项目与命令"
             ),
-            FontId::proportional(11.5),
+            FontId::proportional(12.5),
             p.text3,
             Align2::LEFT_CENTER,
         );

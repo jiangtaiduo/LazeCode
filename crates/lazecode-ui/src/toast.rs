@@ -56,7 +56,7 @@ pub fn draw(ui: &mut Ui, model: &AppModel, _rt: &mut UiRuntime, theme: &Theme, s
                 Pos2::new(rect.right() - 12.0, rect.bottom()),
             ),
             &toast.message,
-            FontId::proportional(11.5),
+            FontId::proportional(12.5),
             p.text.gamma_multiply(alpha),
             Align2::LEFT_CENTER,
         );

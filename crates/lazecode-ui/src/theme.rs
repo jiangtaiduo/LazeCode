@@ -268,10 +268,10 @@ impl Theme {
         ctx.style_mut_of(egui_theme, |style| {
             style.text_styles = [
                 (TextStyle::Heading, FontId::proportional(20.0)),
-                (TextStyle::Body, FontId::proportional(13.0)),
-                (TextStyle::Button, FontId::proportional(12.5)),
-                (TextStyle::Small, FontId::proportional(11.0)),
-                (TextStyle::Monospace, FontId::monospace(12.0)),
+                (TextStyle::Body, FontId::proportional(13.5)),
+                (TextStyle::Button, FontId::proportional(13.0)),
+                (TextStyle::Small, FontId::proportional(12.0)),
+                (TextStyle::Monospace, FontId::monospace(13.0)),
             ]
             .into();
             style.spacing.item_spacing = egui::vec2(6.0, 4.0);
@@ -396,10 +396,10 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-pub const BODY: f32 = 13.0;
-pub const SMALL: f32 = 11.5;
-pub const TINY: f32 = 10.0;
-pub const MONO: f32 = 12.0;
+pub const BODY: f32 = 13.5;
+pub const SMALL: f32 = 12.5;
+pub const TINY: f32 = 11.5;
+pub const MONO: f32 = 13.0;
 
 pub fn body_font() -> FontId {
     FontId::proportional(BODY)

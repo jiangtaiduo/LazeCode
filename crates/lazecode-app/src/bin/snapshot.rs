@@ -99,6 +99,20 @@ fn main() -> anyhow::Result<()> {
             .unwrap_or_default();
             runtime.search.searched = true;
         }
+        "branch_menu" => {
+            runtime.open_menu(
+                lazecode_ui::MenuKind::Branch,
+                egui::Rect::from_min_size(egui::pos2(200.0, 10.0), egui::vec2(100.0, 24.0)),
+                None,
+            );
+        }
+        "project_menu" => {
+            runtime.open_menu(
+                lazecode_ui::MenuKind::Project,
+                egui::Rect::from_min_size(egui::pos2(70.0, 10.0), egui::vec2(120.0, 24.0)),
+                None,
+            );
+        }
         _ => {}
     }
     let ctx = egui::Context::default();

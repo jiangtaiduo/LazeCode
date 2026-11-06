@@ -228,7 +228,7 @@ pub fn primary_button(
         ui.painter(),
         text_rect,
         label,
-        FontId::proportional(12.5),
+        FontId::proportional(13.0),
         text_color,
         Align2::CENTER_CENTER,
     );
@@ -276,7 +276,7 @@ pub fn secondary_button(
         ui.painter(),
         text_rect,
         label,
-        FontId::proportional(12.0),
+        FontId::proportional(12.5),
         p.text2,
         Align2::CENTER_CENTER,
     );
@@ -354,7 +354,7 @@ pub fn section_label(painter: &Painter, pos: Pos2, text: &str, theme: &Theme) {
         pos,
         Align2::LEFT_CENTER,
         text.to_uppercase(),
-        FontId::proportional(9.5),
+        FontId::proportional(11.0),
         theme.palette.text3,
     );
 }

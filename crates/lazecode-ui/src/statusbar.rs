@@ -9,7 +9,7 @@ use crate::widgets::{live_dot, text_clipped};
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, rect: Rect) {
     let p = theme.palette;
     let painter = ui.painter();
-    let font = FontId::proportional(10.5);
+    let font = FontId::proportional(12.0);
     let y = rect.center().y;
     let mut x = rect.left() + 10.0;
 
@@ -71,7 +71,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             Pos2::new(rect.right() - 12.0, y),
             Align2::RIGHT_CENTER,
             format!("LazeCode {}", model.version),
-            FontId::monospace(9.0),
+            FontId::monospace(11.0),
             p.text3,
         );
         return;
@@ -146,7 +146,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             Pos2::new(x, y),
             Align2::LEFT_CENTER,
             format!("↑{ahead}"),
-            FontId::monospace(9.5),
+            FontId::monospace(11.0),
             p.green,
         );
         x += 24.0;
@@ -156,16 +156,12 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             Pos2::new(x, y),
             Align2::LEFT_CENTER,
             format!("↓{behind}"),
-            FontId::monospace(9.5),
+            FontId::monospace(11.0),
             p.orange,
         );
     }
     if response.clicked() {
-        rt.menu = Some(crate::runtime::MenuState {
-            kind: crate::runtime::MenuKind::Branch,
-            anchor: branch_rect,
-            payload: None,
-        });
+        rt.toggle_menu(crate::runtime::MenuKind::Branch, branch_rect, None);
     }
 
     let mut x = branch_rect.right() + 10.0;
@@ -246,12 +242,12 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             } else {
                 format!("Ln {}, Col {}", info.3, info.4)
             },
-            FontId::monospace(10.0),
+            FontId::monospace(11.5),
             p.text3,
         ));
     }
     right_items.push((encoding.clone(), font.clone(), p.text3));
-    right_items.push((eol.clone(), FontId::monospace(9.5), p.text3));
+    right_items.push((eol.clone(), FontId::monospace(11.0), p.text3));
     right_items.push((language.clone(), font.clone(), p.text3));
     for (label, item_font, color) in right_items.into_iter().rev() {
         let width = crate::widgets::text_width(ui.painter(), &label, item_font.clone());

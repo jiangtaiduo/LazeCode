@@ -402,6 +402,8 @@ pub struct ProjectState {
     pub log_seed: Vec<Option<String>>,
     /// True while another page fetch is in flight.
     pub log_paging: bool,
+    /// True if the history walk has reached the root commit (no more commits to load).
+    pub log_reached_end: bool,
     pub log_branch: Option<String>,
     pub selected_commit: Option<String>,
     pub commit_details: Option<CommitDetails>,
@@ -497,6 +499,7 @@ impl ProjectState {
             log_loaded: 0,
             log_seed: Vec::new(),
             log_paging: false,
+            log_reached_end: false,
             log_branch: None,
             selected_commit: None,
             commit_details: None,

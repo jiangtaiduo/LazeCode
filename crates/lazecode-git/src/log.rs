@@ -122,7 +122,7 @@ fn log_from_tips(
     let limit = if options.limit == 0 {
         300
     } else {
-        options.limit.min(5_000)
+        options.limit.min(100_000)
     };
     let walk = repo.rev_walk(tips.iter().copied());
     // `git log`'s topo order keeps parents after children so lane graphs

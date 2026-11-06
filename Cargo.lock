@@ -3394,6 +3394,7 @@ dependencies = [
  "lazecode-git",
  "lazecode-terminal",
  "lazecode-text",
+ "libc",
  "log",
  "unicode-width",
 ]

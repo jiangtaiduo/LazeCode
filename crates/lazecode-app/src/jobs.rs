@@ -227,9 +227,6 @@ impl JobQueue {
             log_query_fingerprint(&query),
             offset
         );
-        if !self.in_flight.insert(key.clone()) {
-            return;
-        }
         let job_root = root.clone();
         self.spawn("log", key, move || {
             let options = log_options_from_query(&query, &job_root, LOG_PAGE_SIZE, offset);
@@ -1437,7 +1434,7 @@ impl JobQueue {
                 let Some(project) = model.active_project() else {
                     return;
                 };
-                if project.log_paging || project.log_reached_end {
+                if project.log_reached_end {
                     return;
                 }
                 let root = project.root.clone();
@@ -2277,5 +2274,31 @@ mod tests {
             .unwrap();
         run_and_apply(&mut queue, completion);
         assert!(!queue.in_flight.contains("git:/repo"));
+    }
+    #[test]
+    fn refresh_log_spawns_and_completes_job() {
+        let mut queue = JobQueue::new(Arc::new(NoopNotifier));
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        queue.refresh_log(root.clone(), lazecode_core::LogQuery::default(), 0);
+        let completion = queue
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("refresh_log should produce completion");
+        let key = completion.key.clone();
+        let mut model = empty_model();
+        let mut project = ProjectState::open(root, &Settings::default(), None).unwrap();
+        project.log_paging = true;
+        model.projects.push(project);
+        model.active_project = Some(0);
+        let mut runtime = UiRuntime::default();
+        queue.apply(&mut model, &mut runtime, completion);
+        assert!(!queue.in_flight.contains(&key));
+        assert!(!model.projects[0].log.is_empty());
+        assert!(!model.projects[0].log_paging);
     }
 }

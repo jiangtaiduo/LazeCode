@@ -155,11 +155,18 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     crate::activity::draw(ui, model, rt, &theme, layout.activity);
     if let Some(sidebar) = layout.sidebar {
         crate::sidebar::draw(ui, model, rt, &theme, sidebar);
-        splitter_vertical(ui, model, rt, &theme, sidebar.right());
+        splitter_vertical(ui, model, rt, &theme, sidebar.y_range(), sidebar.right());
     }
     crate::editor::draw(ui, model, rt, &theme, layout.editor);
     if let Some(panel) = layout.panel {
-        splitter_horizontal(ui, model, rt, &theme, panel.top() - SPLITTER * 0.5);
+        splitter_horizontal(
+            ui,
+            model,
+            rt,
+            &theme,
+            panel.x_range(),
+            panel.top() - SPLITTER * 0.5,
+        );
         crate::panel::draw(ui, model, rt, &theme, panel);
     }
     crate::statusbar::draw(ui, model, rt, &theme, layout.status);
@@ -179,11 +186,15 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     rt.last_frame = std::time::Instant::now();
 }
 
-fn splitter_vertical(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, x: f32) {
-    let rect = Rect::from_min_max(
-        pos2(x - 3.0, ui.max_rect().top()),
-        pos2(x + 3.0, ui.max_rect().bottom()),
-    );
+fn splitter_vertical(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    y_range: egui::Rangef,
+    x: f32,
+) {
+    let rect = Rect::from_min_max(pos2(x - 3.0, y_range.min), pos2(x + 3.0, y_range.max));
     let response = ui.interact(
         rect,
         ui.scope_id().with("sidebar-splitter"),
@@ -194,7 +205,7 @@ fn splitter_vertical(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, them
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         ui.painter().vline(
             x - 0.5,
-            ui.max_rect().y_range(),
+            y_range,
             egui::Stroke::new(2.0, theme.palette.accent),
         );
     }
@@ -214,11 +225,12 @@ fn splitter_horizontal(
     model: &mut AppModel,
     rt: &mut UiRuntime,
     theme: &Theme,
+    x_range: egui::Rangef,
     y: f32,
 ) {
     let rect = Rect::from_min_max(
-        pos2(ui.max_rect().left(), y - 2.0),
-        pos2(ui.max_rect().right(), y + SPLITTER + 2.0),
+        pos2(x_range.min, y - 2.0),
+        pos2(x_range.max, y + SPLITTER + 2.0),
     );
     let response = ui.interact(
         rect,
@@ -229,7 +241,7 @@ fn splitter_horizontal(
     if active {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
         ui.painter().hline(
-            ui.max_rect().x_range(),
+            x_range,
             y + SPLITTER * 0.5,
             egui::Stroke::new(2.0, theme.palette.accent),
         );

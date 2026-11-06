@@ -11,7 +11,6 @@ use crate::theme::{Theme, SMALL, TINY};
 use crate::widgets::{checkbox, icon_button, live_dot, primary_button, text_clipped};
 
 const HEAD_H: f32 = 36.0;
-const BAR_H: f32 = 32.0;
 const FOOT_H: f32 = 25.0;
 const ROW_H: f32 = 25.0;
 
@@ -70,85 +69,6 @@ fn side_head(
     clicked
 }
 
-fn project_bar(ui: &mut Ui, model: &AppModel, theme: &Theme, rect: Rect) {
-    let p = theme.palette;
-    let project = model.active_project().unwrap();
-    let changes = project.changes().len();
-    let running = project
-        .worktrees
-        .iter()
-        .flat_map(|worktree| worktree.terminals.iter())
-        .filter(|terminal| terminal.session.is_running())
-        .count();
-    let tone = Color32::from_rgb(project.tone.0, project.tone.1, project.tone.2);
-    ui.painter()
-        .rect_filled(rect, 0.0, p.panel2.gamma_multiply(0.55));
-    let icon_rect = Rect::from_center_size(
-        Pos2::new(rect.left() + 17.0, rect.center().y),
-        Vec2::splat(15.0),
-    );
-    paint_icon(ui.painter(), icon_rect, Icon::Worktree, tone);
-    text_clipped(
-        ui.painter(),
-        Rect::from_min_max(
-            Pos2::new(rect.left() + 30.0, rect.top()),
-            Pos2::new(rect.left() + 120.0, rect.bottom()),
-        ),
-        &project.name,
-        FontId::proportional(13.0),
-        p.text2,
-        Align2::LEFT_CENTER,
-    );
-    let count_rect = Rect::from_center_size(
-        Pos2::new(rect.left() + 132.0, rect.center().y),
-        Vec2::new(22.0, 15.0),
-    );
-    ui.painter().rect_filled(
-        count_rect,
-        egui::CornerRadius::same(7),
-        if changes > 0 { p.accent_soft } else { p.panel },
-    );
-    ui.painter().text(
-        count_rect.center(),
-        Align2::CENTER_CENTER,
-        changes.to_string(),
-        FontId::monospace(11.0),
-        if changes > 0 { p.accent } else { p.text3 },
-    );
-    if running > 0 {
-        live_dot(
-            ui.painter(),
-            Pos2::new(rect.right() - 62.0, rect.center().y),
-            true,
-            p.running,
-        );
-        ui.painter().text(
-            Pos2::new(rect.right() - 53.0, rect.center().y),
-            Align2::LEFT_CENTER,
-            running.to_string(),
-            FontId::monospace(11.0),
-            p.running,
-        );
-    }
-    let branch_rect = Rect::from_min_max(
-        Pos2::new(rect.right() - 160.0, rect.top() + 4.0),
-        Pos2::new(rect.right() - 8.0, rect.bottom() - 4.0),
-    );
-    text_clipped(
-        ui.painter(),
-        branch_rect,
-        &project.branch(),
-        FontId::proportional(12.0),
-        p.text3,
-        Align2::RIGHT_CENTER,
-    );
-    ui.painter().hline(
-        rect.x_range(),
-        rect.bottom() - 0.5,
-        Stroke::new(1.0, p.border_soft),
-    );
-}
-
 fn file_tone(path: &str, theme: &Theme) -> Color32 {
     let p = theme.palette;
     match path.rsplit('.').next().unwrap_or_default() {
@@ -188,15 +108,10 @@ fn explorer(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             }
         }
     }
-    let bar = Rect::from_min_size(
-        Pos2::new(rect.left(), head.bottom()),
-        Vec2::new(rect.width(), BAR_H),
-    );
-    project_bar(ui, model, theme, bar);
 
     let foot = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - FOOT_H), rect.max);
     let list = Rect::from_min_max(
-        Pos2::new(rect.left(), bar.bottom()),
+        Pos2::new(rect.left(), head.bottom()),
         Pos2::new(rect.right(), foot.top()),
     );
     ui.painter().rect_filled(list, 0.0, p.sidebar);
@@ -633,11 +548,6 @@ fn source_control(
             _ => {}
         }
     }
-    let bar = Rect::from_min_size(
-        Pos2::new(rect.left(), head.bottom()),
-        Vec2::new(rect.width(), BAR_H),
-    );
-    project_bar(ui, model, theme, bar);
 
     let project = model.active_project().unwrap();
     let changes = project.changes().to_vec();
@@ -654,7 +564,7 @@ fn source_control(
         rect.max,
     );
     let list = Rect::from_min_max(
-        Pos2::new(rect.left(), bar.bottom()),
+        Pos2::new(rect.left(), head.bottom()),
         Pos2::new(rect.right(), dock.top()),
     );
 

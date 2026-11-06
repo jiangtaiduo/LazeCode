@@ -882,13 +882,22 @@ fn draw_file_inner(
             );
         }
 
-        // Cursor + preedit.
-        if focused {
+        // Cursor + preedit + IME activation.
+        if focused && !overlays_open {
             let line = cursor.line.min(lines.saturating_sub(1));
             let line_text = doc.line_content(line);
             let vcol = Document::visual_col(&line_text, cursor.col, tab_w);
             let x = content.left() + vcol as f32 * char_w - doc.scroll_x;
             let y = content.top() + (line as f32 - doc.scroll_line) * line_h;
+            let cursor_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(char_w, line_h));
+            ui.ctx().output_mut(|o| {
+                o.ime = Some(egui::output::IMEOutput {
+                    purpose: egui::IMEPurpose::Normal,
+                    rect: content,
+                    cursor_rect,
+                    should_interrupt_composition: false,
+                });
+            });
             if y + line_h > content.top() && y < content.bottom() && x >= content.left() - 1.0 {
                 let time = ui.input(|input| input.time);
                 let blink = ((time * 1.4) as i64 % 2) == 0;

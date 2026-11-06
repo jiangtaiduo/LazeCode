@@ -93,7 +93,13 @@ fn frame(ui: &Ui, rect: Rect, theme: &Theme) {
     );
 }
 
-fn outside_click(ui: &Ui, rect: Rect) -> bool {
+fn should_dismiss(ui: &Ui, rect: Rect, opened_frame: u64, current_frame: u64) -> bool {
+    if ui.input(|input| input.key_pressed(Key::Escape)) {
+        return true;
+    }
+    if opened_frame == current_frame {
+        return false;
+    }
     ui.input(|input| {
         input.pointer.any_click()
             && input
@@ -120,7 +126,7 @@ fn draw_project_menu(
         Pos2::new(rect.left() + 14.0, rect.top() + 20.0),
         Align2::LEFT_CENTER,
         crate::tr!(model, "Switch project", "切换项目"),
-        FontId::proportional(11.0),
+        FontId::proportional(12.5),
         p.text3,
     );
     ui.painter().text(
@@ -131,7 +137,7 @@ fn draw_project_menu(
         } else {
             format!("{count} open")
         },
-        FontId::monospace(9.0),
+        FontId::monospace(11.0),
         p.text3,
     );
     let mut y = rect.top() + 34.0;
@@ -166,7 +172,7 @@ fn draw_project_menu(
             avatar.center(),
             Align2::CENTER_CENTER,
             &project.initials,
-            FontId::proportional(9.5),
+            FontId::proportional(11.0),
             tone,
         );
         text_clipped(
@@ -176,7 +182,7 @@ fn draw_project_menu(
                 Pos2::new(row.right() - 58.0, row.top() + 23.0),
             ),
             &project.name,
-            FontId::proportional(12.0),
+            FontId::proportional(13.0),
             p.text,
             Align2::LEFT_CENTER,
         );
@@ -187,7 +193,7 @@ fn draw_project_menu(
                 Pos2::new(row.right() - 58.0, row.bottom() - 4.0),
             ),
             &project.root.display().to_string(),
-            FontId::proportional(9.0),
+            FontId::proportional(11.0),
             p.text3,
             Align2::LEFT_CENTER,
         );
@@ -291,7 +297,7 @@ fn draw_project_menu(
         model.switch_project(index);
         rt.clear_terminal_cache();
     }
-    if outside_click(ui, rect) {
+    if should_dismiss(ui, rect, menu.opened_frame, rt.frame_count) {
         close = true;
     }
     if !close {
@@ -319,7 +325,7 @@ fn draw_worktree_menu(
         Pos2::new(rect.left() + 14.0, rect.top() + 18.0),
         Align2::LEFT_CENTER,
         crate::tr!(model, "Worktrees", "工作树"),
-        FontId::proportional(11.0),
+        FontId::proportional(12.5),
         p.text3,
     );
     ui.painter().text(
@@ -330,7 +336,7 @@ fn draw_worktree_menu(
         } else {
             format!("{count} attached")
         },
-        FontId::monospace(9.0),
+        FontId::monospace(11.0),
         p.text3,
     );
     let mut close = false;
@@ -363,7 +369,7 @@ fn draw_worktree_menu(
                         Pos2::new(row.left() + 12.0, row.top() + 9.0),
                         Align2::LEFT_CENTER,
                         &worktree.name,
-                        FontId::proportional(11.0),
+                        FontId::proportional(13.0),
                         p.text,
                     );
                     text_clipped(
@@ -373,7 +379,7 @@ fn draw_worktree_menu(
                             Pos2::new(row.right() - 30.0, row.bottom()),
                         ),
                         &branch,
-                        FontId::monospace(9.0),
+                        FontId::monospace(11.5),
                         p.text3,
                         Align2::LEFT_CENTER,
                     );
@@ -457,7 +463,7 @@ fn draw_worktree_menu(
         rt.clear_terminal_cache();
         close = true;
     }
-    if outside_click(ui, rect) {
+    if should_dismiss(ui, rect, menu.opened_frame, rt.frame_count) {
         close = true;
     }
     if !close {
@@ -517,7 +523,7 @@ fn draw_log_branch_menu(
         Pos2::new(rect.left() + 14.0, rect.top() + 18.0),
         Align2::LEFT_CENTER,
         crate::tr!(model, "Log branch filter", "日志分支过滤"),
-        FontId::proportional(11.0),
+        FontId::proportional(12.5),
         p.text3,
     );
     let pick_title = if is_author_menu {
@@ -529,7 +535,7 @@ fn draw_log_branch_menu(
         Pos2::new(rect.left() + 14.0, rect.top() + 18.0),
         Align2::LEFT_CENTER,
         pick_title,
-        FontId::proportional(11.0),
+        FontId::proportional(12.5),
         p.text3,
     );
     let mut pick: Option<Option<String>> = None;
@@ -554,7 +560,7 @@ fn draw_log_branch_menu(
                         Pos2::new(row.left() + 14.0, row.center().y),
                         Align2::LEFT_CENTER,
                         crate::tr!(model, "All authors", "全部作者"),
-                        FontId::proportional(10.5),
+                        FontId::proportional(12.5),
                         p.text,
                     );
                     if active.is_empty() {
@@ -589,7 +595,7 @@ fn draw_log_branch_menu(
                             Pos2::new(row.left() + 32.0, row.center().y),
                             Align2::LEFT_CENTER,
                             name,
-                            FontId::proportional(10.5),
+                            FontId::proportional(12.5),
                             p.text,
                         );
                         if active == *name {
@@ -629,7 +635,7 @@ fn draw_log_branch_menu(
                     Pos2::new(row.left() + 32.0, row.center().y),
                     Align2::LEFT_CENTER,
                     crate::tr!(model, "All branches", "全部分支"),
-                    FontId::proportional(10.5),
+                    FontId::proportional(12.5),
                     p.text,
                 );
                 if active == "__all__" {
@@ -662,7 +668,7 @@ fn draw_log_branch_menu(
                         Pos2::new(row.left() + 32.0, row.center().y),
                         Align2::LEFT_CENTER,
                         name,
-                        FontId::proportional(10.5),
+                        FontId::proportional(12.5),
                         p.text,
                     );
                     if active == *name {
@@ -696,7 +702,7 @@ fn draw_log_branch_menu(
                     Pos2::new(row.left() + 32.0, row.center().y),
                     Align2::LEFT_CENTER,
                     crate::tr!(model, "Current branch only", "仅当前分支"),
-                    FontId::proportional(10.5),
+                    FontId::proportional(12.5),
                     p.text,
                 );
                 if active.is_empty() {
@@ -724,7 +730,7 @@ fn draw_log_branch_menu(
         }
         close = true;
     }
-    if outside_click(ui, rect) {
+    if should_dismiss(ui, rect, menu.opened_frame, rt.frame_count) {
         close = true;
     }
     if !close {
@@ -762,7 +768,7 @@ fn draw_commit_menu(
         Pos2::new(rect.left() + 14.0, rect.top() + 16.0),
         Align2::LEFT_CENTER,
         &commit.short,
-        FontId::monospace(10.0),
+        FontId::monospace(11.5),
         p.accent,
     );
     let mut action: Option<u8> = None;
@@ -800,7 +806,7 @@ fn draw_commit_menu(
             Pos2::new(row.left() + 8.0, row.center().y),
             Align2::LEFT_CENTER,
             *label,
-            FontId::proportional(10.5),
+            FontId::proportional(12.5),
             p.text2,
         );
         if response.clicked() {
@@ -868,7 +874,7 @@ fn draw_commit_menu(
         }
         close = true;
     }
-    if outside_click(ui, rect) {
+    if should_dismiss(ui, rect, menu.opened_frame, rt.frame_count) {
         close = true;
     }
     if !close {
@@ -940,7 +946,7 @@ fn draw_branch_context_menu(
         Pos2::new(rect.left() + 14.0, rect.top() + 16.0),
         Align2::LEFT_CENTER,
         &name,
-        FontId::monospace(10.0),
+        FontId::monospace(11.5),
         p.accent,
     );
     let mut action: Option<u8> = None;
@@ -960,7 +966,7 @@ fn draw_branch_context_menu(
             Pos2::new(row.left() + 8.0, row.center().y),
             Align2::LEFT_CENTER,
             *label,
-            FontId::proportional(10.5),
+            FontId::proportional(12.5),
             p.text2,
         );
         if response.clicked() {
@@ -981,7 +987,7 @@ fn draw_branch_context_menu(
         Pos2::new(fav_row.left() + 8.0, fav_row.center().y),
         Align2::LEFT_CENTER,
         fav_label,
-        FontId::proportional(10.5),
+        FontId::proportional(12.5),
         p.text2,
     );
     if fav_response.clicked() {
@@ -1034,7 +1040,7 @@ fn draw_branch_context_menu(
         }
         close = true;
     }
-    if outside_click(ui, rect) {
+    if should_dismiss(ui, rect, menu.opened_frame, rt.frame_count) {
         close = true;
     }
     if !close {
@@ -1148,7 +1154,7 @@ fn draw_tree_context_menu(
         Pos2::new(rect.left() + 14.0, rect.top() + 16.0),
         Align2::LEFT_CENTER,
         display_name,
-        FontId::monospace(9.5),
+        FontId::monospace(11.5),
         p.accent,
     );
 
@@ -1169,7 +1175,7 @@ fn draw_tree_context_menu(
             Pos2::new(row.left() + 10.0, row.center().y),
             Align2::LEFT_CENTER,
             *label,
-            FontId::proportional(10.0),
+            FontId::proportional(12.5),
             if *code == 5 { p.rose } else { p.text },
         );
         if response.clicked() {
@@ -1276,7 +1282,7 @@ fn draw_tree_context_menu(
         }
         close = true;
     }
-    if outside_click(ui, rect) {
+    if should_dismiss(ui, rect, menu.opened_frame, rt.frame_count) {
         close = true;
     }
     if !close {
@@ -1303,7 +1309,7 @@ fn draw_branch_menu(
         Pos2::new(rect.left() + 14.0, rect.top() + 18.0),
         Align2::LEFT_CENTER,
         crate::tr!(model, "Branches", "分支"),
-        FontId::proportional(11.0),
+        FontId::proportional(12.5),
         p.text3,
     );
     let mut close = false;
@@ -1331,7 +1337,7 @@ fn draw_branch_menu(
         TextEdit::singleline(&mut query)
             .frame(egui::Frame::NONE)
             .hint_text(crate::tr!(model, "Filter branches", "过滤分支"))
-            .font(FontId::proportional(10.5)),
+            .font(FontId::proportional(12.0)),
     );
     if query_response.changed() {
         model.projects[index].branch_query = query.clone();
@@ -1357,7 +1363,7 @@ fn draw_branch_menu(
             .show(ui, |ui| {
                 for branch in &branches {
                     let (row, response) = ui
-                        .allocate_exact_size(Vec2::new(ui.available_width(), 25.0), Sense::click());
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::click());
                     if response.hovered() {
                         ui.painter()
                             .rect_filled(row, egui::CornerRadius::same(4), p.hover);
@@ -1382,7 +1388,7 @@ fn draw_branch_menu(
                             Pos2::new(row.right() - 56.0, row.bottom()),
                         ),
                         &branch.name,
-                        FontId::proportional(10.5),
+                        FontId::proportional(12.5),
                         if branch.remote { p.text2 } else { p.text },
                         Align2::LEFT_CENTER,
                     );
@@ -1391,7 +1397,7 @@ fn draw_branch_menu(
                             Pos2::new(row.right() - 8.0, row.center().y),
                             Align2::RIGHT_CENTER,
                             crate::tr!(model, "remote", "远程"),
-                            FontId::monospace(8.0),
+                            FontId::monospace(10.5),
                             p.text3,
                         );
                     }
@@ -1457,7 +1463,7 @@ fn draw_branch_menu(
         rt.dialog = DialogState::DeleteBranch { name, error: None };
         close = true;
     }
-    if outside_click(ui, rect) {
+    if should_dismiss(ui, rect, menu.opened_frame, rt.frame_count) {
         close = true;
     }
     if !close {
@@ -1547,7 +1553,7 @@ fn draw_agent_menu(
             model.queue(Command::NewTerminalCommand { title, command });
         }
     }
-    if outside_click(ui, rect) {
+    if should_dismiss(ui, rect, rt.agent_menu_frame, rt.frame_count) {
         close = true;
     }
     if !close {

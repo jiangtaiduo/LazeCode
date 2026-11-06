@@ -13,7 +13,7 @@ use crate::widgets::{checkbox, icon_button, live_dot, primary_button, text_clipp
 const HEAD_H: f32 = 36.0;
 const BAR_H: f32 = 32.0;
 const FOOT_H: f32 = 25.0;
-const ROW_H: f32 = 23.0;
+const ROW_H: f32 = 25.0;
 
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, rect: Rect) {
     let p = theme.palette;
@@ -24,7 +24,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             rect.center(),
             Align2::CENTER_CENTER,
             text,
-            FontId::proportional(11.5),
+            FontId::proportional(12.5),
             p.text3,
         );
         return;
@@ -48,7 +48,7 @@ fn side_head(
         Pos2::new(rect.left() + 14.0, rect.center().y),
         Align2::LEFT_CENTER,
         title,
-        FontId::proportional(11.0),
+        FontId::proportional(12.5),
         p.text3,
     );
     let mut right = rect.right() - 8.0;
@@ -95,7 +95,7 @@ fn project_bar(ui: &mut Ui, model: &AppModel, theme: &Theme, rect: Rect) {
             Pos2::new(rect.left() + 120.0, rect.bottom()),
         ),
         &project.name,
-        FontId::proportional(11.5),
+        FontId::proportional(13.0),
         p.text2,
         Align2::LEFT_CENTER,
     );
@@ -112,7 +112,7 @@ fn project_bar(ui: &mut Ui, model: &AppModel, theme: &Theme, rect: Rect) {
         count_rect.center(),
         Align2::CENTER_CENTER,
         changes.to_string(),
-        FontId::monospace(9.0),
+        FontId::monospace(11.0),
         if changes > 0 { p.accent } else { p.text3 },
     );
     if running > 0 {
@@ -126,7 +126,7 @@ fn project_bar(ui: &mut Ui, model: &AppModel, theme: &Theme, rect: Rect) {
             Pos2::new(rect.right() - 53.0, rect.center().y),
             Align2::LEFT_CENTER,
             running.to_string(),
-            FontId::monospace(9.5),
+            FontId::monospace(11.0),
             p.running,
         );
     }
@@ -138,7 +138,7 @@ fn project_bar(ui: &mut Ui, model: &AppModel, theme: &Theme, rect: Rect) {
         ui.painter(),
         branch_rect,
         &project.branch(),
-        FontId::proportional(10.5),
+        FontId::proportional(12.0),
         p.text3,
         Align2::RIGHT_CENTER,
     );
@@ -255,7 +255,7 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
         TextEdit::singleline(&mut filter_value)
             .frame(egui::Frame::NONE)
             .hint_text(crate::tr!(model, "Filter files", "过滤文件"))
-            .font(FontId::proportional(11.0)),
+            .font(FontId::proportional(12.5)),
     );
     if response.changed() {
         model.ui.tree_filter = filter_value;
@@ -365,7 +365,7 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
                     ui.painter(),
                     text_rect,
                     &row.name,
-                    FontId::proportional(11.5),
+                    FontId::proportional(13.0),
                     if row.kind == NodeKind::Folder {
                         p.text2
                     } else {
@@ -378,7 +378,7 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
                         Pos2::new(draw_rect.right() - 14.0, draw_rect.center().y),
                         Align2::CENTER_CENTER,
                         letter.to_string(),
-                        FontId::monospace(9.5),
+                        FontId::monospace(11.0),
                         match letter {
                             'U' => p.green,
                             'D' => p.rose,
@@ -388,14 +388,14 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
                     );
                 }
                 if response.secondary_clicked() {
-                    rt.menu = Some(crate::runtime::MenuState {
-                        kind: crate::runtime::MenuKind::TreeContext {
+                    rt.open_menu(
+                        crate::runtime::MenuKind::TreeContext {
                             project: active_index,
                             is_dir: matches!(row.kind, NodeKind::Folder),
                         },
-                        anchor: response.rect,
-                        payload: Some(row.path.to_string_lossy().to_string()),
-                    });
+                        response.rect,
+                        Some(row.path.to_string_lossy().to_string()),
+                    );
                 }
                 if response.clicked() {
                     match row.kind {
@@ -485,7 +485,7 @@ fn draw_tree_foot(ui: &mut Ui, model: &mut AppModel, theme: &Theme, rect: Rect) 
         } else {
             project.branch()
         },
-        FontId::proportional(10.5),
+        FontId::proportional(11.5),
         p.text3,
         Align2::LEFT_CENTER,
     );
@@ -507,7 +507,7 @@ fn draw_tree_foot(ui: &mut Ui, model: &mut AppModel, theme: &Theme, rect: Rect) 
         } else {
             crate::tr!(model, "idle", "空闲").to_string()
         },
-        FontId::proportional(10.0),
+        FontId::proportional(11.5),
         if running > 0 { p.running } else { p.text3 },
     );
 }
@@ -548,7 +548,7 @@ fn change_row(
         Pos2::new(text_left, rect.center().y - 5.0),
         Align2::LEFT_CENTER,
         name,
-        FontId::proportional(11.5),
+        FontId::proportional(13.0),
         p.text,
     );
     text_clipped(
@@ -558,7 +558,7 @@ fn change_row(
             Pos2::new(rect.right() - 108.0, rect.bottom()),
         ),
         &dir,
-        FontId::proportional(9.0),
+        FontId::proportional(11.0),
         p.text3,
         Align2::LEFT_CENTER,
     );
@@ -570,14 +570,14 @@ fn change_row(
     };
     let del_width = del
         .as_ref()
-        .map(|text| crate::widgets::text_width(ui.painter(), text, FontId::monospace(8.5)))
+        .map(|text| crate::widgets::text_width(ui.painter(), text, FontId::monospace(10.5)))
         .unwrap_or(0.0);
     let add_right = rect.right() - 24.0 - if del.is_some() { del_width + 6.0 } else { 0.0 };
     ui.painter().text(
         Pos2::new(add_right, rect.center().y),
         Align2::RIGHT_CENTER,
         format!("+{}", change.additions),
-        FontId::monospace(8.5),
+        FontId::monospace(10.5),
         p.green,
     );
     if let Some(del) = del {
@@ -585,7 +585,7 @@ fn change_row(
             Pos2::new(rect.right() - 24.0, rect.center().y),
             Align2::RIGHT_CENTER,
             del,
-            FontId::monospace(8.5),
+            FontId::monospace(10.5),
             p.rose,
         );
     }
@@ -593,7 +593,7 @@ fn change_row(
         Pos2::new(rect.right() - 8.0, rect.center().y),
         Align2::CENTER_CENTER,
         letter.to_string(),
-        FontId::monospace(10.0),
+        FontId::monospace(11.0),
         match letter {
             'U' => p.green,
             'D' => p.rose,
@@ -697,14 +697,14 @@ fn source_control(
                     model.active_project().unwrap().name
                 )
             },
-            FontId::proportional(10.5),
+            FontId::proportional(12.0),
             p.text3,
         );
         ui.painter().text(
             Pos2::new(summary.right(), summary.center().y),
             Align2::RIGHT_CENTER,
             format!("+{total_add} −{total_del}"),
-            FontId::monospace(9.0),
+            FontId::monospace(11.0),
             p.text3,
         );
         // Stage / unstage all.
@@ -930,14 +930,14 @@ fn draw_clean_state(
         Pos2::new(center.x, center.y + 34.0),
         Align2::CENTER_CENTER,
         crate::i18n::t(lang, "Working tree clean", "工作区干净"),
-        FontId::proportional(12.0),
+        FontId::proportional(13.5),
         p.text2,
     );
     ui.painter().text(
         Pos2::new(center.x, center.y + 50.0),
         Align2::CENTER_CENTER,
         crate::i18n::t(lang, "Nothing to commit", "没有可提交内容"),
-        FontId::proportional(10.5),
+        FontId::proportional(12.0),
         p.text3,
     );
     if let Some(last) = last {
@@ -960,7 +960,7 @@ fn draw_clean_state(
             Pos2::new(card.left() + 30.0, card.top() + 20.0),
             Align2::LEFT_CENTER,
             &last.short,
-            FontId::monospace(9.5),
+            FontId::monospace(11.0),
             p.accent,
         );
         text_clipped(
@@ -970,7 +970,7 @@ fn draw_clean_state(
                 Pos2::new(card.right() - 10.0, card.top() + 44.0),
             ),
             &last.message,
-            FontId::proportional(11.0),
+            FontId::proportional(12.5),
             p.text2,
             Align2::LEFT_CENTER,
         );
@@ -981,7 +981,7 @@ fn draw_clean_state(
                 Pos2::new(card.right() - 10.0, card.bottom() - 4.0),
             ),
             &format!("{} · {}", last.author, last.short),
-            FontId::proportional(9.5),
+            FontId::proportional(11.5),
             p.text3,
             Align2::LEFT_CENTER,
         );
@@ -1023,7 +1023,7 @@ fn draw_commit_dock(
         TextEdit::multiline(&mut value)
             .frame(egui::Frame::NONE)
             .hint_text(crate::tr!(model, "Commit message", "提交信息"))
-            .font(FontId::proportional(11.5))
+            .font(FontId::proportional(12.5))
             .desired_width(editor_rect.width()),
     );
     if response.changed() {
@@ -1047,7 +1047,7 @@ fn draw_commit_dock(
         Pos2::new(amend_rect.left() + 20.0, amend_rect.center().y),
         Align2::LEFT_CENTER,
         crate::tr!(model, "Amend", "修订"),
-        FontId::proportional(10.5),
+        FontId::proportional(12.0),
         p.text3,
     );
 
@@ -1063,7 +1063,7 @@ fn draw_commit_dock(
         } else {
             format!("{checked} / {} files", changes.len())
         },
-        FontId::proportional(10.0),
+        FontId::proportional(11.5),
         p.text3,
     );
 
@@ -1109,7 +1109,7 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     ) {
         match action {
             0 => {
-                rt.agent_menu = Some(Rect::from_min_size(
+                rt.toggle_agent_menu(Rect::from_min_size(
                     Pos2::new(head.right() - 36.0, head.bottom()),
                     Vec2::splat(1.0),
                 ));

@@ -75,6 +75,7 @@ pub struct MenuState {
     pub anchor: egui::Rect,
     /// Selection context (e.g. the commit a context menu targets).
     pub payload: Option<String>,
+    pub opened_frame: u64,
 }
 
 pub enum DialogState {
@@ -258,6 +259,8 @@ pub struct UiRuntime {
     pub last_frame: Instant,
     pub cursor_epoch: f64,
     pub agent_menu: Option<egui::Rect>,
+    pub agent_menu_frame: u64,
+    pub frame_count: u64,
     pub branch_create_error: Option<String>,
     pub pending_open: Option<(std::path::PathBuf, usize, usize)>,
     pub toast_created: f64,
@@ -290,6 +293,8 @@ impl Default for UiRuntime {
             last_frame: Instant::now(),
             cursor_epoch: 0.0,
             agent_menu: None,
+            agent_menu_frame: 0,
+            frame_count: 0,
             branch_create_error: None,
             pending_open: None,
             toast_created: 0.0,
@@ -300,6 +305,36 @@ impl Default for UiRuntime {
 }
 
 impl UiRuntime {
+    pub fn open_menu(&mut self, kind: MenuKind, anchor: egui::Rect, payload: Option<String>) {
+        self.menu = Some(MenuState {
+            kind,
+            anchor,
+            payload,
+            opened_frame: self.frame_count,
+        });
+    }
+
+    pub fn toggle_menu(&mut self, kind: MenuKind, anchor: egui::Rect, payload: Option<String>) {
+        if matches!(&self.menu, Some(m) if m.kind == kind) {
+            self.menu = None;
+        } else {
+            self.open_menu(kind, anchor, payload);
+        }
+    }
+
+    pub fn open_agent_menu(&mut self, anchor: egui::Rect) {
+        self.agent_menu = Some(anchor);
+        self.agent_menu_frame = self.frame_count;
+    }
+
+    pub fn toggle_agent_menu(&mut self, anchor: egui::Rect) {
+        if self.agent_menu.is_some() {
+            self.agent_menu = None;
+        } else {
+            self.open_agent_menu(anchor);
+        }
+    }
+
     pub fn set_editor_focus(&mut self, id: u64) {
         self.editor_focus = Some(id);
         self.terminal_focus = None;

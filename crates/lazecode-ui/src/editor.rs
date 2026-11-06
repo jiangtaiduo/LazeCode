@@ -175,7 +175,7 @@ fn draw_tabbar(
             ui.painter(),
             text_rect,
             &title,
-            FontId::proportional(11.5),
+            FontId::proportional(13.0),
             if is_active { p.text } else { p.text2 },
             Align2::LEFT_CENTER,
         );
@@ -190,7 +190,7 @@ fn draw_tabbar(
                 badge_rect.center(),
                 Align2::CENTER_CENTER,
                 "diff",
-                FontId::monospace(8.0),
+                FontId::monospace(10.0),
                 p.accent,
             );
         } else if dirty {
@@ -299,7 +299,7 @@ fn draw_crumbs(
             Pos2::new(x, rect.center().y),
             Align2::LEFT_CENTER,
             *part,
-            FontId::proportional(10.5),
+            FontId::proportional(12.0),
             if last { p.text2 } else { p.text3 },
         );
         x += width;
@@ -842,7 +842,7 @@ fn draw_file_inner(
                             Pos2::new(gutter.left() + 6.0, y + line_h * 0.5),
                             Align2::LEFT_CENTER,
                             format!("{} {}", bl.short, bl.author),
-                            FontId::monospace(8.5),
+                            FontId::monospace(11.0),
                             p.accent,
                         );
                     }
@@ -858,7 +858,7 @@ fn draw_file_inner(
                     Pos2::new(gutter.right() - 10.0, y + line_h * 0.5),
                     Align2::RIGHT_CENTER,
                     (line_index + 1).to_string(),
-                    FontId::monospace(font_size - 1.5),
+                    FontId::monospace((font_size - 1.5).max(11.5)),
                     if line_index == cursor.line && focused {
                         p.text3
                     } else {
@@ -1313,7 +1313,7 @@ fn draw_diff(
         Pos2::new(toolbar.left() + 30.0, toolbar.center().y),
         Align2::LEFT_CENTER,
         name,
-        FontId::proportional(11.5),
+        FontId::proportional(13.0),
         p.text,
     );
     if let Some(kind) = status {
@@ -1324,7 +1324,7 @@ fn draw_diff(
             ),
             Align2::LEFT_CENTER,
             kind.label(),
-            FontId::proportional(9.5),
+            FontId::proportional(11.5),
             p.text3,
         );
     }
@@ -1391,7 +1391,7 @@ fn draw_diff(
         Pos2::new(toolbar.center().x, toolbar.center().y),
         Align2::CENTER_CENTER,
         source_label,
-        FontId::monospace(9.5),
+        FontId::monospace(11.5),
         p.text3,
     );
 
@@ -1462,7 +1462,7 @@ fn draw_diff(
             Pos2::new(btn_x + 23.0, toolbar.center().y),
             Align2::CENTER_CENTER,
             hunk_text,
-            FontId::monospace(9.5),
+            FontId::monospace(11.5),
             p.text3,
         );
 
@@ -1748,8 +1748,8 @@ fn draw_side_by_side_diff(
 ) {
     let line_h = 18.0;
     let gutter_w = 42.0;
-    let font = FontId::monospace(11.5);
-    let char_w = mono_char_width(ui.ctx(), 11.5).max(6.0);
+    let font = FontId::monospace(13.0);
+    let char_w = mono_char_width(ui.ctx(), 13.0).max(7.0);
     super::app_ui::region(ui, body, "diff-sbs-scroll", |ui| {
         egui::ScrollArea::vertical()
             .id_salt(("diff-sbs", tab_id))
@@ -1799,7 +1799,7 @@ fn draw_side_by_side_diff(
                                 Pos2::new(left_rect.left() + gutter_w - 6.0, left_rect.center().y),
                                 Align2::RIGHT_CENTER,
                                 num_str,
-                                FontId::monospace(9.5),
+                                FontId::monospace(11.0),
                                 p.text3,
                             );
                             if is_del {
@@ -1856,7 +1856,7 @@ fn draw_side_by_side_diff(
                                 ),
                                 Align2::RIGHT_CENTER,
                                 num_str,
-                                FontId::monospace(9.5),
+                                FontId::monospace(11.0),
                                 p.text3,
                             );
                             if is_add {
@@ -1920,8 +1920,8 @@ fn draw_unified_diff(
     body: Rect,
 ) {
     let line_h = 18.0;
-    let font = FontId::monospace(11.5);
-    let char_w = mono_char_width(ui.ctx(), 11.5).max(6.0);
+    let font = FontId::monospace(13.0);
+    let char_w = mono_char_width(ui.ctx(), 13.0).max(7.0);
     super::app_ui::region(ui, body, "diff-scroll", |ui| {
         egui::ScrollArea::vertical()
             .id_salt(("diff", tab_id))
@@ -1963,14 +1963,14 @@ fn draw_unified_diff(
                             Pos2::new(row.left() + 46.0, row.center().y),
                             Align2::RIGHT_CENTER,
                             old,
-                            FontId::monospace(9.5),
+                            FontId::monospace(11.0),
                             p.text3,
                         );
                         ui.painter().text(
                             Pos2::new(row.left() + 92.0, row.center().y),
                             Align2::RIGHT_CENTER,
                             new,
-                            FontId::monospace(9.5),
+                            FontId::monospace(11.0),
                             p.text3,
                         );
                         let sign = match line.kind {
@@ -2096,7 +2096,7 @@ fn draw_find(
         TextEdit::singleline(&mut rt.find.query)
             .frame(egui::Frame::NONE)
             .hint_text(crate::i18n::t(lang, "Find", "查找"))
-            .font(FontId::proportional(11.0)),
+            .font(FontId::proportional(12.5)),
     );
     if rt.find.focus_requested {
         response.request_focus();
@@ -2129,7 +2129,7 @@ fn draw_find(
         } else {
             "0".to_string()
         },
-        FontId::monospace(9.0),
+        FontId::monospace(11.5),
         p.text3,
     );
     let close = Rect::from_center_size(
@@ -2158,7 +2158,7 @@ fn draw_find(
         TextEdit::singleline(&mut rt.find.replacement)
             .frame(egui::Frame::NONE)
             .hint_text(crate::i18n::t(lang, "Replace", "替换为"))
-            .font(FontId::proportional(11.0)),
+            .font(FontId::proportional(12.5)),
     );
 
     let replace_btn_rect = Rect::from_min_size(
@@ -2233,7 +2233,7 @@ fn draw_find(
             toggle.center(),
             Align2::CENTER_CENTER,
             label,
-            FontId::monospace(9.5),
+            FontId::monospace(11.5),
             if active { p.accent } else { p.text3 },
         );
         if response.clicked() {

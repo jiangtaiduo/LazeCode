@@ -22,5 +22,5 @@ pub mod toast;
 pub mod widgets;
 
 pub use app_ui::draw;
-pub use runtime::UiRuntime;
+pub use runtime::{MenuKind, MenuState, UiRuntime};
 pub use theme::install_fonts;

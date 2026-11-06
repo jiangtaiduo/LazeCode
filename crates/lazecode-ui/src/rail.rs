@@ -95,7 +95,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             tile_rect.center(),
             Align2::CENTER_CENTER,
             &initials,
-            FontId::proportional(11.5),
+            FontId::proportional(12.5),
             text_color,
         );
         if running > 0 {

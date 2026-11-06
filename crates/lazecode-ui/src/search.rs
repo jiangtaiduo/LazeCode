@@ -66,7 +66,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 "Search file contents across the project",
                 "在项目中搜索文件内容"
             ))
-            .font(FontId::proportional(12.0)),
+            .font(FontId::proportional(13.0)),
     );
     if state.focus_requested {
         response.request_focus();
@@ -159,7 +159,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             TextEdit::singleline(&mut state.replacement)
                 .frame(egui::Frame::NONE)
                 .hint_text(crate::tr!(model, "Replace with…", "替换为…"))
-                .font(FontId::proportional(11.5)),
+                .font(FontId::proportional(12.5)),
         );
 
         let mask_field_rect = Rect::from_min_max(
@@ -232,7 +232,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             } else {
                 crate::tr!(model, "Type a query and press Enter", "输入查询并按回车")
             },
-            FontId::proportional(11.5),
+            FontId::proportional(12.5),
             p.text3,
         );
     } else {
@@ -244,7 +244,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             } else {
                 format!("{} matches", state.results.len())
             },
-            FontId::proportional(9.5),
+            FontId::proportional(11.5),
             p.text3,
         );
     }
@@ -285,14 +285,14 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                         Pos2::new(row.left() + 26.0, row.top() + 11.0),
                         Align2::LEFT_CENTER,
                         &location,
-                        FontId::proportional(10.0),
+                        FontId::proportional(11.5),
                         p.text3,
                     );
                     ui.painter().text(
                         Pos2::new(row.left() + 26.0, row.top() + 24.0),
                         Align2::LEFT_CENTER,
                         &hit.line_text,
-                        FontId::monospace(10.5),
+                        FontId::monospace(12.0),
                         p.text2,
                     );
                     if response.clicked() {

@@ -1350,11 +1350,35 @@ fn draw_branch_menu(
         .cloned()
         .collect();
     let current = model.projects[index].branch();
+    let other_worktree_branches: std::collections::HashMap<String, String> = {
+        let active_wt_idx = model.projects[index].active_worktree;
+        let mut map = std::collections::HashMap::new();
+        for (i, wt) in model.projects[index].worktrees.iter().enumerate() {
+            if i != active_wt_idx {
+                let b = wt.branch();
+                if !b.is_empty() && b != "no branch" && !b.contains("(detached)") {
+                    map.insert(b, wt.name.clone());
+                }
+            }
+        }
+        if let Ok(wts) = lazecode_git::list_worktrees(&model.projects[index].root) {
+            let active_wt_path = &model.projects[index].active_worktree().path;
+            for wt in wts {
+                if &wt.path != active_wt_path {
+                    if let Some(b) = wt.branch {
+                        map.insert(b, wt.name);
+                    }
+                }
+            }
+        }
+        map
+    };
     let rows_rect = Rect::from_min_max(
         Pos2::new(rect.left() + 6.0, input.bottom() + 4.0),
         Pos2::new(rect.right() - 6.0, rect.bottom() - 40.0),
     );
     let mut checkout: Option<String> = None;
+    let mut switch_worktree: Option<String> = None;
     let mut delete: Option<String> = None;
     super::app_ui::region(ui, rows_rect, "branch-menu", |ui| {
         egui::ScrollArea::vertical()
@@ -1381,15 +1405,33 @@ fn draw_branch_menu(
                             p.accent,
                         );
                     }
+                    let other_wt = if !branch.remote {
+                        other_worktree_branches.get(&branch.name)
+                    } else {
+                        None
+                    };
+                    let right_cut = if other_wt.is_some() {
+                        90.0
+                    } else if branch.remote {
+                        56.0
+                    } else {
+                        32.0
+                    };
                     text_clipped(
                         ui.painter(),
                         Rect::from_min_max(
                             Pos2::new(row.left() + 20.0, row.top()),
-                            Pos2::new(row.right() - 56.0, row.bottom()),
+                            Pos2::new(row.right() - right_cut, row.bottom()),
                         ),
                         &branch.name,
                         FontId::proportional(12.5),
-                        if branch.remote { p.text2 } else { p.text },
+                        if branch.remote {
+                            p.text2
+                        } else if other_wt.is_some() {
+                            p.text3
+                        } else {
+                            p.text
+                        },
                         Align2::LEFT_CENTER,
                     );
                     if branch.remote {
@@ -1400,8 +1442,25 @@ fn draw_branch_menu(
                             FontId::monospace(10.5),
                             p.text3,
                         );
+                    } else if let Some(wt_name) = other_wt {
+                        ui.painter().text(
+                            Pos2::new(row.right() - 8.0, row.center().y),
+                            Align2::RIGHT_CENTER,
+                            format!("⎇ {wt_name}"),
+                            FontId::proportional(11.0),
+                            p.accent,
+                        );
+                        response
+                            .clone()
+                            .on_hover_text(if model.settings.language.is_zh() {
+                                format!("已被工作树 '{wt_name}' 检出，点击直接切换至该工作树")
+                            } else {
+                                format!(
+                                    "Checked out in worktree '{wt_name}'. Click to switch to it."
+                                )
+                            });
                     }
-                    if !branch.remote && !is_current {
+                    if !branch.remote && !is_current && other_wt.is_none() {
                         let delete_rect = Rect::from_center_size(
                             Pos2::new(row.right() - 14.0, row.center().y),
                             Vec2::splat(18.0),
@@ -1419,7 +1478,11 @@ fn draw_branch_menu(
                         }
                     }
                     if response.clicked() && !branch.remote && !is_current {
-                        checkout = Some(branch.name.clone());
+                        if let Some(wt_name) = other_wt {
+                            switch_worktree = Some(wt_name.clone());
+                        } else {
+                            checkout = Some(branch.name.clone());
+                        }
                     }
                 }
                 if branches.is_empty() {
@@ -1457,6 +1520,18 @@ fn draw_branch_menu(
     }
     if let Some(name) = checkout {
         model.queue(Command::CheckoutBranch(name));
+        close = true;
+    }
+    if let Some(wt_name) = switch_worktree {
+        model.queue(Command::SwitchWorktree(wt_name.clone()));
+        model.toast(
+            if model.settings.language.is_zh() {
+                format!("已切换至工作树: {wt_name}")
+            } else {
+                format!("Switched to worktree '{wt_name}'")
+            },
+            ToastKind::Info,
+        );
         close = true;
     }
     if let Some(name) = delete {

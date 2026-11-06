@@ -126,6 +126,70 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     // Branch chip only exists with an open project.
     let mut left_end = x;
     if project.is_some() {
+        // Worktree chip first (Hierarchy: Project -> Worktree -> Branch).
+        let worktree_name = project
+            .map(|project| project.active_worktree().name.clone())
+            .unwrap_or_else(|| "main".to_string());
+        let wt_width = (worktree_name.chars().count() as f32 * 7.0 + 36.0).clamp(66.0, 160.0);
+        let worktree_rect =
+            Rect::from_min_size(Pos2::new(x + 4.0, top + 7.0), Vec2::new(wt_width, 26.0));
+        let worktree_response = ui.interact(
+            worktree_rect,
+            ui.scope_id().with("worktree-chip"),
+            Sense::click(),
+        );
+        painter.rect_filled(
+            worktree_rect,
+            egui::CornerRadius::same(6),
+            if worktree_response.hovered() {
+                p.hover
+            } else {
+                p.panel2
+            },
+        );
+        painter.rect_stroke(
+            worktree_rect,
+            egui::CornerRadius::same(6),
+            Stroke::new(
+                1.0,
+                if worktree_response.hovered() {
+                    p.border_strong
+                } else {
+                    p.border
+                },
+            ),
+            StrokeKind::Inside,
+        );
+        paint_icon(
+            &painter,
+            Rect::from_center_size(
+                Pos2::new(worktree_rect.left() + 12.0, worktree_rect.center().y),
+                Vec2::splat(12.0),
+            ),
+            Icon::Worktree,
+            p.accent,
+        );
+        text_clipped(
+            &painter,
+            Rect::from_min_max(
+                Pos2::new(worktree_rect.left() + 22.0, worktree_rect.top()),
+                Pos2::new(worktree_rect.right() - 6.0, worktree_rect.bottom()),
+            ),
+            &worktree_name,
+            FontId::proportional(12.5),
+            p.text,
+            Align2::LEFT_CENTER,
+        );
+        if worktree_response.clicked() && has_project {
+            rt.toggle_menu(MenuKind::Worktree, worktree_rect, None);
+        }
+        worktree_response.on_hover_text(crate::tr!(
+            model,
+            "Switch worktree · create linked checkouts with independent consoles",
+            "切换工作树 · 可创建独立控制台的关联检出"
+        ));
+
+        // Branch chip inside the selected worktree.
         let branch = project
             .map(|project| project.branch())
             .unwrap_or_else(|| crate::tr!(model, "no repository", "无仓库").to_string());
@@ -142,8 +206,10 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             + usize::from(ahead > 0) as f32 * 24.0
             + usize::from(behind > 0) as f32 * 24.0)
             .clamp(90.0, 236.0);
-        let branch_rect =
-            Rect::from_min_size(Pos2::new(x + 4.0, top + 7.0), Vec2::new(branch_width, 26.0));
+        let branch_rect = Rect::from_min_size(
+            Pos2::new(worktree_rect.right() + 4.0, top + 7.0),
+            Vec2::new(branch_width, 26.0),
+        );
         let response = ui.interact(
             branch_rect,
             ui.scope_id().with("branch-chip"),
@@ -216,58 +282,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         if response.clicked() && has_project {
             rt.toggle_menu(MenuKind::Branch, branch_rect, None);
         }
-        // Worktree chip next to the branch chip.
-        let wt_width = 66.0;
-        let worktree_rect = Rect::from_min_size(
-            Pos2::new(branch_rect.right() + 4.0, top + 7.0),
-            Vec2::new(wt_width, 26.0),
-        );
-        let worktree_response = ui.interact(
-            worktree_rect,
-            ui.scope_id().with("worktree-chip"),
-            Sense::click(),
-        );
-        painter.rect_filled(
-            worktree_rect,
-            egui::CornerRadius::same(6),
-            if worktree_response.hovered() {
-                p.hover
-            } else {
-                p.panel2
-            },
-        );
-        paint_icon(
-            &painter,
-            Rect::from_center_size(
-                Pos2::new(worktree_rect.left() + 12.0, worktree_rect.center().y),
-                Vec2::splat(11.0),
-            ),
-            Icon::Worktree,
-            p.text3,
-        );
-        let worktree_name = project
-            .map(|project| project.active_worktree().name.clone())
-            .unwrap_or_else(|| "main".to_string());
-        text_clipped(
-            &painter,
-            Rect::from_min_max(
-                Pos2::new(worktree_rect.left() + 22.0, worktree_rect.top()),
-                Pos2::new(worktree_rect.right() - 6.0, worktree_rect.bottom()),
-            ),
-            &worktree_name,
-            FontId::proportional(12.5),
-            p.text2,
-            Align2::LEFT_CENTER,
-        );
-        if worktree_response.clicked() && has_project {
-            rt.toggle_menu(MenuKind::Worktree, worktree_rect, None);
-        }
-        worktree_response.on_hover_text(crate::tr!(
-            model,
-            "Switch worktree · create linked checkouts with independent consoles",
-            "切换工作树 · 可创建独立控制台的关联检出"
-        ));
-        left_end = worktree_rect.right() + 8.0;
+        left_end = branch_rect.right() + 8.0;
     }
 
     // Right cluster.

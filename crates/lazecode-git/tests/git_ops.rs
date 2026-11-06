@@ -325,3 +325,27 @@ fn diff_sources_commit_and_ref_and_files() {
     assert_eq!(d_files.old_text, "hello\n");
     assert_eq!(d_files.new_text, "world\n");
 }
+
+#[test]
+fn checkout_refuses_branch_checked_out_in_other_worktree() {
+    let dir = init();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "base\n").unwrap();
+    git(root, &["add", "a.txt"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    lazecode_git::create_branch(root, "side", false).unwrap();
+    let wt_dest = dir.path().join("linked-wt");
+    lazecode_git::add_worktree(root, &wt_dest, "side").unwrap();
+
+    // Trying to check out "side" from the main worktree must fail
+    let err = lazecode_git::checkout_branch(root, "side")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("already checked out in worktree"), "{err}");
+
+    // Trying to delete "side" while checked out in linked worktree must also fail
+    let del_err = lazecode_git::delete_branch(root, "side")
+        .unwrap_err()
+        .to_string();
+    assert!(del_err.contains("checked out in worktree"), "{del_err}");
+}

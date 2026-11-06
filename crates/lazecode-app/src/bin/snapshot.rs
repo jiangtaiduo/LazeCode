@@ -102,7 +102,14 @@ fn main() -> anyhow::Result<()> {
         "branch_menu" => {
             runtime.open_menu(
                 lazecode_ui::MenuKind::Branch,
-                egui::Rect::from_min_size(egui::pos2(200.0, 10.0), egui::vec2(100.0, 24.0)),
+                egui::Rect::from_min_size(egui::pos2(270.0, 10.0), egui::vec2(100.0, 24.0)),
+                None,
+            );
+        }
+        "worktree_menu" => {
+            runtime.open_menu(
+                lazecode_ui::MenuKind::Worktree,
+                egui::Rect::from_min_size(egui::pos2(190.0, 10.0), egui::vec2(80.0, 24.0)),
                 None,
             );
         }

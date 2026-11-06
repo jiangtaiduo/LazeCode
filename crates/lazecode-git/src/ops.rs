@@ -392,6 +392,18 @@ pub fn delete_branch(root: &Path, name: &str) -> Result<()> {
     if head_branch_name(&repo).as_deref() == Some(name) {
         anyhow::bail!("cannot delete the current branch");
     }
+    if let Ok(worktrees) = crate::worktree::list_worktrees(root) {
+        for wt in worktrees {
+            if let Some(ref b) = wt.branch {
+                if b == name {
+                    anyhow::bail!(
+                        "cannot delete branch '{name}': checked out in worktree '{}'",
+                        wt.name
+                    );
+                }
+            }
+        }
+    }
     if name.is_empty() {
         anyhow::bail!("branch name is empty");
     }
@@ -407,6 +419,24 @@ pub fn checkout_branch(root: &Path, name: &str) -> Result<()> {
     let name = name.trim();
     let repo = discover(root)?;
     let workdir = workdir(&repo)?;
+    if let Ok(worktrees) = crate::worktree::list_worktrees(root) {
+        let current_workdir = workdir
+            .canonicalize()
+            .unwrap_or_else(|_| workdir.to_path_buf());
+        for wt in worktrees {
+            if wt.path != current_workdir {
+                if let Some(ref b) = wt.branch {
+                    if b == name {
+                        anyhow::bail!(
+                            "cannot checkout '{name}': already checked out in worktree '{}' ({})",
+                            wt.name,
+                            wt.path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
     let full = format!("refs/heads/{name}");
     let target_ref = repo
         .find_reference(full.as_str())

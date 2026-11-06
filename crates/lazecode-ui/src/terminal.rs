@@ -321,8 +321,25 @@ pub fn draw(
         }
     }
 
-    // Cursor.
+    // Cursor & IME activation.
     if focus {
+        let (cx, cy) = if let Some(cursor) = snapshot.cursor {
+            let x = inner.left() + cursor.col as f32 * char_w;
+            let y = inner.top() + (cursor.row.min(rows.saturating_sub(1))) as f32 * line_h;
+            (x, y)
+        } else {
+            (inner.left(), inner.top())
+        };
+        let cursor_rect = Rect::from_min_size(Pos2::new(cx, cy), Vec2::new(char_w, line_h));
+        ui.ctx().output_mut(|o| {
+            o.ime = Some(egui::output::IMEOutput {
+                purpose: egui::IMEPurpose::Normal,
+                rect: inner,
+                cursor_rect,
+                should_interrupt_composition: false,
+            });
+        });
+
         if let Some(cursor) = snapshot.cursor {
             if cursor.row < rows {
                 let x = inner.left() + cursor.col as f32 * char_w;

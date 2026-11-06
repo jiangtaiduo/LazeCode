@@ -1424,6 +1424,7 @@ impl JobQueue {
                 if let Some(project) = model.active_project_mut() {
                     project.log_loading = true;
                     project.log_paging = false;
+                    project.log_reached_end = false;
                 }
                 if let Some(project) = model.active_project() {
                     let root = project.root.clone();
@@ -1436,7 +1437,7 @@ impl JobQueue {
                 let Some(project) = model.active_project() else {
                     return;
                 };
-                if project.log_paging {
+                if project.log_paging || project.log_reached_end {
                     return;
                 }
                 let root = project.root.clone();
@@ -1912,6 +1913,7 @@ impl JobQueue {
                     Ok((mut commits, lanes)) => {
                         project.log_error = None;
                         if offset == 0 {
+                            project.log_reached_end = commits.len() < LOG_PAGE_SIZE;
                             project.log = commits;
                         } else {
                             // Dedupe the page against everything already shown:
@@ -1923,6 +1925,9 @@ impl JobQueue {
                                 .map(|commit| commit.id.as_str())
                                 .collect();
                             commits.retain(|commit| !seen.contains(commit.id.as_str()));
+                            if commits.is_empty() {
+                                project.log_reached_end = true;
+                            }
                             project.log.extend(commits);
                         }
                         project.log_seed = lanes;

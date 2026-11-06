@@ -351,7 +351,6 @@ fn draw_console(
         );
         tab_x += 16.0;
     }
-    let _ = tab_x;
 
     // Right actions.
     let mut rx = head.right() - 6.0;
@@ -411,8 +410,13 @@ fn draw_console(
     }
     rx -= 4.0;
 
-    // Console tabs.
-    let mut x = head.left() + 118.0;
+    // Console tabs: positioned safely after Console subtab with a subtle vertical divider.
+    ui.painter().vline(
+        tab_x + 6.0,
+        (head.top() + 7.0)..=(head.bottom() - 7.0),
+        Stroke::new(1.0, p.border_soft),
+    );
+    let mut x = tab_x + 14.0;
     let available = (rx - x).max(0.0);
     let mut close_terminal = None;
     for (id, title, is_running, is_active) in &tabs {
@@ -1498,6 +1502,14 @@ fn draw_git_log(
     let mut select_commit = None;
     let jump_target = model.ui.git_jump_to_commit.take();
     let mut jump_to = None;
+    let mut request_more = false;
+    let has_more = !model.projects[index].log_reached_end;
+    let total_rows = filtered.len()
+        + if has_more || model.projects[index].log_paging {
+            1
+        } else {
+            0
+        };
 
     super::app_ui::region(ui, list_rect, "log-list", |ui| {
         if let Some(ref target) = jump_target {
@@ -1515,8 +1527,51 @@ fn draw_git_log(
         egui::ScrollArea::vertical()
             .id_salt("git-log")
             .auto_shrink([false, false])
-            .show_rows(ui, row_h, filtered.len(), |ui, range| {
+            .show_rows(ui, row_h, total_rows, |ui, range| {
+                if has_more && range.end >= filtered.len().saturating_sub(15) {
+                    request_more = true;
+                }
                 for row_index in range {
+                    if row_index >= filtered.len() {
+                        // Paging / Load more footer row
+                        let (row, response) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), row_h),
+                            Sense::click(),
+                        );
+                        if model.projects[index].log_paging {
+                            ui.painter().text(
+                                row.center(),
+                                Align2::CENTER_CENTER,
+                                crate::tr!(
+                                    model,
+                                    "⏳ Loading more commits...",
+                                    "⏳ 正在加载更多提交..."
+                                ),
+                                FontId::proportional(11.5),
+                                p.text3,
+                            );
+                        } else {
+                            if response.hovered() {
+                                ui.painter()
+                                    .rect_filled(row, egui::CornerRadius::same(3), p.hover);
+                            }
+                            ui.painter().text(
+                                row.center(),
+                                Align2::CENTER_CENTER,
+                                crate::tr!(
+                                    model,
+                                    "↓ Click to load more commits",
+                                    "↓ 点击加载更多提交"
+                                ),
+                                FontId::proportional(11.5),
+                                p.accent,
+                            );
+                            if response.clicked() {
+                                request_more = true;
+                            }
+                        }
+                        continue;
+                    }
                     let commit = &filtered[row_index];
                     let (row, response) = ui.allocate_exact_size(
                         Vec2::new(ui.available_width(), row_h),
@@ -1676,20 +1731,11 @@ fn draw_git_log(
         model.projects[index].selected_commit = Some(id.clone());
         model.queue(Command::SelectCommit(id));
     }
-
-    // Auto-paging: request the next page when the scroll tail is reached and
-    // every page still filled to capacity (a short page = history end).
-    let tailed = ui.input(|input| {
-        input
-            .pointer
-            .latest_pos()
-            .is_some_and(|pos| list_rect.contains(pos) && pos.y > list_rect.bottom() - 240.0)
-    });
-    let full_page = model.projects[index].log.len() >= 300;
-    if tailed
-        && full_page
+    // Auto-paging: trigger next page when scrolled near tail or clicked footer
+    if request_more
         && !model.projects[index].log_paging
         && !model.projects[index].log_loading
+        && !model.projects[index].log_reached_end
     {
         model.projects[index].log_paging = true;
         model.queue(Command::LogLoadMore);
@@ -1768,9 +1814,7 @@ fn draw_branch_list(
         Pos2::new(rect.left(), search_rect.bottom() + 4.0),
         Pos2::new(rect.right(), rect.bottom()),
     );
-    let painter = ui.painter().with_clip_rect(rows_rect);
     let row_h = 22.0;
-    let mut y = rows_rect.top() + 6.0;
 
     // Sections: Local / Remote / Tags; the roots are pre-built above.
     let expanded_dirs: std::collections::HashSet<String> =
@@ -1779,339 +1823,353 @@ fn draw_branch_list(
     let mut pick_ref: Option<(String, bool)> = None; // (name, remote)
     let mut open_menu: Option<(String, bool)> = None; // branch name + remote flag
 
-    let draw_dir_row = |painter: &egui::Painter,
-                        ui: &mut Ui,
-                        label: &str,
-                        path: &str,
-                        expanded: bool,
-                        y: &mut f32|
-     -> bool {
-        let row = Rect::from_min_size(
-            Pos2::new(rows_rect.left() + 4.0, *y),
-            Vec2::new(rows_rect.width() - 8.0, 20.0),
-        );
-        let response = ui.interact(
-            row,
-            ui.scope_id().with(("refdir", path.to_string())),
-            Sense::click(),
-        );
-        if response.hovered() {
-            painter.rect_filled(row, egui::CornerRadius::same(3), p.hover);
-        }
-        // chevron.
-        let cx = row.left() + 12.0;
-        let cy = row.center().y;
-        let color = p.text3;
-        let (dy, dx) = if expanded { (0.0, 3.0) } else { (-3.0, 0.0) };
-        painter.line_segment(
-            [
-                Pos2::new(cx - 3.5 + dx, cy - 3.5 + dy),
-                Pos2::new(cx + 3.5 + dx, cy + 3.5 + dy),
-            ],
-            Stroke::new(1.4, color),
-        );
-        painter.line_segment(
-            [
-                Pos2::new(cx + 3.5 + dx, cy + 3.5 + dy),
-                Pos2::new(cx - 3.5 + dx * 2.0, cy - 3.5 + dy * 2.0),
-            ],
-            Stroke::new(1.4, color),
-        );
-        painter.text(
-            Pos2::new(row.left() + 26.0, row.center().y),
-            Align2::LEFT_CENTER,
-            label,
-            FontId::proportional(12.5),
-            p.text2,
-        );
-        *y += row_h;
-        response.clicked()
-    };
-    // HEAD (Current Branch) section (Image #1)
-    painter.text(
-        Pos2::new(rows_rect.left() + 12.0, y + 8.0),
-        Align2::LEFT_CENTER,
-        "HEAD (Current Branch)",
-        FontId::proportional(11.0),
-        p.text3,
-    );
-    y += 22.0;
-    if let Some(curr) = branches.iter().find(|b| b.name == current) {
-        let row = Rect::from_min_size(
-            Pos2::new(rows_rect.left() + 4.0, y),
-            Vec2::new(rows_rect.width() - 8.0, 20.0),
-        );
-        let resp = ui.interact(row, ui.scope_id().with("head-branch-row"), Sense::click());
-        if resp.hovered() {
-            painter.rect_filled(row, egui::CornerRadius::same(3), p.hover);
-        }
-        let green = Color32::from_rgb(0x3f, 0xb9, 0x50);
-        paint_icon(
-            &painter,
-            Rect::from_center_size(
-                Pos2::new(row.left() + 14.0, row.center().y),
-                Vec2::splat(12.0),
-            ),
-            Icon::Branch,
-            green,
-        );
-        painter.text(
-            Pos2::new(row.left() + 26.0, row.center().y),
-            Align2::LEFT_CENTER,
-            &curr.name,
-            FontId::proportional(12.5),
-            green,
-        );
-        if curr.ahead > 0 {
-            painter.text(
-                Pos2::new(row.right() - 8.0, row.center().y),
-                Align2::RIGHT_CENTER,
-                format!("↑{}", curr.ahead),
-                FontId::monospace(11.0),
-                green,
-            );
-        }
-        if resp.clicked() {
-            pick_ref = Some((curr.name.clone(), false));
-        }
-        if resp.secondary_clicked() {
-            open_menu = Some((curr.name.clone(), false));
-        }
-        y += row_h + 6.0;
-    }
-
-    // Local tree.
-    painter.text(
-        Pos2::new(rows_rect.left() + 12.0, y + 8.0),
-        Align2::LEFT_CENTER,
-        crate::tr!(model, "Local", "本地"),
-        FontId::proportional(11.5),
-        p.text3,
-    );
-    y += 24.0;
+    let curr_branch = branches.iter().find(|b| b.name == current);
     let local_tree = lazecode_core::gitref::build_ref_tree(&local);
-    let flat = lazecode_core::gitref::flatten_ref_tree(&local_tree, &expanded_dirs);
-    for row_ref in flat.iter() {
-        if y > rows_rect.bottom() - 8.0 {
-            break;
-        }
-        if row_ref.dir {
-            if draw_dir_row(
-                &painter,
-                ui,
-                &row_ref.label,
-                &row_ref.path,
-                expanded_dirs.contains(&row_ref.path),
-                &mut y,
-            ) {
-                toggle_dir = Some(row_ref.path.clone());
-            }
-        } else if row_ref.is_tag {
-            // Tags live in their own section below.
-        } else if let Some(branch) = row_ref.branch.as_ref() {
-            let row = Rect::from_min_size(
-                Pos2::new(rows_rect.left() + 4.0, y),
-                Vec2::new(rows_rect.width() - 8.0, 20.0),
-            );
-            let indent = 18.0 + 14.0 * row_ref.depth as f32;
-            let is_current = branch.name == current;
-            let is_fav = model.favorite_branches.contains(&branch.name);
-            let response = ui.interact(
-                row,
-                ui.scope_id().with(("refrow", branch.name.clone())),
-                Sense::click(),
-            );
-            if response.hovered() {
-                painter.rect_filled(row, egui::CornerRadius::same(3), p.hover);
-            }
-            // Branch knob: filled dot for HEAD.
-            if is_current {
-                painter.circle_filled(
-                    Pos2::new(row.left() + indent, row.center().y),
-                    3.0,
-                    p.accent,
+    let local_flat = lazecode_core::gitref::flatten_ref_tree(&local_tree, &expanded_dirs);
+    let remote_tree = lazecode_core::gitref::build_ref_tree(&remote);
+    let remote_flat = lazecode_core::gitref::flatten_ref_tree(&remote_tree, &expanded_dirs);
+
+    let mut total_h = 24.0; // HEAD title
+    if curr_branch.is_some() {
+        total_h += row_h + 6.0;
+    }
+    total_h += 24.0 + local_flat.len() as f32 * row_h;
+    if !remote.is_empty() {
+        total_h += 24.0 + remote_flat.len() as f32 * row_h;
+    }
+    if !tags.is_empty() {
+        total_h += 24.0 + tags.len() as f32 * row_h;
+    }
+    total_h += 24.0;
+
+    super::app_ui::region(ui, rows_rect, "branch-tree-region", |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("branch-tree-scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let (container_rect, _) = ui
+                    .allocate_exact_size(Vec2::new(ui.available_width(), total_h), Sense::hover());
+                let mut y = container_rect.top() + 6.0;
+
+                let draw_dir_row =
+                    |ui: &mut Ui, label: &str, path: &str, expanded: bool, y: &mut f32| -> bool {
+                        let row = Rect::from_min_size(
+                            Pos2::new(container_rect.left() + 4.0, *y),
+                            Vec2::new(container_rect.width() - 8.0, 20.0),
+                        );
+                        let response = ui.interact(
+                            row,
+                            ui.scope_id().with(("refdir", path.to_string())),
+                            Sense::click(),
+                        );
+                        if response.hovered() {
+                            ui.painter()
+                                .rect_filled(row, egui::CornerRadius::same(3), p.hover);
+                        }
+                        // chevron.
+                        let cx = row.left() + 12.0;
+                        let cy = row.center().y;
+                        let color = p.text3;
+                        let (dy, dx) = if expanded { (0.0, 3.0) } else { (-3.0, 0.0) };
+                        ui.painter().line_segment(
+                            [
+                                Pos2::new(cx - 3.5 + dx, cy - 3.5 + dy),
+                                Pos2::new(cx + 3.5 + dx, cy + 3.5 + dy),
+                            ],
+                            Stroke::new(1.4, color),
+                        );
+                        ui.painter().line_segment(
+                            [
+                                Pos2::new(cx + 3.5 + dx, cy + 3.5 + dy),
+                                Pos2::new(cx - 3.5 + dx * 2.0, cy - 3.5 + dy * 2.0),
+                            ],
+                            Stroke::new(1.4, color),
+                        );
+                        ui.painter().text(
+                            Pos2::new(row.left() + 26.0, row.center().y),
+                            Align2::LEFT_CENTER,
+                            label,
+                            FontId::proportional(12.5),
+                            p.text2,
+                        );
+                        *y += row_h;
+                        response.clicked()
+                    };
+
+                // HEAD (Current Branch) section (Image #1)
+                ui.painter().text(
+                    Pos2::new(container_rect.left() + 12.0, y + 8.0),
+                    Align2::LEFT_CENTER,
+                    "HEAD (Current Branch)",
+                    FontId::proportional(11.0),
+                    p.text3,
                 );
-            } else {
-                painter.circle_stroke(
-                    Pos2::new(row.left() + indent, row.center().y),
-                    3.0,
-                    Stroke::new(1.3, p.text3),
+                y += 22.0;
+                if let Some(curr) = curr_branch {
+                    let row = Rect::from_min_size(
+                        Pos2::new(container_rect.left() + 4.0, y),
+                        Vec2::new(container_rect.width() - 8.0, 20.0),
+                    );
+                    let resp =
+                        ui.interact(row, ui.scope_id().with("head-branch-row"), Sense::click());
+                    if resp.hovered() {
+                        ui.painter()
+                            .rect_filled(row, egui::CornerRadius::same(3), p.hover);
+                    }
+                    let green = Color32::from_rgb(0x3f, 0xb9, 0x50);
+                    paint_icon(
+                        ui.painter(),
+                        Rect::from_center_size(
+                            Pos2::new(row.left() + 14.0, row.center().y),
+                            Vec2::splat(12.0),
+                        ),
+                        Icon::Branch,
+                        green,
+                    );
+                    ui.painter().text(
+                        Pos2::new(row.left() + 26.0, row.center().y),
+                        Align2::LEFT_CENTER,
+                        &curr.name,
+                        FontId::proportional(12.5),
+                        green,
+                    );
+                    if curr.ahead > 0 {
+                        ui.painter().text(
+                            Pos2::new(row.right() - 8.0, row.center().y),
+                            Align2::RIGHT_CENTER,
+                            format!("↑{}", curr.ahead),
+                            FontId::monospace(11.0),
+                            green,
+                        );
+                    }
+                    if resp.clicked() {
+                        pick_ref = Some((curr.name.clone(), false));
+                    }
+                    if resp.secondary_clicked() {
+                        open_menu = Some((curr.name.clone(), false));
+                    }
+                    y += row_h + 6.0;
+                }
+
+                // Local tree.
+                ui.painter().text(
+                    Pos2::new(container_rect.left() + 12.0, y + 8.0),
+                    Align2::LEFT_CENTER,
+                    crate::tr!(model, "Local", "本地"),
+                    FontId::proportional(11.5),
+                    p.text3,
                 );
-            }
-            let name_label = row_ref.label.clone();
-            painter.text(
-                Pos2::new(row.left() + indent + 8.0, row.center().y),
-                Align2::LEFT_CENTER,
-                &name_label,
-                FontId::proportional(12.5),
-                if is_current { p.text } else { p.text2 },
-            );
-            // ahead/behind badge.
-            if branch.ahead > 0 {
-                let badge = format!("↑{}", branch.ahead);
-                painter.text(
-                    Pos2::new(
-                        row.right() - (if is_fav { 24.0 } else { 8.0 }),
-                        row.center().y,
-                    ),
-                    Align2::RIGHT_CENTER,
-                    badge,
-                    FontId::monospace(11.0),
-                    Color32::from_rgb(0x3f, 0xb9, 0x50),
-                );
-            }
-            // Favorite star.
-            if is_fav {
-                painter.text(
-                    Pos2::new(
-                        row.right()
-                            - (if branch.ahead > 0 || branch.behind > 0 {
+                y += 24.0;
+                for row_ref in local_flat.iter() {
+                    if row_ref.dir {
+                        if draw_dir_row(
+                            ui,
+                            &row_ref.label,
+                            &row_ref.path,
+                            expanded_dirs.contains(&row_ref.path),
+                            &mut y,
+                        ) {
+                            toggle_dir = Some(row_ref.path.clone());
+                        }
+                    } else if row_ref.is_tag {
+                        // Tags live in their own section below.
+                    } else if let Some(branch) = row_ref.branch.as_ref() {
+                        let row = Rect::from_min_size(
+                            Pos2::new(container_rect.left() + 4.0, y),
+                            Vec2::new(container_rect.width() - 8.0, 20.0),
+                        );
+                        let indent = 18.0 + 14.0 * row_ref.depth as f32;
+                        let is_current = branch.name == current;
+                        let is_fav = model.favorite_branches.contains(&branch.name);
+                        let response = ui.interact(
+                            row,
+                            ui.scope_id().with(("refrow", branch.name.clone())),
+                            Sense::click(),
+                        );
+                        if response.hovered() {
+                            ui.painter()
+                                .rect_filled(row, egui::CornerRadius::same(3), p.hover);
+                        }
+                        // Branch knob: filled dot for HEAD.
+                        if is_current {
+                            ui.painter().circle_filled(
+                                Pos2::new(row.left() + indent, row.center().y),
+                                3.0,
+                                p.accent,
+                            );
+                        } else {
+                            ui.painter().circle_stroke(
+                                Pos2::new(row.left() + indent, row.center().y),
+                                3.0,
+                                Stroke::new(1.3, p.text3),
+                            );
+                        }
+                        let name_label = row_ref.label.clone();
+                        ui.painter().text(
+                            Pos2::new(row.left() + indent + 8.0, row.center().y),
+                            Align2::LEFT_CENTER,
+                            &name_label,
+                            FontId::proportional(12.5),
+                            if is_current { p.text } else { p.text2 },
+                        );
+                        // ahead/behind badge.
+                        if branch.ahead > 0 {
+                            let badge = format!("↑{}", branch.ahead);
+                            ui.painter().text(
+                                Pos2::new(
+                                    row.right() - (if is_fav { 24.0 } else { 8.0 }),
+                                    row.center().y,
+                                ),
+                                Align2::RIGHT_CENTER,
+                                badge,
+                                FontId::monospace(11.0),
+                                Color32::from_rgb(0x3f, 0xb9, 0x50),
+                            );
+                        }
+                        // Favorite star.
+                        if is_fav {
+                            let star_offset = if branch.ahead > 0 || branch.behind > 0 {
                                 56.0
                             } else {
                                 10.0
-                            }),
-                        row.center().y,
-                    ),
-                    Align2::RIGHT_CENTER,
-                    "★",
-                    FontId::proportional(10.0),
-                    p.amber,
-                );
-            }
-            if response.secondary_clicked() {
-                open_menu = Some((branch.name.clone(), branch.remote));
-            }
-            if response.clicked() {
-                pick_ref = Some((branch.name.clone(), branch.remote));
-            }
-            if response.double_clicked() {
-                model.queue(Command::CheckoutBranch(branch.name.clone()));
-            }
-        }
-    }
+                            };
+                            ui.painter().text(
+                                Pos2::new(row.right() - star_offset, row.center().y),
+                                Align2::RIGHT_CENTER,
+                                "★",
+                                FontId::proportional(10.0),
+                                p.amber,
+                            );
+                        }
+                        if response.secondary_clicked() {
+                            open_menu = Some((branch.name.clone(), branch.remote));
+                        }
+                        if response.clicked() {
+                            pick_ref = Some((branch.name.clone(), branch.remote));
+                        }
+                        if response.double_clicked() {
+                            model.queue(Command::CheckoutBranch(branch.name.clone()));
+                        }
+                        y += row_h;
+                    }
+                }
 
-    // Remote section.
-    if !remote.is_empty() {
-        painter.text(
-            Pos2::new(rows_rect.left() + 12.0, y + 8.0),
-            Align2::LEFT_CENTER,
-            crate::tr!(model, "Remote", "远程"),
-            FontId::proportional(9.5),
-            p.text3,
-        );
-        y += 24.0;
-        let remote_tree = lazecode_core::gitref::build_ref_tree(&remote);
-        let flat = lazecode_core::gitref::flatten_ref_tree(&remote_tree, &expanded_dirs);
-        for row_ref in flat.iter() {
-            if y > rows_rect.bottom() - 8.0 {
-                break;
-            }
-            if row_ref.dir {
-                if draw_dir_row(
-                    &painter,
-                    ui,
-                    &row_ref.label,
-                    &row_ref.path,
-                    expanded_dirs.contains(&row_ref.path),
-                    &mut y,
-                ) {
-                    toggle_dir = Some(row_ref.path.clone());
+                // Remote section.
+                if !remote.is_empty() {
+                    ui.painter().text(
+                        Pos2::new(container_rect.left() + 12.0, y + 8.0),
+                        Align2::LEFT_CENTER,
+                        crate::tr!(model, "Remote", "远程"),
+                        FontId::proportional(9.5),
+                        p.text3,
+                    );
+                    y += 24.0;
+                    for row_ref in remote_flat.iter() {
+                        if row_ref.dir {
+                            if draw_dir_row(
+                                ui,
+                                &row_ref.label,
+                                &row_ref.path,
+                                expanded_dirs.contains(&row_ref.path),
+                                &mut y,
+                            ) {
+                                toggle_dir = Some(row_ref.path.clone());
+                            }
+                        } else if let Some(branch) = row_ref.branch.as_ref() {
+                            let row = Rect::from_min_size(
+                                Pos2::new(container_rect.left() + 4.0, y),
+                                Vec2::new(container_rect.width() - 8.0, 20.0),
+                            );
+                            let indent = 18.0 + 14.0 * row_ref.depth as f32;
+                            let response = ui.interact(
+                                row,
+                                ui.scope_id().with(("refrow", branch.name.clone())),
+                                Sense::click(),
+                            );
+                            if response.hovered() {
+                                ui.painter()
+                                    .rect_filled(row, egui::CornerRadius::same(3), p.hover);
+                            }
+                            ui.painter().circle_stroke(
+                                Pos2::new(row.left() + indent, row.center().y),
+                                3.0,
+                                Stroke::new(1.3, p.blue),
+                            );
+                            ui.painter().text(
+                                Pos2::new(row.left() + indent + 8.0, row.center().y),
+                                Align2::LEFT_CENTER,
+                                &row_ref.label,
+                                FontId::proportional(10.5),
+                                p.text2,
+                            );
+                            if response.secondary_clicked() {
+                                open_menu = Some((branch.name.clone(), true));
+                            }
+                            if response.clicked() {
+                                pick_ref = Some((branch.name.clone(), true));
+                            }
+                            y += row_h;
+                        }
+                    }
                 }
-            } else if let Some(branch) = row_ref.branch.as_ref() {
-                let row = Rect::from_min_size(
-                    Pos2::new(rows_rect.left() + 4.0, y),
-                    Vec2::new(rows_rect.width() - 8.0, 20.0),
-                );
-                let indent = 18.0 + 14.0 * row_ref.depth as f32;
-                let response = ui.interact(
-                    row,
-                    ui.scope_id().with(("refrow", branch.name.clone())),
-                    Sense::click(),
-                );
-                if response.hovered() {
-                    painter.rect_filled(row, egui::CornerRadius::same(3), p.hover);
-                }
-                painter.circle_stroke(
-                    Pos2::new(row.left() + indent, row.center().y),
-                    3.0,
-                    Stroke::new(1.3, p.blue),
-                );
-                painter.text(
-                    Pos2::new(row.left() + indent + 8.0, row.center().y),
-                    Align2::LEFT_CENTER,
-                    &row_ref.label,
-                    FontId::proportional(10.5),
-                    p.text2,
-                );
-                if response.secondary_clicked() {
-                    open_menu = Some((branch.name.clone(), true));
-                }
-                if response.clicked() {
-                    pick_ref = Some((branch.name.clone(), true));
-                }
-                y += row_h;
-            }
-        }
-    }
 
-    // Tags section.
-    if !tags.is_empty() {
-        painter.text(
-            Pos2::new(rows_rect.left() + 12.0, y + 8.0),
-            Align2::LEFT_CENTER,
-            crate::tr!(model, "Tags", "标签"),
-            FontId::proportional(9.5),
-            p.text3,
-        );
-        y += 24.0;
-        for tag in tags.iter() {
-            if y > rows_rect.bottom() - 8.0 {
-                break;
-            }
-            let tag_target = tag_targets
-                .iter()
-                .find(|(name, _)| name == tag)
-                .map(|(_, target)| target.clone())
-                .unwrap_or_default();
-            let row = Rect::from_min_size(
-                Pos2::new(rows_rect.left() + 4.0, y),
-                Vec2::new(rows_rect.width() - 8.0, 20.0),
-            );
-            let response = ui.interact(
-                row,
-                ui.scope_id().with(("tagrow", tag.clone())),
-                Sense::click(),
-            );
-            if response.hovered() {
-                painter.rect_filled(row, egui::CornerRadius::same(3), p.hover);
-            }
-            painter.text(
-                Pos2::new(row.left() + 18.0, row.center().y),
-                Align2::LEFT_CENTER,
-                "◇",
-                FontId::proportional(10.0),
-                p.amber,
-            );
-            painter.text(
-                Pos2::new(row.left() + 32.0, row.center().y),
-                Align2::LEFT_CENTER,
-                tag,
-                FontId::proportional(10.5),
-                p.text2,
-            );
-            if !tag_target.is_empty() {
-                painter.text(
-                    Pos2::new(row.right() - 8.0, row.center().y),
-                    Align2::RIGHT_CENTER,
-                    &tag_target,
-                    FontId::monospace(8.5),
-                    p.text3,
-                );
-            }
-            y += row_h;
-        }
-    }
-
+                // Tags section.
+                if !tags.is_empty() {
+                    ui.painter().text(
+                        Pos2::new(container_rect.left() + 12.0, y + 8.0),
+                        Align2::LEFT_CENTER,
+                        crate::tr!(model, "Tags", "标签"),
+                        FontId::proportional(9.5),
+                        p.text3,
+                    );
+                    y += 24.0;
+                    for tag in tags.iter() {
+                        let tag_target = tag_targets
+                            .iter()
+                            .find(|(name, _)| name == tag)
+                            .map(|(_, target)| target.clone())
+                            .unwrap_or_default();
+                        let row = Rect::from_min_size(
+                            Pos2::new(container_rect.left() + 4.0, y),
+                            Vec2::new(container_rect.width() - 8.0, 20.0),
+                        );
+                        let response = ui.interact(
+                            row,
+                            ui.scope_id().with(("tagrow", tag.clone())),
+                            Sense::click(),
+                        );
+                        if response.hovered() {
+                            ui.painter()
+                                .rect_filled(row, egui::CornerRadius::same(3), p.hover);
+                        }
+                        ui.painter().text(
+                            Pos2::new(row.left() + 18.0, row.center().y),
+                            Align2::LEFT_CENTER,
+                            "◇",
+                            FontId::proportional(10.0),
+                            p.amber,
+                        );
+                        ui.painter().text(
+                            Pos2::new(row.left() + 32.0, row.center().y),
+                            Align2::LEFT_CENTER,
+                            tag,
+                            FontId::proportional(10.5),
+                            p.text2,
+                        );
+                        if !tag_target.is_empty() {
+                            ui.painter().text(
+                                Pos2::new(row.right() - 8.0, row.center().y),
+                                Align2::RIGHT_CENTER,
+                                &tag_target,
+                                FontId::monospace(8.5),
+                                p.text3,
+                            );
+                        }
+                        y += row_h;
+                    }
+                }
+            });
+    });
     // Apply deferred actions.
     if let Some(dir) = toggle_dir {
         if expanded_dirs.contains(&dir) {

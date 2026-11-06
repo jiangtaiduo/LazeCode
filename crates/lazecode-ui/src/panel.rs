@@ -43,14 +43,25 @@ fn paint_quad_bezier(painter: &egui::Painter, p0: Pos2, p1: Pos2, p2: Pos2, stro
     painter.add(egui::Shape::line(points, stroke));
 }
 
-#[allow(clippy::too_many_arguments)]
+fn fold_arrow_hit(start_x: f32, row_y: f32, row_h: f32, lane: usize, is_down: bool) -> Rect {
+    let x = start_x + lane_x(lane);
+    let tip_y = if is_down {
+        row_y + row_h - GRAPH_BREAK_GAP
+    } else {
+        row_y + GRAPH_BREAK_GAP
+    };
+    let base_y = if is_down { tip_y - 6.0 } else { tip_y + 6.0 };
+    let y0 = if is_down { base_y - 4.0 } else { row_y };
+    let y1 = if is_down { row_y + row_h } else { tip_y + 4.0 };
+    Rect::from_min_max(Pos2::new(x - 10.0, y0), Pos2::new(x + 10.0, y1))
+}
+
 fn draw_dag_cell(
-    ui: &mut Ui,
+    painter: &egui::Painter,
     row_rect: Rect,
     layout: Option<&GraphRowLayout>,
     brk: Option<&GraphBreak>,
     commit: &CommitInfo,
-    jump_to: &mut Option<String>,
 ) {
     let node = layout.map(|l| l.node).unwrap_or(commit.lane);
     let has_in_node = layout.map(|l| l.has_in_node).unwrap_or(true);
@@ -75,9 +86,7 @@ fn draw_dag_cell(
     let to_x = |lane: usize| -> f32 { start_x + lane_x(lane) };
     let xm = to_x(node);
 
-    let painter = ui.painter();
-
-    // Straight vertical lines
+    // 1. Straight vertical lines (continuous, extending by 0.5px to bridge subpixel gaps)
     for &lane in straight {
         if omitted.is_some_and(|o| o.contains(&lane)) {
             continue;
@@ -90,7 +99,7 @@ fn draw_dag_cell(
         let y2 = if gap_below.contains(&lane) {
             y_bottom - GRAPH_BREAK_GAP
         } else {
-            y_bottom
+            y_bottom + 0.5
         };
         let c = lane_color(lane);
         painter.line_segment(
@@ -99,7 +108,7 @@ fn draw_dag_cell(
         );
     }
 
-    // In-node vertical line
+    // 2. In-node vertical line
     if has_in_node {
         let y1 = if gap_above.contains(&node) {
             y_top + GRAPH_BREAK_GAP
@@ -113,7 +122,7 @@ fn draw_dag_cell(
         );
     }
 
-    // Incoming merge curves (ins)
+    // 3. Incoming merge curves (ins)
     for &src in ins {
         if src != node {
             let c = lane_color(src);
@@ -128,28 +137,38 @@ fn draw_dag_cell(
         }
     }
 
-    // Outgoing fork curves (outs)
+    // 4. Outgoing fork curves (outs)
     for &(from, to) in outs {
         let _ = from;
         let c = lane_color(to);
         if to == node {
+            let y2 = if gap_below.contains(&node) {
+                y_bottom - GRAPH_BREAK_GAP
+            } else {
+                y_bottom + 0.5
+            };
             painter.line_segment(
-                [Pos2::new(xm, half_y), Pos2::new(xm, y_bottom)],
+                [Pos2::new(xm, half_y), Pos2::new(xm, y2)],
                 Stroke::new(stroke_w, Color32::from_rgb(c.0, c.1, c.2)),
             );
         } else {
             let target_x = to_x(to);
+            let y2 = if gap_below.contains(&to) {
+                y_bottom - GRAPH_BREAK_GAP
+            } else {
+                y_bottom + 0.5
+            };
             paint_quad_bezier(
                 painter,
                 Pos2::new(xm, half_y),
                 Pos2::new(target_x, half_y),
-                Pos2::new(target_x, y_bottom),
+                Pos2::new(target_x, y2),
                 Stroke::new(stroke_w, Color32::from_rgb(c.0, c.1, c.2)),
             );
         }
     }
 
-    // Commit node circle
+    // 5. Commit node circle: solid filled color with 1.5px white border
     let node_c = lane_color(node);
     painter.circle_filled(
         Pos2::new(xm, half_y),
@@ -162,7 +181,7 @@ fn draw_dag_cell(
         Stroke::new(1.5, Color32::WHITE),
     );
 
-    // Fold Break Arrows (Image #2)
+    // 6. Fold break arrows (Image #2)
     if let Some(brk) = brk {
         for arrow in &brk.below {
             let x = to_x(arrow.lane);
@@ -172,24 +191,6 @@ fn draw_dag_cell(
             let color = Color32::from_rgb(c.0, c.1, c.2);
             let poly = vec![Pos2::new(x - 4.5, base_y), Pos2::new(x + 4.5, base_y), tip];
             painter.add(egui::Shape::convex_polygon(poly, color, Stroke::NONE));
-
-            let hit_rect = Rect::from_min_max(
-                Pos2::new(x - 8.0, base_y - 2.0),
-                Pos2::new(x + 8.0, y_bottom),
-            );
-            let resp = ui.interact(
-                hit_rect,
-                ui.scope_id()
-                    .with(("arrow-below", commit.id.as_str(), arrow.lane)),
-                Sense::click(),
-            );
-            if resp.hovered() {
-                resp.show_tooltip_text(&arrow.tooltip);
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-            if resp.clicked() {
-                *jump_to = Some(arrow.peer_id.clone());
-            }
         }
 
         for arrow in &brk.above {
@@ -200,22 +201,6 @@ fn draw_dag_cell(
             let color = Color32::from_rgb(c.0, c.1, c.2);
             let poly = vec![Pos2::new(x - 4.5, base_y), Pos2::new(x + 4.5, base_y), tip];
             painter.add(egui::Shape::convex_polygon(poly, color, Stroke::NONE));
-
-            let hit_rect =
-                Rect::from_min_max(Pos2::new(x - 8.0, y_top), Pos2::new(x + 8.0, base_y + 2.0));
-            let resp = ui.interact(
-                hit_rect,
-                ui.scope_id()
-                    .with(("arrow-above", commit.id.as_str(), arrow.lane)),
-                Sense::click(),
-            );
-            if resp.hovered() {
-                resp.show_tooltip_text(&arrow.tooltip);
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-            if resp.clicked() {
-                *jump_to = Some(arrow.peer_id.clone());
-            }
         }
     }
 }
@@ -1533,181 +1518,211 @@ fn draw_git_log(
     let total_rows = filtered.len();
 
     super::app_ui::region(ui, list_rect, "log-list", |ui| {
-        if let Some(ref target) = jump_target {
-            if let Some(pos) = filtered.iter().position(|c| &c.id == target) {
-                let scroll_y = pos as f32 * row_h;
-                ui.scroll_to_rect(
-                    Rect::from_min_size(
-                        Pos2::new(list_rect.left(), list_rect.top() + scroll_y),
-                        Vec2::new(list_rect.width(), row_h),
-                    ),
-                    Some(egui::Align::Center),
-                );
-            }
-        }
-        egui::ScrollArea::vertical()
+        ui.spacing_mut().item_spacing = Vec2::ZERO;
+        let scroll_offset = jump_target.as_ref().and_then(|target| {
+            filtered
+                .iter()
+                .position(|c| &c.id == target)
+                .map(|pos| (pos as f32 * row_h - list_rect.height() * 0.5 + row_h * 0.5).max(0.0))
+        });
+        let mut scroll_area = egui::ScrollArea::vertical()
             .id_salt("git-log")
-            .auto_shrink([false, false])
-            .show_rows(ui, row_h, total_rows, |ui, range| {
-                // Pure auto-scroll pagination matching main: trigger next page when scrolling within 25 rows of tail
-                if has_more && !filtered.is_empty() && range.end + 25 >= filtered.len() {
-                    request_more = true;
+            .auto_shrink([false, false]);
+        if let Some(offset) = scroll_offset {
+            scroll_area = scroll_area.vertical_scroll_offset(offset);
+        }
+        scroll_area.show_rows(ui, row_h, total_rows, |ui, range| {
+            ui.spacing_mut().item_spacing = Vec2::ZERO;
+            // Pure auto-scroll pagination matching main: trigger next page when scrolling within 25 rows of tail
+            if has_more && !filtered.is_empty() && range.end + 25 >= filtered.len() {
+                request_more = true;
+            }
+            for row_index in range {
+                let commit = &filtered[row_index];
+                let (row, response) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), row_h), Sense::click());
+                let out_of_head = commit.in_head == Some(false);
+                let is_selected = selected.as_deref() == Some(commit.id.as_str());
+                if is_selected {
+                    ui.painter()
+                        .rect_filled(row, egui::CornerRadius::ZERO, p.active);
+                } else if response.hovered() {
+                    ui.painter()
+                        .rect_filled(row, egui::CornerRadius::ZERO, p.hover);
                 }
-                for row_index in range {
-                    let commit = &filtered[row_index];
-                    let (row, response) = ui.allocate_exact_size(
-                        Vec2::new(ui.available_width(), row_h),
-                        Sense::click(),
-                    );
-                    let out_of_head = commit.in_head == Some(false);
-                    let is_selected = selected.as_deref() == Some(commit.id.as_str());
-                    if is_selected {
-                        ui.painter()
-                            .rect_filled(row, egui::CornerRadius::ZERO, p.active);
-                    } else if response.hovered() {
-                        ui.painter()
-                            .rect_filled(row, egui::CornerRadius::ZERO, p.hover);
-                    }
-                    let dim = out_of_head && !is_selected;
+                let dim = out_of_head && !is_selected;
 
-                    // 1. DAG cell
-                    let cell_rect = Rect::from_min_size(row.min, Vec2::new(dag_width, row_h));
-                    draw_dag_cell(
-                        ui,
-                        cell_rect,
-                        dag.rows.get(&commit.id),
-                        dag.breaks.get(&commit.id),
-                        commit,
-                        &mut jump_to,
-                    );
+                // 1. DAG cell (100% continuous vertical lines, zero inter-row gaps)
+                let cell_rect = Rect::from_min_size(row.min, Vec2::new(dag_width, row_h));
+                draw_dag_cell(
+                    ui.painter(),
+                    cell_rect,
+                    dag.rows.get(&commit.id),
+                    dag.breaks.get(&commit.id),
+                    commit,
+                );
 
-                    // 2. Commit subject + Merge icon + Ref badges
-                    let mut msg_x = row.left() + dag_width + 6.0;
-                    let is_merge = commit.parents.len() > 1;
-                    if is_merge {
-                        paint_icon(
-                            ui.painter(),
-                            Rect::from_center_size(
-                                Pos2::new(msg_x + 6.0, row.center().y),
-                                Vec2::splat(12.0),
-                            ),
-                            Icon::Merge,
-                            if dim {
-                                p.text3.gamma_multiply(0.65)
-                            } else {
-                                p.text3
-                            },
-                        );
-                        msg_x += 16.0;
-                    }
-
-                    let author_w = 110.0;
-                    let date_w = 110.0;
-                    let refs_w = commit
-                        .refs
-                        .iter()
-                        .take(3)
-                        .map(|r| r.label.chars().count() as f32 * 6.0 + 16.0)
-                        .sum::<f32>();
-                    let msg_right = row.right() - author_w - date_w - refs_w - 12.0;
-
-                    text_clipped(
+                // 2. Commit subject + Merge icon + Ref badges
+                let mut msg_x = row.left() + dag_width + 6.0;
+                let is_merge = commit.parents.len() > 1;
+                if is_merge {
+                    paint_icon(
                         ui.painter(),
-                        Rect::from_min_max(
-                            Pos2::new(msg_x, row.top()),
-                            Pos2::new(msg_right.max(msg_x + 60.0), row.bottom()),
+                        Rect::from_center_size(
+                            Pos2::new(msg_x + 6.0, row.center().y),
+                            Vec2::splat(12.0),
                         ),
-                        &commit.message,
-                        FontId::proportional(12.5),
+                        Icon::Merge,
                         if dim {
                             p.text3.gamma_multiply(0.65)
-                        } else if is_selected {
-                            p.text
                         } else {
-                            p.text2
+                            p.text3
                         },
-                        Align2::LEFT_CENTER,
                     );
+                    msg_x += 16.0;
+                }
 
-                    let mut badge_x = msg_right.max(msg_x + 60.0) + 4.0;
-                    for label in commit.refs.iter().take(3) {
-                        let width = label.label.chars().count() as f32 * 6.0 + 12.0;
-                        let ref_rect = Rect::from_min_size(
-                            Pos2::new(badge_x, row.center().y - 8.0),
-                            Vec2::new(width, 16.0),
-                        );
-                        let color = match label.kind {
-                            RefKind::Head => p.accent,
-                            RefKind::LocalBranch => Color32::from_rgb(0x3f, 0xb9, 0x50),
-                            RefKind::RemoteBranch => Color32::from_rgb(0xa3, 0x71, 0xf7),
-                            RefKind::Tag => Color32::from_rgb(0xe3, 0xb3, 0x41),
-                        };
-                        ui.painter().rect_filled(
-                            ref_rect,
-                            egui::CornerRadius::same(3),
-                            color.gamma_multiply(0.18),
-                        );
-                        ui.painter().rect_stroke(
-                            ref_rect,
-                            egui::CornerRadius::same(3),
-                            Stroke::new(1.0, color),
-                            egui::StrokeKind::Inside,
-                        );
-                        ui.painter().text(
-                            ref_rect.center(),
-                            Align2::CENTER_CENTER,
-                            &label.label,
-                            FontId::monospace(10.0),
-                            color,
-                        );
-                        badge_x += width + 4.0;
-                    }
+                let author_w = 110.0;
+                let date_w = 110.0;
+                let refs_w = commit
+                    .refs
+                    .iter()
+                    .take(3)
+                    .map(|r| r.label.chars().count() as f32 * 6.0 + 16.0)
+                    .sum::<f32>();
+                let msg_right = row.right() - author_w - date_w - refs_w - 12.0;
 
-                    // 3. Author column
-                    let author_rect = Rect::from_min_max(
-                        Pos2::new(row.right() - author_w - date_w, row.top()),
-                        Pos2::new(row.right() - date_w - 8.0, row.bottom()),
+                text_clipped(
+                    ui.painter(),
+                    Rect::from_min_max(
+                        Pos2::new(msg_x, row.top()),
+                        Pos2::new(msg_right.max(msg_x + 60.0), row.bottom()),
+                    ),
+                    &commit.message,
+                    FontId::proportional(12.5),
+                    if dim {
+                        p.text3.gamma_multiply(0.65)
+                    } else if is_selected {
+                        p.text
+                    } else {
+                        p.text2
+                    },
+                    Align2::LEFT_CENTER,
+                );
+
+                let mut badge_x = msg_right.max(msg_x + 60.0) + 4.0;
+                for label in commit.refs.iter().take(3) {
+                    let width = label.label.chars().count() as f32 * 6.0 + 12.0;
+                    let ref_rect = Rect::from_min_size(
+                        Pos2::new(badge_x, row.center().y - 8.0),
+                        Vec2::new(width, 16.0),
                     );
-                    text_clipped(
-                        ui.painter(),
-                        author_rect,
-                        &commit.author,
-                        FontId::proportional(11.5),
-                        p.text3,
-                        Align2::LEFT_CENTER,
+                    let color = match label.kind {
+                        RefKind::Head => p.accent,
+                        RefKind::LocalBranch => Color32::from_rgb(0x3f, 0xb9, 0x50),
+                        RefKind::RemoteBranch => Color32::from_rgb(0xa3, 0x71, 0xf7),
+                        RefKind::Tag => Color32::from_rgb(0xe3, 0xb3, 0x41),
+                    };
+                    ui.painter().rect_filled(
+                        ref_rect,
+                        egui::CornerRadius::same(3),
+                        color.gamma_multiply(0.18),
                     );
-
-                    // 4. Exact date column: YYYY/M/D HH:mm
-                    let date_str = format_commit_datetime(commit.time);
+                    ui.painter().rect_stroke(
+                        ref_rect,
+                        egui::CornerRadius::same(3),
+                        Stroke::new(1.0, color),
+                        egui::StrokeKind::Inside,
+                    );
                     ui.painter().text(
-                        Pos2::new(row.right() - 10.0, row.center().y),
-                        Align2::RIGHT_CENTER,
-                        date_str,
-                        FontId::monospace(11.0),
-                        p.text3,
+                        ref_rect.center(),
+                        Align2::CENTER_CENTER,
+                        &label.label,
+                        FontId::monospace(10.0),
+                        color,
                     );
+                    badge_x += width + 4.0;
+                }
 
-                    if response.clicked() {
-                        select_commit = Some(commit.id.clone());
-                    }
-                    if response.double_clicked() {
-                        model.queue(Command::OpenCommitDiff {
-                            commit: commit.id.clone(),
-                            path: String::new(),
-                        });
-                    }
-                    if response.secondary_clicked() {
-                        rt.open_menu(
-                            crate::runtime::MenuKind::LogCommitMenu { project: index },
-                            row,
-                            Some(commit.id.clone()),
-                        );
+                // 3. Author column
+                let author_rect = Rect::from_min_max(
+                    Pos2::new(row.right() - author_w - date_w, row.top()),
+                    Pos2::new(row.right() - date_w - 8.0, row.bottom()),
+                );
+                text_clipped(
+                    ui.painter(),
+                    author_rect,
+                    &commit.author,
+                    FontId::proportional(11.5),
+                    p.text3,
+                    Align2::LEFT_CENTER,
+                );
+
+                // 4. Exact date column: YYYY/M/D HH:mm
+                let date_str = format_commit_datetime(commit.time);
+                ui.painter().text(
+                    Pos2::new(row.right() - 10.0, row.center().y),
+                    Align2::RIGHT_CENTER,
+                    date_str,
+                    FontId::monospace(11.0),
+                    p.text3,
+                );
+
+                let mut arrow_hit: Option<&lazecode_git::dag::FoldArrowMark> = None;
+                if let Some(brk) = dag.breaks.get(&commit.id) {
+                    if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
+                        for arrow in brk.below.iter().chain(brk.above.iter()) {
+                            let is_down = matches!(arrow.dir, lazecode_git::dag::ArrowDir::Down);
+                            let hit = fold_arrow_hit(
+                                cell_rect.left(),
+                                row.top(),
+                                row_h,
+                                arrow.lane,
+                                is_down,
+                            );
+                            if hit.contains(pointer) {
+                                arrow_hit = Some(arrow);
+                                break;
+                            }
+                        }
                     }
                 }
-            });
+
+                if let Some(arrow) = arrow_hit {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    response.clone().show_tooltip_text(&arrow.tooltip);
+                    if response.clicked() {
+                        if arrow.pending {
+                            model.projects[index].log_paging = true;
+                            model.queue(Command::LogLoadMore);
+                            model.ui.git_jump_to_commit = Some(arrow.peer_id.clone());
+                        } else {
+                            select_commit = Some(arrow.peer_id.clone());
+                            jump_to = Some(arrow.peer_id.clone());
+                        }
+                    }
+                } else if response.clicked() {
+                    select_commit = Some(commit.id.clone());
+                }
+                if response.double_clicked() {
+                    model.queue(Command::OpenCommitDiff {
+                        commit: commit.id.clone(),
+                        path: String::new(),
+                    });
+                }
+                if response.secondary_clicked() {
+                    rt.open_menu(
+                        crate::runtime::MenuKind::LogCommitMenu { project: index },
+                        row,
+                        Some(commit.id.clone()),
+                    );
+                }
+            }
+        });
     });
     if let Some(target) = jump_to {
         model.ui.git_jump_to_commit = Some(target);
+        ui.ctx().request_repaint();
     }
     if let Some(id) = select_commit {
         model.projects[index].selected_commit = Some(id.clone());

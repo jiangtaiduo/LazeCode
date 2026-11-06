@@ -68,6 +68,12 @@ pub struct UiState {
     /// Deferred (project, author) author-filter pick from the overlay menu.
     /// `None` = all authors.
     pub log_author_pick: Option<(usize, Option<String>)>,
+    pub git_branches_visible: bool,
+    pub git_branches_width: f32,
+    pub git_details_width: f32,
+    pub git_details_visible: bool,
+    pub git_jump_to_commit: Option<String>,
+    pub git_log_compact: bool,
 }
 
 impl Default for UiState {
@@ -92,6 +98,12 @@ impl Default for UiState {
             focus_terminal: false,
             log_branch_pick: None,
             log_author_pick: None,
+            git_branches_visible: true,
+            git_branches_width: 210.0,
+            git_details_width: 340.0,
+            git_details_visible: true,
+            git_jump_to_commit: None,
+            git_log_compact: false,
         }
     }
 }
@@ -367,7 +379,8 @@ pub struct ProjectState {
     pub ref_dirs_expanded: std::collections::HashSet<String>,
     /// Multi-selection of the branch tree (full ref names).
     pub ref_selection: std::collections::HashSet<String>,
-    /// Snapshot of tag names for the branch tree's Tags section.
+    pub favorites: std::collections::HashSet<String>,
+    pub commit_file_dirs_expanded: std::collections::HashSet<String>,
     pub tags: Vec<String>,
     /// HEAD anchor of each tag (short hash), for the tags rows.
     pub tag_targets: Vec<(String, String)>,
@@ -472,6 +485,8 @@ impl ProjectState {
             // The branch tree starts fully expanded (PyCharm default):
             ref_dirs_expanded: init_dirs,
             ref_selection: std::collections::HashSet::new(),
+            favorites: std::collections::HashSet::new(),
+            commit_file_dirs_expanded: std::collections::HashSet::new(),
             tags: Vec::new(),
             tag_targets: Vec::new(),
             remotes: Vec::new(),

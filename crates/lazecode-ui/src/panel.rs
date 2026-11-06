@@ -1,14 +1,224 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, TextEdit, Ui, Vec2};
-use lazecode_core::{AppModel, Command, PanelTab, TabKind};
-use lazecode_git::{CommitInfo, RefKind};
+use lazecode_core::{AppModel, Command, PanelTab};
+use lazecode_git::{
+    lane_color, lane_x, CommitInfo, GraphBreak, GraphRowLayout, RefKind, GRAPH_BREAK_GAP, GRAPH_H,
+    LANE_W, NODE_R,
+};
 
 use crate::icons::{paint as paint_icon, Icon};
 use crate::runtime::UiRuntime;
 use crate::theme::Theme;
 use crate::widgets::{icon_button, live_dot, text_clipped};
 
+fn format_commit_datetime(seconds: i64) -> String {
+    unsafe {
+        let t = seconds as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() {
+            return format!("{seconds}");
+        }
+        format!(
+            "{}/{}/{} {:02}:{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min
+        )
+    }
+}
+
+fn paint_quad_bezier(painter: &egui::Painter, p0: Pos2, p1: Pos2, p2: Pos2, stroke: Stroke) {
+    const SEGMENTS: usize = 12;
+    let mut points = Vec::with_capacity(SEGMENTS + 1);
+    for i in 0..=SEGMENTS {
+        let t = i as f32 / SEGMENTS as f32;
+        let u = 1.0 - t;
+        let x = u * u * p0.x + 2.0 * u * t * p1.x + t * t * p2.x;
+        let y = u * u * p0.y + 2.0 * u * t * p1.y + t * t * p2.y;
+        points.push(Pos2::new(x, y));
+    }
+    painter.add(egui::Shape::line(points, stroke));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_dag_cell(
+    ui: &mut Ui,
+    row_rect: Rect,
+    layout: Option<&GraphRowLayout>,
+    brk: Option<&GraphBreak>,
+    commit: &CommitInfo,
+    jump_to: &mut Option<String>,
+) {
+    let node = layout.map(|l| l.node).unwrap_or(commit.lane);
+    let has_in_node = layout.map(|l| l.has_in_node).unwrap_or(true);
+    let ins = layout.map(|l| l.ins.as_slice()).unwrap_or(&[]);
+    let straight = layout.map(|l| l.straight.as_slice()).unwrap_or(&[]);
+    let outs = layout.map(|l| l.outs.as_slice()).unwrap_or(&[]);
+
+    let gap_above: HashSet<usize> = brk
+        .map(|b| b.above.iter().map(|a| a.lane).collect())
+        .unwrap_or_default();
+    let gap_below: HashSet<usize> = brk
+        .map(|b| b.below.iter().map(|a| a.lane).collect())
+        .unwrap_or_default();
+    let omitted = brk.map(|b| &b.omitted);
+
+    let start_x = row_rect.left();
+    let half_y = row_rect.center().y;
+    let y_top = row_rect.top();
+    let y_bottom = row_rect.bottom();
+    let stroke_w = 2.0;
+
+    let to_x = |lane: usize| -> f32 { start_x + lane_x(lane) };
+    let xm = to_x(node);
+
+    let painter = ui.painter();
+
+    // Straight vertical lines
+    for &lane in straight {
+        if omitted.is_some_and(|o| o.contains(&lane)) {
+            continue;
+        }
+        let y1 = if gap_above.contains(&lane) {
+            y_top + GRAPH_BREAK_GAP
+        } else {
+            y_top
+        };
+        let y2 = if gap_below.contains(&lane) {
+            y_bottom - GRAPH_BREAK_GAP
+        } else {
+            y_bottom
+        };
+        let c = lane_color(lane);
+        painter.line_segment(
+            [Pos2::new(to_x(lane), y1), Pos2::new(to_x(lane), y2)],
+            Stroke::new(stroke_w, Color32::from_rgb(c.0, c.1, c.2)),
+        );
+    }
+
+    // In-node vertical line
+    if has_in_node {
+        let y1 = if gap_above.contains(&node) {
+            y_top + GRAPH_BREAK_GAP
+        } else {
+            y_top
+        };
+        let c = lane_color(node);
+        painter.line_segment(
+            [Pos2::new(xm, y1), Pos2::new(xm, half_y)],
+            Stroke::new(stroke_w, Color32::from_rgb(c.0, c.1, c.2)),
+        );
+    }
+
+    // Incoming merge curves (ins)
+    for &src in ins {
+        if src != node {
+            let c = lane_color(src);
+            let src_x = to_x(src);
+            paint_quad_bezier(
+                painter,
+                Pos2::new(src_x, y_top),
+                Pos2::new(src_x, half_y),
+                Pos2::new(xm, half_y),
+                Stroke::new(stroke_w, Color32::from_rgb(c.0, c.1, c.2)),
+            );
+        }
+    }
+
+    // Outgoing fork curves (outs)
+    for &(from, to) in outs {
+        let _ = from;
+        let c = lane_color(to);
+        if to == node {
+            painter.line_segment(
+                [Pos2::new(xm, half_y), Pos2::new(xm, y_bottom)],
+                Stroke::new(stroke_w, Color32::from_rgb(c.0, c.1, c.2)),
+            );
+        } else {
+            let target_x = to_x(to);
+            paint_quad_bezier(
+                painter,
+                Pos2::new(xm, half_y),
+                Pos2::new(target_x, half_y),
+                Pos2::new(target_x, y_bottom),
+                Stroke::new(stroke_w, Color32::from_rgb(c.0, c.1, c.2)),
+            );
+        }
+    }
+
+    // Commit node circle
+    let node_c = lane_color(node);
+    painter.circle_filled(
+        Pos2::new(xm, half_y),
+        NODE_R,
+        Color32::from_rgb(node_c.0, node_c.1, node_c.2),
+    );
+    painter.circle_stroke(
+        Pos2::new(xm, half_y),
+        NODE_R,
+        Stroke::new(1.5, Color32::WHITE),
+    );
+
+    // Fold Break Arrows (Image #2)
+    if let Some(brk) = brk {
+        for arrow in &brk.below {
+            let x = to_x(arrow.lane);
+            let tip = Pos2::new(x, y_bottom - GRAPH_BREAK_GAP);
+            let base_y = tip.y - 6.0;
+            let c = lane_color(arrow.lane);
+            let color = Color32::from_rgb(c.0, c.1, c.2);
+            let poly = vec![Pos2::new(x - 4.5, base_y), Pos2::new(x + 4.5, base_y), tip];
+            painter.add(egui::Shape::convex_polygon(poly, color, Stroke::NONE));
+
+            let hit_rect = Rect::from_min_max(
+                Pos2::new(x - 8.0, base_y - 2.0),
+                Pos2::new(x + 8.0, y_bottom),
+            );
+            let resp = ui.interact(
+                hit_rect,
+                ui.scope_id()
+                    .with(("arrow-below", commit.id.as_str(), arrow.lane)),
+                Sense::click(),
+            );
+            if resp.hovered() {
+                resp.show_tooltip_text(&arrow.tooltip);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if resp.clicked() {
+                *jump_to = Some(arrow.peer_id.clone());
+            }
+        }
+
+        for arrow in &brk.above {
+            let x = to_x(arrow.lane);
+            let tip = Pos2::new(x, y_top + GRAPH_BREAK_GAP);
+            let base_y = tip.y + 6.0;
+            let c = lane_color(arrow.lane);
+            let color = Color32::from_rgb(c.0, c.1, c.2);
+            let poly = vec![Pos2::new(x - 4.5, base_y), Pos2::new(x + 4.5, base_y), tip];
+            painter.add(egui::Shape::convex_polygon(poly, color, Stroke::NONE));
+
+            let hit_rect =
+                Rect::from_min_max(Pos2::new(x - 8.0, y_top), Pos2::new(x + 8.0, base_y + 2.0));
+            let resp = ui.interact(
+                hit_rect,
+                ui.scope_id()
+                    .with(("arrow-above", commit.id.as_str(), arrow.lane)),
+                Sense::click(),
+            );
+            if resp.hovered() {
+                resp.show_tooltip_text(&arrow.tooltip);
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if resp.clicked() {
+                *jump_to = Some(arrow.peer_id.clone());
+            }
+        }
+    }
+}
 const HEAD_H: f32 = 33.0;
 
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, rect: Rect) {
@@ -66,26 +276,59 @@ fn draw_console(
                 .count(),
         )
     };
-    // Dock identity.
-    paint_icon(
-        ui.painter(),
-        Rect::from_center_size(
-            Pos2::new(head.left() + 16.0, head.center().y),
-            Vec2::splat(14.0),
-        ),
-        Icon::Terminal,
-        p.text2,
+    // Subtabs: Git / Log / Console
+    ui.painter().text(
+        Pos2::new(head.left() + 14.0, head.center().y),
+        Align2::LEFT_CENTER,
+        "Git",
+        FontId::proportional(13.0),
+        p.text,
+    );
+
+    let mut tab_x = head.left() + 48.0;
+    // Log subtab
+    let log_rect = Rect::from_min_size(Pos2::new(tab_x, head.top() + 5.0), Vec2::new(42.0, 23.0));
+    let log_resp = ui.interact(
+        log_rect,
+        ui.scope_id().with("console-subtab-log"),
+        Sense::click(),
+    );
+    if log_resp.hovered() {
+        ui.painter()
+            .rect_filled(log_rect, egui::CornerRadius::same(5), p.hover);
+    }
+    ui.painter().text(
+        log_rect.center(),
+        Align2::CENTER_CENTER,
+        crate::tr!(model, "Log", "日志"),
+        FontId::proportional(12.0),
+        p.text3,
+    );
+    if log_resp.clicked() {
+        model.ui.panel_tab = PanelTab::Git;
+    }
+    tab_x += 46.0;
+
+    // Console subtab (active)
+    let con_rect = Rect::from_min_size(Pos2::new(tab_x, head.top() + 5.0), Vec2::new(58.0, 23.0));
+    ui.painter()
+        .rect_filled(con_rect, egui::CornerRadius::same(5), p.panel2);
+    ui.painter().hline(
+        con_rect.x_range(),
+        con_rect.bottom() - 1.0,
+        Stroke::new(2.0, p.accent),
     );
     ui.painter().text(
-        Pos2::new(head.left() + 28.0, head.center().y),
-        Align2::LEFT_CENTER,
-        crate::tr!(model, "Consoles", "控制台"),
-        FontId::proportional(12.5),
-        p.text2,
+        con_rect.center(),
+        Align2::CENTER_CENTER,
+        crate::tr!(model, "Console", "控制台"),
+        FontId::proportional(12.0),
+        p.text,
     );
+    tab_x += 62.0;
     if count > 0 {
         let badge = Rect::from_center_size(
-            Pos2::new(head.left() + 86.0, head.center().y),
+            Pos2::new(tab_x + 10.0, head.center().y),
             Vec2::new(18.0, 14.0),
         );
         ui.painter()
@@ -97,15 +340,18 @@ fn draw_console(
             FontId::monospace(10.5),
             p.text3,
         );
+        tab_x += 22.0;
     }
     if running > 0 {
         live_dot(
             ui.painter(),
-            Pos2::new(head.left() + 106.0, head.center().y),
+            Pos2::new(tab_x + 10.0, head.center().y),
             true,
             p.running,
         );
+        tab_x += 16.0;
     }
+    let _ = tab_x;
 
     // Right actions.
     let mut rx = head.right() - 6.0;
@@ -323,28 +569,62 @@ fn draw_git_panel(
     body: Rect,
 ) {
     let p = theme.palette;
-    paint_icon(
-        ui.painter(),
-        Rect::from_center_size(
-            Pos2::new(head.left() + 16.0, head.center().y),
-            Vec2::splat(14.0),
-        ),
-        Icon::GitLog,
-        p.text2,
+    // Dock title & Subtabs: Log | Console
+    ui.painter().text(
+        Pos2::new(head.left() + 14.0, head.center().y),
+        Align2::LEFT_CENTER,
+        "Git",
+        FontId::proportional(13.0),
+        p.text,
+    );
+
+    let mut tab_x = head.left() + 48.0;
+    // Log subtab (active)
+    let log_rect = Rect::from_min_size(Pos2::new(tab_x, head.top() + 5.0), Vec2::new(42.0, 23.0));
+    ui.painter()
+        .rect_filled(log_rect, egui::CornerRadius::same(5), p.panel2);
+    ui.painter().hline(
+        log_rect.x_range(),
+        log_rect.bottom() - 1.0,
+        Stroke::new(2.0, p.accent),
     );
     ui.painter().text(
-        Pos2::new(head.left() + 28.0, head.center().y),
-        Align2::LEFT_CENTER,
-        crate::tr!(model, "Git Log", "Git 日志"),
-        FontId::proportional(12.5),
-        p.text2,
+        log_rect.center(),
+        Align2::CENTER_CENTER,
+        crate::tr!(model, "Log", "日志"),
+        FontId::proportional(12.0),
+        p.text,
     );
+    tab_x += 46.0;
+
+    // Console subtab
+    let con_rect = Rect::from_min_size(Pos2::new(tab_x, head.top() + 5.0), Vec2::new(58.0, 23.0));
+    let con_resp = ui.interact(
+        con_rect,
+        ui.scope_id().with("git-subtab-console"),
+        Sense::click(),
+    );
+    if con_resp.hovered() {
+        ui.painter()
+            .rect_filled(con_rect, egui::CornerRadius::same(5), p.hover);
+    }
+    ui.painter().text(
+        con_rect.center(),
+        Align2::CENTER_CENTER,
+        crate::tr!(model, "Console", "控制台"),
+        FontId::proportional(12.0),
+        p.text3,
+    );
+    if con_resp.clicked() {
+        model.ui.panel_tab = PanelTab::Console;
+    }
+    tab_x += 64.0;
     let scope = model
         .active_project()
         .and_then(|project| project.log_branch.clone())
         .unwrap_or_else(|| crate::tr!(model, "All branches", "所有分支").to_string());
     let scope_rect = Rect::from_min_size(
-        Pos2::new(head.left() + 80.0, head.top() + 5.0),
+        Pos2::new(tab_x, head.top() + 5.0),
         Vec2::new((scope.chars().count() as f32 * 6.2 + 38.0).min(240.0), 23.0),
     );
     ui.painter()
@@ -806,31 +1086,316 @@ fn draw_git_log(
             model.queue(Command::LogFilterChanged);
         }
     }
+    button_x += author_rect.width() + 6.0;
+
+    // Date filter chip
+    let date_label = match query.date {
+        lazecode_core::DatePreset::All => crate::tr!(model, "Date ▾", "日期 ▾").to_string(),
+        lazecode_core::DatePreset::Today => crate::tr!(model, "Today", "今天").to_string(),
+        lazecode_core::DatePreset::Week => crate::tr!(model, "This Week", "本周").to_string(),
+        lazecode_core::DatePreset::Month => crate::tr!(model, "This Month", "本月").to_string(),
+    };
+    let date_rect = Rect::from_min_size(
+        Pos2::new(button_x, filter.top() + 4.5),
+        Vec2::new(
+            (date_label.chars().count() as f32 * 7.0 + 20.0).clamp(65.0, 110.0),
+            21.0,
+        ),
+    );
+    ui.painter()
+        .rect_filled(date_rect, egui::CornerRadius::same(4), p.panel2);
     ui.painter().text(
-        Pos2::new(filter.right() - 14.0, filter.center().y),
+        date_rect.center(),
+        Align2::CENTER_CENTER,
+        &date_label,
+        FontId::proportional(12.0),
+        if query.date == lazecode_core::DatePreset::All {
+            p.text2
+        } else {
+            p.accent
+        },
+    );
+    if ui
+        .interact(
+            date_rect,
+            ui.scope_id().with("log-date-chip"),
+            Sense::click(),
+        )
+        .clicked()
+    {
+        let next_date = match query.date {
+            lazecode_core::DatePreset::All => lazecode_core::DatePreset::Today,
+            lazecode_core::DatePreset::Today => lazecode_core::DatePreset::Week,
+            lazecode_core::DatePreset::Week => lazecode_core::DatePreset::Month,
+            lazecode_core::DatePreset::Month => lazecode_core::DatePreset::All,
+        };
+        model.projects[index].log_query.date = next_date;
+        model.queue(Command::LogFilterChanged);
+    }
+    button_x += date_rect.width() + 6.0;
+
+    // Paths filter chip
+    let paths_label = if query.path.is_empty() {
+        crate::tr!(model, "Paths ▾", "路径 ▾").to_string()
+    } else {
+        format!("📁 {}", query.path)
+    };
+    let paths_rect = Rect::from_min_size(
+        Pos2::new(button_x, filter.top() + 4.5),
+        Vec2::new(
+            (paths_label.chars().count() as f32 * 7.0 + 20.0).clamp(65.0, 130.0),
+            21.0,
+        ),
+    );
+    ui.painter()
+        .rect_filled(paths_rect, egui::CornerRadius::same(4), p.panel2);
+    ui.painter().text(
+        paths_rect.center(),
+        Align2::CENTER_CENTER,
+        &paths_label,
+        FontId::proportional(12.0),
+        if query.path.is_empty() {
+            p.text2
+        } else {
+            p.accent
+        },
+    );
+
+    // Right toolbar buttons in filter bar (Image #1):
+    // Refresh, Compact graph toggle, Sort toggle, and Commit count
+    let mut frx = filter.right() - 8.0;
+    let refresh_rect =
+        Rect::from_min_size(Pos2::new(frx - 20.0, filter.top() + 5.0), Vec2::splat(20.0));
+    let refresh_resp = icon_button(ui, refresh_rect, Icon::Refresh, false, theme);
+    if refresh_resp.hovered() {
+        refresh_resp.show_tooltip_text(crate::tr!(model, "Refresh Log", "刷新日志"));
+    }
+    if refresh_resp.clicked() {
+        model.queue(Command::RefreshLog);
+    }
+    frx -= 24.0;
+
+    let compact_rect =
+        Rect::from_min_size(Pos2::new(frx - 20.0, filter.top() + 5.0), Vec2::splat(20.0));
+    let compact_resp = icon_button(
+        ui,
+        compact_rect,
+        Icon::GitLog,
+        model.ui.git_log_compact,
+        theme,
+    );
+    if compact_resp.hovered() {
+        compact_resp.show_tooltip_text(crate::tr!(model, "Toggle Compact Graph", "切换紧凑图"));
+    }
+    if compact_resp.clicked() {
+        model.ui.git_log_compact = !model.ui.git_log_compact;
+    }
+    frx -= 24.0;
+
+    let sort_rect =
+        Rect::from_min_size(Pos2::new(frx - 20.0, filter.top() + 5.0), Vec2::splat(20.0));
+    let sort_resp = icon_button(ui, sort_rect, Icon::Commit, query.topo_order, theme);
+    if sort_resp.hovered() {
+        sort_resp.show_tooltip_text(if query.topo_order {
+            crate::tr!(model, "Topological Order (Active)", "拓扑排序（已激活）")
+        } else {
+            crate::tr!(model, "Date Order (Active)", "日期排序（已激活）")
+        });
+    }
+    if sort_resp.clicked() {
+        model.projects[index].log_query.topo_order = !query.topo_order;
+        model.queue(Command::LogFilterChanged);
+    }
+    frx -= 28.0;
+
+    ui.painter().text(
+        Pos2::new(frx, filter.center().y),
         Align2::RIGHT_CENTER,
         if model.settings.language.is_zh() {
             format!("{} 个提交", log.len())
         } else {
             format!("{} commits", log.len())
         },
-        FontId::monospace(9.0),
+        FontId::monospace(9.5),
         p.text3,
     );
 
     let area = Rect::from_min_max(Pos2::new(rect.left(), filter.bottom()), rect.max);
-    let show_branches = area.width() > 720.0;
-    let show_detail = area.width() > 950.0 && details.is_some();
-    let branch_w = if show_branches { 190.0 } else { 0.0 };
-    let detail_w = if show_detail { 300.0 } else { 0.0 };
-    let branch_rect = Rect::from_min_size(area.min, Vec2::new(branch_w, area.height()));
+
+    // 1. Column 1: Vertical tool strip on the far left (26px wide)
+    let toolbar_w = 26.0;
+    let toolbar_rect = Rect::from_min_size(area.min, Vec2::new(toolbar_w, area.height()));
+
+    // 2. Column 2: Branch tree column
+    let show_branches = model.ui.git_branches_visible && area.width() > 500.0;
+    let branch_w = if show_branches {
+        model.ui.git_branches_width.clamp(140.0, 360.0)
+    } else {
+        0.0
+    };
+    let branch_rect = Rect::from_min_size(
+        Pos2::new(toolbar_rect.right(), area.top()),
+        Vec2::new(branch_w, area.height()),
+    );
+
+    // 3. Column 4: Commit details & changed files column
+    let show_detail = model.ui.git_details_visible && details.is_some() && area.width() > 700.0;
+    let detail_w = if show_detail {
+        model.ui.git_details_width.clamp(200.0, 500.0)
+    } else {
+        0.0
+    };
     let detail_rect = Rect::from_min_max(Pos2::new(area.right() - detail_w, area.top()), area.max);
+
+    // 4. Column 3: Center commit log table
     let list_rect = Rect::from_min_max(
-        Pos2::new(area.left() + branch_w, area.top()),
+        Pos2::new(branch_rect.right(), area.top()),
         Pos2::new(area.right() - detail_w, area.bottom()),
     );
 
+    // Paint vertical toolbar (PyCharm style)
+    ui.painter().rect_filled(toolbar_rect, 0.0, p.panel);
+    ui.painter().vline(
+        toolbar_rect.right() - 0.5,
+        toolbar_rect.y_range(),
+        Stroke::new(1.0, p.border_soft),
+    );
+    let mut tb_y = toolbar_rect.top() + 6.0;
+
+    // 1. Collapse / expand branches button
+    let collapse_rect = Rect::from_min_size(
+        Pos2::new(toolbar_rect.left() + 3.0, tb_y),
+        Vec2::splat(20.0),
+    );
+    let collapse_icon = if model.ui.git_branches_visible {
+        Icon::DoubleChevronLeft
+    } else {
+        Icon::DoubleChevronRight
+    };
+    if icon_button(ui, collapse_rect, collapse_icon, false, theme).clicked() {
+        model.ui.git_branches_visible = !model.ui.git_branches_visible;
+    }
+    tb_y += 24.0;
+
+    // Separator
+    ui.painter().hline(
+        (toolbar_rect.left() + 4.0)..=(toolbar_rect.right() - 4.0),
+        tb_y + 2.0,
+        Stroke::new(1.0, p.border_soft),
+    );
+    tb_y += 6.0;
+
+    // 2. New branch button (+)
+    let new_branch_rect = Rect::from_min_size(
+        Pos2::new(toolbar_rect.left() + 3.0, tb_y),
+        Vec2::splat(20.0),
+    );
+    let new_branch_resp = icon_button(ui, new_branch_rect, Icon::Plus, false, theme);
+    if new_branch_resp.hovered() {
+        new_branch_resp.show_tooltip_text(crate::tr!(model, "New Branch", "新建分支"));
+    }
+    if new_branch_resp.clicked() {
+        rt.dialog = crate::runtime::DialogState::NewBranch {
+            value: String::new(),
+            error: None,
+        };
+    }
+    tb_y += 24.0;
+
+    // 3. Update / fetch button (↓)
+    let fetch_rect = Rect::from_min_size(
+        Pos2::new(toolbar_rect.left() + 3.0, tb_y),
+        Vec2::splat(20.0),
+    );
+    let fetch_resp = icon_button(ui, fetch_rect, Icon::ArrowDown, false, theme);
+    if fetch_resp.hovered() {
+        fetch_resp.show_tooltip_text(crate::tr!(model, "Update / Fetch", "更新 / 拉取"));
+    }
+    if fetch_resp.clicked() {
+        model.queue(Command::FetchAll);
+    }
+    tb_y += 24.0;
+
+    // 4. Delete branch button (trash)
+    let del_rect = Rect::from_min_size(
+        Pos2::new(toolbar_rect.left() + 3.0, tb_y),
+        Vec2::splat(20.0),
+    );
+    let del_resp = icon_button(ui, del_rect, Icon::Trash, false, theme);
+    if del_resp.hovered() {
+        del_resp.show_tooltip_text(crate::tr!(
+            model,
+            "Delete Selected Branch",
+            "删除选中的分支"
+        ));
+    }
+    if del_resp.clicked() {
+        if let Some(target) = model.projects[index].ref_selection.iter().next() {
+            if target != &current_branch {
+                rt.dialog = crate::runtime::DialogState::DeleteBranch {
+                    name: target.clone(),
+                    error: None,
+                };
+            }
+        }
+    }
+    tb_y += 24.0;
+
+    // 5. Compare with working tree (diff)
+    let diff_rect = Rect::from_min_size(
+        Pos2::new(toolbar_rect.left() + 3.0, tb_y),
+        Vec2::splat(20.0),
+    );
+    let diff_resp = icon_button(ui, diff_rect, Icon::Diff, false, theme);
+    if diff_resp.hovered() {
+        diff_resp.show_tooltip_text(crate::tr!(
+            model,
+            "Compare with Working Tree",
+            "与工作区比较"
+        ));
+    }
+    tb_y += 24.0;
+
+    // 6. Star / Favorite button
+    let star_rect = Rect::from_min_size(
+        Pos2::new(toolbar_rect.left() + 3.0, tb_y),
+        Vec2::splat(20.0),
+    );
+    let star_resp = icon_button(ui, star_rect, Icon::Star, false, theme);
+    if star_resp.hovered() {
+        star_resp.show_tooltip_text(crate::tr!(
+            model,
+            "Favorite / Unfavorite",
+            "收藏 / 取消收藏"
+        ));
+    }
+    if star_resp.clicked() {
+        if let Some(target) = model.projects[index].ref_selection.iter().next().cloned() {
+            if model.projects[index].favorites.contains(&target) {
+                model.projects[index].favorites.remove(&target);
+            } else {
+                model.projects[index].favorites.insert(target);
+            }
+        }
+    }
+
     if show_branches {
+        let splitter_rect = Rect::from_min_size(
+            Pos2::new(branch_rect.right() - 3.0, area.top()),
+            Vec2::new(6.0, area.height()),
+        );
+        let resp = ui.interact(
+            splitter_rect,
+            ui.scope_id().with("branch-col-splitter"),
+            Sense::drag(),
+        );
+        if resp.hovered() || resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+        }
+        if resp.dragged() {
+            model.ui.git_branches_width =
+                (model.ui.git_branches_width + resp.drag_delta().x).clamp(140.0, 360.0);
+        }
         let tags = model.projects[index].tags.clone();
         let tag_targets = model.projects[index].tag_targets.clone();
         draw_branch_list(
@@ -846,6 +1411,38 @@ fn draw_git_log(
             &tag_targets,
         );
     }
+
+    if show_detail {
+        let splitter_rect = Rect::from_min_size(
+            Pos2::new(detail_rect.left() - 3.0, area.top()),
+            Vec2::new(6.0, area.height()),
+        );
+        let resp = ui.interact(
+            splitter_rect,
+            ui.scope_id().with("detail-col-splitter"),
+            Sense::drag(),
+        );
+        if resp.hovered() || resp.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+        }
+        if resp.dragged() {
+            model.ui.git_details_width =
+                (model.ui.git_details_width - resp.drag_delta().x).clamp(200.0, 500.0);
+        }
+        if let Some(details) = details.as_ref() {
+            draw_commit_detail(
+                ui,
+                model,
+                theme,
+                detail_rect,
+                details,
+                rt,
+                model.settings.language,
+                index,
+            );
+        }
+    }
+
     let filtered: Vec<CommitInfo> = log
         .into_iter()
         .filter(|commit| {
@@ -892,17 +1489,29 @@ fn draw_git_log(
         return;
     }
 
-    // Row index map for graph edges.
-    let row_by_id: HashMap<&str, usize> = filtered
-        .iter()
-        .enumerate()
-        .map(|(row, commit)| (commit.id.as_str(), row))
-        .collect();
-    let row_h = 30.0;
+    let dag = lazecode_git::compute_dag(&filtered);
+    let dag_width = (10.0 + (dag.max_lane + 1) as f32 * LANE_W).max(40.0);
+    let row_h = GRAPH_H; // 26.0!
+
     let painter = ui.painter().with_clip_rect(list_rect);
     painter.rect_filled(list_rect, 0.0, p.panel);
     let mut select_commit = None;
+    let jump_target = model.ui.git_jump_to_commit.take();
+    let mut jump_to = None;
+
     super::app_ui::region(ui, list_rect, "log-list", |ui| {
+        if let Some(ref target) = jump_target {
+            if let Some(pos) = filtered.iter().position(|c| &c.id == target) {
+                let scroll_y = pos as f32 * row_h;
+                ui.scroll_to_rect(
+                    Rect::from_min_size(
+                        Pos2::new(list_rect.left(), list_rect.top() + scroll_y),
+                        Vec2::new(list_rect.width(), row_h),
+                    ),
+                    Some(egui::Align::Center),
+                );
+            }
+        }
         egui::ScrollArea::vertical()
             .id_salt("git-log")
             .auto_shrink([false, false])
@@ -922,61 +1531,57 @@ fn draw_git_log(
                         ui.painter()
                             .rect_filled(row, egui::CornerRadius::ZERO, p.hover);
                     }
-                    // Projection: font dimming for out-of-HEAD commits.
                     let dim = out_of_head && !is_selected;
-                    // Graph lanes.
-                    let graph_x = row.left() + 18.0;
-                    let lane_gap = 12.0;
-                    for edge in &commit.edges {
-                        let color = p.lane[edge.color_lane % p.lane.len()];
-                        let x0 = graph_x + edge.from_lane as f32 * lane_gap;
-                        let x1 = graph_x + edge.to_lane as f32 * lane_gap;
-                        let target_row = edge
-                            .target_commit
-                            .as_deref()
-                            .and_then(|id| row_by_id.get(id).copied());
-                        let y1 = if let Some(target_row) = target_row {
-                            if target_row <= row_index {
-                                row.center().y
+
+                    // 1. DAG cell
+                    let cell_rect = Rect::from_min_size(row.min, Vec2::new(dag_width, row_h));
+                    draw_dag_cell(
+                        ui,
+                        cell_rect,
+                        dag.rows.get(&commit.id),
+                        dag.breaks.get(&commit.id),
+                        commit,
+                        &mut jump_to,
+                    );
+
+                    // 2. Commit subject + Merge icon + Ref badges
+                    let mut msg_x = row.left() + dag_width + 6.0;
+                    let is_merge = commit.parents.len() > 1;
+                    if is_merge {
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(msg_x + 6.0, row.center().y),
+                                Vec2::splat(12.0),
+                            ),
+                            Icon::Merge,
+                            if dim {
+                                p.text3.gamma_multiply(0.65)
                             } else {
-                                row.center().y
-                                    + ((target_row - row_index) as f32 * row_h).min(row_h * 1.05)
-                            }
-                        } else {
-                            row.bottom()
-                        };
-                        ui.painter().line_segment(
-                            [Pos2::new(x0, row.center().y), Pos2::new(x1, y1)],
-                            Stroke::new(1.4, color.gamma_multiply(0.85)),
+                                p.text3
+                            },
                         );
+                        msg_x += 16.0;
                     }
-                    let x = graph_x + commit.lane as f32 * lane_gap;
-                    let color = p.lane[commit.lane % p.lane.len()];
-                    ui.painter()
-                        .circle_filled(Pos2::new(x, row.center().y), 3.4, p.panel);
-                    ui.painter().circle_stroke(
-                        Pos2::new(x, row.center().y),
-                        3.5,
-                        Stroke::new(1.8, color),
-                    );
-                    // Hash.
-                    ui.painter().text(
-                        Pos2::new(row.left() + 62.0, row.center().y),
-                        Align2::LEFT_CENTER,
-                        &commit.short,
-                        FontId::monospace(11.5),
-                        p.accent,
-                    );
-                    // Message.
-                    let text_x = row.left() + 126.0;
+
+                    let author_w = 110.0;
+                    let date_w = 110.0;
+                    let refs_w = commit
+                        .refs
+                        .iter()
+                        .take(3)
+                        .map(|r| r.label.chars().count() as f32 * 6.0 + 16.0)
+                        .sum::<f32>();
+                    let msg_right = row.right() - author_w - date_w - refs_w - 12.0;
+
                     text_clipped(
                         ui.painter(),
                         Rect::from_min_max(
-                            Pos2::new(text_x, row.top()),
-                            Pos2::new(row.right() - 250.0, row.bottom()),
+                            Pos2::new(msg_x, row.top()),
+                            Pos2::new(msg_right.max(msg_x + 60.0), row.bottom()),
                         ),
                         &commit.message,
-                        FontId::proportional(13.0),
+                        FontId::proportional(12.5),
                         if dim {
                             p.text3.gamma_multiply(0.65)
                         } else if is_selected {
@@ -986,52 +1591,73 @@ fn draw_git_log(
                         },
                         Align2::LEFT_CENTER,
                     );
-                    // Refs near the end of the message column.
-                    let refs_right = row.right() - 250.0;
-                    for (ref_index, label) in commit.refs.iter().rev().take(2).enumerate() {
-                        let width = label.label.chars().count() as f32 * 5.8 + 10.0;
+
+                    let mut badge_x = msg_right.max(msg_x + 60.0) + 4.0;
+                    for label in commit.refs.iter().take(3) {
+                        let width = label.label.chars().count() as f32 * 6.0 + 12.0;
                         let ref_rect = Rect::from_min_size(
-                            Pos2::new(
-                                refs_right - width - ref_index as f32 * 4.0 - 6.0,
-                                row.center().y - 7.5,
-                            ),
-                            Vec2::new(width, 15.0),
+                            Pos2::new(badge_x, row.center().y - 8.0),
+                            Vec2::new(width, 16.0),
                         );
                         let color = match label.kind {
                             RefKind::Head => p.accent,
-                            RefKind::LocalBranch => p.green,
-                            RefKind::RemoteBranch => p.blue,
-                            RefKind::Tag => p.amber,
+                            RefKind::LocalBranch => Color32::from_rgb(0x3f, 0xb9, 0x50),
+                            RefKind::RemoteBranch => Color32::from_rgb(0xa3, 0x71, 0xf7),
+                            RefKind::Tag => Color32::from_rgb(0xe3, 0xb3, 0x41),
                         };
                         ui.painter().rect_filled(
                             ref_rect,
                             egui::CornerRadius::same(3),
-                            color.gamma_multiply(0.15),
+                            color.gamma_multiply(0.18),
+                        );
+                        ui.painter().rect_stroke(
+                            ref_rect,
+                            egui::CornerRadius::same(3),
+                            Stroke::new(1.0, color),
+                            egui::StrokeKind::Inside,
                         );
                         ui.painter().text(
                             ref_rect.center(),
                             Align2::CENTER_CENTER,
                             &label.label,
-                            FontId::monospace(10.5),
+                            FontId::monospace(10.0),
                             color,
                         );
+                        badge_x += width + 4.0;
                     }
-                    ui.painter().text(
-                        Pos2::new(row.right() - 160.0, row.center().y),
-                        Align2::LEFT_CENTER,
+
+                    // 3. Author column
+                    let author_rect = Rect::from_min_max(
+                        Pos2::new(row.right() - author_w - date_w, row.top()),
+                        Pos2::new(row.right() - date_w - 8.0, row.bottom()),
+                    );
+                    text_clipped(
+                        ui.painter(),
+                        author_rect,
                         &commit.author,
                         FontId::proportional(11.5),
                         p.text3,
+                        Align2::LEFT_CENTER,
                     );
+
+                    // 4. Exact date column: YYYY/M/D HH:mm
+                    let date_str = format_commit_datetime(commit.time);
                     ui.painter().text(
-                        Pos2::new(row.right() - 16.0, row.center().y),
+                        Pos2::new(row.right() - 10.0, row.center().y),
                         Align2::RIGHT_CENTER,
-                        time_ago(commit.time, model.settings.language.is_zh()),
+                        date_str,
                         FontId::monospace(11.0),
                         p.text3,
                     );
+
                     if response.clicked() {
                         select_commit = Some(commit.id.clone());
+                    }
+                    if response.double_clicked() {
+                        model.queue(Command::OpenCommitDiff {
+                            commit: commit.id.clone(),
+                            path: String::new(),
+                        });
                     }
                     if response.secondary_clicked() {
                         rt.open_menu(
@@ -1043,6 +1669,9 @@ fn draw_git_log(
                 }
             });
     });
+    if let Some(target) = jump_to {
+        model.ui.git_jump_to_commit = Some(target);
+    }
     if let Some(id) = select_commit {
         model.projects[index].selected_commit = Some(id.clone());
         model.queue(Command::SelectCommit(id));
@@ -1065,20 +1694,6 @@ fn draw_git_log(
         model.projects[index].log_paging = true;
         model.queue(Command::LogLoadMore);
         log::debug!("git log tail paged at {}", model.projects[index].log.len());
-    }
-
-    if show_detail {
-        if let Some(details) = details {
-            draw_commit_detail(
-                ui,
-                model,
-                theme,
-                detail_rect,
-                &details,
-                rt,
-                model.settings.language,
-            );
-        }
     }
 }
 
@@ -1212,6 +1827,58 @@ fn draw_branch_list(
         *y += row_h;
         response.clicked()
     };
+    // HEAD (Current Branch) section (Image #1)
+    painter.text(
+        Pos2::new(rows_rect.left() + 12.0, y + 8.0),
+        Align2::LEFT_CENTER,
+        "HEAD (Current Branch)",
+        FontId::proportional(11.0),
+        p.text3,
+    );
+    y += 22.0;
+    if let Some(curr) = branches.iter().find(|b| b.name == current) {
+        let row = Rect::from_min_size(
+            Pos2::new(rows_rect.left() + 4.0, y),
+            Vec2::new(rows_rect.width() - 8.0, 20.0),
+        );
+        let resp = ui.interact(row, ui.scope_id().with("head-branch-row"), Sense::click());
+        if resp.hovered() {
+            painter.rect_filled(row, egui::CornerRadius::same(3), p.hover);
+        }
+        let green = Color32::from_rgb(0x3f, 0xb9, 0x50);
+        paint_icon(
+            &painter,
+            Rect::from_center_size(
+                Pos2::new(row.left() + 14.0, row.center().y),
+                Vec2::splat(12.0),
+            ),
+            Icon::Branch,
+            green,
+        );
+        painter.text(
+            Pos2::new(row.left() + 26.0, row.center().y),
+            Align2::LEFT_CENTER,
+            &curr.name,
+            FontId::proportional(12.5),
+            green,
+        );
+        if curr.ahead > 0 {
+            painter.text(
+                Pos2::new(row.right() - 8.0, row.center().y),
+                Align2::RIGHT_CENTER,
+                format!("↑{}", curr.ahead),
+                FontId::monospace(11.0),
+                green,
+            );
+        }
+        if resp.clicked() {
+            pick_ref = Some((curr.name.clone(), false));
+        }
+        if resp.secondary_clicked() {
+            open_menu = Some((curr.name.clone(), false));
+        }
+        y += row_h + 6.0;
+    }
 
     // Local tree.
     painter.text(
@@ -1280,14 +1947,17 @@ fn draw_branch_list(
                 if is_current { p.text } else { p.text2 },
             );
             // ahead/behind badge.
-            if branch.ahead > 0 || branch.behind > 0 {
-                let badge = format!("↑{} ↓{}", branch.ahead, branch.behind);
+            if branch.ahead > 0 {
+                let badge = format!("↑{}", branch.ahead);
                 painter.text(
-                    Pos2::new(row.right() - 8.0, row.center().y),
+                    Pos2::new(
+                        row.right() - (if is_fav { 24.0 } else { 8.0 }),
+                        row.center().y,
+                    ),
                     Align2::RIGHT_CENTER,
                     badge,
                     FontId::monospace(11.0),
-                    p.text3,
+                    Color32::from_rgb(0x3f, 0xb9, 0x50),
                 );
             }
             // Favorite star.
@@ -1314,7 +1984,9 @@ fn draw_branch_list(
             if response.clicked() {
                 pick_ref = Some((branch.name.clone(), branch.remote));
             }
-            y += row_h;
+            if response.double_clicked() {
+                model.queue(Command::CheckoutBranch(branch.name.clone()));
+            }
         }
     }
 
@@ -1470,6 +2142,7 @@ fn draw_branch_list(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_commit_detail(
     ui: &mut Ui,
     model: &mut AppModel,
@@ -1478,6 +2151,7 @@ fn draw_commit_detail(
     details: &lazecode_git::CommitDetails,
     _rt: &mut UiRuntime,
     lang: lazecode_core::Language,
+    index: usize,
 ) {
     let p = theme.palette;
     ui.painter().rect_filled(rect, 0.0, p.panel);
@@ -1486,154 +2160,325 @@ fn draw_commit_detail(
         rect.y_range(),
         Stroke::new(1.0, p.border_soft),
     );
-    let mut y = rect.top() + 14.0;
-    ui.painter().text(
-        Pos2::new(rect.left() + 14.0, y),
-        Align2::LEFT_CENTER,
-        &details.info.short,
-        FontId::monospace(11.5),
-        p.accent,
+
+    // Top Header (30.0px)
+    let header_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 30.0));
+    ui.painter().rect_filled(header_rect, 0.0, p.panel);
+    ui.painter().hline(
+        header_rect.x_range(),
+        header_rect.bottom() - 0.5,
+        Stroke::new(1.0, p.border_soft),
     );
-    y += 22.0;
+
+    let count_text = if lang.is_zh() {
+        format!("{} 个文件变更", details.files.len())
+    } else {
+        format!("{} files changed", details.files.len())
+    };
+    ui.painter().text(
+        Pos2::new(header_rect.left() + 12.0, header_rect.center().y),
+        Align2::LEFT_CENTER,
+        count_text,
+        FontId::proportional(11.5),
+        p.text2,
+    );
+
+    // Top action buttons: Copy, CollapseAll, ExpandAll, Diff
+    let mut rx = header_rect.right() - 6.0;
+    // Copy hash button
+    let copy_rect = Rect::from_min_size(
+        Pos2::new(rx - 20.0, header_rect.top() + 5.0),
+        Vec2::splat(20.0),
+    );
+    let copy_resp = icon_button(ui, copy_rect, Icon::Copy, false, theme);
+    if copy_resp.hovered() {
+        copy_resp.show_tooltip_text(crate::tr!(model, "Copy Hash", "复制提交哈希"));
+    }
+    if copy_resp.clicked() {
+        ui.ctx().copy_text(details.info.id.clone());
+        model.toast(
+            crate::tr!(model, "Copied hash to clipboard", "已复制提交哈希到剪贴板"),
+            lazecode_core::ToastKind::Info,
+        );
+    }
+    rx -= 22.0;
+
+    // Collapse all
+    let col_rect = Rect::from_min_size(
+        Pos2::new(rx - 20.0, header_rect.top() + 5.0),
+        Vec2::splat(20.0),
+    );
+    let col_resp = icon_button(ui, col_rect, Icon::CollapseAll, false, theme);
+    if col_resp.hovered() {
+        col_resp.show_tooltip_text(crate::tr!(model, "Collapse All", "全部折叠"));
+    }
+    if col_resp.clicked() {
+        model.projects[index].commit_file_dirs_expanded.clear();
+    }
+    rx -= 22.0;
+
+    // Expand all
+    let exp_rect = Rect::from_min_size(
+        Pos2::new(rx - 20.0, header_rect.top() + 5.0),
+        Vec2::splat(20.0),
+    );
+    let exp_resp = icon_button(ui, exp_rect, Icon::ExpandAll, false, theme);
+    if exp_resp.hovered() {
+        exp_resp.show_tooltip_text(crate::tr!(model, "Expand All", "全部展开"));
+    }
+    if exp_resp.clicked() {
+        let tree = lazecode_git::build_commit_file_tree(&details.files);
+        for path in lazecode_git::all_commit_file_dir_paths(&tree) {
+            model.projects[index].commit_file_dirs_expanded.insert(path);
+        }
+    }
+    rx -= 22.0;
+
+    // Full commit diff button
+    let diff_rect = Rect::from_min_size(
+        Pos2::new(rx - 20.0, header_rect.top() + 5.0),
+        Vec2::splat(20.0),
+    );
+    let diff_resp = icon_button(ui, diff_rect, Icon::Diff, false, theme);
+    if diff_resp.hovered() {
+        diff_resp.show_tooltip_text(crate::tr!(model, "View Commit Diff", "查看完整提交差异"));
+    }
+    if diff_resp.clicked() {
+        model.queue(Command::OpenCommitDiff {
+            commit: details.info.id.clone(),
+            path: String::new(),
+        });
+    }
+
+    // Bottom Summary Card (height = 96.0)
+    let card_h = 96.0;
+    let card_rect = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - card_h), rect.max);
+    ui.painter().rect_filled(card_rect, 0.0, p.panel2);
+    ui.painter().hline(
+        card_rect.x_range(),
+        card_rect.top() + 0.5,
+        Stroke::new(1.0, p.border_soft),
+    );
+
+    // Card message
     text_clipped(
         ui.painter(),
-        Rect::from_min_size(
-            Pos2::new(rect.left() + 14.0, y),
-            Vec2::new(rect.width() - 28.0, 18.0),
+        Rect::from_min_max(
+            Pos2::new(card_rect.left() + 12.0, card_rect.top() + 8.0),
+            Pos2::new(card_rect.right() - 12.0, card_rect.top() + 26.0),
         ),
         &details.info.message,
-        FontId::proportional(13.5),
+        FontId::proportional(12.5),
         p.text,
         Align2::LEFT_CENTER,
     );
-    y += 22.0;
     if !details.info.body.is_empty() {
-        for line in details.info.body.lines().take(3) {
-            text_clipped(
-                ui.painter(),
-                Rect::from_min_size(
-                    Pos2::new(rect.left() + 14.0, y),
-                    Vec2::new(rect.width() - 28.0, 16.0),
-                ),
-                line,
-                FontId::proportional(11.5),
-                p.text3,
-                Align2::LEFT_CENTER,
-            );
-            y += 15.0;
-        }
-    }
-    y += 4.0;
-    ui.painter().text(
-        Pos2::new(rect.left() + 14.0, y),
-        Align2::LEFT_CENTER,
-        format!(
-            "{} · {}",
-            details.info.author,
-            time_ago(details.info.time, lang.is_zh())
-        ),
-        FontId::proportional(9.5),
-        p.text3,
-    );
-    y += 20.0;
-    let total_add: u32 = details.files.iter().map(|file| file.additions).sum();
-    let total_del: u32 = details.files.iter().map(|file| file.deletions).sum();
-    ui.painter().text(
-        Pos2::new(rect.left() + 14.0, y),
-        Align2::LEFT_CENTER,
-        if lang.is_zh() {
-            format!("{} 个文件变更", details.files.len())
-        } else {
-            format!("{} files changed", details.files.len())
-        },
-        FontId::proportional(9.5),
-        p.text3,
-    );
-    ui.painter().text(
-        Pos2::new(rect.right() - 14.0, y),
-        Align2::RIGHT_CENTER,
-        format!("+{total_add} −{total_del}"),
-        FontId::monospace(9.0),
-        p.text3,
-    );
-    y += 14.0;
-    let max_rows = (((rect.bottom() - y - 18.0) / 17.0).floor()).max(0.0) as usize;
-    let shown = details.files.len().min(64).min(max_rows);
-    for (row_idx, file) in details.files.iter().take(shown).enumerate() {
-        let row_rect = Rect::from_min_size(
-            Pos2::new(rect.left() + 4.0, y - 8.0),
-            Vec2::new(rect.width() - 8.0, 17.0),
-        );
-        let resp = ui.interact(
-            row_rect,
-            ui.scope_id().with(("commit-file", row_idx, &file.path)),
-            Sense::click(),
-        );
-        if resp.hovered() {
-            ui.painter()
-                .rect_filled(row_rect, egui::CornerRadius::same(3), p.hover);
-        }
-        if resp.clicked() {
-            model.queue(Command::OpenCommitDiff {
-                commit: details.info.id.clone(),
-                path: file.path.clone(),
-            });
-        }
-        if resp.secondary_clicked() {
-            model.queue(Command::OpenCompareWithLocalDiff {
-                commit: details.info.id.clone(),
-                path: file.path.clone(),
-            });
-        }
-        let letter = file.kind.letter();
-        ui.painter().text(
-            Pos2::new(rect.left() + 16.0, y),
-            Align2::LEFT_CENTER,
-            letter.to_string(),
-            FontId::monospace(9.0),
-            match letter {
-                'A' => p.green,
-                'D' => p.rose,
-                _ => p.amber,
-            },
-        );
         text_clipped(
             ui.painter(),
             Rect::from_min_max(
-                Pos2::new(rect.left() + 28.0, y - 8.0),
-                Pos2::new(rect.right() - 56.0, y + 8.0),
+                Pos2::new(card_rect.left() + 12.0, card_rect.top() + 26.0),
+                Pos2::new(card_rect.right() - 12.0, card_rect.top() + 44.0),
             ),
-            &file.path,
-            FontId::proportional(12.0),
-            if resp.hovered() { p.text } else { p.text2 },
+            details.info.body.lines().next().unwrap_or(""),
+            FontId::proportional(11.0),
+            p.text3,
             Align2::LEFT_CENTER,
         );
-        ui.painter().text(
-            Pos2::new(rect.right() - 14.0, y),
-            Align2::RIGHT_CENTER,
-            format!("+{} −{}", file.additions, file.deletions),
-            FontId::monospace(10.5),
-            p.text3,
-        );
-        y += 17.0;
     }
-    let hidden = details.files.len().saturating_sub(shown);
-    if hidden > 0 {
-        ui.painter().text(
-            Pos2::new(rect.left() + 14.0, y.min(rect.bottom() - 10.0)),
-            Align2::LEFT_CENTER,
-            if lang.is_zh() {
-                format!("… 另有 {hidden} 个文件（最大化面板查看）")
-            } else {
-                format!("… {hidden} more files (maximize the panel)")
-            },
-            FontId::proportional(9.0),
-            p.text3,
+
+    // Card blue short hash pill
+    let hash_pill_rect = Rect::from_min_size(
+        Pos2::new(card_rect.left() + 12.0, card_rect.bottom() - 32.0),
+        Vec2::new(68.0, 18.0),
+    );
+    let hash_resp = ui.interact(
+        hash_pill_rect,
+        ui.scope_id().with("card-hash-pill"),
+        Sense::click(),
+    );
+    let pill_color = Color32::from_rgb(0x58, 0xa6, 0xff); // Blue
+    ui.painter().rect_filled(
+        hash_pill_rect,
+        egui::CornerRadius::same(4),
+        pill_color.gamma_multiply(0.18),
+    );
+    ui.painter().text(
+        hash_pill_rect.center(),
+        Align2::CENTER_CENTER,
+        &details.info.short,
+        FontId::monospace(10.5),
+        pill_color,
+    );
+    if hash_resp.hovered() {
+        hash_resp.show_tooltip_text(crate::tr!(model, "Click to copy hash", "点击复制哈希"));
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if hash_resp.clicked() {
+        ui.ctx().copy_text(details.info.id.clone());
+        model.toast(
+            crate::tr!(model, "Copied hash to clipboard", "已复制提交哈希到剪贴板"),
+            lazecode_core::ToastKind::Info,
         );
     }
-    let _ = (Color32::WHITE, TabKind::Diff);
+
+    // Author & Date
+    ui.painter().text(
+        Pos2::new(hash_pill_rect.right() + 8.0, hash_pill_rect.center().y),
+        Align2::LEFT_CENTER,
+        format!("{} <{}>", details.info.author, details.info.email),
+        FontId::proportional(10.5),
+        p.text3,
+    );
+    ui.painter().text(
+        Pos2::new(card_rect.left() + 12.0, card_rect.bottom() - 10.0),
+        Align2::LEFT_CENTER,
+        format_commit_datetime(details.info.time),
+        FontId::monospace(10.5),
+        p.text3,
+    );
+
+    // Changed Files Tree Area (middle area)
+    let files_rect = Rect::from_min_max(
+        Pos2::new(rect.left(), header_rect.bottom()),
+        Pos2::new(rect.right(), card_rect.top()),
+    );
+    let tree = lazecode_git::build_commit_file_tree(&details.files);
+    let flat_files = lazecode_git::flatten_commit_file_tree(
+        &tree,
+        &model.projects[index].commit_file_dirs_expanded,
+        0,
+    );
+
+    super::app_ui::region(ui, files_rect, "commit-files-tree", |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("commit-files")
+            .auto_shrink([false, false])
+            .show_rows(ui, 20.0, flat_files.len(), |ui, range| {
+                for i in range {
+                    let item = &flat_files[i];
+                    let (row, response) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::click());
+                    if response.hovered() {
+                        ui.painter()
+                            .rect_filled(row, egui::CornerRadius::same(3), p.hover);
+                    }
+                    let indent = 12.0 + item.depth as f32 * 14.0;
+                    if item.is_dir {
+                        let is_expanded = !model.projects[index]
+                            .commit_file_dirs_expanded
+                            .contains(&item.path);
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(row.left() + indent, row.center().y),
+                                Vec2::splat(10.0),
+                            ),
+                            if is_expanded {
+                                Icon::ChevronDown
+                            } else {
+                                Icon::ChevronRight
+                            },
+                            p.text3,
+                        );
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(row.left() + indent + 12.0, row.center().y),
+                                Vec2::splat(12.0),
+                            ),
+                            if is_expanded {
+                                Icon::FolderOpen
+                            } else {
+                                Icon::Folder
+                            },
+                            p.accent,
+                        );
+                        ui.painter().text(
+                            Pos2::new(row.left() + indent + 24.0, row.center().y),
+                            Align2::LEFT_CENTER,
+                            &item.name,
+                            FontId::proportional(12.0),
+                            p.text,
+                        );
+                        ui.painter().text(
+                            Pos2::new(row.right() - 8.0, row.center().y),
+                            Align2::RIGHT_CENTER,
+                            format!("{} files", item.total_files),
+                            FontId::monospace(9.5),
+                            p.text3,
+                        );
+                        if response.clicked() {
+                            if is_expanded {
+                                model.projects[index]
+                                    .commit_file_dirs_expanded
+                                    .insert(item.path.clone());
+                            } else {
+                                model.projects[index]
+                                    .commit_file_dirs_expanded
+                                    .remove(&item.path);
+                            }
+                        }
+                    } else if let Some(file) = &item.file {
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(row.left() + indent + 10.0, row.center().y),
+                                Vec2::splat(12.0),
+                            ),
+                            Icon::File,
+                            p.text3,
+                        );
+                        text_clipped(
+                            ui.painter(),
+                            Rect::from_min_max(
+                                Pos2::new(row.left() + indent + 22.0, row.top()),
+                                Pos2::new(row.right() - 65.0, row.bottom()),
+                            ),
+                            &item.name,
+                            FontId::proportional(12.0),
+                            if response.hovered() { p.text } else { p.text2 },
+                            Align2::LEFT_CENTER,
+                        );
+                        let stat_str = if file.additions > 0 && file.deletions > 0 {
+                            format!("+{} -{}", file.additions, file.deletions)
+                        } else if file.additions > 0 {
+                            format!("+{}", file.additions)
+                        } else {
+                            format!("-{}", file.deletions)
+                        };
+                        let stat_color = if file.additions > 0 && file.deletions == 0 {
+                            Color32::from_rgb(0x3f, 0xb9, 0x50)
+                        } else if file.deletions > 0 && file.additions == 0 {
+                            Color32::from_rgb(0xf8, 0x51, 0x49)
+                        } else {
+                            p.text3
+                        };
+                        ui.painter().text(
+                            Pos2::new(row.right() - 8.0, row.center().y),
+                            Align2::RIGHT_CENTER,
+                            stat_str,
+                            FontId::monospace(10.0),
+                            stat_color,
+                        );
+                        if response.clicked() {
+                            model.queue(Command::OpenCommitDiff {
+                                commit: details.info.id.clone(),
+                                path: file.path.clone(),
+                            });
+                        }
+                        if response.secondary_clicked() {
+                            model.queue(Command::OpenCompareWithLocalDiff {
+                                commit: details.info.id.clone(),
+                                path: file.path.clone(),
+                            });
+                        }
+                    }
+                }
+            });
+    });
 }
 
+#[allow(dead_code)]
 fn time_ago(seconds: i64, zh: bool) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

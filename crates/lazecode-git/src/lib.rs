@@ -6,6 +6,7 @@
 //! cannot preserve.
 
 pub mod changelists;
+pub mod dag;
 pub mod diff;
 pub mod history;
 pub mod introspect;
@@ -19,6 +20,7 @@ pub mod tree;
 pub mod worktree;
 
 pub use changelists::Changelists;
+pub use dag::*;
 pub use diff::{
     commit_details, commit_file_diff, diff_commits, diff_ref_worktree, diff_two_files, file_diff,
 };

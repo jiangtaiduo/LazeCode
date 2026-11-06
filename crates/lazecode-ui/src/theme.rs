@@ -343,16 +343,12 @@ pub fn install_fonts(ctx: &egui::Context) {
     let has_ui = add("SF Pro", "/System/Library/Fonts/SFNS.ttf", 0);
     let has_mono = add("SF Mono", "/System/Library/Fonts/SFNSMono.ttf", 0);
     let has_menlo = add("Menlo", "/System/Library/Fonts/Menlo.ttc", 0);
-    let has_pingfang = add(
-        "PingFang SC",
-        "/System/Library/PrivateFrameworks/FontServices.framework/Versions/A/Resources/Reserved/PingFangUI.ttc",
-        0,
-    );
     let has_cjk = add(
         "Hiragino Sans GB",
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
         0,
     );
+    let has_heiti = add("Heiti SC", "/System/Library/Fonts/STHeiti Light.ttc", 1);
     let has_cjk_serif = add(
         "Songti SC",
         "/System/Library/Fonts/Supplemental/Songti.ttc",
@@ -368,8 +364,8 @@ pub fn install_fonts(ctx: &egui::Context) {
     if has_ui {
         proportional.push("SF Pro".to_owned());
     }
-    if has_pingfang {
-        proportional.push("PingFang SC".to_owned());
+    if has_heiti {
+        proportional.push("Heiti SC".to_owned());
     }
     if has_cjk {
         proportional.push("Hiragino Sans GB".to_owned());
@@ -392,8 +388,8 @@ pub fn install_fonts(ctx: &egui::Context) {
     if has_menlo {
         mono.push("Menlo".to_owned());
     }
-    if has_pingfang {
-        mono.push("PingFang SC".to_owned());
+    if has_heiti {
+        mono.push("Heiti SC".to_owned());
     }
     if has_cjk {
         mono.push("Hiragino Sans GB".to_owned());

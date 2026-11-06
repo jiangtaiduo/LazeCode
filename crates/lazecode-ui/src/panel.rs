@@ -200,7 +200,7 @@ fn draw_console(
         text_clipped(
             ui.painter(),
             Rect::from_min_max(
-                Pos2::new(tab.left() + 20.0, tab.top()),
+                Pos2::new(tab.left() + 23.0, tab.top()),
                 Pos2::new(tab.right() - 22.0, tab.bottom()),
             ),
             title,

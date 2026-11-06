@@ -1078,6 +1078,50 @@ mod tests {
     }
 
     #[test]
+    fn cjk_wide_character_attrs() {
+        let options = SpawnOptions {
+            cwd: std::env::temp_dir(),
+            cols: 80,
+            rows: 12,
+            command: Some("printf '这是一段测试\\n'".to_string()),
+            ..Default::default()
+        };
+        let session = spawn(options).expect("spawn");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        let mut snap = Snapshot::default();
+        let mut found = false;
+        while std::time::Instant::now() < deadline {
+            session.snapshot_into(&mut snap);
+            for row in 0..snap.rows {
+                if snap.cell(row, 0).ch == '这' {
+                    println!(
+                        "cell(0, 0): ch='{}', attrs={:#b}",
+                        snap.cell(row, 0).ch,
+                        snap.cell(row, 0).attrs
+                    );
+                    println!(
+                        "cell(0, 1): ch='{}', attrs={:#b}",
+                        snap.cell(row, 1).ch,
+                        snap.cell(row, 1).attrs
+                    );
+                    println!(
+                        "cell(0, 2): ch='{}', attrs={:#b}",
+                        snap.cell(row, 2).ch,
+                        snap.cell(row, 2).attrs
+                    );
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(found);
+    }
+
+    #[test]
     fn scrolls_into_history() {
         let options = SpawnOptions {
             cwd: std::env::temp_dir(),

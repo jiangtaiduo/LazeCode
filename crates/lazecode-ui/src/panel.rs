@@ -1215,7 +1215,13 @@ fn draw_git_log(
     ui.painter().text(
         Pos2::new(frx, filter.center().y),
         Align2::RIGHT_CENTER,
-        if model.settings.language.is_zh() {
+        if model.projects[index].log_paging {
+            if model.settings.language.is_zh() {
+                format!("{} 个提交 (加载中...)", log.len())
+            } else {
+                format!("{} commits (loading...)", log.len())
+            }
+        } else if model.settings.language.is_zh() {
             format!("{} 个提交", log.len())
         } else {
             format!("{} commits", log.len())

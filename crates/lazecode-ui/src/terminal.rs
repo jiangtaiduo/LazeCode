@@ -257,12 +257,19 @@ pub fn draw(
                 let display = text
                     .map(|text| text.to_string())
                     .unwrap_or_else(|| cell.ch.to_string());
-                let width = if wide { 2.0 } else { 1.0 };
+                let cell_w = if wide { 2.0 * char_w } else { char_w };
+                let draw_size = if wide {
+                    (char_w * 1.88).round().max(font_size)
+                } else {
+                    font_size
+                };
+                let center_x = inner.left() + col as f32 * char_w + cell_w * 0.5;
+                let cjk_baseline_adj = if wide { (line_h * 0.05).round() } else { 0.0 };
                 painter.text(
-                    Pos2::new(inner.left() + col as f32 * char_w, y + line_h * 0.5),
-                    Align2::LEFT_CENTER,
+                    Pos2::new(center_x, y + line_h * 0.5 + cjk_baseline_adj),
+                    Align2::CENTER_CENTER,
                     display,
-                    FontId::monospace(font_size),
+                    FontId::monospace(draw_size),
                     fg,
                 );
                 if attrs & ATTR_UNDERLINE != 0 {
@@ -270,7 +277,7 @@ pub fn draw(
                         [
                             Pos2::new(inner.left() + col as f32 * char_w, y + line_h - 1.5),
                             Pos2::new(
-                                inner.left() + (col as f32 + width) * char_w,
+                                inner.left() + col as f32 * char_w + cell_w,
                                 y + line_h - 1.5,
                             ),
                         ],
@@ -869,5 +876,31 @@ mod tests {
         assert!(stroke.alt);
 
         assert!(key_to_stroke(Key::A, Modifiers::default()).is_none());
+    }
+
+    #[test]
+    fn test_cjk_metrics() {
+        let ctx = egui::Context::default();
+        crate::theme::install_fonts(&ctx);
+        let mut out = ctx.run_ui(Default::default(), |_| {});
+        out.textures_delta.clear();
+        let size = 13.0;
+        let char_w = crate::widgets::mono_char_width(&ctx, size);
+        let ascii_galley = ctx.fonts_mut(|f| {
+            f.layout_no_wrap(
+                "M".to_string(),
+                egui::FontId::monospace(size),
+                egui::Color32::WHITE,
+            )
+        });
+        let cjk_galley_15 = ctx.fonts_mut(|f| {
+            f.layout_no_wrap(
+                "这".to_string(),
+                egui::FontId::monospace(15.0),
+                egui::Color32::WHITE,
+            )
+        });
+        assert!(cjk_galley_15.size().x > char_w);
+        assert!(ascii_galley.size().x > 0.0);
     }
 }

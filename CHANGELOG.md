@@ -8,6 +8,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- UI redesign groundwork (branch `feat-ui-redesign`): the design-token layer
+  now ports the stable app's stylesheet verbatim — the two isomorphic
+  macOS Native themes (dark `variant-1`, light `variant-2`) replace the
+  bespoke palette, the 11/12/13/14px type scale and the stable layout
+  rhythm (26px log rows, 24px tree rows, 22px change rows, 30px tab bar,
+  26px status bar, 28px buttons, 260px context menus) become shared
+  constants, and the window body paints the stable background gradient so
+  translucent panels read as Liquid Glass. Syntax colors follow the
+  stable Monaco themes (jetbrains-dark / ide-light).
+- Icons are now rasterized from the stable frontend's own SVG sources
+  (`FileIcons.tsx`, extracted verbatim) via pure-Rust `resvg` into cached
+  alpha textures tinted at draw time — icon geometry is identical to the
+  web app. Icons without a stable counterpart keep hand-drawn vectors.
+
 ### Added
 
 - The tracked-file context menu now carries the stable drawer's full item

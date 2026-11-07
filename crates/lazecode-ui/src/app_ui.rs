@@ -137,7 +137,9 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
 
     let p = theme.palette;
     let painter = ui.painter();
-    painter.rect_filled(layout.full, 0.0, p.bg);
+    // Stable Liquid Glass: the window body carries the stable gradient and
+    // the glass panels draw as translucent fills on top of it.
+    crate::theme::body_gradient(painter, layout.full, theme.dark);
     painter.rect_filled(layout.rail, 0.0, p.rail);
     painter.rect_filled(layout.titlebar, 0.0, p.titlebar);
     painter.rect_filled(layout.activity, 0.0, p.panel);

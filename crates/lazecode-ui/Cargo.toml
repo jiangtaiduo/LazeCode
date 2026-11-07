@@ -20,3 +20,4 @@ lazecode-git.workspace = true
 lazecode-terminal.workspace = true
 libc.workspace = true
 dirs.workspace = true
+resvg = "0.45"

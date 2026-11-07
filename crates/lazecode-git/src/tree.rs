@@ -5,7 +5,7 @@ use gix::hash::ObjectId;
 use crate::ops::safe_worktree_join;
 use crate::{workdir, Result};
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TreeEntry {
     pub oid: ObjectId,
     /// Git's octal file mode, e.g. `0o100644`.

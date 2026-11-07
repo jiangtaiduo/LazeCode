@@ -312,6 +312,18 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
+/// Move a file or directory to the system trash instead of unlinking it.
+///
+/// 稳定版的 Delete（未跟踪文件 / 项目树删除）全部走废纸篓（trash::delete），
+/// 这里保持同一语义：误删可从废纸篓找回，失败时把底层错误原样抛给调用方
+/// 提示（对齐稳定版 `移入废纸篓失败: {e}`）。
+pub fn move_to_trash(path: &Path) -> Result<()> {
+    trash::delete(path).map_err(|err| FsError::Write {
+        path: path.to_path_buf(),
+        source: std::io::Error::other(err.to_string()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

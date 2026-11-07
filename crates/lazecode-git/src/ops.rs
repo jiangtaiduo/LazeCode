@@ -687,3 +687,65 @@ pub fn apply_patch(root: &Path, patch: &str, cached: bool, reverse: bool) -> Res
     }
     Ok(())
 }
+
+/// Initialize a new Git repository at `root`.
+pub fn git_init(root: &Path) -> Result<()> {
+    std::fs::create_dir_all(root)?;
+    let output = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["init", "-b", "main"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => Ok(()),
+        _ => {
+            let output = std::process::Command::new("git")
+                .current_dir(root)
+                .arg("init")
+                .output()
+                .map_err(|err| anyhow::anyhow!("git init failed: {err}"))?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "git init failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Discard changes for a file or directory (rollback to HEAD or delete untracked).
+pub fn discard_file_changes(root: &Path, rel_path: &str) -> Result<()> {
+    let full = root.join(rel_path);
+    let in_head = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["cat-file", "-e", &format!("HEAD:{rel_path}")])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if in_head {
+        let out = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["checkout", "HEAD", "--", rel_path])
+            .output()
+            .map_err(|e| anyhow::anyhow!("git checkout failed: {e}"))?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "cannot discard changes: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    } else {
+        if full.is_dir() {
+            let _ = std::fs::remove_dir_all(&full);
+        } else if full.exists() {
+            let _ = std::fs::remove_file(&full);
+        }
+        let _ = std::process::Command::new("git")
+            .current_dir(root)
+            .args(["rm", "-f", "--cached", "--ignore-unmatch", "--", rel_path])
+            .output();
+    }
+    Ok(())
+}

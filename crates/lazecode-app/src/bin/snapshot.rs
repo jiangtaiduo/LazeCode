@@ -59,6 +59,35 @@ fn main() -> anyhow::Result<()> {
                 path: "images.py".to_string(),
             });
         }
+        if mode == "compare" {
+            // 分支比较页：开当前分支与 main 的比较（feat-rust 仓库内有效）。
+            // snapshot 单帧渲染拿不到后台 job 回填，这里同步预取注入。
+            let title = "Compare: feat-rust and main".to_string();
+            project.open_compare_branches("feat-rust".to_string(), "main".to_string(), title);
+            if let Ok(data) =
+                lazecode_git::compare_branches(&project_root, "feat-rust", "main", None, None, 1000)
+            {
+                model.ui.compare_branches.root = project_root.clone();
+                model.ui.compare_branches.left_ref = "feat-rust".to_string();
+                model.ui.compare_branches.right_ref = "main".to_string();
+                model.ui.compare_branches.loading = false;
+                // 复现 bug 场景：上侧选中首个提交（详情同步注入），下侧
+                // 保持未选中——下侧详情必须为空，不得串用上侧数据。
+                if let Some(first) = data.left.commits.first().cloned() {
+                    model.ui.compare_branches.left_view.selected = vec![first.id.clone()];
+                    if let Ok(files) = lazecode_git::commit_files(&project_root, &first.id) {
+                        model.ui.compare_branches.left_view.detail =
+                            Some(lazecode_core::CompareDetail {
+                                key: format!("c:{}", first.id),
+                                files,
+                                ..Default::default()
+                            });
+                    }
+                }
+                model.ui.compare_branches.sides = Some(data);
+            }
+            model.ui.panel_visible = false;
+        }
         if let Some(commit) = project.log.first() {
             let id = commit.id.clone();
             project.selected_commit = Some(id.clone());

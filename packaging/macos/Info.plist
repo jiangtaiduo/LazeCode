@@ -5,13 +5,13 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>LazeCode</string>
+    <string>LazeCode Native</string>
     <key>CFBundleExecutable</key>
     <string>LazeCode</string>
     <key>CFBundleIconFile</key>
     <string>LazeCode</string>
     <key>CFBundleIdentifier</key>
-    <string>io.github.jiangtaiduo.lazecode</string>
+    <string>io.github.jiangtaiduo.lazecode.native</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>

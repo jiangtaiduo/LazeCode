@@ -204,3 +204,124 @@ fn three_way_merge_file_content_and_resolve() {
         "conflicts should be empty after resolution"
     );
 }
+
+#[test]
+fn undo_amend_checkout_rev_and_patch() {
+    let dir = repo();
+    let root = dir.path();
+    let base = commit(root, "a.txt", "line1\n", "initial commit");
+    let second = commit(root, "b.txt", "line2\n", "second commit");
+
+    // 1. Commit patch
+    let patch = lazecode_git::commit_patch(root, &second).unwrap();
+    assert!(patch.contains("second commit"), "{patch}");
+    assert!(patch.contains("+line2"), "{patch}");
+
+    // 2. Amend commit message
+    lazecode_git::amend_commit_message(root, "amended second commit").unwrap();
+    let log = git(root, true, &["log", "-1", "--format=%s"]);
+    assert_eq!(log.trim(), "amended second commit");
+
+    // 3. Checkout detached revision
+    lazecode_git::checkout_revision(root, &base).unwrap();
+    let head_rev = git(root, true, &["rev-parse", "HEAD"]);
+    assert_eq!(head_rev.trim(), base);
+
+    // Go back to main
+    git(root, true, &["checkout", "-q", "main"]);
+
+    // 4. Undo HEAD commit
+    lazecode_git::undo_commit_head(root).unwrap();
+    let log = git(root, true, &["log", "-1", "--format=%s"]);
+    assert_eq!(log.trim(), "initial commit");
+    // Change b.txt is still present in worktree / index
+    assert!(root.join("b.txt").exists());
+}
+
+#[test]
+fn discard_changes_and_git_init() {
+    let temp = tempfile::tempdir().unwrap();
+    let new_repo = temp.path().join("subrepo");
+
+    // git_init on a clean path
+    lazecode_git::git_init(&new_repo).unwrap();
+    assert!(new_repo.join(".git").exists());
+
+    let dir = repo();
+    let root = dir.path();
+    commit(root, "tracked.txt", "orig\n", "init");
+
+    // Modify tracked file
+    std::fs::write(root.join("tracked.txt"), "modified\n").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+        "modified\n"
+    );
+
+    // Discard tracked changes
+    lazecode_git::discard_file_changes(root, "tracked.txt").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+        "orig\n"
+    );
+
+    // Create untracked file
+    std::fs::write(root.join("untracked.txt"), "untracked\n").unwrap();
+    assert!(root.join("untracked.txt").exists());
+
+    // Discard untracked changes
+    lazecode_git::discard_file_changes(root, "untracked.txt").unwrap();
+    assert!(!root.join("untracked.txt").exists());
+}
+
+#[test]
+fn interactive_rebase_applies_edited_todo() {
+    let dir = repo();
+    let root = dir.path();
+    commit(root, "base.txt", "base\n", "base");
+    git(root, true, &["checkout", "-qb", "feature"]);
+    let first = commit(root, "one.txt", "one\n", "one");
+    let second = commit(root, "two.txt", "two\n", "two");
+    let _third = commit(root, "three.txt", "three\n", "three");
+
+    // squash second into first, drop third：执行后 two/three 文件消失，
+    // one.txt 保留，且 feature 的提交数缩为 1（+ base 之外）。
+    let steps = vec![
+        lazecode_git::RebaseStep {
+            action: "pick".into(),
+            commit: first.clone(),
+        },
+        lazecode_git::RebaseStep {
+            action: "squash".into(),
+            commit: second.clone(),
+        },
+        lazecode_git::RebaseStep {
+            action: "drop".into(),
+            commit: _third.clone(),
+        },
+    ];
+    lazecode_git::rebase_interactive(root, "main", &steps).unwrap();
+    assert!(!root.join("three.txt").exists());
+    assert!(root.join("one.txt").exists());
+    assert!(root.join("two.txt").exists());
+    let count = git(root, true, &["rev-list", "--count", "main..feature"]);
+    assert_eq!(count, "1");
+}
+
+#[test]
+fn interactive_rebase_rejects_bad_action_and_hash() {
+    let dir = repo();
+    let root = dir.path();
+    commit(root, "base.txt", "base\n", "base");
+    let base = git(root, true, &["rev-parse", "HEAD"]);
+    let steps = vec![lazecode_git::RebaseStep {
+        action: "explode".into(),
+        commit: base.clone(),
+    }];
+    assert!(lazecode_git::rebase_interactive(root, "main", &steps).is_err());
+    let steps = vec![lazecode_git::RebaseStep {
+        action: "pick".into(),
+        commit: "../not-a-hash".into(),
+    }];
+    assert!(lazecode_git::rebase_interactive(root, "main", &steps).is_err());
+}

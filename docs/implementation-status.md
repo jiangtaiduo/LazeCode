@@ -65,9 +65,19 @@ Read path:
   and branch dotted ranges (`left..right` mapped to a hidden-ancestor walk).
 - File diff, commit diff stats, blame (porcelain parser), per-file history,
   submodule status, LFS status/track, stash list/show-files.
-- Compare branches (merge-base anchored, both directions: commits with
-  ahead/behind counts plus `diff --name-status` file lists) and compare
-  arbitrary commits.
+- Compare branches as a persistent central editor tab (`TabKind::Compare`,
+  stable CompareBranchesView page design): upper/lower panes with a
+  draggable splitter (persisted in `settings.compare_split`), per-side
+  banners + Swap on the upper pane, per-side filters (search+regex+case,
+  User/Date/Branch menus, Paths re-query), commit multi-select (click/Cmd/
+  Shift/⌘A/Esc/arrows), double-click commit diff, Load More(+500) with
+  limit+1 truncation detection, and a shared draggable details column
+  (`settings.compare_details_width`, 24-62%) per pane — single-commit files,
+  parent..newest range diff, or whole-side three-dot (`other...side`)
+  numstat+name-status lists as a collapsible tree with stable diff-base
+  rules. Single-instance tab; closing it clears the session. All
+  compare/detail loads run as background jobs (loading/Retry/empty states);
+  compare arbitrary commits via the range diff path (`compare_commits`).
 
 Write path:
 
@@ -86,23 +96,71 @@ Write path:
   pull (merge/rebase/ff-only), fetch (`--all --prune`), clone (non-empty
   target refused); remote list/add/remove/rename/set-url.
 - History rewrite porcelain: merge, rebase (+continue/abort/skip),
+  interactive rebase (UI-arranged todo executed through a
+  GIT_SEQUENCE_EDITOR shim; conflicts fall through to the sequencer bar),
   cherry-pick (+continue/abort, editor neutralised, empty picks skipped),
   revert, drop (HEAD via reset, others via rebase --onto with a hash
   whitelist), squash (merge-base --is-ancestor ordering; root gotcha
   special-cased), reset (soft/mixed/hard) with a clean-tree gate; sequencer
   state introspection (MERGE_HEAD / rebase-merge|apply / CHERRY_PICK_HEAD /
   REVERT_HEAD) drives a conflict bar with continue/abort routed per kind.
-- Stash push/list/show/files/apply/drop; shelves live in
-  `.git/lazecode-shelves/*.patch` (save retracts new files, restore, partial
-  apply via `--include` gated on a `--check` pre-pass, delete). Porcelain
-  rename, tag create (lightweight)/delete.
+- Stash push (optional message, `-u` for untracked)/list/show/files/apply/
+  drop; shelves live in `.git/lazecode-shelves/*.patch` (whole-tree or
+  path-scoped save — the retract step reuses the per-file discard so
+  staged-new files leave both worktree and index — restore, partial apply
+  via `--include` gated on a `--check` pre-pass, delete, per-file listing
+  for the unshelve dialog). Porcelain rename, tag create (lightweight)/delete.
+
+### Changes list (source-control sidebar)
+
+- Ported from the stable version's commit drawer, on the new sidebar layout:
+  changelist groups (default group + named lists + a fixed "Unversioned
+  Files" group; untracked files never join a changelist), collapsible groups
+  with Expand/Collapse All, tri-state group checkboxes, and a "Merge
+  Conflicts" subgroup inside the default list with a Resolve entry.
+- Checkbox = include in this commit, nothing checked by default (stable
+  semantics); the commit scope is exactly the checked set via
+  stage-checked/unstage-excluded, amend exempt. Multi-selection of rows
+  (plain/Cmd/Shift) with display-order ranges feeds the context menu.
+- Context menus: Show Diff, Jump to Source, Resolve (conflicted), Commit
+  File(s)... with an own message, Revert Selected Changes (confirmed;
+  batch discard closes tabs of retracted new files), Copy as Patch to
+  Clipboard, Move to Changelist, Shelve Changes..., Refresh VCS Changes,
+  New Changelist. Changelist create/delete/assign run as background jobs;
+  delete first asks Move-to-default vs Rollback.
+- Untracked files get the stable untracked menu: Add to VCS (background
+  git add with the stable toasts; snapshot refresh moves files out of
+  Unversioned), Jump to Source (single file), and a trash-semantics
+  Delete… (single file reuses the delete confirm; multi-file confirms once,
+  moves everything to the system trash, closes affected editor tabs).
+- Stash button opens a dialog (message + include-untracked) instead of a
+  silent push; shelve defaults to the checked files (name: file name for a
+  single file, default changelist name for many); the unshelve dialog
+  restores a file subset into a chosen or new changelist (entry kept).
+- Commit dock: message history (10 entries, settings.toml) with a
+  refill/clear popover and a Commit & Push button that opens the push
+  dialog after success. Non-Git projects get a not-a-repository notice with
+  an Initialize Git Repository entry.
+- Context menus match the stable drawer item-for-item (tracked + untracked
+  branches, greyed placeholders, separators): functional Compare Before
+  with Local / Create Patch from Local Changes (save dialog) / History Up
+  to Here are wired; group-header right-click carries the whole group's
+  file menu.
+- Deferred from the stable drawer (audited 2026-11-07, next batches): the
+  inline Shelf tab (rename, recently-deleted, shelf file diffs/patches,
+  import, silent unshelve shortcut), Group-By-Directory tree mode + ^P +
+  Ignored Files group, commit-draft persistence per repo, staged-vs-
+  unstaged diff preference on double-click, and shelf rename/delete-files
+  backend fns.
 
 Not implemented (explicit):
 
 - network credential surfaces beyond the system `credential.helper` (gix
   push/sendpack transport); signed commits/tags.
-- interactive rebase todo editor, standalone conflict resolution window (a
-  single overlay is equivalent in scope).
+- standalone conflict resolution window (a single overlay is equivalent in
+  scope); interactive rebase **is** implemented (todo executed via
+  GIT_SEQUENCE_EDITOR shim, tested) — reword keeps the original message
+  until the dialog gains a message editor.
 
 ### Terminal
 
@@ -173,7 +231,7 @@ workspace under `crates/`.
 ## 3. Verification performed
 
 ```sh
-cargo test --workspace          # 52 tests, all passing
+cargo test --workspace          # 102 tests, all passing
 cargo clippy --workspace --all-targets   # clean
 cargo build --release -p lazecode-app    # native binary
 ./scripts/build-app.sh --debug           # dist/LazeCode.app launches

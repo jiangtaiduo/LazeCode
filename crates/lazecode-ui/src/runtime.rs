@@ -53,6 +53,40 @@ pub enum MenuKind {
         project: usize,
         is_dir: bool,
     },
+    /// Editor tab right-click context menu (payload: path).
+    EditorTabContext {
+        project: usize,
+        tab_id: u64,
+    },
+    /// Terminal tab right-click context menu (payload: title).
+    TerminalTabContext {
+        project: usize,
+        terminal_id: u64,
+    },
+    /// 提交信息历史下拉（dock 内时钟按钮）：列出 settings.commit_history。
+    CommitHistory {
+        project: usize,
+    },
+    /// 分支比较对话框的 User 过滤菜单（side: 0=left 1=right）。
+    CompareUserFilter {
+        side: u8,
+    },
+    /// 分支比较对话框的 Date 过滤菜单。
+    CompareDateFilter {
+        side: u8,
+    },
+    /// 分支比较对话框的 Branch(ref) 过滤菜单。
+    CompareRefFilter {
+        side: u8,
+    },
+    /// Changelist group header context menu (payload: changelist name).
+    ChangelistHeaderContext {
+        project: usize,
+    },
+    /// Changelist file row context menu (payload: file relative path).
+    ChangeFileContext {
+        project: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -149,41 +183,34 @@ pub enum DialogState {
         path: std::path::PathBuf,
         is_dir: bool,
     },
+    /// 未跟踪文件批量 Delete…：全部移入系统废纸篓（对齐稳定版
+    /// trashUnversionedConfirm；单文件走 DeletePath 复用同一确认）。
+    ConfirmDeleteUntracked {
+        paths: Vec<std::path::PathBuf>,
+    },
+    /// 删除架藏前确认（稳定版删除架藏/架藏文件都有确认；此前直接删）。
+    ConfirmDeleteShelf {
+        name: String,
+    },
     ConflictResolve {
         path: String,
         ours: String,
         theirs: String,
         worktree: String,
     },
-    CompareBranches {
-        left: String,
-        right: String,
-        sides: Option<Box<(lazecode_git::CompareSide, lazecode_git::CompareSide)>>,
-        loading: bool,
-    },
-    CompareCommits {
-        from: String,
-        to: String,
-        files: Vec<(String, String)>,
-        loading: bool,
-    },
-    StashManager {
-        stashes: Vec<lazecode_git::StashEntry>,
-        selected: usize,
-    },
-    ShelfManager {
-        shelves: Vec<lazecode_git::ShelfEntry>,
-        selected: usize,
-    },
     FileHistory {
         path: String,
         entries: Vec<lazecode_git::HistoryEntry>,
         selected: usize,
+        /// 首帧已加载过（空列表≠未加载，避免每帧重复起 git 子进程）。
+        loaded: bool,
     },
     GitTools {
         tab: GitToolsTab,
         submodules: Vec<lazecode_git::SubmoduleEntry>,
         lfs_status: Option<lazecode_git::LfsStatus>,
+        /// 两个页签各加载一次（空子模块列表≠未加载，避免每帧 spawn git）。
+        loaded: (bool, bool),
     },
     CloneRepo {
         url: String,
@@ -193,6 +220,77 @@ pub enum DialogState {
     InteractiveRebase {
         onto: String,
         todos: Vec<RebaseTodoRow>,
+    },
+    Squash {
+        commits: Vec<String>,
+        value: String,
+        error: Option<String>,
+    },
+    /// 架藏保存：`paths` 为勾选/选中的文件（空=全部已跟踪变更）。
+    NewShelf {
+        value: String,
+        error: Option<String>,
+        paths: Vec<String>,
+    },
+    GoToLine {
+        value: String,
+        error: Option<String>,
+    },
+    RenameTerminal {
+        terminal_id: u64,
+        value: String,
+        error: Option<String>,
+    },
+    NewChangelist {
+        value: String,
+        error: Option<String>,
+    },
+    /// Stash 按钮（对齐稳定版 StashDialog）：说明 + 是否含未跟踪文件。
+    StashCreate {
+        message: String,
+        include_untracked: bool,
+        error: Option<String>,
+    },
+    StashManager {
+        stashes: Vec<lazecode_git::StashEntry>,
+        selected: usize,
+        /// 列表加载失败原因（原先静默置空，用户无从感知）。
+        error: Option<String>,
+        /// 首帧已加载过（空列表≠未加载，避免每帧重复 spawn git）。
+        loaded: bool,
+    },
+    /// Discard（Rollback）前的统一确认弹窗。
+    ConfirmDiscard {
+        paths: Vec<String>,
+    },
+    /// 删除变更列表确认：移入默认列表 or 回滚（丢弃）其文件更改。
+    DeleteChangelist {
+        name: String,
+        count: usize,
+        rollback: bool,
+    },
+    /// Unshelve（对齐稳定版）：逐文件勾选 + 目标 changelist（现有列表或
+    /// 新建）。`files` 为 (path, selected)。
+    Unshelve {
+        name: String,
+        files: Vec<(String, bool)>,
+        target: Option<String>,
+        new_name: String,
+        error: Option<String>,
+    },
+    /// 右键「Commit File(s)...」：为显式路径集输入提交信息。
+    CommitFiles {
+        paths: Vec<String>,
+        value: String,
+        error: Option<String>,
+    },
+    ShelfManager {
+        shelves: Vec<lazecode_git::ShelfEntry>,
+        selected: usize,
+        /// 列表加载失败原因（原先静默置空，用户无从感知）。
+        error: Option<String>,
+        /// 首帧已加载过（空列表≠未加载，避免每帧重复 spawn git）。
+        loaded: bool,
     },
     Quit,
 }
@@ -253,6 +351,10 @@ pub struct UiRuntime {
     pub editor_drag: bool,
     pub sidebar_drag: bool,
     pub panel_drag: bool,
+    /// 分支比较页：pane 高度分隔条拖拽中（松手时落盘 settings）。
+    pub compare_split_drag: bool,
+    /// 分支比较页：详情列宽度分隔条拖拽中。
+    pub compare_details_drag: bool,
     pub settings_open: bool,
     pub about_open: bool,
     pub applied_theme: Option<lazecode_core::ThemeMode>,
@@ -287,6 +389,8 @@ impl Default for UiRuntime {
             editor_drag: false,
             sidebar_drag: false,
             panel_drag: false,
+            compare_split_drag: false,
+            compare_details_drag: false,
             settings_open: false,
             about_open: false,
             applied_theme: None,
@@ -410,6 +514,12 @@ pub enum PaletteAction {
     About,
     SwitchProject(usize),
     SwitchWorktree { project: usize, name: String },
+    CloneRepo,
+    StashManager,
+    ShelfManager,
+    GitTools,
+    CompareBranches,
+    GoToLine,
     Quit,
 }
 

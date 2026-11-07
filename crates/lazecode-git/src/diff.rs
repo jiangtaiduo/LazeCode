@@ -87,7 +87,6 @@ pub fn file_diff(root: &Path, path: &str) -> Result<FileDiff> {
 }
 
 pub fn commit_file_diff(root: &Path, commit_spec: &str, path: &str) -> Result<FileDiff> {
-    validate_repo_path(path)?;
     let repo = discover(root)?;
     let id = resolve_commit(&repo, commit_spec)?;
     let commit = repo.find_commit(id)?;
@@ -98,8 +97,41 @@ pub fn commit_file_diff(root: &Path, commit_spec: &str, path: &str) -> Result<Fi
         Default::default()
     };
     let current_map = commit_tree_map(&repo, id)?;
-    let old_entry = parent_map.get(path);
-    let new_entry = current_map.get(path);
+
+    let target_path = if path.is_empty() {
+        let mut diff_path = None;
+        for (p, entry) in &current_map {
+            if parent_map.get(p) != Some(entry) {
+                diff_path = Some(p.clone());
+                break;
+            }
+        }
+        if diff_path.is_none() {
+            for p in parent_map.keys() {
+                if !current_map.contains_key(p) {
+                    diff_path = Some(p.clone());
+                    break;
+                }
+            }
+        }
+        diff_path.unwrap_or_default()
+    } else {
+        validate_repo_path(path)?;
+        path.to_string()
+    };
+
+    if target_path.is_empty() {
+        return Ok(build_file_diff(
+            String::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            false,
+        ));
+    }
+
+    let old_entry = parent_map.get(&target_path);
+    let new_entry = current_map.get(&target_path);
     let old = old_entry
         .map(|entry| load_blob_capped(&repo, entry.oid))
         .unwrap_or_default();
@@ -107,7 +139,7 @@ pub fn commit_file_diff(root: &Path, commit_spec: &str, path: &str) -> Result<Fi
         .map(|entry| load_blob_capped(&repo, entry.oid))
         .unwrap_or_default();
     Ok(build_file_diff(
-        path.to_string(),
+        target_path,
         old,
         new,
         old_entry.is_some(),
@@ -116,14 +148,46 @@ pub fn commit_file_diff(root: &Path, commit_spec: &str, path: &str) -> Result<Fi
 }
 
 pub fn diff_commits(root: &Path, from_spec: &str, to_spec: &str, path: &str) -> Result<FileDiff> {
-    validate_repo_path(path)?;
     let repo = discover(root)?;
     let from_id = resolve_commit(&repo, from_spec)?;
     let to_id = resolve_commit(&repo, to_spec)?;
     let from_map = commit_tree_map(&repo, from_id)?;
     let to_map = commit_tree_map(&repo, to_id)?;
-    let old_entry = from_map.get(path);
-    let new_entry = to_map.get(path);
+
+    let target_path = if path.is_empty() {
+        let mut diff_path = None;
+        for (p, entry) in &to_map {
+            if from_map.get(p) != Some(entry) {
+                diff_path = Some(p.clone());
+                break;
+            }
+        }
+        if diff_path.is_none() {
+            for p in from_map.keys() {
+                if !to_map.contains_key(p) {
+                    diff_path = Some(p.clone());
+                    break;
+                }
+            }
+        }
+        diff_path.unwrap_or_default()
+    } else {
+        validate_repo_path(path)?;
+        path.to_string()
+    };
+
+    if target_path.is_empty() {
+        return Ok(build_file_diff(
+            String::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            false,
+        ));
+    }
+
+    let old_entry = from_map.get(&target_path);
+    let new_entry = to_map.get(&target_path);
     let old = old_entry
         .map(|entry| load_blob_capped(&repo, entry.oid))
         .unwrap_or_default();
@@ -131,7 +195,7 @@ pub fn diff_commits(root: &Path, from_spec: &str, to_spec: &str, path: &str) -> 
         .map(|entry| load_blob_capped(&repo, entry.oid))
         .unwrap_or_default();
     Ok(build_file_diff(
-        path.to_string(),
+        target_path,
         old,
         new,
         old_entry.is_some(),
@@ -140,16 +204,35 @@ pub fn diff_commits(root: &Path, from_spec: &str, to_spec: &str, path: &str) -> 
 }
 
 pub fn diff_ref_worktree(root: &Path, ref_spec: &str, path: &str) -> Result<FileDiff> {
-    validate_repo_path(path)?;
     let repo = discover(root)?;
     let workdir = workdir(&repo)?;
     let ref_id = resolve_commit(&repo, ref_spec)?;
     let ref_map = commit_tree_map(&repo, ref_id)?;
-    let old_entry = ref_map.get(path);
+
+    let target_path = if path.is_empty() {
+        let snap = crate::status::snapshot(root)?;
+        snap.changes
+            .first()
+            .map(|c| c.path.clone())
+            .unwrap_or_default()
+    } else {
+        validate_repo_path(path)?;
+        path.to_string()
+    };
+    if target_path.is_empty() {
+        return Ok(build_file_diff(
+            String::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            false,
+        ));
+    }
+    let old_entry = ref_map.get(&target_path);
     let old = old_entry
         .map(|entry| load_blob_capped(&repo, entry.oid))
         .unwrap_or_default();
-    let abs = safe_worktree_join(&workdir, path)?;
+    let abs = safe_worktree_join(&workdir, &target_path)?;
     let exists = std::fs::symlink_metadata(&abs).is_ok();
     let new = match std::fs::symlink_metadata(&abs) {
         Ok(metadata) if metadata.file_type().is_symlink() => std::fs::read_link(&abs)
@@ -161,7 +244,7 @@ pub fn diff_ref_worktree(root: &Path, ref_spec: &str, path: &str) -> Result<File
         _ => Vec::new(),
     };
     Ok(build_file_diff(
-        path.to_string(),
+        target_path,
         old,
         new,
         old_entry.is_some(),

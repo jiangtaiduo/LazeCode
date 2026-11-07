@@ -102,6 +102,26 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     }
     let layout = compute_layout(ui.max_rect(), model);
 
+    // 「Commit & Push」提交成功后的一-shot：打开 Push 对话框（对齐稳定
+    // 版 Commit and Push...）。标志由 JobResult 消费点置位。
+    if model.ui.open_push_dialog {
+        model.ui.open_push_dialog = false;
+        if let Some(project) = model.active_project() {
+            let branch = project.branch();
+            let remote = project
+                .remotes
+                .first()
+                .map(|info| info.name.clone())
+                .unwrap_or_else(|| "origin".to_string());
+            rt.dialog = crate::runtime::DialogState::Push {
+                remote,
+                branch,
+                set_upstream: false,
+                status: None,
+            };
+        }
+    }
+
     // Focus follows the pointer: clicking outside the editor or terminal
     // releases that surface's keyboard focus before the click is handled.
     if ui.ctx().input(|input| input.pointer.any_pressed()) {

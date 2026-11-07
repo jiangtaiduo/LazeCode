@@ -168,7 +168,102 @@ impl LazeApp {
                 }
                 "quit" => self.request_quit(event_loop),
                 "open-project" => self.model.queue(lazecode_core::Command::OpenProjectDialog),
+                "new-file" => {
+                    if let Some(project) = self.model.active_project() {
+                        self.runtime.dialog = lazecode_ui::runtime::DialogState::NewFile {
+                            dir: project.root.clone(),
+                            value: String::new(),
+                            error: None,
+                        };
+                    }
+                }
+                "clone-repo" => {
+                    self.runtime.dialog = lazecode_ui::runtime::DialogState::CloneRepo {
+                        url: String::new(),
+                        dest: String::new(),
+                        error: None,
+                    };
+                }
+                "close-project" => {
+                    if let Some(active) = self.model.active_project {
+                        self.model
+                            .queue(lazecode_core::Command::CloseProject(active));
+                    }
+                }
                 "new-console" => self.model.queue(lazecode_core::Command::NewTerminal),
+                "save-all" => self.model.queue(lazecode_core::Command::SaveAll),
+                "goto-line" => {
+                    self.model.ui.goto_line_open = true;
+                    self.model.ui.goto_line_input.clear();
+                }
+                "git-commit" => {
+                    self.model.ui.sidebar_visible = true;
+                    self.model.ui.sidebar_view = lazecode_core::SidebarView::Git;
+                }
+                "git-push" => {
+                    if let Some(project) = self.model.active_project() {
+                        self.runtime.dialog = lazecode_ui::runtime::DialogState::Push {
+                            remote: project
+                                .remotes
+                                .first()
+                                .map(|r| r.name.clone())
+                                .unwrap_or_else(|| "origin".into()),
+                            branch: project.branch(),
+                            set_upstream: false,
+                            status: None,
+                        };
+                    }
+                }
+                "git-pull" => {
+                    self.runtime.dialog = lazecode_ui::runtime::DialogState::Pull {
+                        mode: lazecode_git::PullMode::Merge,
+                        status: None,
+                    };
+                }
+                "git-fetch" => {
+                    self.model.queue(lazecode_core::Command::FetchAll);
+                }
+                "git-remotes" => {
+                    let remotes = self
+                        .model
+                        .active_project()
+                        .map(|p| p.remotes.clone())
+                        .unwrap_or_default();
+                    self.runtime.dialog = lazecode_ui::runtime::DialogState::Remotes {
+                        remotes,
+                        new_name: String::new(),
+                        new_url: String::new(),
+                        error: None,
+                    };
+                }
+                "git-stashes" => {
+                    self.runtime.dialog = lazecode_ui::runtime::DialogState::StashManager {
+                        stashes: Vec::new(),
+                        selected: 0,
+                        error: None,
+                        loaded: false,
+                    };
+                }
+                "git-shelves" => {
+                    self.runtime.dialog = lazecode_ui::runtime::DialogState::ShelfManager {
+                        shelves: Vec::new(),
+                        selected: 0,
+                        error: None,
+                        loaded: false,
+                    };
+                }
+                "git-tools" => {
+                    self.runtime.dialog = lazecode_ui::runtime::DialogState::GitTools {
+                        tab: lazecode_ui::runtime::GitToolsTab::Submodules,
+                        submodules: Vec::new(),
+                        lfs_status: None,
+                        loaded: (false, false),
+                    };
+                }
+                "git-refresh" => {
+                    self.model.queue(lazecode_core::Command::ReloadGit);
+                    self.model.queue(lazecode_core::Command::ReloadTree);
+                }
                 "save" => {
                     if let Some(project) = self.model.active_project() {
                         let command = match project.active_tab {
@@ -482,6 +577,19 @@ impl ApplicationHandler<AppEvent> for LazeApp {
                     self.request_quit(event_loop);
                 }
             }
+            WindowEvent::DroppedFile(path) => {
+                if path.is_dir() {
+                    let _ = self.model.open_project(path);
+                } else if path.is_file() {
+                    let settings = self.model.settings.clone();
+                    if let Some(project) = self.model.active_project_mut() {
+                        let _ = project.open_file(path, &settings);
+                    } else {
+                        let _ = self.model.open_project(path);
+                    }
+                }
+                gfx.window.request_redraw();
+            }
             WindowEvent::RedrawRequested => {
                 self.poll_jobs();
                 self.poll_watchers();
@@ -550,6 +658,15 @@ fn main() -> anyhow::Result<()> {
     }
     let jobs = JobQueue::new(notifier.clone());
     let mut app = LazeApp::new(model, jobs);
+    for arg in std::env::args().skip(1) {
+        if !arg.starts_with('-') {
+            let path = std::path::PathBuf::from(&arg);
+            if path.exists() {
+                let _ = app.model.open_project(path);
+                break;
+            }
+        }
+    }
     event_loop.run_app(&mut app)?;
     Ok(())
 }
@@ -614,6 +731,25 @@ fn build_menu(zh: bool) -> Option<Menu> {
                 accel(Code::KeyO),
             ),
             &MenuItem::with_id(
+                "new-file",
+                pick(zh, "New File…", "新建文件…"),
+                true,
+                accel(Code::KeyN),
+            ),
+            &MenuItem::with_id(
+                "clone-repo",
+                pick(zh, "Clone Repository…", "克隆仓库…"),
+                true,
+                None,
+            ),
+            &MenuItem::with_id(
+                "close-project",
+                pick(zh, "Close Project", "关闭项目"),
+                true,
+                None,
+            ),
+            &PredefinedMenuItem::separator(),
+            &MenuItem::with_id(
                 "new-console",
                 pick(zh, "New Console", "新建控制台"),
                 true,
@@ -621,6 +757,12 @@ fn build_menu(zh: bool) -> Option<Menu> {
             ),
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id("save", pick(zh, "Save", "保存"), true, accel(Code::KeyS)),
+            &MenuItem::with_id(
+                "save-all",
+                pick(zh, "Save All", "保存全部"),
+                true,
+                accel_shift(Code::KeyS),
+            ),
             &MenuItem::with_id(
                 "close-tab",
                 pick(zh, "Close Tab", "关闭标签页"),
@@ -631,6 +773,22 @@ fn build_menu(zh: bool) -> Option<Menu> {
     )
     .ok()?;
     menu.append(&file).ok()?;
+
+    let edit = Submenu::with_items(
+        pick(zh, "Edit", "编辑"),
+        true,
+        &[
+            &PredefinedMenuItem::undo(Some(pick(zh, "Undo", "撤销"))),
+            &PredefinedMenuItem::redo(Some(pick(zh, "Redo", "重做"))),
+            &PredefinedMenuItem::separator(),
+            &PredefinedMenuItem::cut(Some(pick(zh, "Cut", "剪切"))),
+            &PredefinedMenuItem::copy(Some(pick(zh, "Copy", "复制"))),
+            &PredefinedMenuItem::paste(Some(pick(zh, "Paste", "粘贴"))),
+            &PredefinedMenuItem::select_all(Some(pick(zh, "Select All", "全选"))),
+        ],
+    )
+    .ok()?;
+    menu.append(&edit).ok()?;
 
     let view = Submenu::with_items(
         pick(zh, "View", "视图"),
@@ -656,22 +814,82 @@ fn build_menu(zh: bool) -> Option<Menu> {
             ),
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id(
-                "palette",
-                pick(zh, "Command Palette", "命令面板"),
+                "settings",
+                pick(zh, "Settings", "设置"),
                 true,
-                accel(Code::KeyK),
-            ),
-            &MenuItem::with_id(
-                "find",
-                pick(zh, "Find in Files", "在文件中查找"),
-                true,
-                accel_shift(Code::KeyF),
+                accel(Code::Comma),
             ),
         ],
     )
     .ok()?;
     menu.append(&view).ok()?;
 
+    let navigate = Submenu::with_items(
+        pick(zh, "Navigate", "导航"),
+        true,
+        &[
+            &MenuItem::with_id(
+                "palette",
+                pick(zh, "Command Palette…", "命令面板…"),
+                true,
+                accel(Code::KeyK),
+            ),
+            &MenuItem::with_id(
+                "find",
+                pick(zh, "Find in Files…", "在文件中查找…"),
+                true,
+                accel_shift(Code::KeyF),
+            ),
+            &MenuItem::with_id(
+                "goto-line",
+                pick(zh, "Go to Line…", "跳转到行…"),
+                true,
+                accel(Code::KeyL),
+            ),
+        ],
+    )
+    .ok()?;
+    menu.append(&navigate).ok()?;
+
+    let git = Submenu::with_items(
+        "Git",
+        true,
+        &[
+            &MenuItem::with_id("git-commit", pick(zh, "Commit…", "提交…"), true, None),
+            &MenuItem::with_id(
+                "git-push",
+                pick(zh, "Push…", "推送…"),
+                true,
+                accel_shift(Code::KeyK),
+            ),
+            &MenuItem::with_id("git-pull", pick(zh, "Pull…", "拉取…"), true, None),
+            &MenuItem::with_id("git-fetch", pick(zh, "Fetch", "获取远程更新"), true, None),
+            &MenuItem::with_id(
+                "git-remotes",
+                pick(zh, "Manage Remotes…", "管理远程仓库…"),
+                true,
+                None,
+            ),
+            &PredefinedMenuItem::separator(),
+            &MenuItem::with_id("git-stashes", pick(zh, "Stashes…", "贮藏管理…"), true, None),
+            &MenuItem::with_id("git-shelves", pick(zh, "Shelves…", "架藏管理…"), true, None),
+            &MenuItem::with_id(
+                "git-tools",
+                pick(zh, "Git Tools (Submodules/LFS)…", "Git 工具 (子模块/LFS)…"),
+                true,
+                None,
+            ),
+            &PredefinedMenuItem::separator(),
+            &MenuItem::with_id(
+                "git-refresh",
+                pick(zh, "Refresh", "刷新"),
+                true,
+                accel(Code::F5),
+            ),
+        ],
+    )
+    .ok()?;
+    menu.append(&git).ok()?;
     let window = Submenu::with_items(
         pick(zh, "Window", "窗口"),
         true,

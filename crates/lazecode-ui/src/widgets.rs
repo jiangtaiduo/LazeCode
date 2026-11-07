@@ -185,6 +185,67 @@ pub fn checkbox(ui: &mut Ui, rect: Rect, checked: bool, theme: &Theme) -> Respon
     response
 }
 
+/// 组头三态勾选框状态：全勾 / 全不勾 / 半选（组内勾选不一致）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TriState {
+    Checked,
+    Unchecked,
+    Partial,
+}
+
+/// Tri-state checkbox for changelist group headers. 半选态画一条短横线
+/// （JetBrains 惯例），点击行为由调用方决定（有未勾项→全勾，否则全不勾）。
+pub fn checkbox_tri(ui: &mut Ui, rect: Rect, state: TriState, theme: &Theme) -> Response {
+    let response = ui.interact(
+        rect,
+        ui.scope_id()
+            .with(("chktri", rect.min.x as i32, rect.min.y as i32)),
+        Sense::click(),
+    );
+    let p = theme.palette;
+    let box_rect = Rect::from_center_size(rect.center(), Vec2::splat(14.0));
+    match state {
+        TriState::Checked => {
+            ui.painter()
+                .rect_filled(box_rect, egui::CornerRadius::same(4), p.accent);
+            paint_icon(
+                ui.painter(),
+                box_rect.shrink(2.0),
+                Icon::Check,
+                p.accent_on_fill,
+            );
+        }
+        TriState::Partial => {
+            ui.painter()
+                .rect_filled(box_rect, egui::CornerRadius::same(4), p.accent);
+            let bar = Rect::from_min_max(
+                Pos2::new(box_rect.left() + 3.5, box_rect.center().y - 1.0),
+                Pos2::new(box_rect.right() - 3.5, box_rect.center().y + 1.0),
+            );
+            ui.painter()
+                .rect_filled(bar, egui::CornerRadius::same(1), p.accent_on_fill);
+        }
+        TriState::Unchecked => {
+            ui.painter()
+                .rect_filled(box_rect, egui::CornerRadius::same(4), p.panel2);
+            ui.painter().rect_stroke(
+                box_rect,
+                egui::CornerRadius::same(4),
+                Stroke::new(
+                    1.0,
+                    if response.hovered() {
+                        p.border_strong
+                    } else {
+                        p.border
+                    },
+                ),
+                StrokeKind::Inside,
+            );
+        }
+    }
+    response
+}
+
 /// A filled primary button (Commit, Open project).
 pub fn primary_button(
     ui: &mut Ui,
@@ -278,6 +339,61 @@ pub fn secondary_button(
         label,
         FontId::proportional(12.5),
         p.text2,
+        Align2::CENTER_CENTER,
+    );
+    response
+}
+
+/// `secondary_button` 的可禁用版本（Shelve 等需要空态禁用的按钮）。
+pub fn secondary_button_enabled(
+    ui: &mut Ui,
+    rect: Rect,
+    label: &str,
+    icon: Option<Icon>,
+    enabled: bool,
+    theme: &Theme,
+) -> Response {
+    let p = theme.palette;
+    let response = ui.interact(
+        rect,
+        ui.scope_id()
+            .with(("secondarye", rect.min.x as i32, rect.min.y as i32, label)),
+        Sense::click(),
+    );
+    let hovered = enabled && response.hovered();
+    let fill = if hovered {
+        p.hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(6), fill);
+    ui.painter().rect_stroke(
+        rect,
+        egui::CornerRadius::same(6),
+        Stroke::new(1.0, if enabled { p.border } else { p.border_soft }),
+        StrokeKind::Inside,
+    );
+    let mut text_rect = rect;
+    if let Some(icon) = icon {
+        let icon_rect = Rect::from_center_size(
+            Pos2::new(rect.left() + 14.0, rect.center().y),
+            Vec2::splat(13.0),
+        );
+        paint_icon(
+            ui.painter(),
+            icon_rect,
+            icon,
+            if enabled { p.text2 } else { p.text3 },
+        );
+        text_rect.min.x += 22.0;
+    }
+    text_clipped(
+        ui.painter(),
+        text_rect,
+        label,
+        FontId::proportional(12.5),
+        if enabled { p.text2 } else { p.text3 },
         Align2::CENTER_CENTER,
     );
     response

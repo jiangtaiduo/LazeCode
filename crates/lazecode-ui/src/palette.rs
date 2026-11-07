@@ -315,6 +315,76 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
         PaletteAction::StashChanges,
     );
     action(
+        Icon::GitLog,
+        crate::tr!(model, "Stashes (Manage stashes)…", "贮藏管理 (Stashes)…"),
+        crate::tr!(
+            model,
+            "List, apply, pop or drop stashes",
+            "查看、应用或删除贮藏"
+        ),
+        None,
+        PaletteAction::StashManager,
+    );
+    action(
+        Icon::GitLog,
+        crate::tr!(model, "Shelves (Manage shelves)…", "架藏管理 (Shelves)…"),
+        crate::tr!(
+            model,
+            "List, restore or delete shelves",
+            "查看、恢复或删除架藏"
+        ),
+        None,
+        PaletteAction::ShelfManager,
+    );
+    action(
+        Icon::GitLog,
+        crate::tr!(
+            model,
+            "Git tools (Submodules / LFS)…",
+            "Git 工具 (子模块 / LFS)…"
+        ),
+        crate::tr!(
+            model,
+            "Submodules and Git LFS status",
+            "子模块与 Git LFS 状态"
+        ),
+        None,
+        PaletteAction::GitTools,
+    );
+    action(
+        Icon::GitLog,
+        crate::tr!(model, "Compare branches…", "比较分支…"),
+        crate::tr!(
+            model,
+            "Two-way commit and diff comparison",
+            "分支双向提交与文件差异比较"
+        ),
+        None,
+        PaletteAction::CompareBranches,
+    );
+    action(
+        Icon::FolderOpen,
+        crate::tr!(model, "Clone repository…", "克隆仓库…"),
+        crate::tr!(
+            model,
+            "Clone a Git repository from URL",
+            "从 URL 克隆 Git 仓库"
+        ),
+        None,
+        PaletteAction::CloneRepo,
+    );
+    action(
+        Icon::Search,
+        crate::tr!(model, "Go to line…", "跳转到行…"),
+        crate::tr!(
+            model,
+            "Jump to line in active file",
+            "跳转到当前文件的指定行"
+        ),
+        Some("⌘L"),
+        PaletteAction::GoToLine,
+    );
+    action(
         Icon::Search,
         crate::tr!(model, "Find in files", "在文件中查找"),
         crate::tr!(model, "Search file contents", "搜索文件内容"),
@@ -599,19 +669,62 @@ fn execute(action: PaletteAction, model: &mut AppModel, rt: &mut UiRuntime) {
         }
         PaletteAction::FetchAll => model.queue(Command::FetchAll),
         PaletteAction::StashChanges => {
-            model.queue(Command::StashPush { message: None });
+            model.queue(Command::StashPush {
+                message: None,
+                include_untracked: true,
+            });
         }
-        PaletteAction::ShelvedChanges => {
-            // Shelved list is surfaced from the source-control sidebar; keep
-            // the palette hook minimal until the shelf picker dialog lands.
-            model.toast(
-                if model.settings.language.is_zh() {
-                    "Shelf 列表在版本控制侧栏的 Changes 菜单里".to_string()
-                } else {
-                    "Shelves live in the Source Control sidebar's Changes menu".to_string()
-                },
-                lazecode_core::ToastKind::Info,
-            );
+        PaletteAction::ShelvedChanges | PaletteAction::ShelfManager => {
+            rt.dialog = crate::runtime::DialogState::ShelfManager {
+                shelves: Vec::new(),
+                selected: 0,
+                error: None,
+                loaded: false,
+            };
+        }
+        PaletteAction::StashManager => {
+            rt.dialog = crate::runtime::DialogState::StashManager {
+                stashes: Vec::new(),
+                selected: 0,
+                error: None,
+                loaded: false,
+            };
+        }
+        PaletteAction::CloneRepo => {
+            rt.dialog = crate::runtime::DialogState::CloneRepo {
+                url: String::new(),
+                dest: String::new(),
+                error: None,
+            };
+        }
+        PaletteAction::GitTools => {
+            rt.dialog = crate::runtime::DialogState::GitTools {
+                tab: crate::runtime::GitToolsTab::Submodules,
+                submodules: Vec::new(),
+                lfs_status: None,
+                loaded: (false, false),
+            };
+        }
+        PaletteAction::CompareBranches => {
+            let (left, right) = if let Some(project) = model.active_project() {
+                let current = project.branch();
+                let other = project
+                    .branches
+                    .iter()
+                    .find(|b| b.name != current)
+                    .map(|b| b.name.clone())
+                    .unwrap_or_else(|| "main".into());
+                (current, other)
+            } else {
+                ("HEAD".into(), "main".into())
+            };
+            crate::editor::open_compare_page(model, left, right);
+        }
+        PaletteAction::GoToLine => {
+            rt.dialog = crate::runtime::DialogState::GoToLine {
+                value: String::new(),
+                error: None,
+            };
         }
         PaletteAction::About => {
             rt.settings_open = true;

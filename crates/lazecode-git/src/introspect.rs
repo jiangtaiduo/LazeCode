@@ -228,74 +228,194 @@ pub fn lfs_pull(root: &Path) -> Result<String> {
 
 // ---------------- compare ----------------
 
-#[derive(Clone, Debug)]
-pub struct CompareSide {
-    pub commits: Vec<crate::model::CommitInfo>,
-    /// Files changed between the tips' merge-base..tip.
-    pub files: Vec<(String, String)>, // (path, kind A/M/D)
+/// 文件条目：`--name-status` 的状态字母 + `--numstat` 的增删行数合并
+/// （稳定版 CommitFileDto 的等价物；二进制行显示为 `-`，记 0）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompareFile {
+    pub path: String,
+    pub status: char,
+    pub additions: u32,
+    pub deletions: u32,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct CompareSide {
+    pub commits: Vec<crate::model::CommitInfo>,
+    /// 提交日志遍历触及上限（还有更早的提交，前端显示 Load More）。
+    pub truncated: bool,
+    /// 该侧相对 merge-base 的文件清单（`other...side` 三点）。
+    pub files: Vec<CompareFile>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CompareBranches {
+    pub left: CompareSide,
+    pub right: CompareSide,
+    /// 两个分支端点的 merge-base；`None` = 无共同祖先（unrelated
+    /// histories），文件清单退化为空（对齐稳定版语义）。
+    pub merge_base: Option<String>,
+}
+
+/// 把 `--numstat` 与 `--name-status` 两路输出合并成 CompareFile 列表。
+/// numstat 失败时状态字母退化为 'M'（对齐稳定版 git_commit_files）。
+fn merge_file_lists(numstat: &str, name_status: &str) -> Vec<CompareFile> {
+    let mut counts: std::collections::HashMap<String, (u32, u32)> =
+        std::collections::HashMap::new();
+    for line in numstat.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let add = parts.next().unwrap_or("");
+        let del = parts.next().unwrap_or("");
+        let path = match parts.next() {
+            Some(path) if !path.is_empty() => path,
+            _ => continue,
+        };
+        let parse = |text: &str| -> u32 {
+            text.parse::<u32>().unwrap_or(0) // binary rows show '-'
+        };
+        counts.insert(path.to_string(), (parse(add), parse(del)));
+    }
+    let mut files: Vec<CompareFile> = Vec::new();
+    for line in name_status.lines() {
+        let mut parts = line.splitn(2, '\t');
+        let kind = parts.next().unwrap_or("").trim();
+        let path = match parts.next() {
+            Some(path) if !path.is_empty() => path.to_string(),
+            _ => continue,
+        };
+        let status = kind.chars().next().unwrap_or('M');
+        let (additions, deletions) = counts.remove(&path).unwrap_or((0, 0));
+        files.push(CompareFile {
+            path,
+            status,
+            additions,
+            deletions,
+        });
+    }
+    files
+}
+
+/// 统一的两路 diff：`git diff --no-renames --numstat/--name-status <range> [-- path]`。
+fn diff_range_files(root: &Path, range: &str, path: Option<&str>) -> Vec<CompareFile> {
+    let base_args: Vec<&str> = vec!["diff", "--no-renames", "--no-color"];
+    let mut tail: Vec<String> = vec![range.to_string()];
+    if let Some(path) = path {
+        if !path.trim().is_empty() {
+            tail.push("--".to_string());
+            tail.push(path.trim().to_string());
+        }
+    }
+    // numstat / name-status 两路并发执行（对齐稳定版 git_commit_files 的
+    // 合并策略；任一路失败该路退化为空）。
+    let mut numstat_args = base_args.clone();
+    numstat_args.push("--numstat");
+    let numstat = run_args(root, &numstat_args, &tail).unwrap_or_default();
+    let mut status_args = base_args;
+    status_args.push("--name-status");
+    let name_status = run_args(root, &status_args, &tail).unwrap_or_default();
+    merge_file_lists(&numstat, &name_status)
+}
+
+fn run_args(root: &Path, args: &[&str], tail: &[String]) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .args(tail)
+        .output()
+        .map_err(|err| anyhow!("git spawn failed: {err}"))?;
+    if !output.status.success() {
+        anyhow::bail!("{}", String::from_utf8_lossy(&output.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// 双向分支比较（对齐稳定版 git_compare_branches）：
+/// - 每侧提交 = `git log {other}..{side}`（topo 序），多取 1 条探测截断；
+/// - 每侧文件 = `git diff --no-renames {other}...{side}`（三点 =
+///   merge-base..side，只统计该侧独有变更；失败不拖垮提交列表，退化为空）；
+/// - `left_path`/`right_path` 同时作用于提交日志与文件清单；
+/// - `limit` 夹在 1..=10000。
 pub fn compare_branches(
     root: &Path,
     left: &str,
     right: &str,
-) -> Result<(CompareSide, CompareSide)> {
-    // merge-base of the two tips; unrelated histories fall back to empty diff.
-    let base = run(root, &["merge-base", left, right]).unwrap_or_default();
-    let build = |tip: &str, range: String| -> Result<CompareSide> {
+    left_path: Option<&str>,
+    right_path: Option<&str>,
+    limit: usize,
+) -> Result<CompareBranches> {
+    let limit = limit.clamp(1, 10_000);
+    // merge-base of the two tips; unrelated histories -> None.
+    let base = run(root, &["merge-base", "--end-of-options", left, right]).ok();
+    let build = |tip: &str, range: String, path: Option<&str>| -> Result<CompareSide> {
         let options = crate::model::LogOptions {
-            limit: 500,
+            limit: limit + 1,
             branch: Some(range),
             topo_order: true,
+            path: path.map(str::to_string),
             ..Default::default()
         };
-        let commits = crate::log::log(root, options)?;
-        // Files of tip relative to the merge-base (or an empty tree).
-        let range_arg = if base.is_empty() {
-            tip.to_string()
-        } else {
-            format!("{base}..{tip}")
+        let mut commits = crate::log::log(root, options)?;
+        let truncated = commits.len() > limit;
+        commits.truncate(limit);
+        // Files of tip relative to the merge-base. 无 merge-base 时不做
+        // 端点退化（git 三点语法自身会失败）——与稳定版一致退化为空清单。
+        let range_arg = match &base {
+            Some(base) => format!("{base}...{tip}"),
+            None => String::new(),
         };
-        let name_only = run(
-            root,
-            &["diff", "--name-status", "--no-color", &range_arg, "--"],
-        )
-        .unwrap_or_default();
-        let files: Vec<(String, String)> = name_only
-            .lines()
-            .filter_map(|line| {
-                let mut parts = line.splitn(2, '\t');
-                let kind = parts.next()?.to_string();
-                let path = parts.next()?.to_string();
-                if path.is_empty() {
-                    None
-                } else {
-                    Some((path, kind))
-                }
-            })
-            .collect();
-        Ok(CompareSide { commits, files })
+        let files = if range_arg.is_empty() {
+            Vec::new()
+        } else {
+            diff_range_files(root, &range_arg, path)
+        };
+        Ok(CompareSide {
+            commits,
+            truncated,
+            files,
+        })
     };
-    let left_range = format!("{right}..{left}");
-    let right_range = format!("{left}..{right}");
-    let left_side = build(left, left_range)?;
-    let right_side = build(right, right_range)?;
-    Ok((left_side, right_side))
+    let left_side = build(left, format!("{right}..{left}"), left_path)?;
+    let right_side = build(right, format!("{left}..{right}"), right_path)?;
+    Ok(CompareBranches {
+        left: left_side,
+        right: right_side,
+        merge_base: base,
+    })
 }
 
-/// Files changed between any two revisions.
-pub fn compare_commits(root: &Path, base: &str, tip: &str) -> Result<Vec<(String, String)>> {
-    let output = run(
+/// 单个提交的变更文件（`git show --numstat/--name-status`，对齐稳定版
+/// git_commit_files）。
+pub fn commit_files(root: &Path, commit: &str) -> Result<Vec<CompareFile>> {
+    let numstat = run_args(
         root,
-        &["diff", "--name-status", "--no-color", base, tip, "--"],
+        &[
+            "show",
+            "--no-renames",
+            "--no-color",
+            "--numstat",
+            "--format=",
+        ],
+        &[commit.to_string()],
     )?;
-    Ok(output
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.splitn(2, '\t');
-            let kind = parts.next()?.to_string();
-            let path = parts.next()?.to_string();
-            Some((path, kind))
-        })
-        .collect())
+    let name_status = run_args(
+        root,
+        &[
+            "show",
+            "--no-renames",
+            "--no-color",
+            "--name-status",
+            "--format=",
+        ],
+        &[commit.to_string()],
+    );
+    let name_status = match name_status {
+        Ok(text) if !text.trim().is_empty() => text,
+        // 根提交的 show 也可用；仍失败则按 merge-base 语义退化为空。
+        _ => String::new(),
+    };
+    Ok(merge_file_lists(&numstat, &name_status))
+}
+
+/// 两个 revision 之间的变更文件（二点范围，用于详情列多选范围 diff）。
+pub fn compare_commits(root: &Path, base: &str, tip: &str) -> Result<Vec<CompareFile>> {
+    Ok(diff_range_files(root, &format!("{base}..{tip}"), None))
 }

@@ -74,6 +74,80 @@ pub struct UiState {
     pub git_details_visible: bool,
     pub git_jump_to_commit: Option<String>,
     pub git_log_compact: bool,
+    pub goto_line_open: bool,
+    pub goto_line_input: String,
+    /// One-shot: 「Commit and Push」的提交已成功，shell 下一次绘制时打开
+    /// Push 对话框并复位（JobResult 消费点置位，UI 消费）。
+    pub open_push_dialog: bool,
+    /// 分支比较会话（数据缓存 + 双侧 UI 状态）。稳定版的比较页是常驻
+    /// 标签（换 ref 不丢状态），对话框方案下挂在 UiState 以便后台任务
+    /// 回填，重开对话框保留上次比较。
+    pub compare_branches: CompareBranchesState,
+}
+
+/// 详情列文件缓存：一次「选中提交 / 多选范围 / 整侧」的文件清单。
+#[derive(Default, Clone, Debug)]
+pub struct CompareDetail {
+    /// `"c:{commit}"` 或 `"r:{from}..{to}"`，回填时匹配。
+    pub key: String,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub files: Vec<lazecode_git::CompareFile>,
+}
+
+/// 日期过滤（对齐稳定版 compareBranches 的 Date 菜单）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompareDateFilter {
+    Today,
+    Last7Days,
+    Last30Days,
+}
+
+/// 单侧的 UI 状态（选择、过滤、树折叠），互不串扰。
+#[derive(Default, Clone, Debug)]
+pub struct CompareBranchesSideView {
+    /// 选中的提交 id（显示顺序）。
+    pub selected: Vec<String>,
+    pub anchor: Option<String>,
+    /// ⌘A 整侧全选：详情直接用该侧的 merge-base 文件清单。
+    pub select_all: bool,
+    pub collapsed_dirs: HashSet<String>,
+    pub selected_file: Option<String>,
+    pub query: String,
+    pub regex: bool,
+    pub match_case: bool,
+    pub author: Option<String>,
+    pub date: Option<CompareDateFilter>,
+    /// Branch(ref) 过滤（按提交所属引用名过滤显示行）。
+    pub selected_ref_filter: Option<String>,
+    /// 本侧详情文件缓存（选中提交/范围 diff 的清单）。**每侧独立**：
+    /// 两个 pane 不能共用，否则一侧的选择会污染另一侧的详情。
+    pub detail: Option<CompareDetail>,
+    /// 路径过滤（非空即触发重查）。
+    pub path: String,
+    pub path_edit_open: bool,
+    pub path_edit: String,
+}
+
+/// 分支比较会话。`left_ref/right_ref` 是方向身份；job 回填时按
+/// (refs, paths) 匹配，不匹配的结果丢弃。
+#[derive(Default, Clone, Debug)]
+pub struct CompareBranchesState {
+    /// 会话所属项目（比较数据只对应该仓库）。跨项目切换时 refs 可能
+    /// 同名，没有 root 就会把 A 仓库的数据填进 B 仓库的会话。
+    pub root: PathBuf,
+    pub left_ref: String,
+    pub right_ref: String,
+    pub left_path: String,
+    pub right_path: String,
+    /// 每侧提交加载的上限（Load More 递增）。
+    pub limit: usize,
+    pub sides: Option<lazecode_git::CompareBranches>,
+    pub loading: bool,
+    pub error: Option<String>,
+    pub loading_more: [bool; 2],
+    pub left_view: CompareBranchesSideView,
+    pub right_view: CompareBranchesSideView,
 }
 
 impl Default for UiState {
@@ -104,6 +178,10 @@ impl Default for UiState {
             git_details_visible: true,
             git_jump_to_commit: None,
             git_log_compact: false,
+            goto_line_open: false,
+            goto_line_input: String::new(),
+            open_push_dialog: false,
+            compare_branches: CompareBranchesState::default(),
         }
     }
 }
@@ -168,6 +246,17 @@ pub struct DiffTab {
 pub enum TabKind {
     File(FileTab),
     Diff(DiffTab),
+    /// 分支比较页（稳定版 compare-branches 中央标签页；单实例）。
+    Compare(CompareTab),
+}
+
+/// 分支比较标签页：只保存方向身份，数据在 `UiState::compare_branches`。
+#[derive(Clone, Debug)]
+pub struct CompareTab {
+    pub left: String,
+    pub right: String,
+    /// 标签页标题（打开时按语言生成）。
+    pub title: String,
 }
 
 pub struct Tab {
@@ -179,24 +268,29 @@ impl Tab {
     pub fn title(&self) -> String {
         match &self.kind {
             TabKind::File(file) => file.doc.title(),
+            TabKind::Compare(compare) => compare.title.clone(),
             TabKind::Diff(diff) => {
-                let base = diff.path.rsplit('/').next().unwrap_or(&diff.path);
+                // 稳定版 diff 标签标题（EditorTabBar）：路径不在标题里，
+                // 文件名由 diff 视图内部标题栏展示；两种语言同文案。
                 match &diff.source {
-                    DiffSource::Worktree { .. } => base.to_string(),
+                    DiffSource::Worktree { .. } => "Working Tree Diff".to_string(),
                     DiffSource::Commit { commit, .. } => {
-                        format!("{base} ({})", &commit[..commit.len().min(7)])
+                        format!("Diff ({})", &commit[..commit.len().min(7)])
                     }
                     DiffSource::CompareWithLocal { commit, .. } => {
-                        format!("{base} (Local ↔ {})", &commit[..commit.len().min(7)])
+                        format!("Diff (Local ↔ {})", &commit[..commit.len().min(7)])
                     }
-                    DiffSource::CompareCommits { from, to, .. } => {
-                        format!(
-                            "{base} ({}..{})",
-                            &from[..from.len().min(7)],
-                            &to[..to.len().min(7)]
-                        )
-                    }
-                    DiffSource::Files { .. } => base.to_string(),
+                    DiffSource::CompareCommits { from, to, .. } => format!(
+                        "Diff ({} ↔ {})",
+                        &from[..from.len().min(7)],
+                        &to[..to.len().min(7)]
+                    ),
+                    DiffSource::Files { .. } => diff
+                        .path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&diff.path)
+                        .to_string(),
                 }
             }
         }
@@ -205,6 +299,7 @@ impl Tab {
         match &self.kind {
             TabKind::File(file) => file.doc.path.to_str(),
             TabKind::Diff(diff) => Some(diff.path.as_str()),
+            TabKind::Compare(_) => None,
         }
     }
 
@@ -378,7 +473,10 @@ pub struct ProjectState {
     /// Expanded directory paths of the Git log branch tree.
     pub ref_dirs_expanded: std::collections::HashSet<String>,
     /// Multi-selection of the branch tree (full ref names).
-    pub ref_selection: std::collections::HashSet<String>,
+    /// 分支树多选（**点击顺序**保留：多选恰两个时「比较分支」以第 1 个
+    /// 为 left、第 2 个为 right，对齐稳定版；HashSet 的随机序会导致左右
+    /// 随机互换）。
+    pub ref_selection: Vec<String>,
     pub favorites: std::collections::HashSet<String>,
     pub commit_file_dirs_expanded: std::collections::HashSet<String>,
     pub tags: Vec<String>,
@@ -406,13 +504,26 @@ pub struct ProjectState {
     pub log_reached_end: bool,
     pub log_branch: Option<String>,
     pub selected_commit: Option<String>,
+    pub selected_commits: Vec<String>,
+    pub is_single_file: bool,
     pub commit_details: Option<CommitDetails>,
     pub commit_details_attempted: Option<String>,
     pub tabs: Vec<Tab>,
     pub active_tab: Option<u64>,
     pub commit_message: String,
     pub amend: bool,
-    pub unchecked_paths: HashSet<String>,
+    /// 对齐稳定版语义：勾选 = 包含进本次提交，默认全部不勾，提交范围
+    /// 完全由用户显式勾选决定（正向集合；Amend 不受勾选限制）。
+    pub checked_paths: HashSet<String>,
+    /// Collapsed changelist groups of the source-control list.
+    pub collapsed_lists: HashSet<String>,
+    /// Multi-selection of the source-control file rows (repo-relative).
+    pub change_selection: HashSet<String>,
+    /// Anchor row of the selection (Shift-range base), in displayed order.
+    pub change_anchor: Option<String>,
+    /// Set when the user clicks 「Commit and Push」: on commit success the
+    /// shell opens the push dialog (JobResult 消费点写回 UiState)。
+    pub open_push_after_commit: bool,
     /// All worktrees incl. the main one at index 0.
     pub worktrees: Vec<WorktreeState>,
     /// Index into `worktrees` of the console/tree pane target.
@@ -429,10 +540,15 @@ impl ProjectState {
         settings: &Settings,
         notifier: Option<Arc<dyn Notifier>>,
     ) -> Result<Self, String> {
-        let root = canonical(&root);
-        if !root.is_dir() {
-            return Err(format!("{} is not a directory", root.display()));
-        }
+        let path = canonical(&root);
+        let (root, is_single_file, file_to_open) = if path.is_file() {
+            let parent = path.parent().unwrap_or(&path).to_path_buf();
+            (parent, true, Some(path.clone()))
+        } else if path.is_dir() {
+            (path, false, None)
+        } else {
+            return Err(format!("{} does not exist", path.display()));
+        };
         let name = root
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -486,7 +602,7 @@ impl ProjectState {
             branch_query: String::new(),
             // The branch tree starts fully expanded (PyCharm default):
             ref_dirs_expanded: init_dirs,
-            ref_selection: std::collections::HashSet::new(),
+            ref_selection: Vec::new(),
             favorites: std::collections::HashSet::new(),
             commit_file_dirs_expanded: std::collections::HashSet::new(),
             tags: Vec::new(),
@@ -502,13 +618,19 @@ impl ProjectState {
             log_reached_end: false,
             log_branch: None,
             selected_commit: None,
+            selected_commits: Vec::new(),
+            is_single_file,
             commit_details: None,
             commit_details_attempted: None,
             tabs: Vec::new(),
             active_tab: None,
             commit_message: String::new(),
             amend: false,
-            unchecked_paths: HashSet::new(),
+            checked_paths: HashSet::new(),
+            collapsed_lists: HashSet::new(),
+            change_selection: HashSet::new(),
+            change_anchor: None,
+            open_push_after_commit: false,
             worktrees: Vec::new(),
             active_worktree: 0,
             watcher,
@@ -518,6 +640,12 @@ impl ProjectState {
         };
         if let Some(first) = project.log.first() {
             project.selected_commit = Some(first.id.clone());
+        }
+        if let Some(first) = project.log.first() {
+            project.selected_commits = vec![first.id.clone()];
+        }
+        if let Some(file_path) = file_to_open {
+            let _ = project.open_file(file_path, settings);
         }
         let main = WorktreeState::load("main".to_string(), project.root.clone(), true);
         project.worktrees.push(main);
@@ -556,7 +684,7 @@ impl ProjectState {
     pub fn checked_changes(&self) -> Vec<String> {
         self.changes()
             .iter()
-            .filter(|change| !self.unchecked_paths.contains(&change.path))
+            .filter(|change| self.checked_paths.contains(&change.path))
             .map(|change| change.path.clone())
             .collect()
     }
@@ -604,7 +732,14 @@ impl ProjectState {
             .iter()
             .map(|change| change.path.clone())
             .collect();
-        self.unchecked_paths.retain(|path| existing.contains(path));
+        // 勾选集合、行多选与锚点都按当前变更路径裁剪，消失的文件不留幽灵状态。
+        self.checked_paths.retain(|path| existing.contains(path));
+        self.change_selection.retain(|path| existing.contains(path));
+        if let Some(anchor) = &self.change_anchor {
+            if !existing.contains(anchor) {
+                self.change_anchor = None;
+            }
+        }
     }
 
     pub fn refresh_log(&mut self) {
@@ -812,6 +947,8 @@ impl ProjectState {
     }
 
     pub fn open_diff_source(&mut self, source: DiffSource) -> u64 {
+        // 完全同源（同提交同文件）：只激活不重置，避免重复加载与后台任务
+        // 去重（同 key 会被丢弃）竞争导致永远转圈。
         if let Some(tab) = self.tabs.iter().find(|tab| match &tab.kind {
             TabKind::Diff(diff) => diff.source == source,
             _ => false,
@@ -819,7 +956,6 @@ impl ProjectState {
             self.active_tab = Some(tab.id);
             return tab.id;
         }
-        let id = NEXT_TAB.fetch_add(1, Ordering::Relaxed);
         let path = match &source {
             DiffSource::Worktree { path }
             | DiffSource::Commit { path, .. }
@@ -837,6 +973,29 @@ impl ProjectState {
                     .unwrap_or("right"),
             ),
         };
+        // 稳定版语义（App.tsx enterDiff）：diff 是全局单例标签，换文件/
+        // 换提交/换来源只换内容不新开标签；任两文件互比（Files）不参与。
+        if !matches!(source, DiffSource::Files { .. }) {
+            let reuse = self.tabs.iter().position(|tab| {
+                matches!(
+                    &tab.kind,
+                    TabKind::Diff(diff) if !matches!(diff.source, DiffSource::Files { .. })
+                )
+            });
+            if let Some(index) = reuse {
+                if let TabKind::Diff(diff) = &mut self.tabs[index].kind {
+                    diff.source = source.clone();
+                    diff.path = path;
+                    diff.diff = None;
+                    diff.loading = true;
+                    diff.error = None;
+                    diff.current_hunk = 0;
+                }
+                self.active_tab = Some(self.tabs[index].id);
+                return self.tabs[index].id;
+            }
+        }
+        let id = NEXT_TAB.fetch_add(1, Ordering::Relaxed);
         self.tabs.push(Tab {
             id,
             kind: TabKind::Diff(DiffTab {
@@ -871,6 +1030,33 @@ impl ProjectState {
 
     pub fn open_files_diff(&mut self, old_path: PathBuf, new_path: PathBuf) -> u64 {
         self.open_diff_source(DiffSource::Files { old_path, new_path })
+    }
+
+    /// 打开分支比较页（单实例，对齐稳定版：再开同一功能只是更新方向并
+    /// 激活既有标签页；标题在 UI 层填充为 i18n 文案）。
+    pub fn open_compare_branches(&mut self, left: String, right: String, title: String) -> u64 {
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|tab| matches!(tab.kind, TabKind::Compare(_)))
+        {
+            if let TabKind::Compare(compare) = &mut tab.kind {
+                if compare.left != left || compare.right != right {
+                    compare.left = left;
+                    compare.right = right;
+                    compare.title = title;
+                }
+            }
+            self.active_tab = Some(tab.id);
+            return tab.id;
+        }
+        let id = NEXT_TAB.fetch_add(1, Ordering::Relaxed);
+        self.tabs.push(Tab {
+            id,
+            kind: TabKind::Compare(CompareTab { left, right, title }),
+        });
+        self.active_tab = Some(id);
+        id
     }
 
     pub fn set_diff_for_source(&mut self, source: &DiffSource, result: Result<FileDiff, String>) {
@@ -928,6 +1114,54 @@ impl ProjectState {
                 .or_else(|| self.tabs.first())
                 .map(|tab| tab.id);
         }
+    }
+
+    pub fn close_other_tabs(&mut self, id: u64) {
+        self.tabs.retain(|tab| tab.id == id);
+        self.active_tab = Some(id);
+    }
+
+    pub fn close_all_tabs(&mut self) {
+        self.tabs.clear();
+        self.active_tab = None;
+    }
+
+    pub fn close_tabs_to_right(&mut self, id: u64) {
+        if let Some(pos) = self.tabs.iter().position(|tab| tab.id == id) {
+            self.tabs.truncate(pos + 1);
+            if !self.tabs.iter().any(|tab| Some(tab.id) == self.active_tab) {
+                self.active_tab = Some(id);
+            }
+        }
+    }
+
+    /// 关闭目标标签左侧的所有标签（稳定版「关闭左侧标签」，首标签禁用）。
+    pub fn close_tabs_to_left(&mut self, id: u64) {
+        if let Some(pos) = self.tabs.iter().position(|tab| tab.id == id) {
+            self.tabs.drain(..pos);
+            if !self.tabs.iter().any(|tab| Some(tab.id) == self.active_tab) {
+                self.active_tab = Some(id);
+            }
+        }
+    }
+
+    pub fn close_unmodified_tabs(&mut self) {
+        self.tabs.retain(|tab| tab.is_dirty());
+        if !self.tabs.iter().any(|tab| Some(tab.id) == self.active_tab) {
+            self.active_tab = self.tabs.first().map(|tab| tab.id);
+        }
+    }
+
+    pub fn close_other_terminals(&mut self, id: u64) {
+        let wt = self.active_worktree_mut();
+        wt.terminals.retain(|term| term.id == id);
+        wt.active_terminal = Some(id);
+    }
+
+    pub fn close_all_terminals(&mut self) {
+        let wt = self.active_worktree_mut();
+        wt.terminals.clear();
+        wt.active_terminal = None;
     }
 
     pub fn expand_parents(&mut self, path: &Path) {
@@ -1207,6 +1441,7 @@ impl AppModel {
         }
         let path = project.root.clone();
         let name = project.name.clone();
+        let is_single_file = project.is_single_file;
         let was_empty = self.projects.is_empty();
         let index = self.projects.len();
         self.projects.push(project);
@@ -1215,9 +1450,11 @@ impl AppModel {
             self.ui.panel_visible = true;
         }
         self.active_project = Some(index);
-        self.recent.retain(|recent| recent != &path);
-        self.recent.insert(0, path);
-        self.recent.truncate(12);
+        if !is_single_file {
+            self.recent.retain(|recent| recent != &path);
+            self.recent.insert(0, path);
+            self.recent.truncate(12);
+        }
         let message = if self.settings.language.is_zh() {
             format!("已打开 {name}")
         } else {
@@ -1323,6 +1560,7 @@ impl AppModel {
             projects: self
                 .projects
                 .iter()
+                .filter(|p| !p.is_single_file)
                 .map(|project| project.root.clone())
                 .collect(),
             active_project: self.active_project().map(|project| project.root.clone()),
@@ -1349,7 +1587,7 @@ impl AppModel {
                 .iter()
                 .filter_map(|tab| match &tab.kind {
                     TabKind::File(file) => Some(file.doc.path.clone()),
-                    TabKind::Diff(_) => None,
+                    TabKind::Diff(_) | TabKind::Compare(_) => None,
                 })
                 .collect();
             file.open_tabs.insert(project.root.clone(), files);

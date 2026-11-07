@@ -92,6 +92,63 @@ pub fn rebase_skip(root: &Path) -> Result<String> {
     run(root, &["rebase", "--skip"]).map(|_| "rebase skipped".to_string())
 }
 
+/// 交互式变基的一条 todo（action ∈ pick/reword/edit/squash/fixup/drop）。
+#[derive(Clone, Debug)]
+pub struct RebaseStep {
+    pub action: String,
+    pub commit: String,
+}
+
+/// 执行交互式变基：把 UI 编排好的 todo 写进临时文件，再用
+/// GIT_SEQUENCE_EDITOR 让 `git rebase -i` 直接采用该清单（不弹外部
+/// 编辑器）。GIT_EDITOR=true 使 reword 保留原提交信息（UI 暂无消息
+/// 编辑框）；edit 会停在对应提交，由面板的 Continue/Abort 接管。
+pub fn rebase_interactive(root: &Path, onto: &str, steps: &[RebaseStep]) -> Result<String> {
+    require_clean(root)?;
+    // onto 可以是分支名等 committish，先解析成完整提交号。
+    let resolved = run(
+        root,
+        &["rev-parse", "--verify", &format!("{onto}^{{commit}}")],
+    )?;
+    let onto = validated_hash(&resolved)?;
+    if steps.is_empty() {
+        anyhow::bail!("empty interactive rebase todo");
+    }
+    let mut todo = String::new();
+    for step in steps {
+        let action = step.action.trim();
+        if !matches!(
+            action,
+            "pick" | "reword" | "edit" | "squash" | "fixup" | "drop"
+        ) {
+            anyhow::bail!("unsupported rebase action '{action}'");
+        }
+        let commit = validated_hash(&step.commit)?;
+        todo.push_str(&format!("{action} {commit}\n"));
+    }
+    // 临时清单文件：进程号 + 纳秒避免并行冲突，结束后整目录清理。
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.subsec_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("lazecode-rebase-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let todo_path = dir.join("todo");
+    std::fs::write(&todo_path, todo)?;
+    let output = builder(root, &["rebase", "-i", onto])
+        .env("GIT_SEQUENCE_EDITOR", format!("cp {}", todo_path.display()))
+        .env("GIT_EDITOR", "true")
+        .output()
+        .map_err(|err| anyhow!("git spawn failed: {err}"))?;
+    let _ = std::fs::remove_dir_all(&dir);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() {
+        return Err(anyhow!("{}{}", stdout.trim(), stderr.trim()));
+    }
+    Ok(stdout.trim().to_string())
+}
+
 // ---------------- cherry-pick ----------------
 
 pub fn cherry_pick(root: &Path, hash: &str) -> Result<String> {
@@ -382,4 +439,68 @@ pub fn mark_conflict_resolved(root: &Path, path: &str, content: Option<&str>) ->
         std::fs::write(root.join(path), content.as_bytes())?;
     }
     run(root, &["add", "--", path]).map(drop)
+}
+
+/// Checkout a detached revision/commit.
+pub fn checkout_revision(root: &Path, revision: &str) -> Result<String> {
+    validated_hash(revision)?;
+    require_clean(root)?;
+    let output = builder(root, &["checkout", "--detach", revision])
+        .output()
+        .map_err(|e| anyhow!("git checkout failed: {e}"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(format!("checked out revision {revision}"))
+}
+
+/// Undo the HEAD commit (soft reset HEAD~1).
+pub fn undo_commit_head(root: &Path) -> Result<String> {
+    require_clean(root)?;
+    let output = builder(root, &["reset", "--soft", "HEAD~1"])
+        .output()
+        .map_err(|e| anyhow!("git reset --soft failed: {e}"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok("undid HEAD commit".to_string())
+}
+
+/// Amend HEAD commit's message only.
+pub fn amend_commit_message(root: &Path, message: &str) -> Result<String> {
+    let msg = message.trim();
+    if msg.is_empty() {
+        anyhow::bail!("commit message cannot be empty");
+    }
+    let output = builder(root, &["commit", "--amend", "--only", "-m", msg])
+        .output()
+        .map_err(|e| anyhow!("git commit --amend failed: {e}"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok("amended commit message".to_string())
+}
+
+/// Export full unified patch for a commit.
+pub fn commit_patch(root: &Path, hash: &str) -> Result<String> {
+    validated_hash(hash)?;
+    let output = builder(root, &["format-patch", "-1", "--stdout", hash])
+        .output()
+        .map_err(|e| anyhow!("git format-patch failed: {e}"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }

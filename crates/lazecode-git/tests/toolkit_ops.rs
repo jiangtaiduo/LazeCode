@@ -1,7 +1,7 @@
 use lazecode_git::{
-    blame, compare_commits, file_history, shelf_delete, shelf_list, shelf_patch, shelf_restore,
-    shelf_restore_partial, shelf_save, stash_apply, stash_drop, stash_files, stash_list,
-    stash_push, submodule_list,
+    blame, compare_commits, diff_patch_paths, file_history, shelf_delete, shelf_files, shelf_list,
+    shelf_patch, shelf_restore, shelf_restore_partial, shelf_save, shelf_save_paths, stash_apply,
+    stash_drop, stash_files, stash_list, stash_push, submodule_list,
 };
 use std::path::Path;
 use std::process::Command;
@@ -37,7 +37,7 @@ fn stash_round_trip() {
     let dir = repo();
     let root = dir.path();
     std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
-    stash_push(root, Some("work in progress"), false).unwrap();
+    stash_push(root, Some("work in progress"), false, false).unwrap();
     let list = stash_list(root).unwrap();
     assert_eq!(list.len(), 1);
     assert!(list[0].subject.contains("work in progress"));
@@ -76,36 +76,6 @@ fn shelf_save_restore_partial_and_delete() {
     assert!(shelf_patch(root, "wip").unwrap().contains("b.txt"));
 
     // full restore brings both changes back
-    let disk_bytes = std::fs::read(root.join(".git/lazecode-shelves/wip.patch"))
-        .unwrap()
-        .len();
-    eprintln!("DISK SHELF wip bytes={disk_bytes}");
-    eprintln!(
-        "STSH: {STSH}",
-        STSH = String::from_utf8_lossy(
-            &Command::new("git")
-                .current_dir(root)
-                .args(["status", "--short"])
-                .output()
-                .unwrap()
-                .stdout
-        )
-        .trim_end()
-        .replace('\n', " | ")
-    );
-    eprintln!(
-        "LSF: {LSF}",
-        LSF = String::from_utf8_lossy(
-            &Command::new("git")
-                .current_dir(root)
-                .args(["ls-files", "-s"])
-                .output()
-                .unwrap()
-                .stdout
-        )
-        .trim_end()
-        .replace('\n', " | ")
-    );
     shelf_restore(root, "wip", false).unwrap();
     assert_eq!(
         std::fs::read_to_string(root.join("a.txt")).unwrap(),
@@ -173,7 +143,15 @@ fn submodule_list_and_compare() {
     git(root, &["commit", "-q", "-m", "second"]);
     let new_head = git(root, &["rev-parse", "HEAD"]);
     let files = compare_commits(root, &head, &new_head).unwrap();
-    assert_eq!(files, vec![("b.txt".to_string(), "A".to_string())]);
+    assert_eq!(
+        files,
+        vec![lazecode_git::CompareFile {
+            path: "b.txt".to_string(),
+            status: 'A',
+            additions: 1,
+            deletions: 0,
+        }]
+    );
 }
 
 #[test]
@@ -190,21 +168,130 @@ fn compare_branches_both_directions() {
     git(root, &["add", "main.txt"]);
     git(root, &["commit", "-q", "-m", "main"]);
 
-    let (left, right) = lazecode_git::compare_branches(root, "main", "feature").unwrap();
-    // main-only (base..main)
-    assert!(left.commitset_contains("main.txt"), "{left:?}");
-    assert!(right.files.iter().any(|(path, _)| path == "feat.txt"));
-    // Both sides have exactly one unique commit.
-    assert_eq!(left.commits.len(), 1);
-    assert_eq!(right.commits.len(), 1);
+    let result = lazecode_git::compare_branches(root, "main", "feature", None, None, 1000).unwrap();
+    // merge-base anchored.
+    assert!(result.merge_base.is_some());
+    // main-only side lists main.txt with numstat; feature side lists feat.txt.
+    let main_file = result
+        .left
+        .files
+        .iter()
+        .find(|file| file.path == "main.txt")
+        .expect("left side carries main.txt");
+    assert_eq!(main_file.status, 'A');
+    assert_eq!(main_file.additions, 1);
+    let feat_file = result
+        .right
+        .files
+        .iter()
+        .find(|file| file.path == "feat.txt")
+        .expect("right side carries feat.txt");
+    assert_eq!(feat_file.status, 'A');
+    // Both sides have exactly one unique commit, and not truncated.
+    assert_eq!(result.left.commits.len(), 1);
+    assert_eq!(result.right.commits.len(), 1);
+    assert!(!result.left.truncated);
+    assert!(!result.right.truncated);
+    // path 过滤：限定 feat.txt 后右侧文件清单只剩它，左侧为空。
+    let filtered =
+        lazecode_git::compare_branches(root, "main", "feature", None, Some("feat.txt"), 1000)
+            .unwrap();
+    assert!(filtered
+        .right
+        .files
+        .iter()
+        .all(|file| file.path == "feat.txt"));
+    // 极小 limit：提交列表截断并被裁到 limit。
+    let tiny = lazecode_git::compare_branches(root, "main", "feature", None, None, 1).unwrap();
+    assert_eq!(tiny.left.commits.len(), 1);
 }
 
-trait Contains {
-    fn commitset_contains(&self, path: &str) -> bool;
+#[test]
+fn commit_files_reports_numstat_and_status() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "c1"]);
+    std::fs::write(root.join("a.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+    std::fs::write(root.join("new.txt"), "hello\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "c2"]);
+    let head = git(root, &["rev-parse", "HEAD"]);
+    let files = lazecode_git::commit_files(root, &head).unwrap();
+    let modified = files
+        .iter()
+        .find(|file| file.path == "a.txt")
+        .expect("a.txt in commit");
+    assert_eq!(modified.status, 'M');
+    assert_eq!(modified.additions, 2);
+    let added = files
+        .iter()
+        .find(|file| file.path == "new.txt")
+        .expect("new.txt in commit");
+    assert_eq!(added.status, 'A');
 }
 
-impl Contains for lazecode_git::CompareSide {
-    fn commitset_contains(&self, path: &str) -> bool {
-        self.files.iter().any(|(entry, _)| entry == path)
-    }
+#[test]
+fn shelf_save_paths_scopes_to_selected_files_including_untracked() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+    std::fs::write(root.join("c.txt"), "untracked\n").unwrap();
+    // Only shelve a.txt (tracked) and c.txt (untracked) — the stable
+    // version's "shelve the checked files" semantics.
+    shelf_save_paths(root, "sel", &["a.txt".to_string(), "c.txt".to_string()]).unwrap();
+    // Both retracted from the worktree.
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "one\n"
+    );
+    assert!(!root.join("c.txt").exists());
+    // The patch carries both sections.
+    let patch = shelf_patch(root, "sel").unwrap();
+    assert!(patch.contains("a.txt"), "patch misses tracked path");
+    assert!(patch.contains("c.txt"), "patch misses untracked path");
+    assert_eq!(shelf_files(root, "sel").unwrap(), vec!["a.txt", "c.txt"]);
+    // Partial restore of the untracked section recreates the file.
+    shelf_restore_partial(root, "sel", &["c.txt".to_string()]).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("c.txt")).unwrap(),
+        "untracked\n"
+    );
+    shelf_delete(root, "sel").unwrap();
+}
+
+#[test]
+fn diff_patch_paths_includes_untracked_files() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+    std::fs::write(root.join("c.txt"), "fresh\n").unwrap();
+    let patch = diff_patch_paths(root, &["a.txt".to_string(), "c.txt".to_string()]).unwrap();
+    assert!(patch.contains("diff --git"));
+    assert!(patch.contains("a.txt"));
+    assert!(patch.contains("c.txt"));
+    // Empty selection yields an empty patch.
+    assert!(diff_patch_paths(root, &[]).unwrap().is_empty());
+}
+
+#[test]
+fn stash_push_can_include_untracked_files() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+    std::fs::write(root.join("new.txt"), "brand new\n").unwrap();
+    stash_push(root, Some("with untracked"), false, true).unwrap();
+    assert!(
+        !root.join("new.txt").exists(),
+        "untracked file must be stashed away"
+    );
+    let files = stash_files(root, "stash@{0}").unwrap();
+    assert!(files.contains(&"new.txt".to_string()));
+    stash_apply(root, "stash@{0}").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("new.txt")).unwrap(),
+        "brand new\n"
+    );
+    stash_drop(root, "stash@{0}").unwrap();
 }

@@ -78,6 +78,13 @@ pub struct Settings {
     pub terminal: TerminalSettings,
     pub sidebar_width: f32,
     pub panel_height: f32,
+    /// 分支比较页上下两个 pane 的高度占比（left pane，20-80）。
+    pub compare_split: f32,
+    /// 分支比较页详情列宽度占比（两侧共用，24-62）。
+    pub compare_details_width: f32,
+    /// 最近提交信息历史（本机级，最新在前，上限 10 条；对齐稳定版的
+    /// useCommitMessageHistory：提交成功后入史、历史项可回填可清除）。
+    pub commit_history: Vec<String>,
 }
 
 impl Default for Settings {
@@ -89,11 +96,25 @@ impl Default for Settings {
             terminal: TerminalSettings::default(),
             sidebar_width: 262.0,
             panel_height: 248.0,
+            compare_split: 40.0,
+            compare_details_width: 36.0,
+            commit_history: Vec::new(),
         }
     }
 }
 
 impl Settings {
+    /// Push a successful commit message into the history (dedupe, cap 10).
+    pub fn remember_commit_message(&mut self, message: &str) {
+        let trimmed = message.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        self.commit_history.retain(|existing| existing != trimmed);
+        self.commit_history.insert(0, trimmed.to_string());
+        self.commit_history.truncate(10);
+    }
+
     pub fn config_dir() -> PathBuf {
         dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -144,6 +165,8 @@ impl Settings {
         self.terminal.scrollback = self.terminal.scrollback.clamp(1_000, 200_000);
         self.sidebar_width = self.sidebar_width.clamp(180.0, 520.0);
         self.panel_height = self.panel_height.clamp(120.0, 900.0);
+        self.compare_split = self.compare_split.clamp(20.0, 80.0);
+        self.compare_details_width = self.compare_details_width.clamp(24.0, 62.0);
     }
 }
 

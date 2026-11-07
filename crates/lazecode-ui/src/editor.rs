@@ -45,13 +45,37 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         .map(|tab| matches!(tab.kind, TabKind::File(_)))
         .unwrap_or(false);
     let content = Rect::from_min_max(Pos2::new(rect.left(), tabbar.bottom()), rect.max);
-    if is_file {
+    let is_compare = model.projects[index]
+        .tab_by_id(active)
+        .map(|tab| matches!(tab.kind, lazecode_core::TabKind::Compare(_)))
+        .unwrap_or(false);
+    if is_compare {
+        // 分支比较页（稳定版 compare-branches 中央标签页）。
+        if let Some(tab) = model.projects[index].tab_by_id(active) {
+            if let lazecode_core::TabKind::Compare(compare) = &tab.kind {
+                let (left, right) = (compare.left.clone(), compare.right.clone());
+                crate::compare::draw_page(ui, model, rt, theme, content, &left, &right);
+            }
+        }
+    } else if is_file {
         let crumbs = Rect::from_min_size(content.min, Vec2::new(content.width(), CRUMBS_H));
         draw_crumbs(ui, model, theme, crumbs, index, active);
         let body = Rect::from_min_max(Pos2::new(content.left(), crumbs.bottom()), content.max);
         draw_file(ui, model, rt, theme, body, index, active);
     } else {
         draw_diff(ui, model, rt, theme, content, index, active);
+    }
+}
+
+/// 打开（或激活）分支比较页，标题按当前语言生成。
+pub fn open_compare_page(model: &mut AppModel, left: String, right: String) {
+    let title = if model.settings.language.is_zh() {
+        format!("比较：{left} 和 {right}")
+    } else {
+        format!("Compare: {left} and {right}")
+    };
+    if let Some(project) = model.active_project_mut() {
+        project.open_compare_branches(left, right, title);
     }
 }
 
@@ -89,22 +113,20 @@ fn draw_tabbar(
         Stroke::new(1.0, p.border),
     );
     let project = &model.projects[index];
-    let tabs: Vec<(u64, String, Option<String>, bool, bool)> = project
+    /// (tab id, title, path, dirty, badge label)
+    type TabBadge = (u64, String, Option<String>, bool, Option<&'static str>);
+    let tabs: Vec<TabBadge> = project
         .tabs
         .iter()
         .map(|tab| {
             let path = tab.path().map(|path| path.to_string());
-            let (is_diff, external) = match &tab.kind {
-                TabKind::File(file) => (false, file.external),
-                TabKind::Diff(_) => (true, false),
+            let badge = match &tab.kind {
+                TabKind::File(file) if file.external => Some("diff"),
+                TabKind::Diff(_) => Some("diff"),
+                TabKind::Compare(_) => Some("cmp"),
+                TabKind::File(_) => None,
             };
-            (
-                tab.id,
-                tab.title(),
-                path,
-                tab.is_dirty(),
-                is_diff || external,
-            )
+            (tab.id, tab.title(), path, tab.is_dirty(), badge)
         })
         .collect();
     let active = project.active_tab;
@@ -112,7 +134,7 @@ fn draw_tabbar(
     let mut pending: Option<Command> = None;
     let mut close: Option<u64> = None;
     for (id, title, path, dirty, badge) in tabs {
-        let extra = if badge { 36.0 } else { 0.0 };
+        let extra = if badge.is_some() { 36.0 } else { 0.0 };
         let width = (title.chars().count() as f32 * 6.8 + 62.0 + extra).clamp(96.0, 240.0);
         let tab_rect =
             Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(width, rect.height()));
@@ -172,7 +194,7 @@ fn draw_tabbar(
                 tone.gamma_multiply(0.8)
             },
         );
-        let text_right = if badge {
+        let text_right = if badge.is_some() {
             close_rect.left() - 38.0
         } else if dirty {
             close_rect.left() - 18.0
@@ -191,7 +213,7 @@ fn draw_tabbar(
             if is_active { p.text } else { p.text2 },
             Align2::LEFT_CENTER,
         );
-        if badge {
+        if let Some(badge) = badge {
             let badge_rect = Rect::from_center_size(
                 Pos2::new(close_rect.left() - 20.0, tab_rect.center().y),
                 Vec2::new(30.0, 14.0),
@@ -201,7 +223,7 @@ fn draw_tabbar(
             ui.painter().text(
                 badge_rect.center(),
                 Align2::CENTER_CENTER,
-                "diff",
+                badge,
                 FontId::monospace(10.0),
                 p.accent,
             );
@@ -224,11 +246,20 @@ fn draw_tabbar(
                 },
             );
         }
-        if close_response.clicked() {
+        if close_response.clicked() || response.middle_clicked() {
             close = Some(id);
         } else if response.clicked() {
             model.projects[index].active_tab = Some(id);
             rt.set_editor_focus(id);
+        } else if response.secondary_clicked() {
+            rt.open_menu(
+                crate::runtime::MenuKind::EditorTabContext {
+                    project: index,
+                    tab_id: id,
+                },
+                tab_rect,
+                path.clone(),
+            );
         }
         x = tab_rect.right() + 1.0;
     }
@@ -252,7 +283,12 @@ fn draw_tabbar(
                     name: tab.title(),
                 };
             } else {
+                let was_compare = matches!(tab.kind, lazecode_core::TabKind::Compare(_));
                 model.projects[index].close_tab(id);
+                if was_compare {
+                    // 关闭比较页即结束会话（稳定版关闭标签页同理）。
+                    model.ui.compare_branches = lazecode_core::CompareBranchesState::default();
+                }
                 if rt.editor_focus == Some(id) {
                     rt.editor_focus = None;
                 }
@@ -2376,14 +2412,19 @@ fn draw_welcome(
             "open-project",
         ),
         (
-            crate::tr!(model, "New console", "新建控制台"),
-            Icon::Plus,
-            "new-console",
+            crate::tr!(model, "Clone repo", "克隆仓库"),
+            Icon::Worktree,
+            "clone-repo",
         ),
         (
-            crate::tr!(model, "Git log", "Git 日志"),
-            Icon::GitLog,
-            "git-log",
+            crate::tr!(model, "New file", "新建文件"),
+            Icon::Plus,
+            "new-file",
+        ),
+        (
+            crate::tr!(model, "New console", "新建控制台"),
+            Icon::Terminal,
+            "new-console",
         ),
         (
             crate::tr!(model, "Find in files", "在文件中查找"),
@@ -2404,12 +2445,25 @@ fn draw_welcome(
         if response.clicked() {
             match id {
                 "open-project" => model.queue(Command::OpenProjectDialog),
-                "new-console" => model.queue(Command::NewTerminal),
-                "git-log" => {
-                    model.ui.panel_visible = true;
-                    model.ui.panel_tab = lazecode_core::PanelTab::Git;
-                    model.queue(Command::RefreshLog);
+                "clone-repo" => {
+                    rt.dialog = crate::runtime::DialogState::CloneRepo {
+                        url: String::new(),
+                        dest: String::new(),
+                        error: None,
+                    };
                 }
+                "new-file" => {
+                    let dir = model
+                        .active_project()
+                        .map(|p| p.root.clone())
+                        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+                    rt.dialog = crate::runtime::DialogState::NewFile {
+                        dir,
+                        value: String::new(),
+                        error: None,
+                    };
+                }
+                "new-console" => model.queue(Command::NewTerminal),
                 _ => {
                     rt.search.open = true;
                     rt.search.focus_requested = true;

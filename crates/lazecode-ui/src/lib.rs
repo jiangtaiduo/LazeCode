@@ -6,6 +6,7 @@ pub mod compare;
 pub mod editor;
 pub mod i18n;
 pub mod icons;
+pub mod icons_svg;
 pub mod overlays;
 pub mod palette;
 pub mod panel;

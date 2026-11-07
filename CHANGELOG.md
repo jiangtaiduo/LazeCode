@@ -6,452 +6,160 @@ All notable changes to LazeCode are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- The tracked-file context menu now carries the stable drawer's full item
+  set, in the stable order: functional "Compare Before with Local"
+  (HEAD ↔ worktree), "Create Patch from Local Changes..." (system save
+  dialog, patch written by a background job), and "History Up to Here"
+  (file-history dialog) join the menu; stable's greyed placeholders (Show
+  Diff in a New Tab, Compare with Local, Open Repository Version,
+  Cherry-Pick/Extract/Drop Selected Changes, Get from Revision, Show
+  Changes to Parents) render disabled; separators match the stable layout;
+  and "Move to <list>" is now disabled (not hidden) when every selected
+  file is already in that list, for multi-selections too.
+- Right-clicking a changelist group header now offers the whole group's
+  file operations (commit / revert / move / shelve / add-to-VCS for
+  Unversioned groups), matching the stable group menu — not just
+  New/Delete Changelist.
+- The editor tab context menu gains "Close to the left" plus stable's
+  disabled-state rules (first/last tab) and separator layout, keeping the
+  new path-copy entries.
+- Escape now closes dialogs (stable behaviour). The conflict editor is
+  exempt so hand-merged content can't be lost by a stray press.
+- Unshelve… now defaults to creating a changelist named after the shelf
+  (stable default), and deleting a shelf asks for confirmation first.
+- The clean worktree card is no longer drawn before the first snapshot
+  arrives ("Reading changes…" instead), and opening a worktree diff now
+  also selects the file in the changes list (stable selectedFile sync).
+- Diff windows now follow the stable single-window model: every diff entry
+  point (compare-branches files, git log, commit drawer, sidebar Show Diff)
+  reuses one diff tab and only swaps its content, instead of opening a tab
+  per file. Tab titles use the stable scheme — `Diff (hash7)`,
+  `Diff (from7 ↔ to7)`, `Working Tree Diff` — with the file name shown in
+  the diff view's own header bar. Opening the exact same source again just
+  re-activates the tab without reloading (no loading-spinner race with
+  in-flight jobs).
+- Right-click context menus no longer render a title line (the stable
+  menus never had one): editor tabs, terminal tabs, project tree, branches,
+  commits, changelist headers, and change files now start directly with
+  their items.
+- Untracked files can now be added to version control from the source-control
+  context menu ("Add to VCS" / "Add N Files to VCS", matching the stable
+  wording): the git add runs as a background job with the stable success /
+  failure toast, and the snapshot refresh moves the files out of the
+  Unversioned group. The untracked context menu now mirrors the stable one —
+  Add to VCS, Jump to Source (single file), a separator, and a trash-semantics
+  Delete… — instead of showing the tracked-file actions (Commit/Discard/
+  Shelve/Move to) that do not apply.
+- Untracked multi-file delete ("Delete N Files…") confirms once and moves all
+  files to the system trash; failed names are reported in one toast.
+- Branch comparison ported as a persistent central editor tab (stable
+  CompareBranchesView page design, new-version visual tokens): upper/lower
+  panes — one independent commit log per side — with a draggable 8px
+  splitter (split persisted in settings.toml), a per-side banner ("Commits
+  that exist in X but don't exist in Y") with the Swap button on the upper
+  pane, and inside each pane a details column (shared draggable width,
+  24-62%) showing single-commit files, parent..newest range diff for
+  multi-select, or the whole-side merge-base list as a collapsible
+  directory tree with numstat and status colors. Commit rows support
+  click/Cmd/Shift selection, ⌘A/Esc/↑↓, double-click opens the whole-commit
+  diff, and Load More (+500) honours truncation. Double-clicking a file
+  opens the diff with the stable base rules (merge-base..side /
+  parent..newest / the commit itself). The tab is single-instance; closing
+  it ends the session.
+- Per-side filters (independent for both sides): search with regex/case
+  toggles, User menu (first-seen authors), Date menu (All/Today/7d/30d),
+  Branch(ref) menu, and a Paths filter that re-queries with path limits.
+- Comparison and detail file loading run as background jobs with proper
+  loading / Retry / empty states (the old dialog ran `git compare` on the UI
+  thread, retried every frame on failure and spammed toasts).
+- Branch-tree toolbar: the dead "Compare with Working Tree" button is now
+  "Compare Selected Branches" (needs exactly two selected branches), matching
+  the stable GitBottomPanel toolbar.
+
+### Fixed
+
+- Interactive Rebase was a silent stub: the dialog's "Start Rebase" only
+  showed a toast and changed nothing. It now executes a real
+  `git rebase -i` with the UI-arranged todo (pick/reword/edit/squash/
+  fixup/drop) via a sequence-editor shim, with conflicts surfacing in the
+  panel's Continue/Abort banner. Covered by tests.
+- Deleting a file from the project tree was a permanent unlink; it now moves
+  the file (or directory) to the system trash like the stable `fs_delete`,
+  closes editor tabs of deleted paths, and refreshes the VCS snapshot.
+- Dialog lazy-loads refetched every frame while open with an empty list
+  (Stash/Shelf managers, file history, Git tools — the latter spawning a git
+  subprocess per frame on machines without submodules). Each dialog now
+  loads once per open.
+- Compare-branches audit fixes: branch multi-selection (`ref_selection`) is
+  now click-ordered (was a `HashSet`, so the two sides of a comparison were
+  assigned randomly); the compare session carries its project root and every
+  background result is matched against it (same-named branches in two
+  projects no longer cross-contaminate); ⌘A selects only the focused side
+  (was both); arrow-key navigation clears the previous commit's stale file
+  list; swap/path-filter reloads invalidate selections up front; and
+  switching commits while a file-list load is in flight no longer sticks in
+  "Loading…" forever.
+- Compare-branches details were session-shared: selecting a commit in one
+  pane leaked its file list into the other pane (visible as the empty side
+  rendering the selected side's tree). The detail cache is now per side, and
+  an unselected side always renders "No commit selected" with no files.
+- Commit context menu "Compare with local" opened a worktree diff of the
+  literal string `{hash}::{file}`; it now opens the commit↔worktree diff.
+- Removed the never-constructed `CompareCommits` dialog state.
+
+### Changed
+
+- `compare_branches` now matches the stable data contract: three-dot
+  (`other...side`) file lists merged from `--numstat` + `--name-status`
+  (path, status letter, additions/deletions), limit+1 truncation detection,
+  per-side path filters, and `merge-base` reported as `None` for unrelated
+  histories (file lists degrade to empty instead of tip-vs-empty-tree).
+
+### Added
+
+- Source control changes list aligned with the stable version's commit drawer:
+  changelist groups collapse (per group + Expand/Collapse All in the header),
+  group headers carry a tri-state checkbox for bulk inclusion, and conflicted
+  files surface in a "Merge Conflicts" subgroup inside the default changelist
+  with a Resolve entry.
+- File-row multi-selection (plain click selects, Cmd/Ctrl toggles, Shift picks
+  a range in display order) plus a hover rollback button that asks for
+  confirmation before discarding (batch discard supported; tabs of retracted
+  new files close automatically).
+- Context menus ported from the stable drawer: Show Diff, Jump to Source,
+  Resolve (conflicts), Commit File(s)... with their own message, Revert
+  Selected Changes, Copy as Patch to Clipboard, Move to Changelist, Shelve
+  Changes..., Refresh VCS Changes and New Changelist.
+- Stash button opens a dialog (message + "include untracked files"
+  `git stash -u`) instead of pushing silently; the stash manager surfaces
+  load errors instead of showing an empty list.
+- Shelve scopes to the checked files (default name: the file name for a
+  single file, the default changelist name for many) and an "Unshelve…"
+  dialog restores a selected file subset into a chosen (or new) changelist.
+- Commit message history (last 10, deduped, persisted in settings.toml) with
+  a dock popover to refill or clear it, and a "Commit & Push" button that
+  opens the push dialog after a successful commit.
+- Non-Git projects show a "not a Git repository" notice with an Initialize
+  Git Repository entry (the old dock button was unreachable).
+
+### Changed
+
+- The changes-list checkbox now means "include in this commit" with the
+  stable version's default of nothing checked; the commit scope is exactly
+  the checked set (staged on commit, everything else unstaged), and amend
+  stays exempt from the check requirement.
+- Changelist create/delete/move operations moved off the UI thread into the
+  background job queue (delete asks Move-to-default vs Rollback first), and
+  the changelist store resolves the real git-dir so linked worktrees persist
+  their lists.
+- Shelve retracts shelved paths via the per-file discard path, so staged-new
+  files disappear from both worktree and index (previously a staged delta
+  survived shelving).
+- Tool buttons flow onto a second row instead of clipping on narrow
+  sidebars / Chinese labels.
+
 ## [0.4.0] - 2026-11-04
-
-### Changed
-
-- Replaced the Tauri/WebView/React/Monaco application shell with a native Rust
-  workspace: `winit` windowing, `egui-wgpu` on Metal, `ropey`/`syntect` editor,
-  `gix` Git reads and writes, and `alacritty_terminal` on a `portable-pty`
-  session. No JavaScript or WebView is loaded by the native build.
-- Split the application into `lazecode-core`, `lazecode-fs`, `lazecode-text`,
-  `lazecode-git`, `lazecode-terminal`, `lazecode-ui` and `lazecode-app`.
-- Rewrote the shell around the LazeCode design tokens: project rail, project
-  tabs, activity bar, explorer, source control, consoles, editor stage,
-  bottom panel, status bar and command palette.
-- Workspace and settings persistence moved to TOML under
-  `~/Library/Application Support/LazeCode/` with a new schema.
-
-### Added
-
-- Native editable project tree with `ignore` semantics and debounced watcher.
-- Incremental syntax highlighting, undo/redo, find/replace, IME and dirty-tab
-  guards.
-- Git status, branch/tag lists, commit log with lane graph, commit details,
-  stage/unstage, commit/amend, branch create/delete/switch, and a worktree diff.
-- Project-bound PTY consoles with scrollback search, selection/copy, bracketed
-  paste and SGR mouse support.
-- English/Chinese chrome for primary surfaces.
-- `scripts/build-app.sh` for an ad-hoc-signed `dist/LazeCode.app`.
-
-### Not yet implemented
-
-- LSP, Git push/pull/fetch/clone, merge/rebase/cherry-pick/revert/stash,
-  worktrees/submodules/LFS, blame, hunk staging.
-- Terminal cold history, kitty graphics, OSC 7/133, split panes.
-- Notarisation and auto-update.
-
-The previous Tauri/React/Monaco tree was removed from the working tree after
-the native port became the only build target; it remains in Git history. See
-`docs/implementation-status.md` for the exact capability matrix.
-
-## [0.3.0] - 2026-11-04
-
-### Added
-
-- Single-file sessions (not projects): opening/dropping one or more loose files
-  enters the same single-file session — the title bar no longer shows them as
-  project tabs and the left project panel no longer lists these temporary files
-  (Zed/IDEA-style temporary open: only a hint and an "Open Folder" entry; the
-  files live in the editor tabs). They are not written to recent/last project
-  history and take no part in project session snapshots. Closing the last
-  editor tab ends the session and returns to the welcome screen; a closed loose
-  file never "comes back" on its own.
-- Dropping files while a project is open attaches them to that project as
-  "External / Dropped" entries and opens them in the editor without switching
-  projects or adding project tabs; dropping a folder still opens it as a
-  project.
-- New file with no project open: File › New File… (⌘N, also on the welcome
-  screen). The NSSavePanel lets the user choose the name, format and location
-  (macOS convention: Documents); the file opens directly in a single-file
-  session.
-- Console with no project open: the welcome screen's "Open Console" (and the
-  search/menu entries) now actually spawns a shell in the user's home
-  directory (`~`) instead of showing an empty panel. The session is not bound
-  to a project — it survives switching to a project and back (app-level
-  session) and ends when its tab is closed.
-- Drag-and-drop open: files or folders from Finder/desktop can be dropped onto
-  the window. While dragging, the whole window shows a highlight overlay; the
-  file tree gains an "External / Dropped" section divider (dropped files
-  included).
-- Create a branch without switching it: the branch dropdown's New Branch…
-  form, the branch-tree toolbar and the New Branch from 'x'… dialog all carry
-  a "switch to the new branch after creating" checkbox; unchecked, they run
-  plain `git branch` (HEAD and the working tree stay on the current branch).
-  Default behavior remains create-and-switch.
-- "File missing in this branch" context: when switching branches / checking
-  out a tag makes an open file vanish in the current branch, the error panel
-  adds a contextual line under the raw error (the file does not exist in the
-  current branch; the tab stays open and its content returns when switching
-  back).
-
-### Fixed
-
-- Dropped images failed with `ERR:path_outside_workspace`: `read_image_bytes`
-  only consulted the workspace allow-list and lacked the native-panel grant
-  channel that `read_file_text` has; both now share the same authorization
-  model (`register_workspace` as well as PathGrant panel paths pass).
-- Console default directory: with no project open, or a single-file session
-  open, the console now always starts in the user's home directory (`~`).
-  Previously no cwd fell back to the process current_dir (`/` when launched
-  from Finder) and a single-file session used the file's parent directory. The
-  frontend now sends no cwd in both cases, and the backend treats empty / `.` /
-  non-directory (a single-file path) as "not specified" and falls back to
-  `$HOME`; the status bar shows the resolved directory. Directory projects
-  still start at the project root.
-- Title bar jitter when switching between git and non-git projects: the branch
-  pill used to unmount when `isRepo` was false and rebuild when switching back.
-  A fixed-width pill now stays mounted for project workspaces (a static
-  "Not a Git repository" label for non-git projects — not the pulsing skeleton,
-  which looked like it was forever loading; skeleton while loading), so layout
-  is identical across the git ↔ non-git transition; single-file sessions hide
-  it entirely.
-- Stale `isRepo` on project switch: switching from a non-git single-file
-  session back to a git project showed the "Not a Git repository" placeholder
-  until data arrived. `isRepo` now resets to the optimistic initial value on
-  switch (skeleton while loading, correct branch once data lands).
-- Consoles of sibling single-file workspaces killed together: closing a
-  project used to match terminals by cwd — two single-file workspaces whose
-  files share a parent directory have identical cwd. Terminal sessions are now
-  owned by projectKey (new command `pty_close_by_project`); the cwd match
-  remains as a compatibility path.
-
-## [0.2.0] - 2026-11-02
-
-### Added
-
-- Console-task confirmation before quitting the app: if any project's console
-  still has a task running (green ring or red outputting marquee on the
-  project tab), both the window close button and Cmd+Q first show a confirm
-  dialog listing those projects and their running commands; quitting (and
-  terminating those consoles) proceeds only after "Force Quit", and cancelling
-  keeps the app open. Before the dialog opens, the Rust-side "force-exit after
-  10 s without a reply" flush failsafe is disarmed so the dialog may stay open
-  indefinitely; concurrent close-button and Cmd+Q triggers share one dialog.
-
-- Browser-style project tabs in the title bar: the leftmost LC logo button now
-  hosts the project menu (formerly on the project-name pill), the branch
-  selector follows, and every project opened in the window gets a tab for
-  one-click switching. Tabs support drag-to-reorder (hover shows a close
-  button, middle-click closes), and overflow collapses into a "≫" menu. The
-  active project's tab is highlighted with a deep accent background plus a
-  2px accent underline along its bottom edge, so the selection reads from the
-  fill and the bottom line while the console state reads from the ring around
-  the tab. Each
-  tab's border mirrors that project's console state: gray when no process is
-  running, a softened orange while a process runs (same hue as the running
-  dot, dimmed so it cannot outweigh the selection), and a softened animated
-  marquee while that process is actively
-  producing output (within 2 s of the last output). Background projects are
-  polled through a new batched `pty_sessions_busy` command that also reports
-  per-session output freshness, so state for non-active projects needs no
-  extra IPC round trips.
-- Double-clicking a file in the changelist (diff) or in the project tree (open
-  file) now auto-hides the console panel so the diff/file content takes over
-  the main area. The hide is one-way; reopen the console from the tool strip.
-
-### Fixed
-
-- Switching to a project whose console was actively outputting could stop the
-  marquee for one poll cycle (red → green → red). Activating a pane records a
-  UI-event timestamp, and the 500 ms redraw grace classified the real output
-  that kept arriving right after the switch as interactive repaint, so the
-  next poll saw "busy but quiet". UI events now carry whether the session was
-  outputting at the moment of recording (per-session result of the latest
-  poll): a hot event no longer suppresses output within its window, while
-  quiet consoles keep the one-shot repaint suppression. Keyboard echo stays
-  unconditionally suppressed at 200 ms.
-- Short white lines could appear after typing Chinese: the IME preedit was the
-  only text drawn outside the per-row clip, so descenders (q/g/p/y/j) leaked
-  1–2 px past the row bottom into the next row; during composition that row is
-  never repainted (row-level diff says "unchanged"), and the instant the
-  preedit is committed or deleted, the cursor row is erased and repainted while
-  the leaked white pixels stay until that row's content changes. Preedit now
-  shares the same row clip as regular glyphs. Also fixes a stale closure in the
-  render loop: the rAF loop is created once when ready, so its tick kept
-  calling the first-frame refresh even after a font-size change produced a new
-  paint/refresh (cell size came from refs, font metrics from the stale
-  closure); the tick now goes through a render-time mirror ref.
-- Pasting multi-line text into the console triggered Enter per line: paste
-  never checked the bracketed-paste (DECSET 2004) mode and normalized all
-  newlines to `\r` before writing to the PTY, so TUIs that only recognize
-  `ESC[200~…201~` paste markers (like omp) treated each `\r` as Enter. Paste
-  (including Finder file-path attachments) now goes through a new
-  `vt_encode_paste` command that lets the engine encode by the foreground
-  program's 2004 mode: enabled — wrap in paste markers and keep newlines
-  verbatim (omp inserts the whole text into its input box); disabled — legacy
-  `\n`→`\r` behavior. The always-wrap attachment path is gone, so literal
-  escape markers are no longer injected into programs without 2004.
-
-- Switching between project consoles could flash the "outputting" marquee
-  even though every console was idle. The echo filter only knew about
-  keyboard/paste/IME writes; a PTY resize (SIGWINCH) or a forwarded mouse
-  event makes the TUI repaint without recording an input time, so the repaint
-  was classified as command output. Resize, mouse protocol events, key-release
-  writes and pane activation now record a separate UI-event timestamp with a
-  500 ms grace (keyboard echo stays at 200 ms), so those interactive repaints
-  no longer light the marquee.
-- The console canvas could reach the right window edge because the grid was
-  derived from `clientWidth/clientHeight` including the host padding; the
-  content-box fix restores the side inset, and the canvas host now uses a
-  14 px horizontal inset for a clearer, symmetric right gap.
-- The title bar could only be dragged from its outer padding/edges. The
-  project tab strip's background was marked non-draggable, and the native
-  `-webkit-app-region` drag competed with Tauri's drag-region handler. The
-  strip background is now a deep drag region (tabs, close buttons and the
-  overflow menu stay non-draggable) and dragging is handled solely by
-  `data-tauri-drag-region`, so the whole title-bar background can move the
-  window; double-click still maximizes.
-- The console's last row (input line and cursor) was clipped against the status
-  bar when the panel was maximized. The terminal grid was derived from
-  `clientWidth/clientHeight`, which include the canvas host's padding, so
-  the PTY received one more row and two more columns than the visible content
-  box; the extra row was painted into the bottom padding and cut off. Grid
-  sizing now subtracts the computed padding. Row painting is also clipped to
-  its own cell row, so glyph ink that overhangs the row by a pixel can no
-  longer linger on an unchanged neighbour as short white lines under text
-  (which previously disappeared only after scrolling forced a repaint).
-- A maximized console kept the height computed from `window.innerHeight` at
-  the moment React last rendered. Maximizing or half-screening the app window
-  does not trigger a re-render, so the open console stayed at its old size.
-  The dock height is now a CSS `calc(100vh - titlebar - statusbar)` expression
-  that the layout engine re-evaluates on every window resize.
-- Bottom-panel visibility (console / changes / closed) was shared by every
-  project open in a window: opening the console in project B and switching
-  back to project A — which had it closed — popped the console open there too.
-  Terminal sessions, per-project active terminal tabs, running-command probes
-  and PTY budgets were already isolated per project; the panel toggle was the
-  one piece of state left outside the project session snapshot. It now
-  travels with the snapshot on both the project-switch path and the
-  close-project-return-to-previous path (which also failed to restore the
-  previous project's compare-versions / multi-commit diff sources, leaking
-  the closed project's comparison targets into it). A project opened for the
-  first time inherits whatever the panel currently shows until it has been
-  switched away from once and holds its own memory.
-- Switching between files in the diff viewer briefly flashed the previous
-  file's page before the new diff appeared. The 0.1.3 loading veil missed both
-  ends of the switch: it was raised one frame late (the loading flag is only
-  set inside the data effect, so the first paint went out uncovered), and —
-  the main offender — it lifted as soon as the patch data arrived, while the
-  mounted Monaco diff editor still had the previous file's text in its models
-  (@monaco-editor/react writes the new values asynchronously and the diff
-  re-computation only finishes after that; this window is exactly the flash).
-  The veil is now derived at render time from which request the on-screen data
-  belongs to: it covers from the same frame the target changes and lifts only
-  once the editor has confirmed the new text is in and its diff is computed
-  (`onDidUpdateDiff`). Identical-content reloads are exempted via a content
-  fingerprint (no model change, no event), and a failsafe timer keeps a lost
-  event from pinning the veil shut.
-- Project-tab close buttons are now always visible: they used to appear only
-  on hover, so every tab changed width as the pointer moved across the bar.
-  They sit dimmed by default and light up on hover instead.
-- Switching projects no longer shoves the tab strip around. The branch pill
-  was unmounted while branch info reloaded (the branch name is cleared on
-  every switch and refetched), and its natural width varied with the branch
-  name — the tabs to its right jumped left and back. The pill now has a
-  fixed width with an ellipsized name and stays mounted while loading as a
-  non-interactive skeleton, so the tab strip's start position is stable.
-- The language-server chain was effectively dead after the first file in a
-  workspace: provider registration and the initial `didOpen` lived in the
-  editor's one-shot mount hook, while the editor only swaps models on file
-  switch. From the second file on, hover / completion / definition / formatting
-  silently did nothing (and if the first opened file had no server, the whole
-  session never got one). Registration now follows file switches, and every
-  opened file sends `didOpen` immediately so diagnostics arrive without
-  requiring an edit first.
-- Server-to-client LSP requests (`workspace/configuration`,
-  `window/workDoneProgress/create`, sent by pylsp / rust-analyzer / tsserver)
-  were consumed as if they were responses: a server request whose id collided
-  with an in-flight client request resolved that request with `undefined`, and
-  the server request itself was never answered (some servers stall). Dispatch
-  now checks the method first and answers known server requests.
-- Monaco models for paths containing `#`, `?` or `%` could never be disposed
-  (the disposer looked the model up under a different URI form than the
-  creator used), leaking the document and its undo stack; LSP URIs for such
-  paths were also inconsistent between `didOpen` and provider calls.
-- While a git refresh was in flight, a new request upgraded the follow-up run
-  to the full six-command sweep; under directory-event bursts this re-ran
-  log/branches/tags repeatedly. The follow-up now keeps the light shape unless
-  a full refresh was actually requested.
-- Project-tab console indicators treated keystroke echo and TUI redraws as
-  console output, so typing into the terminal started the activity runner. A
-  short per-session echo window now filters PTY output that follows user input;
-  running-but-idle tabs use a macOS traffic-light green ring, active output
-  uses a red runner that travels the border at a uniform pace, and the active
-  tab is an accent-filled raised chip instead of an accent underline.
-
-- Files created externally (build tools, agent CLIs, Finder) inside a
-  subdirectory of an open project no longer require a manual reload to appear
-  in the file tree. Two causes: the directory watcher was non-recursive, and
-  notify's FSEvents backend drops events deeper than a direct child of the
-  watched root, so `project/src/new.ts` never produced an event at all; and
-  tree refreshes replaced expanded deeper subtrees with a depth-2 re-read.
-  Directory watching is now recursive with per-directory coalescing (250 ms,
-  one event per changed directory, root fallback under load), events report
-  the changed directory so only that subtree is re-read and merged, expanded
-  deeper subtrees survive refreshes, and expanding a folder always re-reads it.
-  Events under `.git` are filtered out: the app's own git refresh writes
-  `.git/index` (opportunistic update) on every run, so without the filter the
-  recursive watcher fed itself — refresh, write, event, refresh — showing as
-  the changelist spinner spinning forever after opening a project. The old
-  non-recursive watcher happened to drop all `.git` events and masked this.
-
-### Performance
-
-- LSP document changes are debounced per file (200 ms): full-text sync turned
-  every keystroke into a whole-document stringify + IPC + server-side reparse;
-  closing a file flushes the pending change first so formatting never sees a
-  stale buffer.
-- The status-bar cursor indicator now subscribes in its own leaf component:
-  the subscription previously sat at the top of the App component, so every
-  arrow key re-ran the entire 6,500-line App body — the exact cost the
-  cursor store's design comment promised to avoid.
-- CommitDrawer/MergeToolDialog per-keystroke re-renders and the
-  per-pointermove modal dragging hook are known remaining items, deferred
-  (they need prop-stability audits / a drag-skeleton refactor; interactions
-  are user-paced and not on the keystroke path).
-
-- `git log` no longer re-runs `git rev-list HEAD` (full-history output, tens of
-  thousands of lines on monorepos) on every refresh and every log pagination:
-  the ancestor set is cached by repository + HEAD sha and recomputed only when
-  HEAD moves.
-- Editing no longer triggers the full six-command git refresh 2.5 s after each
-  typing pause. Editing can only change the working-tree status, so the
-  debounced refresh now runs `git status` alone (without
-  `--ignored=matching`, the most expensive walk shape); log, branches and tags
-  refresh on focus, after git operations, and on explicit refresh. The Ignored
-  group carries over between light refreshes.
-- Terminal event channels (`pty://dirty|pwd|exit`, file-watch, menu events) are
-  now delivered with `emit_to` to the owning window instead of being broadcast
-  to every window; under heavy terminal output with multiple windows this
-  stops flooding unrelated WebViews.
-- Large terminal pastes now travel as a raw byte body (`application/
-  octet-stream`) with the session id in a header, instead of a JSON number
-  array (~4x size inflation and per-element parsing on the Rust side),
-  mirroring the snapshot path.
-- Window geometry persistence no longer writes a file on every Moved/Resized
-  event (~60 Hz during a drag, on the main thread): updates are coalesced in
-  memory and flushed 300 ms after the last event; window destruction still
-  saves immediately.
-- Acquiring the user's real PATH (login-shell probe, 200-800 ms with nvm/rbenv)
-  no longer blocks the first frame: it runs on a background thread at startup,
-  and the first git / PTY / LSP spawn waits for it to finish.
-- Inline arrow props defeating `React.memo` on TitleBar, GitBottomPanel and
-  CommitDrawer are now stable callbacks, and the left tool strip is memoized —
-  every keystroke previously re-rendered all of them on top of the App body.
-- The renderer loop reads layout once per frame instead of twice; the six
-  terminal commands that still held the global session-table lock while
-  working on a terminal (`vt_encode_key`, selection family, `vt_selected_text`)
-  now follow the lookup-then-release convention; `TERM_PROGRAM_VERSION` reports
-  the real version instead of a hardcoded 0.1.0.
-
-- Pasting an image from the clipboard (screenshot / browser "Copy Image") into
-  the console previously did nothing: such clipboards carry image data but no
-  file-path flavor. The Rust side now writes the image data to a temporary file
-  and returns its path; the path goes to the terminal as a bracketed paste and
-  omp renders its own thumbnail.
-- With a task producing output in the console, switching to another app for a
-  while and coming back left the whole window black for seconds: while occluded,
-  terminal dirty-signal events piled up in the WebView evaluation queue and were
-  replayed all at once, saturating the main thread. Dirty signals are now
-  unsubscribed while the page is hidden and resubscribed with a catch-up frame
-  on return.
-- The project dropdown grew with the open-projects section and only scrolled
-  internally after crossing the window's bottom edge. The popup height is now
-  clamped to the viewport, and open + recent projects scroll together in a
-  single region while the search box and action buttons stay pinned (matching
-  the branch dropdown).
-
-- The project file tree is now windowed: only the rows around the viewport are
-  mounted, so expanding a directory with tens of thousands of entries no longer
-  creates a DOM row (and an inline SVG icon) per file. Expand/collapse,
-  multi-select, context menus and locate-in-tree keep their existing behavior;
-  locate now scrolls by flattened index instead of `querySelector`.
-- Hidden terminal canvases are released after the page has been hidden for five
-  minutes. Active panes and foreground tab switches are never touched — the
-  first frame after switching back from another app is still the last painted
-  screen — while background tabs stop holding their Retina backing stores. A
-  released pane takes one full snapshot + repaint when it is next opened.
-
-## [0.1.3] - 2026-10-31
-
-### Added
-
-- While commands are still running in the console, the Terminal icon in the left
-  tool strip now shows an orange dot in its top-right corner; hovering lists the
-  running command names. Detection keeps running while the panel is collapsed
-  (probed every 2 seconds).
-
-### Fixed
-
-- When the console is docked at the bottom, the terminal's own status bar and
-  the global status bar stacked into two rows and squeezed the terminal view.
-  The dedicated status bar is removed; the active session's cwd now merges into
-  the left side of the global status bar (shown only while the console is
-  open), returning the reclaimed height to the terminal.
-- Double-clicking a file in the changes list to switch diffs briefly flashed
-  the previous file at its last scroll position. A loading veil now covers the
-  content area during loads (the diff editor stays mounted, no rebuild), and
-  the new file lands directly on its first difference block.
-
-### Changed
-
-- When a background update check finds a new release, the title bar now shows a
-  green `vX.Y.Z available` badge next to Search; clicking it opens the existing
-  update dialog. The label is localized in English and Simplified Chinese.
-
-### Changed
-
-- Renamed the project to LazeCode. The bundle identifier is now
-  `io.github.jiangtaiduo.lazecode`, project settings use
-  `.lazecode/settings.json`, and local storage keys use the `lazecode.` prefix.
-  Existing settings are not migrated.
-- Documentation is now maintained in English and Simplified Chinese, with
-  matching language links in every user-facing document.
-- The README now includes an at-a-glance status table, DMG installation
-  guidance, and a troubleshooting section. The app icon and favicons use the
-  LazeCode wordmark.
-- CI and release workflows now use `macos-15`; GitHub is retiring the `macos-14`
-  runner image on 2026-11-02.
-- Local and CI release builds use `APPLE_SIGNING_IDENTITY=-` when no Developer ID
-  is configured, so the macOS bundle has a complete ad-hoc signature instead of
-  only a linker signature.
-- Automatic update checks are enabled by default (at most once a day). Installing
-  an update still requires explicit user confirmation.
-
-## [0.1.2] - 2026-10-30
-
-### Changed
-
-- The declared minimum macOS version is now 13.0 instead of 27.0. Tauri writes
-  this value into both `LSMinimumSystemVersion` and the Mach-O deployment
-  target, so macOS 13 through 26 can launch the app; only macOS 27 has been
-  tested so far.
-
-## [0.1.1] - 2026-10-30
-
-### Added
-
-- The welcome screen now shows the running version under the LazeCode wordmark,
-  so an applied update is visible without opening Settings.
-
-### Changed
-
-- Release artifacts are signed with a new updater key pair; in-app updates are
-  verified against the public key shipped in this build.
-
-## [0.1.0] - 2026-10-29
-
-### Added
-
-- Native Ghostty VT terminal with incremental cell-frame diffs, Kitty graphics,
-  multi-tab/split panes, scrollback search and an accessible text mirror.
-- Git IDE: DAG log, branches/tags/remotes/worktrees/submodules/LFS, commit,
-  push/pull/fetch, merge/rebase/cherry-pick/revert, interactive rebase, stash,
-  shelves, hunk staging, diff viewer and batch drop-commit.
-- Monaco editor with per-file encoding, atomic writes, file watching, Find in
-  Files, Search Everywhere and LSP diagnostics.
-- Local-first settings, window-state persistence, English/Simplified Chinese
-  UI and native localized menus.
-- Cross-language wire verification (34 checks), terminal conformance goldens,
-  378 Rust tests and 98 UI tests.

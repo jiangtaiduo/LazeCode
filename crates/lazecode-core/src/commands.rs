@@ -10,6 +10,25 @@ pub enum Command {
     Stage(Vec<String>),
     Unstage(Vec<String>),
     Commit,
+    /// Commit an explicit path set with its own message (context-menu
+    /// 「Commit File(s)...」), bypassing the sidebar checkbox state.
+    CommitPaths {
+        paths: Vec<String>,
+        message: String,
+    },
+    /// Create a changelist (persisted JSON in the repo git-dir).
+    ChangelistCreate(String),
+    /// Delete a changelist; `rollback` discards the uncommitted changes of
+    /// its files instead of re-homing them to the default list.
+    ChangelistDelete {
+        name: String,
+        rollback: bool,
+    },
+    /// Move files into a changelist.
+    ChangelistAssign {
+        paths: Vec<String>,
+        list: String,
+    },
     CheckoutBranch(String),
     CreateBranch(String),
     DeleteBranch(String),
@@ -37,12 +56,22 @@ pub enum Command {
     AbortCherryPick,
     StashPush {
         message: Option<String>,
+        include_untracked: bool,
     },
     StashApply(String),
     StashDrop(String),
-    ShelfSave(String),
+    /// Shelve the given paths (empty = all tracked changes) as a named patch.
+    ShelfSave {
+        name: String,
+        paths: Vec<String>,
+    },
+    /// Apply a shelf back onto the worktree; `paths` restricts the restore
+    /// to a file subset (unshelve dialog) and `target_list` optionally
+    /// assigns the restored files to a (created) changelist.
     ShelfRestore {
         name: String,
+        paths: Option<Vec<String>>,
+        target_list: Option<String>,
         delete_after: bool,
     },
     RevertCommit {
@@ -56,6 +85,29 @@ pub enum Command {
         hash: String,
         mode: lazecode_git::ResetMode,
     },
+    SquashCommits {
+        hashes: Vec<String>,
+        message: String,
+    },
+    /// Roll back the uncommitted changes of these files (确认后执行；
+    /// 新增文件回滚后其编辑器标签会被一并关闭).
+    DiscardFiles(Vec<String>),
+    /// Stage untracked paths into the index（对齐 PyCharm/stable 的
+    /// Add to VCS；成功后刷新快照让文件移出 Unversioned 组）.
+    AddToVcs(Vec<String>),
+    /// Create Patch from Local Changes：先弹系统保存对话框（execute 里
+    /// 处理），选中目标文件后再由后台任务计算并写出补丁。
+    SavePatch(Vec<String>),
+    /// 真正执行交互式变基（todo 由 UI 编排；此前只有对话框没有实现）。
+    InteractiveRebase {
+        onto: String,
+        steps: Vec<lazecode_git::RebaseStep>,
+    },
+    CheckoutRevision(String),
+    GitInit,
+    UndoCommitHead,
+    EditCommitMessageHead(String),
+    GoToLine(usize),
     FetchAll,
     Push {
         remote: String,
@@ -85,6 +137,30 @@ pub enum Command {
         cached: bool,
         reverse: bool,
         root: std::path::PathBuf,
+    },
+    /// 后台分支比较（对话框打开/换方向/路径过滤触发）。
+    CompareBranches {
+        left: String,
+        right: String,
+        left_path: String,
+        right_path: String,
+    },
+    /// 某一侧加载更多提交（Load More，稳定版 +500 递增）。
+    CompareBranchesMore {
+        /// 0 = left 侧，1 = right 侧。
+        side: u8,
+        exclude: String,
+        include: String,
+        limit: usize,
+        path: String,
+    },
+    /// 详情列文件清单：单提交 / 多选范围（稳定版 git_commit_files /
+    /// git_compare_commits）。`key` 用于回填匹配。
+    CompareFiles {
+        key: String,
+        commit: String,
+        from: String,
+        to: String,
     },
     RefreshLog,
     /// The log filter changed: re-query with the new options.

@@ -180,7 +180,8 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             p.text,
             Align2::LEFT_CENTER,
         );
-        if worktree_response.clicked() && has_project {
+        let is_single = project.map(|p| p.is_single_file).unwrap_or(false);
+        if worktree_response.clicked() && has_project && !is_single {
             rt.toggle_menu(MenuKind::Worktree, worktree_rect, None);
         }
         worktree_response.on_hover_text(crate::tr!(
@@ -190,9 +191,13 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         ));
 
         // Branch chip inside the selected worktree.
-        let branch = project
-            .map(|project| project.branch())
-            .unwrap_or_else(|| crate::tr!(model, "no repository", "无仓库").to_string());
+        let branch = if is_single {
+            crate::tr!(model, "Single-file", "单文件模式").to_string()
+        } else {
+            project
+                .map(|project| project.branch())
+                .unwrap_or_else(|| crate::tr!(model, "no repository", "无仓库").to_string())
+        };
         let ahead = project
             .and_then(|project| project.git.as_ref())
             .map(|git| git.ahead)
@@ -279,7 +284,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             Icon::ChevronDown,
             p.text3,
         );
-        if response.clicked() && has_project {
+        if response.clicked() && has_project && !is_single {
             rt.toggle_menu(MenuKind::Branch, branch_rect, None);
         }
         left_end = branch_rect.right() + 8.0;

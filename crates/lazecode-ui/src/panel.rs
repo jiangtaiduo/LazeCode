@@ -455,12 +455,21 @@ fn draw_console(
                 },
             );
         }
-        if close_response.clicked() {
+        if close_response.clicked() || response.middle_clicked() {
             close_terminal = Some(*id);
         } else if response.clicked() {
             model.projects[index].active_worktree_mut().active_terminal = Some(*id);
             rt.set_terminal_focus(*id);
             model.ui.panel_tab = PanelTab::Console;
+        } else if response.secondary_clicked() {
+            rt.open_menu(
+                crate::runtime::MenuKind::TerminalTabContext {
+                    project: index,
+                    terminal_id: *id,
+                },
+                tab,
+                Some(title.clone()),
+            );
         }
         x = tab.right() + 2.0;
     }
@@ -1325,7 +1334,7 @@ fn draw_git_log(
         ));
     }
     if del_resp.clicked() {
-        if let Some(target) = model.projects[index].ref_selection.iter().next() {
+        if let Some(target) = model.projects[index].ref_selection.first() {
             if target != &current_branch {
                 rt.dialog = crate::runtime::DialogState::DeleteBranch {
                     name: target.clone(),
@@ -1336,18 +1345,43 @@ fn draw_git_log(
     }
     tb_y += 24.0;
 
-    // 5. Compare with working tree (diff)
+    // 5. Compare Selected（原「Compare with Working Tree」死按钮：有
+    // tooltip 无 clicked。接上稳定版 GitBottomPanel 工具栏的「比较选中
+    // 分支」语义：恰好选中 2 个分支时打开比较）。
     let diff_rect = Rect::from_min_size(
         Pos2::new(toolbar_rect.left() + 3.0, tb_y),
         Vec2::splat(20.0),
     );
-    let diff_resp = icon_button(ui, diff_rect, Icon::Diff, false, theme);
+    let compare_enabled = model
+        .projects
+        .get(index)
+        .map(|project| project.ref_selection.len() == 2)
+        .unwrap_or(false);
+    let diff_resp = icon_button(ui, diff_rect, Icon::Diff, compare_enabled, theme);
     if diff_resp.hovered() {
         diff_resp.show_tooltip_text(crate::tr!(
             model,
-            "Compare with Working Tree",
-            "与工作区比较"
+            "Compare Selected Branches",
+            "比较选中的分支"
         ));
+    }
+    if diff_resp.clicked() {
+        if let Some(project) = model.projects.get(index) {
+            let refs: Vec<String> = project.ref_selection.clone();
+            if refs.len() == 2 {
+                crate::editor::open_compare_page(model, refs[0].clone(), refs[1].clone());
+            } else {
+                model.toast(
+                    crate::tr!(
+                        model,
+                        "Select exactly two branches to compare",
+                        "请先选中两个分支再比较"
+                    )
+                    .to_string(),
+                    lazecode_core::ToastKind::Warning,
+                );
+            }
+        }
     }
     tb_y += 24.0;
 
@@ -1365,7 +1399,7 @@ fn draw_git_log(
         ));
     }
     if star_resp.clicked() {
-        if let Some(target) = model.projects[index].ref_selection.iter().next().cloned() {
+        if let Some(target) = model.projects[index].ref_selection.first().cloned() {
             if model.projects[index].favorites.contains(&target) {
                 model.projects[index].favorites.remove(&target);
             } else {
@@ -1542,7 +1576,8 @@ fn draw_git_log(
                 let (row, response) =
                     ui.allocate_exact_size(Vec2::new(ui.available_width(), row_h), Sense::click());
                 let out_of_head = commit.in_head == Some(false);
-                let is_selected = selected.as_deref() == Some(commit.id.as_str());
+                let is_selected = selected.as_deref() == Some(commit.id.as_str())
+                    || model.projects[index].selected_commits.contains(&commit.id);
                 if is_selected {
                     ui.painter()
                         .rect_filled(row, egui::CornerRadius::ZERO, p.active);
@@ -1702,7 +1737,43 @@ fn draw_git_log(
                         }
                     }
                 } else if response.clicked() {
-                    select_commit = Some(commit.id.clone());
+                    let cmd_ctrl = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    if cmd_ctrl {
+                        if model.projects[index].selected_commits.contains(&commit.id) {
+                            model.projects[index]
+                                .selected_commits
+                                .retain(|c| c != &commit.id);
+                        } else {
+                            model.projects[index]
+                                .selected_commits
+                                .push(commit.id.clone());
+                        }
+                        select_commit = Some(commit.id.clone());
+                    } else if shift && !model.projects[index].selected_commits.is_empty() {
+                        let anchor = model.projects[index].selected_commits[0].clone();
+                        let pos_anchor = model.projects[index]
+                            .log
+                            .iter()
+                            .position(|c| c.id == anchor)
+                            .unwrap_or(0);
+                        let pos_curr = model.projects[index]
+                            .log
+                            .iter()
+                            .position(|c| c.id == commit.id)
+                            .unwrap_or(0);
+                        let start = pos_anchor.min(pos_curr);
+                        let end = pos_anchor.max(pos_curr);
+                        model.projects[index].selected_commits = model.projects[index].log
+                            [start..=end]
+                            .iter()
+                            .map(|c| c.id.clone())
+                            .collect();
+                        select_commit = Some(commit.id.clone());
+                    } else {
+                        model.projects[index].selected_commits = vec![commit.id.clone()];
+                        select_commit = Some(commit.id.clone());
+                    }
                 }
                 if response.double_clicked() {
                     model.queue(Command::OpenCommitDiff {
@@ -1711,9 +1782,17 @@ fn draw_git_log(
                     });
                 }
                 if response.secondary_clicked() {
+                    let anchor = ui
+                        .input(|i| i.pointer.hover_pos())
+                        .map(|p| Rect::from_min_size(p, Vec2::splat(1.0)))
+                        .unwrap_or(row);
+                    if !model.projects[index].selected_commits.contains(&commit.id) {
+                        model.projects[index].selected_commits = vec![commit.id.clone()];
+                        select_commit = Some(commit.id.clone());
+                    }
                     rt.open_menu(
                         crate::runtime::MenuKind::LogCommitMenu { project: index },
-                        row,
+                        anchor,
                         Some(commit.id.clone()),
                     );
                 }
@@ -1821,7 +1900,7 @@ fn draw_branch_list(
         model.projects[index].ref_dirs_expanded.clone();
     let mut toggle_dir: Option<String> = None;
     let mut pick_ref: Option<(String, bool)> = None; // (name, remote)
-    let mut open_menu: Option<(String, bool)> = None; // branch name + remote flag
+    let mut open_menu: Option<(String, bool, Rect)> = None; // branch name + remote flag + anchor
 
     let curr_branch = branches.iter().find(|b| b.name == current);
     let local_tree = lazecode_core::gitref::build_ref_tree(&local);
@@ -1946,7 +2025,11 @@ fn draw_branch_list(
                         pick_ref = Some((curr.name.clone(), false));
                     }
                     if resp.secondary_clicked() {
-                        open_menu = Some((curr.name.clone(), false));
+                        let anchor = ui
+                            .input(|i| i.pointer.hover_pos())
+                            .map(|p| Rect::from_min_size(p, Vec2::splat(1.0)))
+                            .unwrap_or(row);
+                        open_menu = Some((curr.name.clone(), false, anchor));
                     }
                     y += row_h + 6.0;
                 }
@@ -1986,7 +2069,12 @@ fn draw_branch_list(
                             ui.scope_id().with(("refrow", branch.name.clone())),
                             Sense::click(),
                         );
-                        if response.hovered() {
+                        let is_selected =
+                            model.projects[index].ref_selection.contains(&branch.name);
+                        if is_selected {
+                            ui.painter()
+                                .rect_filled(row, egui::CornerRadius::same(3), p.active);
+                        } else if response.hovered() {
                             ui.painter()
                                 .rect_filled(row, egui::CornerRadius::same(3), p.hover);
                         }
@@ -2042,9 +2130,58 @@ fn draw_branch_list(
                             );
                         }
                         if response.secondary_clicked() {
-                            open_menu = Some((branch.name.clone(), branch.remote));
+                            if !model.projects[index].ref_selection.contains(&branch.name) {
+                                model.projects[index].ref_selection.clear();
+                                model.projects[index]
+                                    .ref_selection
+                                    .push(branch.name.clone());
+                            }
+                            let anchor = ui
+                                .input(|i| i.pointer.hover_pos())
+                                .map(|p| Rect::from_min_size(p, Vec2::splat(1.0)))
+                                .unwrap_or(row);
+                            open_menu = Some((branch.name.clone(), branch.remote, anchor));
                         }
                         if response.clicked() {
+                            let cmd = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+                            let shift = ui.input(|i| i.modifiers.shift);
+                            if cmd {
+                                let selection = &mut model.projects[index].ref_selection;
+                                if let Some(pos) = selection.iter().position(|n| n == &branch.name)
+                                {
+                                    selection.remove(pos);
+                                } else {
+                                    selection.push(branch.name.clone());
+                                }
+                            } else if shift && !model.projects[index].ref_selection.is_empty() {
+                                let all_names: Vec<String> = local_flat
+                                    .iter()
+                                    .filter_map(|r| r.branch.as_ref().map(|b| b.name.clone()))
+                                    .collect();
+                                let anchor = model.projects[index]
+                                    .ref_selection
+                                    .first()
+                                    .cloned()
+                                    .unwrap_or_else(|| branch.name.clone());
+                                let pos1 = all_names.iter().position(|n| n == &anchor).unwrap_or(0);
+                                let pos2 = all_names
+                                    .iter()
+                                    .position(|n| n == &branch.name)
+                                    .unwrap_or(0);
+                                let start = pos1.min(pos2);
+                                let end = pos1.max(pos2);
+                                for n in &all_names[start..=end] {
+                                    let selection = &mut model.projects[index].ref_selection;
+                                    if !selection.contains(n) {
+                                        selection.push(n.clone());
+                                    }
+                                }
+                            } else {
+                                model.projects[index].ref_selection.clear();
+                                model.projects[index]
+                                    .ref_selection
+                                    .push(branch.name.clone());
+                            }
                             pick_ref = Some((branch.name.clone(), branch.remote));
                         }
                         if response.double_clicked() {
@@ -2086,7 +2223,15 @@ fn draw_branch_list(
                                 ui.scope_id().with(("refrow", branch.name.clone())),
                                 Sense::click(),
                             );
-                            if response.hovered() {
+                            let is_selected =
+                                model.projects[index].ref_selection.contains(&branch.name);
+                            if is_selected {
+                                ui.painter().rect_filled(
+                                    row,
+                                    egui::CornerRadius::same(3),
+                                    p.active,
+                                );
+                            } else if response.hovered() {
                                 ui.painter()
                                     .rect_filled(row, egui::CornerRadius::same(3), p.hover);
                             }
@@ -2103,9 +2248,35 @@ fn draw_branch_list(
                                 p.text2,
                             );
                             if response.secondary_clicked() {
-                                open_menu = Some((branch.name.clone(), true));
+                                if !model.projects[index].ref_selection.contains(&branch.name) {
+                                    model.projects[index].ref_selection.clear();
+                                    model.projects[index]
+                                        .ref_selection
+                                        .push(branch.name.clone());
+                                }
+                                let anchor = ui
+                                    .input(|i| i.pointer.hover_pos())
+                                    .map(|p| Rect::from_min_size(p, Vec2::splat(1.0)))
+                                    .unwrap_or(row);
+                                open_menu = Some((branch.name.clone(), true, anchor));
                             }
                             if response.clicked() {
+                                let cmd = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+                                if cmd {
+                                    let selection = &mut model.projects[index].ref_selection;
+                                    if let Some(pos) =
+                                        selection.iter().position(|n| n == &branch.name)
+                                    {
+                                        selection.remove(pos);
+                                    } else {
+                                        selection.push(branch.name.clone());
+                                    }
+                                } else {
+                                    model.projects[index].ref_selection.clear();
+                                    model.projects[index]
+                                        .ref_selection
+                                        .push(branch.name.clone());
+                                }
                                 pick_ref = Some((branch.name.clone(), true));
                             }
                             y += row_h;
@@ -2188,10 +2359,10 @@ fn draw_branch_list(
         model.queue(Command::LogFilterChanged);
         let _ = remote;
     }
-    if let Some((name, remote)) = open_menu {
+    if let Some((name, remote, anchor)) = open_menu {
         rt.open_menu(
             crate::runtime::MenuKind::BranchContext { project: index },
-            rect,
+            anchor,
             Some(format!(
                 "{name}\u{1}{}",
                 if remote { "remote" } else { "local" }
@@ -2537,7 +2708,7 @@ fn draw_commit_detail(
 }
 
 #[allow(dead_code)]
-fn time_ago(seconds: i64, zh: bool) -> String {
+pub(crate) fn time_ago(seconds: i64, zh: bool) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)

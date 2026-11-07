@@ -2,6 +2,7 @@
 
 pub mod activity;
 pub mod app_ui;
+pub mod compare;
 pub mod editor;
 pub mod i18n;
 pub mod icons;

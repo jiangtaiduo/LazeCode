@@ -229,9 +229,6 @@ fn worktree_status(
             return Ok(WorktreeStatus::Modified);
         }
     }
-    if meta.len() > MAX_STAT_BYTES as u64 {
-        return Ok(WorktreeStatus::Modified);
-    }
     let stat_matches = gix::index::fs::Metadata::from_path_no_follow(&abs)
         .ok()
         .and_then(|meta| Stat::from_fs(&meta).ok())
@@ -239,17 +236,17 @@ fn worktree_status(
     if stat_matches {
         return Ok(WorktreeStatus::Clean);
     }
-    let bytes = std::fs::read(&abs)?;
-    if bytes.iter().take(8000).any(|byte| *byte == 0) {
-        // Binary: compare by hash-equivalent bytes anyway.
-        let recorded = blob_bytes(repo, index_oid)?;
-        return Ok(if bytes == recorded {
-            WorktreeStatus::Clean
-        } else {
-            WorktreeStatus::Modified
-        });
+    if index_stat.size != 0 && meta.len() != index_stat.size as u64 {
+        return Ok(WorktreeStatus::Modified);
     }
-    let recorded = blob_bytes(repo, index_oid)?;
+    let bytes = match std::fs::read(&abs) {
+        Ok(b) => b,
+        Err(_) => return Ok(WorktreeStatus::Modified),
+    };
+    let recorded = match blob_bytes(repo, index_oid) {
+        Ok(b) => b,
+        Err(_) => return Ok(WorktreeStatus::Modified),
+    };
     Ok(if bytes == recorded {
         WorktreeStatus::Clean
     } else {

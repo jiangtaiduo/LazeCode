@@ -18,14 +18,20 @@ struct Stored {
 }
 
 pub struct Changelists {
-    root: PathBuf,
+    git_dir: PathBuf,
     data: Stored,
 }
 
 impl Changelists {
     pub fn open(root: &Path) -> Self {
-        let path = root.join(".git").join(FILE_NAME);
-        let data: Stored = std::fs::read_to_string(&path)
+        let git_dir = match crate::discover(root) {
+            // 关联 worktree / submodule 的 `.git` 是文件而非目录，必须经
+            // discover 解析出真实 git-dir；直接拼 `.git` 会让这些仓库的
+            // 变更列表静默失效（shelf.rs 同样遵循此约定）。
+            Ok(repo) => repo.git_dir().to_path_buf(),
+            Err(_) => root.join(".git"),
+        };
+        let data: Stored = std::fs::read_to_string(git_dir.join(FILE_NAME))
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
@@ -33,10 +39,7 @@ impl Changelists {
         if data.lists.is_empty() {
             data.lists.push(DEFAULT_LIST.to_string());
         }
-        Self {
-            root: root.to_path_buf(),
-            data,
-        }
+        Self { git_dir, data }
     }
 
     pub fn lists(&self) -> &[String] {
@@ -54,6 +57,31 @@ impl Changelists {
             self.data.lists.push(name.to_string());
             self.flush();
         }
+    }
+
+    /// `create_list` 的可判错版本：重名/空名返回 `Err`，供需要把失败
+    /// 原因回显给用户的调用方（如 Unshelve 目标列表）使用。
+    pub fn create_list_checked(&mut self, name: &str) -> anyhow::Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            anyhow::bail!("empty changelist name");
+        }
+        if self.data.lists.iter().any(|existing| existing == name) {
+            anyhow::bail!("changelist '{name}' already exists");
+        }
+        self.create_list(name);
+        Ok(())
+    }
+
+    /// Batch-assign many paths in one flush (unshelve-to-changelist path).
+    pub fn assign_many(&mut self, paths: &[String], list: &str) {
+        if paths.is_empty() {
+            return;
+        }
+        for path in paths {
+            self.data.files.insert(path.clone(), list.to_string());
+        }
+        self.flush();
     }
 
     /// Removes a custom list; the files that belonged to it fall back to
@@ -79,12 +107,11 @@ impl Changelists {
     }
 
     fn flush(&self) {
-        let dir = self.root.join(".git");
-        if std::fs::create_dir_all(&dir).is_err() {
+        if std::fs::create_dir_all(&self.git_dir).is_err() {
             return;
         }
         if let Ok(text) = serde_json::to_string_pretty(&self.data) {
-            let _ = lazecode_fs::file::write_atomic(&dir.join(FILE_NAME), text.as_bytes());
+            let _ = lazecode_fs::file::write_atomic(&self.git_dir.join(FILE_NAME), text.as_bytes());
         }
     }
 }

@@ -34,6 +34,8 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     let mut close_tab = false;
     let mut switch_project: Option<usize> = None;
     let mut close_overlay = false;
+    let mut goto_line = false;
+    let mut new_file = false;
 
     ctx.input_mut(|input| {
         if input.consume_key(command_only(), Key::K) || input.consume_key(command_only(), Key::P) {
@@ -68,6 +70,12 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         }
         if input.consume_key(command_only(), Key::F) {
             find = true;
+        }
+        if input.consume_key(command_only(), Key::L) {
+            goto_line = true;
+        }
+        if input.consume_key(command_only(), Key::N) {
+            new_file = true;
         }
         if input.consume_key(command_only(), Key::Num1) {
             switch_project = Some(0);
@@ -158,6 +166,21 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     if find && rt.terminal_focus.is_none() && model.active_project().is_some() {
         rt.find.open = true;
         rt.find.focus_requested = true;
+    }
+    if goto_line {
+        rt.dialog = DialogState::GoToLine {
+            value: String::new(),
+            error: None,
+        };
+    }
+    if new_file {
+        if let Some(project) = model.active_project() {
+            rt.dialog = DialogState::NewFile {
+                dir: project.root.clone(),
+                value: String::new(),
+                error: None,
+            };
+        }
     }
     if let Some(index) = switch_project {
         model.switch_project(index);

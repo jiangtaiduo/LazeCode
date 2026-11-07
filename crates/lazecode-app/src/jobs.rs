@@ -106,6 +106,37 @@ pub enum JobResult {
         reload_files: bool,
         clear_commit_message: bool,
     },
+    /// 文件更改已回滚：除常规刷新外，还要关闭已不存在文件的编辑器标签
+    /// （对齐稳定版：新增/未跟踪文件回滚后关闭标签页）。
+    Discarded {
+        root: PathBuf,
+        paths: Vec<String>,
+        message: String,
+    },
+    /// 分支比较整单回填（按 root+refs+paths 匹配 UiState 缓存；root 防
+    /// 跨项目同名分支错配）。
+    CompareBranchesLoaded {
+        root: PathBuf,
+        left: String,
+        right: String,
+        left_path: String,
+        right_path: String,
+        result: Result<lazecode_git::CompareBranches, String>,
+    },
+    /// 某一侧「Load More」的提交列表回填。
+    CompareBranchesCommits {
+        root: PathBuf,
+        side: u8,
+        exclude: String,
+        include: String,
+        result: Result<(Vec<lazecode_git::CommitInfo>, bool), String>,
+    },
+    /// 详情列文件清单回填（root+key 匹配）。
+    CompareFilesLoaded {
+        root: PathBuf,
+        key: String,
+        result: Result<Vec<lazecode_git::CompareFile>, String>,
+    },
     Saved {
         root: PathBuf,
         path: PathBuf,
@@ -345,6 +376,59 @@ impl JobQueue {
                     self.load_project(path, model.settings.clone(), model.notifier.clone());
                 }
             }
+            Command::SavePatch(paths) => {
+                // 稳定版 Create Patch from Local Changes：保存对话框在 UI
+                // 线程（与 OpenProjectDialog 同一先例），写文件走后台任务。
+                let default_name = match paths.len() {
+                    1 => paths[0].rsplit('/').next().unwrap_or("changes").to_string(),
+                    _ => "changes".to_string(),
+                };
+                let Some(dest) = rfd::FileDialog::new()
+                    .set_title("Create Patch")
+                    .set_file_name(format!("{default_name}.patch"))
+                    .add_filter("Patch files", &["patch", "diff"])
+                    .save_file()
+                else {
+                    return;
+                };
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let paths = paths.clone();
+                self.spawn(
+                    "save-patch",
+                    format!("patch:{root:?}:{paths:?}:{dest:?}"),
+                    move || {
+                        let result =
+                            lazecode_git::diff_patch_paths(&root, &paths).and_then(|patch| {
+                                std::fs::write(&dest, patch).map_err(|err| anyhow::anyhow!("{err}"))
+                            });
+                        let name = dest
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(()) => {
+                                    if zh {
+                                        format!("补丁已保存到 {name}")
+                                    } else {
+                                        format!("Patch saved to {name}")
+                                    }
+                                }
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: false,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
             Command::OpenProject(path) => {
                 self.load_project(path, model.settings.clone(), model.notifier.clone());
             }
@@ -509,6 +593,270 @@ impl JobQueue {
                             clear_commit_message: false,
                         },
                     }
+                });
+            }
+            Command::CommitPaths { paths, message } => {
+                let Some(project) = model.active_project() else {
+                    return;
+                };
+                let root = project.root.clone();
+                let excluded: Vec<String> = project
+                    .changes()
+                    .iter()
+                    .map(|change| change.path.clone())
+                    .filter(|path| !paths.contains(path))
+                    .collect();
+                let zh = model.settings.language.is_zh();
+                if message.trim().is_empty() {
+                    model.toast(
+                        if zh {
+                            "请先填写提交信息"
+                        } else {
+                            "Add a commit message first"
+                        },
+                        ToastKind::Warning,
+                    );
+                    return;
+                }
+                let key = format!("commit-paths:{}", root.display());
+                let job_root = root.clone();
+                let message = message.clone();
+                self.spawn("commit-paths", key, move || {
+                    let result =
+                        lazecode_git::commit_checked(&job_root, &paths, &excluded, &message, false);
+                    match result {
+                        Ok(id) => JobResult::OpDone {
+                            root: job_root,
+                            message: if zh {
+                                format!("已提交 {}", &id[..id.len().min(8)])
+                            } else {
+                                format!("Committed {}", &id[..id.len().min(8)])
+                            },
+                            ok: true,
+                            refresh: true,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        },
+                        Err(err) => JobResult::OpDone {
+                            root: job_root,
+                            message: err.to_string(),
+                            ok: false,
+                            refresh: false,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        },
+                    }
+                });
+            }
+            Command::ChangelistCreate(name) => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let name = name.clone();
+                self.spawn(
+                    "clist-create",
+                    format!("clist:{root:?}:{name}"),
+                    move || {
+                        let mut lists = lazecode_git::Changelists::open(&root);
+                        let result = lists.create_list_checked(&name).map(|_| ());
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(_) => {
+                                    if zh {
+                                        format!("已创建变更列表 {name}")
+                                    } else {
+                                        format!("Created changelist {name}")
+                                    }
+                                }
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: false,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
+            Command::ChangelistDelete { name, rollback } => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let name = name.clone();
+                self.spawn(
+                    "clist-delete",
+                    format!("clist-d:{root:?}:{name}:{rollback}"),
+                    move || {
+                        // rollback=true 逐文件回滚（对齐稳定版 deleteChangelist
+                        // 的 Rollback 分支）；否则文件隐式回归默认列表。
+                        let mut lists = lazecode_git::Changelists::open(&root);
+                        let orphans = lists.remove_list(&name);
+                        let result: anyhow::Result<Vec<String>> = if rollback {
+                            let mut first_error: Option<anyhow::Error> = None;
+                            for path in &orphans {
+                                if let Err(err) = lazecode_git::discard_file_changes(&root, path) {
+                                    if first_error.is_none() {
+                                        first_error = Some(err);
+                                    }
+                                }
+                            }
+                            match first_error {
+                                None => Ok(orphans),
+                                Some(err) => Err(err),
+                            }
+                        } else {
+                            Ok(orphans)
+                        };
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(orphans) => {
+                                    if zh {
+                                        format!("已删除变更列表 {name}（{} 个文件）", orphans.len())
+                                    } else {
+                                        format!(
+                                            "Deleted changelist {name} ({} files)",
+                                            orphans.len()
+                                        )
+                                    }
+                                }
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: rollback,
+                            reload_files: rollback,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
+            Command::ChangelistAssign { paths, list } => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let paths = paths.clone();
+                let count = paths.len();
+                self.spawn(
+                    "clist-assign",
+                    format!("clist-a:{root:?}:{list}:{paths:?}"),
+                    move || {
+                        // assign_many 只写 JSON，不会失败。
+                        let mut lists = lazecode_git::Changelists::open(&root);
+                        lists.assign_many(&paths, &list);
+                        JobResult::OpDone {
+                            root,
+                            message: if zh {
+                                format!("已移动 {count} 个文件到 {list}")
+                            } else {
+                                format!("Moved {count} files to {list}")
+                            },
+                            ok: true,
+                            refresh: false,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
+            Command::CompareBranches {
+                left,
+                right,
+                left_path,
+                right_path,
+            } => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn(
+                    "cb",
+                    format!("cb:{root:?}:{left}:{right}:{left_path}:{right_path}"),
+                    move || {
+                        let result = lazecode_git::compare_branches(
+                            &root,
+                            &left,
+                            &right,
+                            Some(&left_path),
+                            Some(&right_path),
+                            1000,
+                        )
+                        .map_err(|err| err.to_string());
+                        JobResult::CompareBranchesLoaded {
+                            root,
+                            left,
+                            right,
+                            left_path,
+                            right_path,
+                            result,
+                        }
+                    },
+                );
+            }
+            Command::CompareBranchesMore {
+                side,
+                exclude,
+                include,
+                limit,
+                path,
+            } => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn(
+                    "cb-more",
+                    format!("cbm:{root:?}:{side}:{exclude}:{include}:{limit}:{path}"),
+                    move || {
+                        // 多取 1 条探测截断（对齐稳定版 fetch_limit=limit+1）。
+                        let options = lazecode_git::LogOptions {
+                            limit: limit + 1,
+                            branch: Some(format!("{exclude}..{include}")),
+                            topo_order: true,
+                            path: (!path.is_empty()).then_some(path.clone()),
+                            ..Default::default()
+                        };
+                        let result = lazecode_git::log(&root, options)
+                            .map(|mut commits| {
+                                let truncated = commits.len() > limit;
+                                commits.truncate(limit);
+                                (commits, truncated)
+                            })
+                            .map_err(|err| err.to_string());
+                        JobResult::CompareBranchesCommits {
+                            root,
+                            side,
+                            exclude,
+                            include,
+                            result,
+                        }
+                    },
+                );
+            }
+            Command::CompareFiles {
+                key,
+                commit,
+                from,
+                to,
+            } => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("cb-files", format!("cbf:{root:?}:{key}"), move || {
+                    let result = if !commit.is_empty() {
+                        lazecode_git::commit_files(&root, &commit)
+                    } else {
+                        lazecode_git::compare_commits(&root, &from, &to)
+                    }
+                    .map_err(|err| err.to_string());
+                    JobResult::CompareFilesLoaded { root, key, result }
                 });
             }
             Command::CheckoutBranch(name) => {
@@ -1023,6 +1371,30 @@ impl JobQueue {
                     }
                 });
             }
+            Command::InteractiveRebase { onto, steps } => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn(
+                    "rebase-i",
+                    format!("rbi:{root:?}:{onto}:{steps:?}"),
+                    move || {
+                        let result = lazecode_git::rebase_interactive(&root, &onto, &steps);
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(_) => format!("Interactive rebase onto {onto} done"),
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: true,
+                            reload_files: true,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
             Command::RebaseContinue => {
                 let root = model
                     .active_project()
@@ -1234,7 +1606,262 @@ impl JobQueue {
                     },
                 );
             }
-            Command::StashPush { message } => {
+            Command::SquashCommits { hashes, message } => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let hashes = hashes.clone();
+                let message = message.clone();
+                self.spawn(
+                    "squash",
+                    format!("sq:{root:?}:{}", hashes.len()),
+                    move || {
+                        let result = lazecode_git::squash_commits(&root, &hashes, Some(&message));
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(msg) => {
+                                    if zh {
+                                        format!("压缩提交成功: {msg}")
+                                    } else {
+                                        format!("Squash succeeded: {msg}")
+                                    }
+                                }
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: true,
+                            reload_files: true,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
+            Command::AddToVcs(paths) => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let paths = paths.clone();
+                self.spawn("vcs-add", format!("vcsa:{root:?}:{paths:?}"), move || {
+                    // 对齐稳定版 handleAddToVcs：git add 后刷新快照，
+                    // 文件随之移出 Unversioned 组；toast 文案也逐字对齐。
+                    let result = lazecode_git::ops::stage(&root, &paths);
+                    let what = if paths.len() > 1 {
+                        paths.len().to_string()
+                    } else {
+                        paths
+                            .first()
+                            .and_then(|path| path.rsplit('/').next())
+                            .unwrap_or("")
+                            .to_string()
+                    };
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(()) => {
+                                if zh {
+                                    format!("已将 {what} 加入版本控制")
+                                } else {
+                                    format!("Added {what} to version control")
+                                }
+                            }
+                            Err(err) => {
+                                if zh {
+                                    format!("加入版本控制失败：{err}")
+                                } else {
+                                    format!("Failed to add to version control: {err}")
+                                }
+                            }
+                        },
+                        ok: result.is_ok(),
+                        // 未跟踪 → 已暂存是状态列表的结构性变化，必须刷新。
+                        refresh: true,
+                        reload_files: false,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::DiscardFiles(paths) => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let paths = paths.clone();
+                self.spawn("discard", format!("disc:{root:?}:{paths:?}"), move || {
+                    // 逐文件回滚（对齐稳定版 git_discard_file_changes）；
+                    // 结果走 Discarded 变体：回滚的新增文件需要关闭其
+                    // 编辑器标签（文件已不存在，reload 无意义）。
+                    let mut first_error: Option<anyhow::Error> = None;
+                    for path in &paths {
+                        if let Err(err) = lazecode_git::discard_file_changes(&root, path) {
+                            if first_error.is_none() {
+                                first_error = Some(err);
+                            }
+                        }
+                    }
+                    match first_error {
+                        None => {
+                            let count = paths.len();
+                            JobResult::Discarded {
+                                root,
+                                paths,
+                                message: if zh {
+                                    format!("已放弃 {count} 个文件的更改")
+                                } else {
+                                    format!("Discarded changes in {count} files")
+                                },
+                            }
+                        }
+                        Some(err) => JobResult::OpDone {
+                            root,
+                            message: err.to_string(),
+                            ok: false,
+                            refresh: true,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        },
+                    }
+                });
+            }
+            Command::CheckoutRevision(revision) => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let revision = revision.clone();
+                self.spawn(
+                    "checkout_rev",
+                    format!("corev:{root:?}:{revision}"),
+                    move || {
+                        let result = lazecode_git::checkout_revision(&root, &revision);
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(_) => {
+                                    if zh {
+                                        format!("已检出版本 {revision}")
+                                    } else {
+                                        format!("Checked out revision {revision}")
+                                    }
+                                }
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: true,
+                            reload_files: true,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
+            Command::GitInit => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("init", format!("init:{root:?}"), move || {
+                    let result = lazecode_git::git_init(&root);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => {
+                                if zh {
+                                    "Git 仓库初始化成功".to_string()
+                                } else {
+                                    "Git repository initialized".to_string()
+                                }
+                            }
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: false,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::UndoCommitHead => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                self.spawn("undo_head", format!("undo:{root:?}"), move || {
+                    let result = lazecode_git::undo_commit_head(&root);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => {
+                                if zh {
+                                    "已撤销 HEAD 提交（保留改动）".to_string()
+                                } else {
+                                    "Undid HEAD commit".to_string()
+                                }
+                            }
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::EditCommitMessageHead(message) => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let message = message.clone();
+                self.spawn("amend_msg", format!("amend_msg:{root:?}"), move || {
+                    let result = lazecode_git::amend_commit_message(&root, &message);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => {
+                                if zh {
+                                    "已修改提交信息".to_string()
+                                } else {
+                                    "Amended commit message".to_string()
+                                }
+                            }
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: false,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::GoToLine(line) => {
+                if let Some(project) = model.active_project_mut() {
+                    if let Some(active_id) = project.active_tab {
+                        if let Some(tab) = project.tab_mut_by_id(active_id) {
+                            if let lazecode_core::TabKind::File(file) = &mut tab.kind {
+                                let target_line = line.saturating_sub(1);
+                                file.doc.cursor.line =
+                                    target_line.min(file.doc.line_count().saturating_sub(1));
+                                file.doc.cursor.col = 0;
+                                file.doc.selection = None;
+                                file.doc.scroll_line = target_line.saturating_sub(5) as f32;
+                            }
+                        }
+                    }
+                }
+            }
+            Command::StashPush {
+                message,
+                include_untracked,
+            } => {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
@@ -1242,7 +1869,12 @@ impl JobQueue {
                     .unwrap_or_default();
                 let message = message.clone();
                 self.spawn("stash-push", format!("stash:{root:?}"), move || {
-                    let result = lazecode_git::stash_push(&root, message.as_deref(), false);
+                    let result = lazecode_git::stash_push(
+                        &root,
+                        message.as_deref(),
+                        false,
+                        include_untracked,
+                    );
                     JobResult::OpDone {
                         root,
                         message: match &result {
@@ -1312,7 +1944,7 @@ impl JobQueue {
                     },
                 );
             }
-            Command::ShelfSave(name) => {
+            Command::ShelfSave { name, paths } => {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
@@ -1320,7 +1952,9 @@ impl JobQueue {
                     .unwrap_or_default();
                 let name = name.clone();
                 self.spawn("shelf-save", format!("shelf:{root:?}:{name}"), move || {
-                    let result = lazecode_git::shelf_save(&root, &name);
+                    // paths 空 = 全部已跟踪变更；否则只架藏给定路径
+                    // （对齐稳定版「只架藏勾选文件」）。
+                    let result = lazecode_git::shelf_save_paths(&root, &name, &paths);
                     JobResult::OpDone {
                         root,
                         message: match &result {
@@ -1340,7 +1974,12 @@ impl JobQueue {
                     }
                 });
             }
-            Command::ShelfRestore { name, delete_after } => {
+            Command::ShelfRestore {
+                name,
+                paths,
+                target_list,
+                delete_after,
+            } => {
                 let root = model
                     .active_project()
                     .map(|project| project.root.clone())
@@ -1351,7 +1990,16 @@ impl JobQueue {
                     "shelf-restore",
                     format!("shelf-r:{root:?}:{name}"),
                     move || {
-                        let result = lazecode_git::shelf_restore(&root, &name, d_after);
+                        // paths=Some 走部分恢复（只应用勾选文件，对齐稳定
+                        // 版 Unshelve）；target_list 在恢复成功后把文件归
+                        // 入该变更列表（不存在则创建）。
+                        let result = shelf_restore_scoped(
+                            &root,
+                            &name,
+                            paths.as_deref(),
+                            target_list.as_deref(),
+                            d_after,
+                        );
                         JobResult::OpDone {
                             root,
                             message: match &result {
@@ -1461,6 +2109,11 @@ impl JobQueue {
             }
             Command::OpenDiff(path) => {
                 if let Some(project) = model.active_project_mut() {
+                    // 稳定版语义：diff 打开时该文件成为变更列表当前选中
+                    // （selectedFile → 行选中同步）。
+                    project.change_selection.clear();
+                    project.change_selection.insert(path.clone());
+                    project.change_anchor = Some(path.clone());
                     let source = DiffSource::Worktree { path };
                     project.open_diff_source(source.clone());
                     let root = project.root.clone();
@@ -1689,6 +2342,13 @@ impl JobQueue {
                     }
                     model.ui.panel_visible = true;
                     model.ui.panel_tab = lazecode_core::PanelTab::Console;
+                } else {
+                    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+                    if let Ok(index) = model.open_project(home) {
+                        model.active_project = Some(index);
+                        model.ui.panel_visible = true;
+                        model.ui.panel_tab = lazecode_core::PanelTab::Console;
+                    }
                 }
             }
             Command::NewTerminalCommand { title, command } => {
@@ -1873,9 +2533,7 @@ impl JobQueue {
                                 .iter()
                                 .map(|change| change.path.clone())
                                 .collect();
-                            project
-                                .unchecked_paths
-                                .retain(|path| existing.contains(path));
+                            project.checked_paths.retain(|path| existing.contains(path));
                         }
                         Err(err) => project.git_error = Some(err),
                     }
@@ -2028,6 +2686,132 @@ impl JobQueue {
                     }
                 }
             }
+            JobResult::CompareBranchesLoaded {
+                root,
+                left,
+                right,
+                left_path,
+                right_path,
+                result,
+            } => {
+                let state = &mut model.ui.compare_branches;
+                // 回填前先核对会话身份（项目 + 方向 + 路径）：任何一项
+                // 变化都意味着结果已过期，丢弃。
+                if state.root == root
+                    && state.left_ref == left
+                    && state.right_ref == right
+                    && state.left_path == left_path
+                    && state.right_path == right_path
+                {
+                    state.loading = false;
+                    match result {
+                        Ok(data) => {
+                            state.sides = Some(data);
+                            state.error = None;
+                        }
+                        Err(err) => state.error = Some(err),
+                    }
+                    // 换数据后详情缓存作废。
+                    for view in [&mut state.left_view, &mut state.right_view] {
+                        view.selected.clear();
+                        view.anchor = None;
+                        view.select_all = false;
+                        view.selected_file = None;
+                        view.detail = None;
+                    }
+                }
+            }
+            JobResult::CompareBranchesCommits {
+                root,
+                side,
+                exclude,
+                include,
+                result,
+            } => {
+                let state = &mut model.ui.compare_branches;
+                let (this, other) = if side == 0 {
+                    (&state.left_ref, &state.right_ref)
+                } else {
+                    (&state.right_ref, &state.left_ref)
+                };
+                // root + range 语义必须与当前会话一致，否则丢弃。
+                if state.root == root && *this == include && *other == exclude {
+                    if let Ok((commits, truncated)) = result {
+                        if let Some(sides) = &mut state.sides {
+                            let target = if side == 0 {
+                                &mut sides.left
+                            } else {
+                                &mut sides.right
+                            };
+                            target.commits = commits;
+                            target.truncated = truncated;
+                        }
+                    }
+                }
+                state.loading_more[side as usize] = false;
+            }
+            JobResult::CompareFilesLoaded { root, key, result } => {
+                // 详情缓存是每侧独立的：root+key 都匹配才回填。
+                let state = &mut model.ui.compare_branches;
+                if state.root != root {
+                    return;
+                }
+                for view in [&mut state.left_view, &mut state.right_view] {
+                    if let Some(detail) = &mut view.detail {
+                        if detail.key == key {
+                            detail.loading = false;
+                            match &result {
+                                Ok(files) => {
+                                    detail.files = files.clone();
+                                    detail.error = None;
+                                }
+                                Err(err) => detail.error = Some(err.clone()),
+                            }
+                        }
+                    }
+                }
+            }
+            JobResult::Discarded {
+                root,
+                paths,
+                message,
+            } => {
+                model.toast(message, ToastKind::Success);
+                if !root.as_os_str().is_empty() {
+                    if let Some(project) = model
+                        .projects
+                        .iter_mut()
+                        .find(|project| project.root == root)
+                    {
+                        // 关闭已回滚文件（尤其是新增文件，磁盘上已删除）
+                        // 的标签页：无论是否 dirty——文件已不存在，保留
+                        // 标签只会让用户对着幽灵缓冲编辑。
+                        let mut closed: Vec<u64> = Vec::new();
+                        for path in &paths {
+                            let absolute = root.join(path);
+                            for tab in &project.tabs {
+                                if let TabKind::File(file) = &tab.kind {
+                                    if file.doc.path == absolute {
+                                        closed.push(tab.id);
+                                    }
+                                }
+                            }
+                        }
+                        for tab_id in closed {
+                            project.close_tab(tab_id);
+                        }
+                    }
+                    let log_query = model
+                        .projects
+                        .iter()
+                        .find(|project| project.root == root)
+                        .map(|project| project.log_query.clone())
+                        .unwrap_or_default();
+                    self.refresh_git(root.clone(), None);
+                    self.refresh_log(root.clone(), log_query, 0);
+                    self.refresh_branches(root.clone());
+                }
+            }
             JobResult::OpDone {
                 root,
                 message,
@@ -2069,6 +2853,18 @@ impl JobQueue {
                     {
                         project.commit_details = None;
                         if clear_commit_message {
+                            if ok {
+                                // 提交成功：入历史（去重、上限 10 条，对齐
+                                // 稳定版 useCommitMessageHistory）。
+                                let message = project.commit_message.trim().to_string();
+                                model.settings.remember_commit_message(&message);
+                                if project.open_push_after_commit {
+                                    project.open_push_after_commit = false;
+                                    model.ui.open_push_dialog = true;
+                                }
+                            } else {
+                                project.open_push_after_commit = false;
+                            }
                             project.commit_message.clear();
                         }
                         if reload_files {
@@ -2196,6 +2992,37 @@ struct SaveData {
     encoding: Option<&'static encoding_rs::Encoding>,
     eol: lazecode_fs::Eol,
     bom: bool,
+}
+
+/// 恢复 shelf（整只或部分恢复）并把恢复出的文件归入目标变更列表。
+/// `paths=Some` 只应用这些文件（部分恢复）；`target_list` 不存在时创建；
+/// `delete_after` 在成功后删除 shelf 条目。
+fn shelf_restore_scoped(
+    root: &std::path::Path,
+    name: &str,
+    paths: Option<&[String]>,
+    target_list: Option<&str>,
+    delete_after: bool,
+) -> anyhow::Result<()> {
+    match paths {
+        Some(selected) => lazecode_git::shelf_restore_partial(root, name, selected)?,
+        None => lazecode_git::shelf_restore(root, name, false)?,
+    }
+    if let Some(list) = target_list {
+        let mut lists = lazecode_git::Changelists::open(root);
+        if !lists.lists().iter().any(|existing| existing == list) {
+            lists.create_list(list);
+        }
+        let assigned = match paths {
+            Some(selected) => selected.to_vec(),
+            None => lazecode_git::shelf_files(root, name)?,
+        };
+        lists.assign_many(&assigned, list);
+    }
+    if delete_after {
+        lazecode_git::shelf_delete(root, name)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -9,8 +9,8 @@ pub mod settings;
 pub use commands::Command;
 pub use gitref::{FlatRefRow, RefTreeEntry, RefTreeNode};
 pub use model::{
-    AppModel, DatePreset, DiffSource, DiffTab, DiffViewMode, FileTab, LogQuery, MarkdownViewMode,
-    PanelTab, ProjectState, SidebarView, Tab, TabKind, TerminalTab, Toast, ToastKind, UiState,
-    WorktreeState,
+    AppModel, CompareBranchesSideView, CompareBranchesState, CompareDateFilter, CompareDetail,
+    DatePreset, DiffSource, DiffTab, DiffViewMode, FileTab, LogQuery, MarkdownViewMode, PanelTab,
+    ProjectState, SidebarView, Tab, TabKind, TerminalTab, Toast, ToastKind, UiState, WorktreeState,
 };
 pub use settings::{Language, Settings, ThemeMode, WorkspaceFile};

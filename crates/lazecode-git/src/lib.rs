@@ -25,25 +25,27 @@ pub use diff::{
     commit_details, commit_file_diff, diff_commits, diff_ref_worktree, diff_two_files, file_diff,
 };
 pub use history::{
-    cherry_pick, cherry_pick_abort, cherry_pick_continue, conflict_list, drop_commit,
-    mark_conflict_resolved, merge, merge_abort, merge_continue, merge_file_content, rebase,
-    rebase_abort, rebase_continue, rebase_skip, require_clean, reset, resolve_take, revert,
-    sequencer_state, squash_commits, ConflictEntry, MergeFile3Way, ResetMode, SequencerState,
+    amend_commit_message, checkout_revision, cherry_pick, cherry_pick_abort, cherry_pick_continue,
+    commit_patch, conflict_list, drop_commit, mark_conflict_resolved, merge, merge_abort,
+    merge_continue, merge_file_content, rebase, rebase_abort, rebase_continue, rebase_interactive,
+    rebase_skip, require_clean, reset, resolve_take, revert, sequencer_state, squash_commits,
+    undo_commit_head, ConflictEntry, MergeFile3Way, RebaseStep, ResetMode, SequencerState,
 };
 pub use introspect::{
-    blame, compare_branches, compare_commits, file_history, lfs_pull, lfs_status, lfs_track,
-    submodule_list, BlameLine, CompareSide, HistoryEntry, LfsStatus, SubmoduleEntry,
+    blame, commit_files, compare_branches, compare_commits, file_history, lfs_pull, lfs_status,
+    lfs_track, submodule_list, BlameLine, CompareBranches, CompareFile, CompareSide, HistoryEntry,
+    LfsStatus, SubmoduleEntry,
 };
 pub use log::{branches, head_ancestors, log, log_ref, tags};
 pub use model::*;
 pub use ops::{
     apply_patch, checkout_branch, commit, commit_checked, create_branch, create_tag, delete_branch,
-    delete_tag, rename_branch, stage, unstage,
+    delete_tag, discard_file_changes, git_init, rename_branch, stage, unstage,
 };
 pub use shelf::{
-    shelf_delete, shelf_list, shelf_patch, shelf_restore, shelf_restore_partial, shelf_save,
-    stash_apply, stash_drop, stash_files, stash_list, stash_pop, stash_push, ShelfEntry,
-    StashEntry,
+    diff_patch_paths, shelf_delete, shelf_files, shelf_list, shelf_patch, shelf_restore,
+    shelf_restore_partial, shelf_save, shelf_save_paths, stash_apply, stash_drop, stash_files,
+    stash_list, stash_pop, stash_push, ShelfEntry, StashEntry,
 };
 pub use status::snapshot;
 pub use sync::{

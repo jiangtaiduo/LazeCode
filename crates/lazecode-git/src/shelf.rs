@@ -45,10 +45,20 @@ pub fn stash_list(root: &Path) -> Result<Vec<StashEntry>> {
         .collect())
 }
 
-pub fn stash_push(root: &Path, message: Option<&str>, keep_index: bool) -> Result<String> {
+pub fn stash_push(
+    root: &Path,
+    message: Option<&str>,
+    keep_index: bool,
+    include_untracked: bool,
+) -> Result<String> {
     let mut args: Vec<&str> = vec!["stash", "push"];
     if keep_index {
         args.push("--keep-index");
+    }
+    if include_untracked {
+        // `git stash -u`：未跟踪文件一并入栈，对齐 IDE「Include untracked
+        // files」选项；stash push 默认不触碰 untracked。
+        args.push("-u");
     }
     if let Some(message) = message.map(str::trim).filter(|m| !m.is_empty()) {
         args.push("-m");
@@ -58,8 +68,19 @@ pub fn stash_push(root: &Path, message: Option<&str>, keep_index: bool) -> Resul
 }
 
 /// Files touched by a stash entry, for previewing before applying.
+/// `--include-untracked` 让 `-u` 贮藏的未跟踪文件也出现在清单里。
 pub fn stash_files(root: &Path, stash: &str) -> Result<Vec<String>> {
-    let output = run(root, &["stash", "show", "--name-only", "--format=", stash])?;
+    let output = run(
+        root,
+        &[
+            "stash",
+            "show",
+            "--include-untracked",
+            "--name-only",
+            "--format=",
+            stash,
+        ],
+    )?;
     Ok(output.lines().map(str::to_string).collect())
 }
 
@@ -130,15 +151,40 @@ pub fn shelf_list(root: &Path) -> Result<Vec<ShelfEntry>> {
 
 /// Shelve the current tracked/untracked changes as a named patch in the
 /// repo's private store; equivalent of IDE "shelve changes".
+///
+/// `paths` 为空时等价于「架藏全部已跟踪变更」（旧 `shelf_save` 语义）；
+/// 否则只生成并撤回这些路径的变更（含未跟踪文件，对齐稳定版「只架藏
+/// 勾选文件」的行为）。撤回复用 `discard_file_changes`：它对 HEAD 中存在
+/// 的文件走 `checkout HEAD --`（索引+工作区同时复位，避免只 `checkout --`
+/// 时暂存区残留），对新增文件删盘并清索引。
 pub fn shelf_save(root: &Path, name: &str) -> Result<()> {
+    shelf_save_paths(root, name, &[])
+}
+
+pub fn shelf_save_paths(root: &Path, name: &str, paths: &[String]) -> Result<()> {
     let name = name.trim();
     if name.is_empty() || name.contains("..") || name.contains('/') {
         anyhow::bail!("unsuitable shelf name '{name}'");
     }
-    // Generate a unified patch from the worktree against HEAD (tracked files).
-    let output = run(root, &["diff", "HEAD"])?;
+    let output = if paths.is_empty() {
+        // 全树架藏：`git diff HEAD` 只覆盖已跟踪变更，未跟踪新文件必须
+        // 单独以 --no-index 补进补丁（否则架藏后它们仍散落在工作区）。
+        let tracked = run(root, &["-c", "core.quotepath=false", "diff", "HEAD"])?;
+        let mut all = patch_paths(&tracked);
+        all.extend(list_untracked(root));
+        if all.is_empty() {
+            anyhow::bail!("nothing to shelve (no tracked changes)");
+        }
+        diff_patch_paths(root, &all)?
+    } else {
+        diff_patch_paths(root, paths)?
+    };
     if output.trim().is_empty() {
         anyhow::bail!("nothing to shelve (no tracked changes)");
+    }
+    let mut output = output;
+    if !output.ends_with('\n') {
+        output.push('\n');
     }
     let dir = shelves_dir(root);
     std::fs::create_dir_all(&dir)?;
@@ -148,43 +194,183 @@ pub fn shelf_save(root: &Path, name: &str) -> Result<()> {
     }
     lazecode_fs::file::write_atomic(&file, output.as_bytes())
         .map_err(|err| anyhow!("cannot write shelf: {err}"))?;
-    // Detect new-file sections (`--- /dev/null`) so their paths can be
-    // removed below; `git checkout --` cannot revert untracked files.
-    let new_paths: Vec<String> = {
-        let mut paths = Vec::new();
-        let mut current: Option<String> = None;
-        let mut current_is_new = false;
-        for line in output.lines() {
-            if let Some(rest) = line.strip_prefix("diff --git a/") {
-                if current_is_new {
-                    if let Some(path) = &current {
-                        paths.push(path.clone());
-                    }
-                }
-                current = rest.split_once(" b/").map(|(_, right)| right.to_string());
-                current_is_new = false;
-            } else if line.starts_with("new file mode") {
-                current_is_new = true;
-            }
-        }
-        if current_is_new {
-            if let Some(path) = current {
-                paths.push(path);
-            }
-        }
-        paths
+    // Retract exactly the shelved paths (patch paths when shelving all) so
+    // the worktree no longer shows them. Reuse the single-file discard so
+    // staged-new files are removed from disk *and* index.
+    let retract: Vec<String> = if paths.is_empty() {
+        patch_paths(&output)
+    } else {
+        paths.to_vec()
     };
-    // Roll the changes back out of the worktree so the tree is clean.
-    run(root, &["checkout", "--", "."])?;
-    for path in new_paths {
-        let absolute = root.join(&path);
-        if let Err(err) = std::fs::remove_file(&absolute) {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                return Err(anyhow!("cannot remove shelved new file {path}: {err}"));
+    let mut first_error: Option<anyhow::Error> = None;
+    for path in &retract {
+        if let Err(err) = crate::ops::discard_file_changes(root, path) {
+            // 部分撤回失败时不中断其余路径（与稳定版逐文件回滚一致），
+            // 但必须把首错误暴露给调用方，避免「看起来架藏成功」。
+            if first_error.is_none() {
+                first_error = Some(err);
             }
         }
     }
+    if let Some(err) = first_error {
+        return Err(err);
+    }
     Ok(())
+}
+
+/// Unified patch limited to `paths`: `git diff HEAD -- paths` for tracked
+/// entries plus a `--no-index` pseudo-diff against /dev/null for each
+/// untracked file (they never appear in `git diff`). Port of the stable
+/// version's patch builder used by shelve/copy-patch flows.
+pub fn diff_patch_paths(root: &Path, paths: &[String]) -> Result<String> {
+    let cleaned: Vec<&str> = paths
+        .iter()
+        .map(|path| path.trim())
+        .filter(|path| !path.is_empty())
+        .collect();
+    if cleaned.is_empty() {
+        return Ok(String::new());
+    }
+    let mut tracked_args: Vec<&str> = vec![
+        "-c",
+        "core.quotepath=false",
+        "diff",
+        "--no-color",
+        "--no-ext-diff",
+        "HEAD",
+        "--",
+    ];
+    tracked_args.extend(cleaned.iter().copied());
+    let output = run(root, &tracked_args)?;
+    let mut patch = output;
+
+    // 未跟踪文件：一次 `git ls-files -z` 批量判定已跟踪集合（稳定版的
+    // 优化：避免逐文件 spawn），差集中的普通文件逐个生成 /dev/null 补丁。
+    let mut ls_args: Vec<&str> = vec!["-c", "core.quotepath=false", "ls-files", "-z", "--"];
+    ls_args.extend(cleaned.iter().copied());
+    let tracked_out = run_raw(root, &ls_args)?;
+    let tracked: std::collections::HashSet<String> = tracked_out
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            entry
+                .trim_start_matches('"')
+                .trim_end_matches('"')
+                .to_string()
+        })
+        .collect();
+    for path in cleaned {
+        if tracked.contains(path) || !root.join(path).is_file() {
+            continue;
+        }
+        // --no-index 有差异时退出码为 1，属正常输出路径。
+        if let Ok(text) = run_diff_allow_one(
+            root,
+            &[
+                "-c",
+                "core.quotepath=false",
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-index",
+                "--",
+                "/dev/null",
+                path,
+            ],
+        ) {
+            // `run` 会 trim 尾部换行；补丁节之间必须以换行分隔，
+            // 否则 git apply 报 "corrupt patch"。
+            if !patch.is_empty() && !patch.ends_with('\n') {
+                patch.push('\n');
+            }
+            patch.push_str(&text);
+        }
+    }
+    if !patch.is_empty() && !patch.ends_with('\n') {
+        patch.push('\n');
+    }
+    Ok(patch)
+}
+
+/// Paths touched by a shelf patch (the `b/` side of each `diff --git`
+/// header), used by the unshelve dialog for per-file selection.
+pub fn shelf_files(root: &Path, name: &str) -> Result<Vec<String>> {
+    let patch = shelf_patch(root, name)?;
+    Ok(patch_paths(&patch))
+}
+
+/// Extract the new-side path of every file section from a unified patch.
+/// `--no-index` creation sections carry `--- /dev/null`; the `diff --git`
+/// header still names the real path on both sides, so the b-side parse
+/// covers them uniformly.
+fn patch_paths(patch: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git a/") {
+            if let Some((_, right)) = rest.split_once(" b/") {
+                paths.push(right.to_string());
+            }
+        }
+    }
+    paths
+}
+
+fn run_raw(root: &Path, args: &[&str]) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .map_err(|err| anyhow!("git spawn failed: {err}"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// `--no-index` 差异比较以退出码 1 表示「有差异」，属预期结果；
+/// 只有其他码才算失败（对齐稳定版 run_git_diff 的语义）。
+fn run_diff_allow_one(root: &Path, args: &[&str]) -> Result<String> {
+    let output = std::process::Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .map_err(|err| anyhow!("git spawn failed: {err}"))?;
+    let code = output.status.code();
+    if !output.status.success() && code != Some(1) {
+        return Err(anyhow!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// 未跟踪文件清单（respect gitignore），供全树架藏补齐 diff 看不到的
+/// 新文件。
+fn list_untracked(root: &Path) -> Vec<String> {
+    match run_raw(
+        root,
+        &[
+            "-c",
+            "core.quotepath=false",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+    ) {
+        Ok(out) => out
+            .split('\0')
+            .filter(|entry| !entry.is_empty() && root.join(entry).is_file())
+            .map(str::to_string)
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 pub fn shelf_delete(root: &Path, name: &str) -> Result<()> {
@@ -200,10 +386,6 @@ pub fn shelf_patch(root: &Path, name: &str) -> Result<String> {
 /// Apply the full (or index-only) patch of a shelf back onto the worktree.
 pub fn shelf_restore(root: &Path, name: &str, delete_after: bool) -> Result<()> {
     let patch = shelf_patch(root, name)?;
-    eprintln!(
-        "SHELF_RESTORE {name}: patch bytes={};\n{patch}\n===END===",
-        patch.len()
-    );
     crate::apply_patch(root, &patch, false, false)?;
     if delete_after {
         shelf_delete(root, name)?;

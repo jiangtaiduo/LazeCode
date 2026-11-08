@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2};
-use lazecode_core::{AppModel, Command, PanelTab, ProjectState, SidebarView, ToastKind};
+use lazecode_core::{AppModel, Command, ProjectState, SidebarView, ToastKind};
 use lazecode_fs::tree::{visible_rows, NodeKind, VisibleRow};
 
 use crate::icons::{paint as paint_icon, Icon};
@@ -1956,7 +1956,8 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                         model.projects[row.project].worktrees[row.worktree].active_terminal =
                             Some(row.terminal);
                         model.ui.panel_visible = true;
-                        model.ui.panel_tab = PanelTab::Console;
+                        model.ui.terminal_visible = true;
+                        model.ui.panel_visible = false;
                         rt.clear_terminal_cache();
                     }
                 }

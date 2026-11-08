@@ -195,7 +195,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         rt.about_open = false;
     }
 
-    let terminal_active = model.ui.panel_visible && model.ui.panel_tab == PanelTab::Console;
+    let terminal_active = model.ui.terminal_visible;
     let response = button(
         ui,
         theme,
@@ -208,12 +208,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         crate::tr!(model, "Terminal", "终端").to_string(),
     );
     if response.clicked() {
-        if terminal_active {
-            model.ui.panel_visible = false;
-        } else {
-            model.ui.panel_visible = true;
-            model.ui.panel_tab = PanelTab::Console;
-        }
+        model.ui.terminal_visible = !terminal_active;
     }
 
     let log_active = model.ui.panel_visible && model.ui.panel_tab == PanelTab::Git;

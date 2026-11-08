@@ -206,7 +206,8 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         model.ui.sidebar_view = SidebarView::Consoles;
         model.ui.sidebar_visible = true;
         model.ui.panel_visible = true;
-        model.ui.panel_tab = PanelTab::Console;
+        model.ui.terminal_visible = true;
+        model.ui.panel_visible = false;
     }
 
     // Right side: measure each label so nothing overlaps on any window width.

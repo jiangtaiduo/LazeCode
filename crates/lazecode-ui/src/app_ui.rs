@@ -23,6 +23,7 @@ pub struct Layout {
     pub sidebar: Option<Rect>,
     pub stage: Rect,
     pub editor: Rect,
+    pub terminal_dock: Option<Rect>,
     pub panel: Option<Rect>,
     pub status: Rect,
 }
@@ -83,7 +84,28 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
     } else {
         None
     };
-    let editor = if let Some(panel) = panel {
+    // 稳定版 grid：终端 dock 在 git 面板之上（main / dock / bottom / status）。
+    let upper_limit = panel
+        .as_ref()
+        .map(|panel| panel.top() - SPLITTER)
+        .unwrap_or_else(|| status.top());
+    let terminal_height = if model.ui.terminal_visible {
+        let max_height = (stage.height() - TABBAR_H - 120.0).max(120.0);
+        model.ui.terminal_height.clamp(120.0, max_height)
+    } else {
+        0.0
+    };
+    let terminal_dock = if model.ui.terminal_visible && has_project {
+        Some(Rect::from_min_max(
+            pos2(stage.left(), upper_limit - terminal_height),
+            pos2(stage.right(), upper_limit),
+        ))
+    } else {
+        None
+    };
+    let editor = if let Some(dock) = terminal_dock {
+        Rect::from_min_max(stage.min, pos2(stage.right(), dock.top() - SPLITTER))
+    } else if let Some(panel) = panel {
         Rect::from_min_max(stage.min, pos2(stage.right(), panel.top() - SPLITTER))
     } else {
         Rect::from_min_max(stage.min, pos2(stage.right(), status.top()))
@@ -96,6 +118,7 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
         sidebar,
         stage,
         editor,
+        terminal_dock,
         panel,
         status,
     }
@@ -144,10 +167,10 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     }
 
     let p = theme.palette;
-    let painter = ui.painter();
+    let painter = ui.painter().clone();
     // Stable Liquid Glass: the window body carries the stable gradient and
     // the glass panels draw as translucent fills on top of it.
-    crate::theme::body_gradient(painter, layout.full, theme.dark);
+    crate::theme::body_gradient(&painter, layout.full, theme.dark);
     painter.rect_filled(layout.titlebar, 0.0, p.titlebar);
     painter.rect_filled(layout.strip, 0.0, p.rail);
     painter.vline(
@@ -186,6 +209,19 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         splitter_vertical(ui, model, rt, &theme, sidebar.y_range(), sidebar.right());
     }
     crate::editor::draw(ui, model, rt, &theme, layout.editor);
+    if let Some(dock) = layout.terminal_dock {
+        painter.rect_filled(dock, 0.0, p.panel);
+        painter.hline(dock.x_range(), dock.top() + 0.5, Stroke::new(1.0, p.border));
+        splitter_terminal(
+            ui,
+            model,
+            rt,
+            &theme,
+            dock.x_range(),
+            dock.top() - SPLITTER * 0.5,
+        );
+        crate::panel::draw_terminal_dock(ui, model, rt, &theme, dock);
+    }
     if let Some(panel) = layout.panel {
         splitter_horizontal(
             ui,
@@ -252,6 +288,43 @@ fn splitter_vertical(
         rt.sidebar_drag = false;
         model.settings.sidebar_width = model.ui.sidebar_width;
         model.settings.commit_drawer_width = model.ui.commit_width;
+        model.save_settings();
+    }
+}
+
+fn splitter_terminal(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    x_range: egui::Rangef,
+    y: f32,
+) {
+    let rect = Rect::from_min_max(
+        pos2(x_range.min, y - 2.0),
+        pos2(x_range.max, y + SPLITTER + 2.0),
+    );
+    let response = ui.interact(
+        rect,
+        ui.scope_id().with("terminal-splitter"),
+        egui::Sense::drag(),
+    );
+    let active = response.hovered() || response.dragged();
+    if active {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        ui.painter().rect_filled(
+            Rect::from_min_max(pos2(x_range.min, y + 1.0), pos2(x_range.max, y + 3.0)),
+            egui::CornerRadius::same(1),
+            theme.palette.accent,
+        );
+    }
+    if response.dragged() {
+        model.ui.terminal_height =
+            (model.ui.terminal_height - response.drag_delta().y).clamp(120.0, 900.0);
+        rt.panel_drag = true;
+    } else if rt.panel_drag {
+        // 与面板共用拖拽标志；面板自身不在拖拽时才落盘终端高度。
+        rt.panel_drag = false;
         model.save_settings();
     }
 }

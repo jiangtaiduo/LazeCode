@@ -51,8 +51,12 @@ pub struct UiState {
     /// Commit 抽屉（源控视图）宽度，独立于文件树抽屉持久化（稳定版语义）。
     pub commit_width: f32,
     pub panel_visible: bool,
+    /// 终端 dock 独立可见（稳定版 grid：main / dock / bottom / status 四行）。
+    pub terminal_visible: bool,
     pub panel_tab: PanelTab,
     pub panel_height: f32,
+    /// 终端 dock 高度（稳定版默认 340）。
+    pub terminal_height: f32,
     pub panel_maximised: bool,
     pub settings_open: bool,
     pub settings_section: usize,
@@ -160,8 +164,10 @@ impl Default for UiState {
             sidebar_width: 262.0,
             commit_width: 330.0,
             panel_visible: true,
+            terminal_visible: true,
             panel_tab: PanelTab::Console,
             panel_height: 248.0,
+            terminal_height: 340.0,
             panel_maximised: false,
             settings_open: false,
             settings_section: 0,

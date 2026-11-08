@@ -77,6 +77,8 @@ pub struct Settings {
     pub editor: EditorSettings,
     pub terminal: TerminalSettings,
     pub sidebar_width: f32,
+    /// Commit 抽屉宽度（稳定版 ide_commit_drawer_width，默认 330，240-640）。
+    pub commit_drawer_width: f32,
     pub panel_height: f32,
     /// 分支比较页上下两个 pane 的高度占比（left pane，20-80）。
     pub compare_split: f32,
@@ -95,6 +97,7 @@ impl Default for Settings {
             editor: EditorSettings::default(),
             terminal: TerminalSettings::default(),
             sidebar_width: 262.0,
+            commit_drawer_width: 330.0,
             panel_height: 248.0,
             compare_split: 40.0,
             compare_details_width: 36.0,
@@ -164,6 +167,7 @@ impl Settings {
         self.terminal.font_size = self.terminal.font_size.clamp(9.0, 24.0);
         self.terminal.scrollback = self.terminal.scrollback.clamp(1_000, 200_000);
         self.sidebar_width = self.sidebar_width.clamp(180.0, 520.0);
+        self.commit_drawer_width = self.commit_drawer_width.clamp(240.0, 640.0);
         self.panel_height = self.panel_height.clamp(120.0, 900.0);
         self.compare_split = self.compare_split.clamp(20.0, 80.0);
         self.compare_details_width = self.compare_details_width.clamp(24.0, 62.0);
@@ -182,6 +186,7 @@ pub struct WorkspaceFile {
     pub sidebar_view: Option<String>,
     pub sidebar_visible: Option<bool>,
     pub sidebar_width: Option<f32>,
+    pub commit_drawer_width: Option<f32>,
     pub panel_visible: Option<bool>,
     pub panel_height: Option<f32>,
     pub open_tabs: std::collections::BTreeMap<PathBuf, Vec<PathBuf>>,

@@ -92,6 +92,9 @@ pub struct Palette {
     // --- misc identity colours ---
     pub selected_row: Color32,
     pub win_close: Color32,
+    /// LeftStrip active button fill — stable `.strip-btn.active`:
+    /// `rgba(255,255,255,0.10)` dark / `rgba(0,0,0,0.08)` light.
+    pub strip_active: Color32,
     // --- window body gradient (stable body[data-variant]) ---
     pub grad_a: Color32,
     pub grad_b: Color32,
@@ -198,6 +201,7 @@ impl Palette {
             dialog_card: Color32::from_rgb(0x32, 0x32, 0x36),
             selected_row: Color32::from_rgb(0x26, 0x41, 0x5f), // --bg-selected-row
             win_close: Color32::from_rgb(0xff, 0x5f, 0x57),
+            strip_active: rgba(255, 255, 255, 26),       // 0.10
             grad_a: Color32::from_rgb(0x2b, 0x2b, 0x3d), // body radial #2b2b3d
             grad_b: Color32::from_rgb(0x1e, 0x1e, 0x20), // body radial #1e1e20
         }
@@ -277,6 +281,7 @@ impl Palette {
             dialog_card: Color32::from_rgb(0xf2, 0xf2, 0xf5),
             selected_row: Color32::from_rgb(0xcf, 0xe4, 0xff),
             win_close: Color32::from_rgb(0xff, 0x5f, 0x57),
+            strip_active: rgba(0, 0, 0, 20),             // 0.08
             grad_a: Color32::from_rgb(0xf2, 0xf2, 0xf5), // body linear start
             grad_b: Color32::from_rgb(0xe6, 0xe6, 0xea), // body linear end
         }

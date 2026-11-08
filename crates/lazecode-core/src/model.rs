@@ -48,6 +48,8 @@ pub struct UiState {
     pub sidebar_visible: bool,
     pub sidebar_view: SidebarView,
     pub sidebar_width: f32,
+    /// Commit 抽屉（源控视图）宽度，独立于文件树抽屉持久化（稳定版语义）。
+    pub commit_width: f32,
     pub panel_visible: bool,
     pub panel_tab: PanelTab,
     pub panel_height: f32,
@@ -156,6 +158,7 @@ impl Default for UiState {
             sidebar_visible: true,
             sidebar_view: SidebarView::Files,
             sidebar_width: 262.0,
+            commit_width: 330.0,
             panel_visible: true,
             panel_tab: PanelTab::Console,
             panel_height: 248.0,
@@ -1327,6 +1330,7 @@ impl AppModel {
         let mut model = Self {
             ui: UiState {
                 sidebar_width: settings.sidebar_width,
+                commit_width: settings.commit_drawer_width,
                 panel_height: settings.panel_height,
                 show_minimap: settings.editor.show_minimap,
                 sidebar_visible: workspace.sidebar_visible.unwrap_or(true),
@@ -1574,6 +1578,7 @@ impl AppModel {
             ),
             sidebar_visible: Some(self.ui.sidebar_visible),
             sidebar_width: Some(self.ui.sidebar_width),
+            commit_drawer_width: Some(self.ui.commit_width),
             panel_visible: Some(self.ui.panel_visible),
             panel_height: Some(self.ui.panel_height),
             open_tabs: BTreeMap::new(),

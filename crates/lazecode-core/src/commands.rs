@@ -74,6 +74,17 @@ pub enum Command {
         target_list: Option<String>,
         delete_after: bool,
     },
+    /// 删除架藏（移入「最近删除」，可恢复；对齐稳定版语义）。
+    ShelfDelete(String),
+    /// 重命名架藏。
+    ShelfRename {
+        from: String,
+        to: String,
+    },
+    /// 从「最近删除」恢复架藏。
+    ShelfRestoreDeleted(String),
+    /// 彻底删除「最近删除」中的架藏（不可恢复）。
+    ShelfPurgeDeleted(String),
     RevertCommit {
         hash: String,
     },

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, TextEdit, Ui, Vec2};
+use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2};
 use lazecode_core::{AppModel, Command, PanelTab};
 use lazecode_git::{
     lane_color, lane_x, CommitInfo, GraphBreak, GraphRowLayout, RefKind, GRAPH_BREAK_GAP, GRAPH_H,
@@ -12,6 +12,8 @@ use crate::runtime::UiRuntime;
 use crate::theme::Theme;
 use crate::widgets::{icon_button, live_dot, text_clipped};
 
+/// 稳定版 commitDate：今天 → "Today HH:MM"，昨天 → "Yesterday HH:MM"，
+/// 其余 → "YYYY/M/D HH:MM"（月/日不补零，时分补零）。
 fn format_commit_datetime(seconds: i64) -> String {
     unsafe {
         let t = seconds as libc::time_t;
@@ -19,14 +21,38 @@ fn format_commit_datetime(seconds: i64) -> String {
         if libc::localtime_r(&t, &mut tm).is_null() {
             return format!("{seconds}");
         }
-        format!(
-            "{}/{}/{} {:02}:{:02}",
-            tm.tm_year + 1900,
-            tm.tm_mon + 1,
-            tm.tm_mday,
-            tm.tm_hour,
-            tm.tm_min
-        )
+        let clock = format!("{:02}:{:02}", tm.tm_hour, tm.tm_min);
+        let now = libc::time(std::ptr::null_mut());
+        let mut local: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&now, &mut local).is_null() {
+            return format!(
+                "{}/{}/{} {}",
+                tm.tm_year + 1900,
+                tm.tm_mon + 1,
+                tm.tm_mday,
+                clock
+            );
+        }
+        let same_day = local.tm_year == tm.tm_year && local.tm_yday == tm.tm_yday;
+        let yesterday = {
+            let mut y = local;
+            y.tm_mday -= 1;
+            libc::mktime(&mut y);
+            y.tm_year == tm.tm_year && y.tm_yday == tm.tm_yday
+        };
+        if same_day {
+            format!("Today {clock}")
+        } else if yesterday {
+            format!("Yesterday {clock}")
+        } else {
+            format!(
+                "{}/{}/{} {}",
+                tm.tm_year + 1900,
+                tm.tm_mon + 1,
+                tm.tm_mday,
+                clock
+            )
+        }
     }
 }
 
@@ -578,13 +604,15 @@ fn draw_git_panel(
 
     let mut tab_x = head.left() + 48.0;
     // Log subtab (active)
-    let log_rect = Rect::from_min_size(Pos2::new(tab_x, head.top() + 5.0), Vec2::new(42.0, 23.0));
+    let log_rect = Rect::from_min_size(Pos2::new(tab_x, head.top() + 5.0), Vec2::new(42.0, 22.0));
+    // 稳定版 subtab 激活态：填充盒（overlay-hover + border-subtle），非下划线。
     ui.painter()
-        .rect_filled(log_rect, egui::CornerRadius::same(5), p.panel2);
-    ui.painter().hline(
-        log_rect.x_range(),
-        log_rect.bottom() - 1.0,
-        Stroke::new(2.0, p.accent),
+        .rect_filled(log_rect, egui::CornerRadius::same(6), p.hover);
+    ui.painter().rect_stroke(
+        log_rect,
+        egui::CornerRadius::same(6),
+        Stroke::new(1.0, p.border_soft),
+        StrokeKind::Inside,
     );
     ui.painter().text(
         log_rect.center(),

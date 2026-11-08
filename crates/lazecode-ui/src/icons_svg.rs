@@ -237,6 +237,16 @@ static SVGS: &[(&str, &str, bool)] = &[
         false,
     ),
     (
+        "shelve_in",
+        mono!("1.4", "<path d=\"M2.5 9.2v3.3a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1V9.2\"/><path d=\"M8 1.8v7.4\"/><path d=\"M5.2 6.4 8 9.2l2.8-2.8\"/>"),
+        false,
+    ),
+    (
+        "view_options",
+        mono!("1.3", "<path d=\"M1.5 8s2.5-4.5 6.5-4.5S14.5 8 14.5 8s-2.5 4.5-6.5 4.5S1.5 8 1.5 8z\"/><circle cx=\"8\" cy=\"8\" r=\"2\"/><path d=\"M12 12.5l2.5 2.5h-2.5v-2.5z\" fill=\"#fff\" stroke=\"none\"/>"),
+        false,
+    ),
+    (
         "rollback",
         mono!("1.4", "<path d=\"M5.5 3.5L2 7l3.5 3.5\"/><path d=\"M2 7h7.2a3.8 3.8 0 0 1 3.8 3.8v0a3.8 3.8 0 0 1-3.8 3.8H6.5\"/>"),
         false,

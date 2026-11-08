@@ -36,10 +36,15 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     let mut close_overlay = false;
     let mut goto_line = false;
     let mut new_file = false;
+    let mut toggle_tree_view = false;
 
     ctx.input_mut(|input| {
         if input.consume_key(command_only(), Key::K) || input.consume_key(command_only(), Key::P) {
             open_palette = true;
+        }
+        // ^P：稳定版 Group by Directory 切换（源控抽屉可见时）。
+        if input.consume_key(egui::Modifiers::CTRL, Key::P) {
+            toggle_tree_view = true;
         }
         if input.consume_key(command_only(), Key::B) {
             toggle_sidebar = true;
@@ -173,6 +178,13 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
             error: None,
         };
     }
+    if toggle_tree_view
+        && model.ui.sidebar_visible
+        && model.ui.sidebar_view == lazecode_core::SidebarView::Git
+    {
+        rt.commit_tree_view = !rt.commit_tree_view;
+    }
+
     if new_file {
         if let Some(project) = model.active_project() {
             rt.dialog = DialogState::NewFile {

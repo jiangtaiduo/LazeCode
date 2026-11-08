@@ -1974,6 +1974,123 @@ impl JobQueue {
                     }
                 });
             }
+            Command::ShelfDelete(name) => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let name = name.clone();
+                self.spawn("shelf-delete", format!("shelf-del:{root:?}:{name}"), move || {
+                    let result = lazecode_git::shelf_delete(&root, &name);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => {
+                                if zh {
+                                    format!("已删除架藏 {name}（可在最近删除中恢复）")
+                                } else {
+                                    format!("Deleted shelf {name} (restorable from Recently Deleted)")
+                                }
+                            }
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: false,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::ShelfRename { from, to } => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let (from, to) = (from.clone(), to.clone());
+                self.spawn(
+                    "shelf-rename",
+                    format!("shelf-ren:{root:?}:{from}:{to}"),
+                    move || {
+                        let result = lazecode_git::shelf_rename(&root, &from, &to);
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(_) => {
+                                    if zh {
+                                        format!("已重命名为 {to}")
+                                    } else {
+                                        format!("Renamed to {to}")
+                                    }
+                                }
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: false,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
+            Command::ShelfRestoreDeleted(name) => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let name = name.clone();
+                self.spawn(
+                    "shelf-restore-del",
+                    format!("shelf-resdel:{root:?}:{name}"),
+                    move || {
+                        let result = lazecode_git::shelf_restore_deleted(&root, &name);
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(_) => {
+                                    if zh {
+                                        format!("已恢复架藏 {name}")
+                                    } else {
+                                        format!("Restored shelf {name}")
+                                    }
+                                }
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: false,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
+            Command::ShelfPurgeDeleted(name) => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.root.clone())
+                    .unwrap_or_default();
+                let name = name.clone();
+                self.spawn(
+                    "shelf-purge",
+                    format!("shelf-purge:{root:?}:{name}"),
+                    move || {
+                        let result = lazecode_git::shelf_purge_deleted(&root, &name);
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(_) => "Purged".to_string(),
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: false,
+                            reload_files: false,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
             Command::ShelfRestore {
                 name,
                 paths,

@@ -35,6 +35,12 @@ pub struct TermSearchState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuKind {
+    /// 提交抽屉 ⋮ 扩展菜单（贮藏 / 架藏库入口）。
+    CommitExtras,
+    /// 架藏（页签）右键：payload = name \u{1} deleted \u{1} paths…。
+    ShelfContext {
+        project: usize,
+    },
     Project,
     Branch,
     Worktree,
@@ -191,6 +197,8 @@ pub enum DialogState {
     /// 删除架藏前确认（稳定版删除架藏/架藏文件都有确认；此前直接删）。
     ConfirmDeleteShelf {
         name: String,
+        /// true = 「最近删除」中的彻底删除（不可恢复）。
+        purge: bool,
     },
     ConflictResolve {
         path: String,
@@ -231,6 +239,12 @@ pub enum DialogState {
         value: String,
         error: Option<String>,
         paths: Vec<String>,
+    },
+    /// 重命名架藏。
+    RenameShelf {
+        from: String,
+        value: String,
+        error: Option<String>,
     },
     GoToLine {
         value: String,
@@ -368,6 +382,30 @@ pub struct UiRuntime {
     pub toast_created: f64,
     pub last_revealed_tab: Option<u64>,
     pub ime_preedit: String,
+    // --- 提交抽屉（稳定版 CommitDrawer）状态 ---
+    /// Commit / Shelf 页签。
+    pub commit_tab: CommitTab,
+    /// 稳定版 ^P：Group by Directory（树视图）。
+    pub commit_tree_view: bool,
+    /// 工具栏眼睛视图选项弹层开关。
+    pub commit_view_menu_open: bool,
+    /// Shelf 页签数据（页签激活时同步加载：读本地补丁文件，无子进程）。
+    pub shelf_entries: Vec<lazecode_git::ShelfEntry>,
+    pub shelf_deleted: Vec<lazecode_git::ShelfEntry>,
+    /// 已加载的架藏数据所属仓库（切换项目后重新加载）。
+    pub shelf_loaded: Option<std::path::PathBuf>,
+    /// 架藏名 → 文件列表（加载时从补丁解析）。
+    pub shelf_files_map: HashMap<String, Vec<String>>,
+    pub shelf_selected: Option<String>,
+    /// 选中的架藏文件（仓库相对路径，单架藏内多选）。
+    pub shelf_file_sel: Vec<String>,
+}
+
+/// CommitDrawer 顶部页签（稳定版 tabCommit / tabShelf）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CommitTab {
+    Commit,
+    Shelf,
 }
 
 impl Default for UiRuntime {
@@ -404,6 +442,15 @@ impl Default for UiRuntime {
             toast_created: 0.0,
             last_revealed_tab: None,
             ime_preedit: String::new(),
+            commit_tab: CommitTab::Commit,
+            commit_tree_view: false,
+            commit_view_menu_open: false,
+            shelf_entries: Vec::new(),
+            shelf_deleted: Vec::new(),
+            shelf_loaded: None,
+            shelf_files_map: HashMap::new(),
+            shelf_selected: None,
+            shelf_file_sel: Vec::new(),
         }
     }
 }

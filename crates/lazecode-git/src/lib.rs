@@ -43,9 +43,10 @@ pub use ops::{
     delete_tag, discard_file_changes, git_init, rename_branch, stage, unstage,
 };
 pub use shelf::{
-    diff_patch_paths, shelf_delete, shelf_files, shelf_list, shelf_patch, shelf_restore,
-    shelf_restore_partial, shelf_save, shelf_save_paths, stash_apply, stash_drop, stash_files,
-    stash_list, stash_pop, stash_push, ShelfEntry, StashEntry,
+    diff_patch_paths, shelf_delete, shelf_files, shelf_list, shelf_list_deleted, shelf_patch,
+    shelf_purge_deleted, shelf_rename, shelf_restore, shelf_restore_deleted, shelf_restore_partial,
+    shelf_save, shelf_save_paths, stash_apply, stash_drop, stash_files, stash_list, stash_pop,
+    stash_push, ShelfEntry, StashEntry,
 };
 pub use status::snapshot;
 pub use sync::{

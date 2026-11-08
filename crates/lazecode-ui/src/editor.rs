@@ -4,9 +4,7 @@ use egui::{
     Align2, Color32, Event, FontId, ImeEvent, Key, Modifiers, Pos2, Rect, Sense, Stroke,
     StrokeKind, TextEdit, Ui, Vec2,
 };
-use lazecode_core::{
-    AppModel, Command, DiffSource, DiffViewMode, ProjectState, TabKind,
-};
+use lazecode_core::{AppModel, Command, DiffSource, DiffViewMode, ProjectState, TabKind};
 use lazecode_text::{Cursor, Document, MatchOptions, Motion, Selection, TokenKind};
 
 use crate::icons::{paint as paint_icon, Icon};

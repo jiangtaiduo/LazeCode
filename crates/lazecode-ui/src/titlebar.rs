@@ -1,7 +1,7 @@
 use egui::{
     Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, ViewportCommand,
 };
-use lazecode_core::{AppModel, Command, PanelTab};
+use lazecode_core::{AppModel, Command};
 
 use crate::icons::{paint as paint_icon, Icon};
 use crate::runtime::{MenuKind, UiRuntime};
@@ -460,7 +460,8 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         model.ui.sidebar_view = lazecode_core::SidebarView::Consoles;
         model.ui.sidebar_visible = true;
         model.ui.panel_visible = true;
-        model.ui.panel_tab = PanelTab::Console;
+        model.ui.terminal_visible = true;
+        model.ui.panel_visible = false;
     }
     rx = running_rect.left() - 8.0;
 

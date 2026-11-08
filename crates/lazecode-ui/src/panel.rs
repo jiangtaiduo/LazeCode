@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2};
-use lazecode_core::{AppModel, Command, PanelTab};
+use lazecode_core::{AppModel, Command};
 use lazecode_git::{
     lane_color, lane_x, CommitInfo, GraphBreak, GraphRowLayout, RefKind, GRAPH_BREAK_GAP, GRAPH_H,
     LANE_W, NODE_R,
@@ -10,7 +10,7 @@ use lazecode_git::{
 use crate::icons::{paint as paint_icon, Icon};
 use crate::runtime::UiRuntime;
 use crate::theme::Theme;
-use crate::widgets::{icon_button, live_dot, text_clipped};
+use crate::widgets::{icon_button, text_clipped};
 
 /// 稳定版 commitDate：今天 → "Today HH:MM"，昨天 → "Yesterday HH:MM"，
 /// 其余 → "YYYY/M/D HH:MM"（月/日不补零，时分补零）。
@@ -230,7 +230,7 @@ fn draw_dag_cell(
         }
     }
 }
-const HEAD_H: f32 = 34.0;
+const HEAD_H: f32 = 28.0;
 
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, rect: Rect) {
     let p = theme.palette;
@@ -243,26 +243,34 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         Stroke::new(1.0, p.border),
     );
     let body = Rect::from_min_max(Pos2::new(rect.left(), head.bottom()), rect.max);
-    match model.ui.panel_tab {
-        PanelTab::Console => draw_console(ui, model, rt, theme, head, body),
-        PanelTab::Git => draw_git_panel(ui, model, rt, theme, head, body),
-    }
+    draw_git_panel(ui, model, rt, theme, head, body);
 }
 
-fn draw_console(
+pub fn draw_terminal_dock(
     ui: &mut Ui,
     model: &mut AppModel,
     rt: &mut UiRuntime,
     theme: &Theme,
-    head: Rect,
-    body: Rect,
+    rect: Rect,
 ) {
     let p = theme.palette;
+    // 稳定版 `.terminal-header-bar`（30px，双击最大化）。
+    let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 30.0));
+    ui.painter().rect_filled(head, 0.0, p.titlebar);
+    ui.painter().hline(
+        head.x_range(),
+        head.bottom() - 0.5,
+        Stroke::new(1.0, p.border),
+    );
+    let bar = ui.interact(head, ui.scope_id().with("term-head-bar"), Sense::click());
+    if bar.double_clicked() {
+        model.ui.panel_maximised = !model.ui.panel_maximised;
+    }
     let Some(index) = model.active_project else {
-        draw_empty(ui, theme, body, "No project open");
+        draw_empty(ui, theme, rect, "No project open");
         return;
     };
-    let (count, tabs, active, running) = {
+    let (tabs, _active) = {
         let worktree = model.projects[index].active_worktree();
         let tabs: Vec<(u64, String, bool, bool)> = worktree
             .terminals
@@ -276,206 +284,88 @@ fn draw_console(
                 )
             })
             .collect();
-        (
-            worktree.terminals.len(),
-            tabs,
-            worktree.active_terminal,
-            worktree
-                .terminals
-                .iter()
-                .filter(|terminal| terminal.session.is_running())
-                .count(),
-        )
+        (tabs, worktree.active_terminal)
     };
-    // Subtabs: Git / Log / Console
-    ui.painter().text(
-        Pos2::new(head.left() + 14.0, head.center().y),
-        Align2::LEFT_CENTER,
-        "Git",
-        FontId::proportional(13.0),
-        p.text,
-    );
 
-    let mut tab_x = head.left() + 48.0;
-    // Log subtab
-    let log_rect = Rect::from_min_size(Pos2::new(tab_x, head.top() + 5.0), Vec2::new(42.0, 23.0));
-    let log_resp = ui.interact(
-        log_rect,
-        ui.scope_id().with("console-subtab-log"),
-        Sense::click(),
-    );
-    if log_resp.hovered() {
-        ui.painter()
-            .rect_filled(log_rect, egui::CornerRadius::same(5), p.hover);
-    }
-    ui.painter().text(
-        log_rect.center(),
-        Align2::CENTER_CENTER,
-        crate::tr!(model, "Log", "日志"),
-        FontId::proportional(12.0),
-        p.text3,
-    );
-    if log_resp.clicked() {
-        model.ui.panel_tab = PanelTab::Git;
-    }
-    tab_x += 46.0;
-
-    // Console subtab (active)
-    let con_rect = Rect::from_min_size(Pos2::new(tab_x, head.top() + 5.0), Vec2::new(58.0, 23.0));
-    ui.painter()
-        .rect_filled(con_rect, egui::CornerRadius::same(5), p.panel2);
-    ui.painter().hline(
-        con_rect.x_range(),
-        con_rect.bottom() - 1.0,
-        Stroke::new(2.0, p.accent),
-    );
-    ui.painter().text(
-        con_rect.center(),
-        Align2::CENTER_CENTER,
-        crate::tr!(model, "Console", "控制台"),
-        FontId::proportional(12.0),
-        p.text,
-    );
-    tab_x += 62.0;
-    if count > 0 {
-        let badge = Rect::from_center_size(
-            Pos2::new(tab_x + 10.0, head.center().y),
-            Vec2::new(18.0, 14.0),
-        );
-        ui.painter()
-            .rect_filled(badge, egui::CornerRadius::same(7), p.panel2);
-        ui.painter().text(
-            badge.center(),
-            Align2::CENTER_CENTER,
-            count.to_string(),
-            FontId::monospace(10.5),
-            p.text3,
-        );
-        tab_x += 22.0;
-    }
-    if running > 0 {
-        live_dot(
-            ui.painter(),
-            Pos2::new(tab_x + 10.0, head.center().y),
-            true,
-            p.running,
-        );
-        tab_x += 16.0;
-    }
-
-    // Right actions.
-    let mut rx = head.right() - 6.0;
-    let close_rect = Rect::from_min_size(Pos2::new(rx - 24.0, head.top() + 4.0), Vec2::splat(24.0));
-    if icon_button(ui, close_rect, Icon::X, false, theme).clicked() {
-        model.ui.panel_visible = false;
-    }
-    rx -= 26.0;
-    let active_state = active.and_then(|id| model.projects[index].term_by_id(id));
-    if let Some(terminal) = active_state {
-        let action_rect =
-            Rect::from_min_size(Pos2::new(rx - 24.0, head.top() + 4.0), Vec2::splat(24.0));
-        let running = terminal.session.is_running();
-        if icon_button(
-            ui,
-            action_rect,
-            if running { Icon::Stop } else { Icon::Play },
-            false,
-            theme,
-        )
-        .clicked()
-        {
-            if running {
-                terminal.session.kill();
-            } else if let Some(id) = active {
-                model.queue(Command::RestartTerminal(id));
-            }
-        }
-        rx -= 26.0;
-    }
-    let max_rect = Rect::from_min_size(Pos2::new(rx - 24.0, head.top() + 4.0), Vec2::splat(24.0));
-    let max_icon = if model.ui.panel_maximised {
-        Icon::Minimize
-    } else {
-        Icon::Maximize
-    };
-    if icon_button(ui, max_rect, max_icon, model.ui.panel_maximised, theme).clicked() {
-        model.ui.panel_maximised = !model.ui.panel_maximised;
-    }
-    rx -= 26.0;
-    let spark_rect = Rect::from_min_size(Pos2::new(rx - 24.0, head.top() + 4.0), Vec2::splat(24.0));
-    if icon_button(ui, spark_rect, Icon::Spark, false, theme).clicked() {
-        rt.toggle_agent_menu(spark_rect);
-    }
-    rx -= 26.0;
-    let search_rect =
-        Rect::from_min_size(Pos2::new(rx - 24.0, head.top() + 4.0), Vec2::splat(24.0));
-    let searching = active
-        .and_then(|id| rt.terminal_search.get(&id))
-        .is_some_and(|state| state.open);
-    if icon_button(ui, search_rect, Icon::Search, searching, theme).clicked() {
-        if let Some(id) = active {
-            let state = rt.terminal_search.entry(id).or_default();
-            state.open = !state.open;
-            state.focus_requested = state.open;
-        }
-    }
-    rx -= 4.0;
-
-    // Console tabs: positioned safely after Console subtab with a subtle vertical divider.
-    ui.painter().vline(
-        tab_x + 6.0,
-        (head.top() + 7.0)..=(head.bottom() - 7.0),
-        Stroke::new(1.0, p.border_soft),
-    );
-    let mut x = tab_x + 14.0;
-    let available = (rx - x).max(0.0);
+    // 页签：底对齐 26px；激活 = 终端底色 + 2px accent 顶边（稳定版 tab-item）。
     let mut close_terminal = None;
-    for (id, title, is_running, is_active) in &tabs {
-        let width = (title.chars().count() as f32 * 6.2 + 54.0).clamp(96.0, 178.0);
-        if width > available || x + width > rx {
-            break;
-        }
-        let tab = Rect::from_min_size(Pos2::new(x, head.top() + 4.0), Vec2::new(width, 25.0));
-        let body_rect = Rect::from_min_max(tab.min, Pos2::new(tab.right() - 20.0, tab.bottom()));
-        let close_rect_inner =
-            Rect::from_min_max(Pos2::new(tab.right() - 20.0, tab.top()), tab.max);
-        let response = ui.interact(body_rect, ui.scope_id().with(("ctab", id)), Sense::click());
+    let mut x = head.left() + 6.0;
+    for (id, title, _is_running, is_active) in &tabs {
+        let width = (title.chars().count() as f32 * 6.2 + 46.0).clamp(84.0, 178.0);
+        let tab = Rect::from_min_size(Pos2::new(x, head.bottom() - 26.0), Vec2::new(width, 26.0));
+        let close_rect_inner = Rect::from_center_size(
+            Pos2::new(tab.right() - 12.0, tab.center().y),
+            Vec2::splat(14.0),
+        );
+        let response = ui.interact(
+            Rect::from_min_max(tab.min, Pos2::new(close_rect_inner.left(), tab.max.y)),
+            ui.scope_id().with(("ctab", id)),
+            Sense::click(),
+        );
         let close_response = ui.interact(
             close_rect_inner,
             ui.scope_id().with(("ctab-close", id)),
             Sense::click(),
         );
         if *is_active {
-            ui.painter()
-                .rect_filled(tab, egui::CornerRadius::same(5), p.active);
+            ui.painter().rect_filled(
+                tab,
+                egui::CornerRadius {
+                    nw: 4,
+                    ne: 4,
+                    se: 0,
+                    sw: 0,
+                },
+                p.terminal_bg,
+            );
+            ui.painter().rect_filled(
+                Rect::from_min_max(tab.min, Pos2::new(tab.right(), tab.top() + 2.0)),
+                egui::CornerRadius::ZERO,
+                p.accent,
+            );
         } else if response.hovered() || close_response.hovered() {
-            ui.painter()
-                .rect_filled(tab, egui::CornerRadius::same(5), p.hover);
+            ui.painter().rect_filled(
+                tab,
+                egui::CornerRadius {
+                    nw: 4,
+                    ne: 4,
+                    se: 0,
+                    sw: 0,
+                },
+                p.hover,
+            );
         }
-        live_dot(
-            ui.painter(),
-            Pos2::new(tab.left() + 12.0, tab.center().y),
-            *is_running,
-            if *is_running { p.running } else { p.text3 },
+        // `>_` 等宽 10px accent（稳定版 tab-term-icon）。
+        ui.painter().text(
+            Pos2::new(tab.left() + 10.0, tab.center().y),
+            Align2::LEFT_CENTER,
+            ">_",
+            FontId::monospace(10.0),
+            p.accent,
         );
         text_clipped(
             ui.painter(),
             Rect::from_min_max(
-                Pos2::new(tab.left() + 23.0, tab.top()),
-                Pos2::new(tab.right() - 22.0, tab.bottom()),
+                Pos2::new(tab.left() + 26.0, tab.top()),
+                Pos2::new(tab.right() - 21.0, tab.bottom()),
             ),
             title,
-            FontId::proportional(12.5),
-            if *is_active { p.text } else { p.text2 },
+            FontId::proportional(11.0),
+            if *is_active { p.text_bright } else { p.text2 },
             Align2::LEFT_CENTER,
         );
+        if close_response.hovered() {
+            ui.painter()
+                .circle_filled(close_rect_inner.center(), 7.0, p.hover);
+        }
         if close_response.hovered() || *is_active {
-            paint_icon(
-                ui.painter(),
-                Rect::from_center_size(close_rect_inner.center(), Vec2::splat(10.0)),
-                Icon::X,
+            ui.painter().text(
+                close_rect_inner.center(),
+                Align2::CENTER_CENTER,
+                "×",
+                FontId::proportional(10.0),
                 if close_response.hovered() {
-                    p.text
+                    p.text_bright
                 } else {
                     p.text3
                 },
@@ -486,32 +376,71 @@ fn draw_console(
         } else if response.clicked() {
             model.projects[index].active_worktree_mut().active_terminal = Some(*id);
             rt.set_terminal_focus(*id);
-            model.ui.panel_tab = PanelTab::Console;
+            model.ui.terminal_visible = true;
         } else if response.secondary_clicked() {
             rt.open_menu(
                 crate::runtime::MenuKind::TerminalTabContext {
                     project: index,
                     terminal_id: *id,
                 },
-                tab,
+                response.rect,
                 Some(title.clone()),
             );
         }
-        x = tab.right() + 2.0;
+        x += width + 2.0;
     }
-    // Plus button.
-    if x + 22.0 < rx {
-        let plus = Rect::from_center_size(Pos2::new(x + 11.0, head.center().y), Vec2::splat(22.0));
+    // 新建按钮（22×22，底对齐）。
+    if x + 22.0 < head.right() - 90.0 {
+        let plus =
+            Rect::from_center_size(Pos2::new(x + 11.0, head.bottom() - 15.0), Vec2::splat(22.0));
         let response = ui.interact(plus, ui.scope_id().with("new-console"), Sense::click());
         if response.hovered() {
             ui.painter()
-                .rect_filled(plus, egui::CornerRadius::same(5), p.hover);
+                .rect_filled(plus, egui::CornerRadius::same(6), p.hover);
         }
-        paint_icon(ui.painter(), plus.shrink(5.0), Icon::Plus, p.text3);
+        paint_icon(ui.painter(), plus.shrink(4.5), Icon::Plus, p.text2);
         if response.clicked() {
             model.queue(Command::NewTerminal);
         }
     }
+    // 右侧动作：停靠切换（占位）/ 最大化 / 关闭。
+    let mut rx = head.right() - 6.0;
+    let close_rect =
+        Rect::from_center_size(Pos2::new(rx - 10.0, head.center().y), Vec2::splat(20.0));
+    if icon_button(ui, close_rect, Icon::X, false, theme).clicked() {
+        model.ui.terminal_visible = false;
+    }
+    rx -= 24.0;
+    let max_icon = if model.ui.panel_maximised {
+        Icon::Minimize
+    } else {
+        Icon::Maximize
+    };
+    let max_rect = Rect::from_center_size(Pos2::new(rx - 10.0, head.center().y), Vec2::splat(20.0));
+    if icon_button(ui, max_rect, max_icon, model.ui.panel_maximised, theme).clicked() {
+        model.ui.panel_maximised = !model.ui.panel_maximised;
+    }
+    rx -= 24.0;
+    // 停靠右侧/底部切换：分屏后端未接，先做稳定版图标占位。
+    let dock_rect =
+        Rect::from_center_size(Pos2::new(rx - 10.0, head.center().y), Vec2::splat(20.0));
+    paint_icon(
+        ui.painter(),
+        dock_rect.shrink(4.0),
+        Icon::Panel,
+        p.text3.gamma_multiply(0.55),
+    );
+    ui.interact(
+        dock_rect,
+        ui.scope_id().with("term-dock-toggle"),
+        Sense::hover(),
+    )
+    .on_hover_text(crate::tr!(
+        model,
+        "Dock to the right (coming soon)",
+        "停靠到右侧（即将支持）"
+    ));
+
     if let Some(id) = close_terminal {
         model.projects[index].close_terminal(id);
         rt.terminal_snapshots.remove(&id);
@@ -522,7 +451,13 @@ fn draw_console(
         }
     }
 
-    // Body.
+    // 终端画布：稳定版 `.terminal-canvas-host`（12px 14px 内边距，--term-bg）。
+    let body = Rect::from_min_max(Pos2::new(rect.left(), head.bottom()), rect.max);
+    ui.painter().rect_filled(body, 0.0, p.terminal_bg);
+    let content = Rect::from_min_max(
+        Pos2::new(body.left() + 14.0, body.top() + 12.0),
+        Pos2::new(body.right() - 14.0, body.bottom() - 12.0),
+    );
     let project = &mut model.projects[index];
     let active = project.active_worktree().active_terminal;
     let Some(id) = active else {
@@ -550,7 +485,7 @@ fn draw_console(
     let search = rt_ref.terminal_search.entry(id).or_default();
     let preedit = rt_ref.terminal_preedit.entry(id).or_default();
     let output = crate::terminal::draw(
-        ui, session, snapshot, selection, search, focus, preedit, theme, body, id, font_size,
+        ui, session, snapshot, selection, search, focus, preedit, theme, content, id, font_size,
     );
     if output.focus_requested {
         rt.set_terminal_focus(id);
@@ -563,7 +498,6 @@ fn draw_console(
             }
         }
     }
-    // Resize is driven by the terminal view; nothing else to do here.
 }
 
 fn draw_empty(ui: &mut Ui, theme: &Theme, rect: Rect, text: &str) {
@@ -623,28 +557,9 @@ fn draw_git_panel(
     );
     tab_x += 46.0;
 
-    // Console subtab
-    let con_rect = Rect::from_min_size(Pos2::new(tab_x, head.top() + 5.0), Vec2::new(58.0, 23.0));
-    let con_resp = ui.interact(
-        con_rect,
-        ui.scope_id().with("git-subtab-console"),
-        Sense::click(),
-    );
-    if con_resp.hovered() {
-        ui.painter()
-            .rect_filled(con_rect, egui::CornerRadius::same(5), p.hover);
-    }
-    ui.painter().text(
-        con_rect.center(),
-        Align2::CENTER_CENTER,
-        crate::tr!(model, "Console", "控制台"),
-        FontId::proportional(12.0),
-        p.text3,
-    );
-    if con_resp.clicked() {
-        model.ui.panel_tab = PanelTab::Console;
-    }
-    tab_x += 64.0;
+    // （稳定版 git 头部还有 Console 子页签 = git 调用日志；本版无此
+    // 数据源，先不渲染，避免出现死页签。）
+    let _ = tab_x;
     let scope = model
         .active_project()
         .and_then(|project| project.log_branch.clone())

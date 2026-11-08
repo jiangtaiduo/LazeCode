@@ -100,13 +100,15 @@ fn main() -> anyhow::Result<()> {
                 model.ui.sidebar_view = SidebarView::Git;
             }
             "terminal" => {
-                model.ui.panel_tab = PanelTab::Console;
+                model.ui.terminal_visible = true;
+                model.ui.panel_visible = false;
                 model.ui.panel_visible = true;
                 model.ui.sidebar_view = SidebarView::Consoles;
             }
             _ => {
                 model.ui.panel_visible = true;
-                model.ui.panel_tab = PanelTab::Console;
+                model.ui.terminal_visible = true;
+                model.ui.panel_visible = false;
                 model.ui.sidebar_view = SidebarView::Files;
             }
         }

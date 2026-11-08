@@ -2458,13 +2458,13 @@ impl JobQueue {
                         model.toast(err, ToastKind::Error);
                     }
                     model.ui.panel_visible = true;
-                    model.ui.panel_tab = lazecode_core::PanelTab::Console;
+                    model.ui.terminal_visible = true;
                 } else {
                     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
                     if let Ok(index) = model.open_project(home) {
                         model.active_project = Some(index);
                         model.ui.panel_visible = true;
-                        model.ui.panel_tab = lazecode_core::PanelTab::Console;
+                        model.ui.terminal_visible = true;
                     }
                 }
             }
@@ -2482,7 +2482,7 @@ impl JobQueue {
                         model.toast(err, ToastKind::Error);
                     }
                     model.ui.panel_visible = true;
-                    model.ui.panel_tab = lazecode_core::PanelTab::Console;
+                    model.ui.terminal_visible = true;
                 }
             }
             Command::RestartTerminal(id) => {

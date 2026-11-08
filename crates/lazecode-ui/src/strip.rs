@@ -73,6 +73,7 @@ fn button(
     response.on_hover_text(tooltip)
 }
 
+#[allow(dead_code)]
 fn compare_tab_open(model: &AppModel) -> bool {
     model.active_project().is_some_and(|project| {
         project
@@ -137,41 +138,38 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         }
     }
 
-    let compare_open = compare_tab_open(model);
-    let response = button(
-        ui,
-        theme,
-        rect,
-        Pos2::new(cx, y + BTN * 0.5),
-        "strip-compare",
-        Icon::Compare,
-        compare_open,
-        None,
-        crate::tr!(model, "Compare", "比较").to_string(),
-    );
-    if response.clicked() {
-        let activated = model.active_project_mut().is_some_and(|project| {
-            let tab = project
-                .tabs
-                .iter()
-                .find(|tab| matches!(tab.kind, lazecode_core::TabKind::Compare(_)))
-                .map(|tab| tab.id);
-            if let Some(id) = tab {
-                project.active_tab = Some(id);
-                true
+    // 稳定版：Compare 条目仅在有 Compare Versions 会话时出现（LeftStrip
+    // hasCompareSession），点击在显示/隐藏抽屉间切换。
+    let has_session = model
+        .active_project()
+        .is_some_and(|project| project.compare_session.is_some());
+    if has_session {
+        let compare_active =
+            model.ui.sidebar_visible && model.ui.sidebar_view == SidebarView::Compare;
+        let response = button(
+            ui,
+            theme,
+            rect,
+            Pos2::new(cx, y + BTN * 0.5),
+            "strip-compare",
+            Icon::Compare,
+            compare_active,
+            None,
+            crate::tr!(model, "Compare", "比较").to_string(),
+        );
+        let _ = y;
+        if response.clicked() {
+            if compare_active {
+                model.ui.sidebar_view = SidebarView::Git;
             } else {
-                false
+                model.ui.sidebar_view = SidebarView::Compare;
+                model.ui.sidebar_visible = true;
+                if let Some(project) = model.active_project_mut() {
+                    if let Some(session) = project.compare_session.as_mut() {
+                        session.minimized = false;
+                    }
+                }
             }
-        });
-        if !activated {
-            model.toast(
-                crate::tr!(
-                    model,
-                    "Select two branches in the branch tree to compare",
-                    "先在分支树中选中两个分支再进行比较"
-                ),
-                lazecode_core::ToastKind::Info,
-            );
         }
     }
 

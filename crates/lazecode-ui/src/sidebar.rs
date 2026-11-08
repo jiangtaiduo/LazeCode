@@ -35,6 +35,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         SidebarView::Files => explorer(ui, model, rt, theme, rect),
         SidebarView::Git => source_control(ui, model, rt, theme, rect),
         SidebarView::Consoles => consoles(ui, model, rt, theme, rect),
+        SidebarView::Compare => compare_drawer(ui, model, rt, theme, rect),
     }
 }
 
@@ -2303,4 +2304,650 @@ fn shelf_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
                 }
             });
     });
+}
+
+// ===================== Compare Versions 抽屉（稳定版 CompareDrawer） =====================
+
+const CMP_HEADER_H: f32 = 34.0;
+const CMP_TOOLBAR_H: f32 = 28.0;
+const CMP_ROOT_H: f32 = 26.0;
+const CMP_ROW_H: f32 = 24.0;
+
+struct CmpRow {
+    dir: Option<(String, String, bool)>, // (name, path, open)
+    path: String,
+    depth: usize,
+    is_root: bool,
+    status: char,
+    additions: u32,
+    deletions: u32,
+    selected: bool,
+}
+
+pub fn compare_drawer(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    rect: Rect,
+) {
+    let p = theme.palette;
+    let Some(index) = model.active_project else {
+        return;
+    };
+    let Some(session) = model.projects[index].compare_session.clone() else {
+        return;
+    };
+    let zh = model.settings.language.is_zh();
+    // 不透明 bg-app（稳定版 .compare-drawer），右缘 1px 分隔。
+    ui.painter().rect_filled(rect, 0.0, p.bg);
+    ui.painter().vline(
+        rect.right() - 0.5,
+        rect.top()..=rect.bottom(),
+        Stroke::new(1.0, p.border),
+    );
+
+    // ---- 1. 头部 34px：Changes Between pill + close，右侧 ⋮ / — ----
+    let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), CMP_HEADER_H));
+    ui.painter().rect_filled(head, 0.0, p.bg);
+    ui.painter().hline(
+        head.x_range(),
+        head.bottom() - 0.5,
+        Stroke::new(1.0, p.border),
+    );
+    let from8: String = session.from.chars().take(8).collect();
+    let to8: String = session.to.chars().take(8).collect();
+    let title = if zh {
+        format!("{from8} 与 {to8} 之间的变更")
+    } else {
+        format!("Changes Between {from8} and {to8}")
+    };
+    let title_rect = Rect::from_min_max(
+        Pos2::new(head.left() + 12.0, head.top() + 4.0),
+        Pos2::new(head.right() - 56.0, head.bottom() - 4.0),
+    );
+    text_clipped(
+        ui.painter(),
+        title_rect,
+        &title,
+        FontId::proportional(12.0),
+        p.text_bright,
+        Align2::LEFT_CENTER,
+    );
+    let close_btn = Rect::from_min_size(
+        Pos2::new(title_rect.right() + 4.0, head.center().y - 8.0),
+        Vec2::new(16.0, 16.0),
+    );
+    if icon_16(ui, "cmp-close", close_btn, Icon::X, p.text3) {
+        model.queue(Command::CompareClose);
+        return;
+    }
+    let more_btn = Rect::from_min_size(
+        Pos2::new(head.right() - 44.0, head.center().y - 9.0),
+        Vec2::new(20.0, 18.0),
+    );
+    let _ = icon_16(ui, "cmp-more", more_btn, Icon::More, p.text3);
+    let min_btn = Rect::from_min_size(
+        Pos2::new(head.right() - 24.0, head.center().y - 9.0),
+        Vec2::new(20.0, 18.0),
+    );
+    if icon_16(ui, "cmp-min", min_btn, Icon::Minimize, p.text3) {
+        if let Some(session) = model.projects[index].compare_session.as_mut() {
+            session.minimized = true;
+        }
+        model.ui.sidebar_view = SidebarView::Git;
+        return;
+    }
+
+    // ---- 2. 工具栏 28px：⇆ 交换 + 视图选项；右侧 展开/折叠 ----
+    let tb = Rect::from_min_size(
+        Pos2::new(rect.left(), head.bottom()),
+        Vec2::new(rect.width(), CMP_TOOLBAR_H),
+    );
+    ui.painter().rect_filled(tb, 0.0, p.bg);
+    ui.painter()
+        .hline(tb.x_range(), tb.bottom() - 0.5, Stroke::new(1.0, p.border));
+    let swap_btn = Rect::from_center_size(
+        Pos2::new(tb.left() + 18.0, tb.center().y),
+        Vec2::new(20.0, 20.0),
+    );
+    if icon_16(ui, "cmp-swap", swap_btn, Icon::Compare, p.text2) {
+        model.queue(Command::CompareSwap);
+    }
+    let view_btn = Rect::from_center_size(
+        Pos2::new(tb.left() + 40.0, tb.center().y),
+        Vec2::new(20.0, 20.0),
+    );
+    let view_open = rt.cmp_view_menu_open;
+    if icon_16_active(
+        ui,
+        "cmp-view",
+        view_btn,
+        Icon::ViewOptions,
+        p.text2,
+        view_open,
+    ) {
+        rt.cmp_view_menu_open = !view_open;
+    }
+    if view_open {
+        // 弹层：header "Group by" + "✓ Directory ^P"。
+        let menu_w = 170.0;
+        let menu = Rect::from_min_size(
+            Pos2::new(view_btn.left(), tb.bottom() + 2.0),
+            Vec2::new(menu_w, 56.0),
+        );
+        menu_frame(ui, menu, theme);
+        ui.painter().text(
+            Pos2::new(menu.left() + 10.0, menu.top() + 11.0),
+            Align2::LEFT_CENTER,
+            if zh { "分组方式" } else { "Group by" },
+            FontId::proportional(10.0),
+            p.text3,
+        );
+        let item = Rect::from_min_size(
+            Pos2::new(menu.left() + 4.0, menu.top() + 20.0),
+            Vec2::new(menu_w - 8.0, 24.0),
+        );
+        let hover = item.contains(ui.input(|i| i.pointer.latest_pos().unwrap_or_default()));
+        if hover {
+            ui.painter()
+                .rect_filled(item, egui::CornerRadius::same(4), p.menu_item_hover);
+        }
+        if session.group_by_dir {
+            ui.painter().text(
+                Pos2::new(item.left() + 8.0, item.center().y),
+                Align2::LEFT_CENTER,
+                "✓",
+                FontId::proportional(11.0),
+                p.text_bright,
+            );
+        }
+        ui.painter().text(
+            Pos2::new(item.left() + 24.0, item.center().y),
+            Align2::LEFT_CENTER,
+            if zh { "目录" } else { "Directory" },
+            FontId::proportional(11.0),
+            p.menu_item_text,
+        );
+        ui.painter().text(
+            Pos2::new(item.right() - 8.0, item.center().y),
+            Align2::RIGHT_CENTER,
+            "^P",
+            FontId::proportional(10.0),
+            p.text3,
+        );
+        if ui
+            .interact(item, ui.scope_id().with("cmp-view-dir"), Sense::click())
+            .clicked()
+        {
+            if let Some(session) = model.projects[index].compare_session.as_mut() {
+                session.group_by_dir = !session.group_by_dir;
+            }
+            rt.cmp_view_menu_open = false;
+        }
+        if ui
+            .interact(
+                rect.expand(60.0),
+                ui.scope_id().with("cmp-view-dismiss"),
+                Sense::click(),
+            )
+            .clicked()
+        {
+            rt.cmp_view_menu_open = false;
+        }
+    }
+    let expand_btn = Rect::from_center_size(
+        Pos2::new(tb.right() - 40.0, tb.center().y),
+        Vec2::new(20.0, 20.0),
+    );
+    let collapse_btn = Rect::from_center_size(
+        Pos2::new(tb.right() - 18.0, tb.center().y),
+        Vec2::new(20.0, 20.0),
+    );
+    let can_tree = session.group_by_dir;
+    if icon_16_enabled(
+        ui,
+        "cmp-expand",
+        expand_btn,
+        Icon::ExpandAll,
+        p.text2,
+        can_tree,
+    ) {
+        if let Some(session) = model.projects[index].compare_session.as_mut() {
+            session.root_expanded = true;
+            session.collapsed.clear();
+        }
+    }
+    if icon_16_enabled(
+        ui,
+        "cmp-collapse",
+        collapse_btn,
+        Icon::CollapseAll,
+        p.text2,
+        can_tree,
+    ) {
+        if let Some(session) = model.projects[index].compare_session.as_mut() {
+            session.root_expanded = false;
+        }
+    }
+
+    // ---- 3. 文件树 ----
+    let body = Rect::from_min_max(Pos2::new(rect.left(), tb.bottom()), rect.max);
+    if session.loading {
+        ui.painter().text(
+            body.center(),
+            Align2::CENTER_CENTER,
+            if zh {
+                "正在加载差异…"
+            } else {
+                "Loading differences…"
+            },
+            FontId::proportional(11.0),
+            p.text3,
+        );
+        return;
+    }
+    if session.files.is_empty() {
+        ui.painter().text(
+            body.center(),
+            Align2::CENTER_CENTER,
+            if zh {
+                "两个版本之间没有差异"
+            } else {
+                "No differences between versions"
+            },
+            FontId::proportional(11.0),
+            p.text3,
+        );
+        return;
+    }
+
+    let root_name = model.projects[index].name.clone();
+
+    // 组装可见行（目录优先、文件在后；与稳定版 renderDirNodes 一致）。
+    let mut rows: Vec<CmpRow> = Vec::new();
+    if !session.group_by_dir {
+        for file in &session.files {
+            rows.push(CmpRow {
+                dir: None,
+                path: file.path.clone(),
+                depth: 0,
+                is_root: false,
+                status: file.status.to_ascii_uppercase(),
+                additions: file.additions,
+                deletions: file.deletions,
+                selected: session.selected.as_deref() == Some(file.path.as_str()),
+            });
+        }
+    } else {
+        rows.push(CmpRow {
+            dir: Some((String::new(), String::new(), session.root_expanded)),
+            path: String::new(),
+            depth: 0,
+            is_root: true,
+            status: 'M',
+            additions: 0,
+            deletions: 0,
+            selected: false,
+        });
+        if session.root_expanded {
+            push_cmp_dirs(
+                &session.files,
+                &session.collapsed,
+                "",
+                1,
+                &mut rows,
+                session.selected.as_deref(),
+            );
+        }
+    }
+
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(body)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    egui::ScrollArea::vertical()
+        .id_salt("compare-drawer-tree")
+        .auto_shrink([false, false])
+        .show(&mut child, |ui| {
+            let pointer = ui.input(|i| i.pointer.latest_pos().unwrap_or_default());
+            for row in &rows {
+                let h = if row.is_root { CMP_ROOT_H } else { CMP_ROW_H };
+                let (row_rect, _) =
+                    ui.allocate_exact_size(Vec2::new(body.width(), h), Sense::click());
+                let indent = if row.is_root {
+                    10.0
+                } else {
+                    10.0 + row.depth as f32 * 14.0 + if row.dir.is_none() { 16.0 } else { 0.0 }
+                };
+                let hover = row_rect.contains(pointer) && !row.is_root;
+                if row.dir.is_none() && row.selected {
+                    ui.painter().rect_filled(
+                        row_rect.shrink2(Vec2::new(4.0, 1.0)),
+                        egui::CornerRadius::same(4),
+                        p.jb_accent,
+                    );
+                } else if hover {
+                    ui.painter().rect_filled(
+                        row_rect.shrink2(Vec2::new(4.0, 1.0)),
+                        egui::CornerRadius::same(4),
+                        p.hover,
+                    );
+                }
+                if let Some((name, _path, open)) = &row.dir {
+                    let chev = Pos2::new(row_rect.left() + indent, row_rect.center().y);
+                    paint_chevron(ui.painter(), chev, *open, p.text3, 11.0);
+                    let folder = Rect::from_center_size(
+                        Pos2::new(row_rect.left() + indent + 14.0, row_rect.center().y),
+                        Vec2::new(16.0, 16.0),
+                    );
+                    paint_icon(
+                        ui.painter(),
+                        folder,
+                        Icon::Folder,
+                        Color32::from_rgb(0xdc, 0xd7, 0xaa),
+                    );
+                    if row.is_root {
+                        let name_x = row_rect.left() + indent + 26.0;
+                        ui.painter().text(
+                            Pos2::new(name_x, row_rect.center().y),
+                            Align2::LEFT_CENTER,
+                            &root_name,
+                            FontId::proportional(12.0),
+                            p.text,
+                        );
+                        let count = if session.files.len() == 1 {
+                            "1 file".to_string()
+                        } else {
+                            format!("{} files", session.files.len())
+                        };
+                        let count_x = name_x + root_name.chars().count() as f32 * 6.9 + 8.0;
+                        ui.painter().text(
+                            Pos2::new(count_x, row_rect.center().y),
+                            Align2::LEFT_CENTER,
+                            count,
+                            FontId::proportional(11.0),
+                            p.text3,
+                        );
+                    } else {
+                        ui.painter().text(
+                            Pos2::new(row_rect.left() + indent + 26.0, row_rect.center().y),
+                            Align2::LEFT_CENTER,
+                            name,
+                            FontId::proportional(12.0),
+                            p.text,
+                        );
+                    }
+                    if response_clicked(ui, row_rect, ("cmp-dir", row.path.clone())) {
+                        if row.is_root {
+                            if let Some(session) = model.projects[index].compare_session.as_mut() {
+                                session.root_expanded = !session.root_expanded;
+                            }
+                        } else if let Some(session) = model.projects[index].compare_session.as_mut()
+                        {
+                            if session.collapsed.contains(&row.path) {
+                                session.collapsed.remove(&row.path);
+                            } else {
+                                session.collapsed.insert(row.path.clone());
+                            }
+                        }
+                    }
+                } else {
+                    // 文件行。
+                    let name_color = if row.selected {
+                        Color32::WHITE
+                    } else if row.status == 'A' || row.status == '?' || row.status == 'R' {
+                        p.green
+                    } else if row.status == 'D' {
+                        p.rose
+                    } else {
+                        p.blue
+                    };
+                    let icon_rect = Rect::from_center_size(
+                        Pos2::new(row_rect.left() + indent, row_rect.center().y),
+                        Vec2::new(14.0, 14.0),
+                    );
+                    paint_icon(
+                        ui.painter(),
+                        icon_rect,
+                        Icon::File,
+                        if row.selected {
+                            Color32::from_rgba_unmultiplied(255, 255, 255, 230)
+                        } else {
+                            p.text3
+                        },
+                    );
+                    let base = row.path.rsplit('/').next().unwrap_or(&row.path);
+                    ui.painter().text(
+                        Pos2::new(row_rect.left() + indent + 12.0, row_rect.center().y),
+                        Align2::LEFT_CENTER,
+                        base,
+                        FontId::proportional(12.0),
+                        name_color,
+                    );
+                    let mut nx = row_rect.right() - 12.0;
+                    if row.deletions > 0 {
+                        let label = format!("-{}", row.deletions);
+                        nx -= label.chars().count() as f32 * 6.2;
+                        ui.painter().text(
+                            Pos2::new(nx, row_rect.center().y),
+                            Align2::LEFT_CENTER,
+                            label,
+                            FontId::proportional(11.0),
+                            if row.selected {
+                                Color32::from_rgba_unmultiplied(255, 255, 255, 220)
+                            } else {
+                                p.rose
+                            },
+                        );
+                        nx -= 6.0;
+                    }
+                    if row.additions > 0 || row.deletions == 0 {
+                        let label = format!("+{}", row.additions);
+                        nx -= label.chars().count() as f32 * 6.2;
+                        ui.painter().text(
+                            Pos2::new(nx, row_rect.center().y),
+                            Align2::LEFT_CENTER,
+                            label,
+                            FontId::proportional(11.0),
+                            if row.selected {
+                                Color32::from_rgba_unmultiplied(255, 255, 255, 220)
+                            } else {
+                                p.green
+                            },
+                        );
+                    }
+                    let response = ui.interact(
+                        row_rect,
+                        ui.scope_id().with(("cmp-file", row.path.as_str())),
+                        Sense::click(),
+                    );
+                    if response.clicked() {
+                        if let Some(session) = model.projects[index].compare_session.as_mut() {
+                            session.selected = Some(row.path.clone());
+                        }
+                    }
+                    if response.double_clicked() {
+                        let target = row.path.clone();
+                        model.queue(Command::OpenCompareCommitsDiff {
+                            from: session.from.clone(),
+                            to: session.to.clone(),
+                            path: target.clone(),
+                        });
+                        if let Some(session) = model.projects[index].compare_session.as_mut() {
+                            session.selected = Some(target);
+                        }
+                    }
+                }
+            }
+        });
+}
+
+/// 递归压平目录行 + 文件行（目录在前、文件在后，同层字典序）。
+fn push_cmp_dirs(
+    files: &[lazecode_git::CompareFile],
+    collapsed: &HashSet<String>,
+    prefix: &str,
+    depth: usize,
+    rows: &mut Vec<CmpRow>,
+    selected: Option<&str>,
+) {
+    let mut dirs: Vec<String> = Vec::new();
+    for file in files {
+        let Some(rest) = file.path.strip_prefix(prefix) else {
+            // 不属于该前缀的文件（理论上不会发生）——跳过，绝不回退到全路径，
+            // 否则 dir key 会每层重复拼接造成无限递归。
+            continue;
+        };
+        let rest = rest.strip_prefix('/').unwrap_or(rest);
+        if let Some(head) = rest.split('/').next() {
+            if rest.contains('/') && !head.is_empty() {
+                let dir_key = if prefix.is_empty() {
+                    head.to_string()
+                } else {
+                    format!("{prefix}/{head}")
+                };
+                if !dirs.contains(&dir_key) {
+                    dirs.push(dir_key);
+                }
+            }
+        }
+    }
+    dirs.sort();
+    for dir in dirs {
+        let open = !collapsed.contains(&dir);
+        let name = dir.rsplit('/').next().unwrap_or(&dir).to_string();
+        rows.push(CmpRow {
+            dir: Some((name, dir.clone(), open)),
+            path: dir.clone(),
+            depth,
+            is_root: false,
+            status: 'M',
+            additions: 0,
+            deletions: 0,
+            selected: false,
+        });
+        if open {
+            push_cmp_dirs(files, collapsed, &dir, depth + 1, rows, selected);
+        }
+    }
+    let mut level_files: Vec<&lazecode_git::CompareFile> = files
+        .iter()
+        .filter(|file| {
+            let rest = file.path.strip_prefix(prefix).unwrap_or(&file.path);
+            let rest = rest.strip_prefix('/').unwrap_or(rest);
+            !rest.contains('/')
+        })
+        .collect();
+    level_files.sort_by(|a, b| a.path.cmp(&b.path));
+    for file in level_files {
+        rows.push(CmpRow {
+            dir: None,
+            path: file.path.clone(),
+            depth,
+            is_root: false,
+            status: file.status.to_ascii_uppercase(),
+            additions: file.additions,
+            deletions: file.deletions,
+            selected: selected == Some(file.path.as_str()),
+        });
+    }
+}
+
+/// 行点击辅助（独立 scope id）。
+fn response_clicked(ui: &mut Ui, rect: Rect, key: (&'static str, String)) -> bool {
+    ui.interact(rect, ui.scope_id().with(key), Sense::click())
+        .clicked()
+}
+
+/// 20px 图标按钮（hover 填充），返回是否本帧被点击。
+fn icon_16(ui: &mut Ui, key: &'static str, rect: Rect, icon: Icon, color: Color32) -> bool {
+    icon_16_impl(ui, key, rect, icon, color, false, false)
+}
+
+fn icon_16_active(
+    ui: &mut Ui,
+    key: &'static str,
+    rect: Rect,
+    icon: Icon,
+    color: Color32,
+    active: bool,
+) -> bool {
+    icon_16_impl(ui, key, rect, icon, color, active, false)
+}
+
+fn icon_16_enabled(
+    ui: &mut Ui,
+    key: &'static str,
+    rect: Rect,
+    icon: Icon,
+    color: Color32,
+    enabled: bool,
+) -> bool {
+    icon_16_impl(ui, key, rect, icon, color, false, !enabled)
+}
+
+fn icon_16_impl(
+    ui: &mut Ui,
+    key: &'static str,
+    rect: Rect,
+    icon: Icon,
+    color: Color32,
+    active: bool,
+    disabled: bool,
+) -> bool {
+    let response = ui.interact(rect, ui.scope_id().with(key), Sense::click());
+    let hover = response.hovered() && !disabled;
+    if hover || active {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(6), p_hover());
+    }
+    let tint = if disabled {
+        color.gamma_multiply(0.4)
+    } else {
+        color
+    };
+    paint_icon(ui.painter(), rect.shrink(3.0), icon, tint);
+    response.clicked() && !disabled
+}
+
+fn p_hover() -> Color32 {
+    crate::theme::Palette::dark().hover
+}
+
+/// 小折叠箭头（10-11px）。
+fn paint_chevron(painter: &egui::Painter, center: Pos2, open: bool, color: Color32, size: f32) {
+    let r = size * 0.32;
+    if open {
+        painter.line_segment(
+            [
+                Pos2::new(center.x - r, center.y - r * 0.6),
+                Pos2::new(center.x, center.y + r * 0.6),
+            ],
+            Stroke::new(1.2, color),
+        );
+        painter.line_segment(
+            [
+                Pos2::new(center.x, center.y + r * 0.6),
+                Pos2::new(center.x + r, center.y - r * 0.6),
+            ],
+            Stroke::new(1.2, color),
+        );
+    } else {
+        painter.line_segment(
+            [
+                Pos2::new(center.x - r * 0.6, center.y - r),
+                Pos2::new(center.x + r * 0.6, center.y),
+            ],
+            Stroke::new(1.2, color),
+        );
+        painter.line_segment(
+            [
+                Pos2::new(center.x + r * 0.6, center.y),
+                Pos2::new(center.x - r * 0.6, center.y + r),
+            ],
+            Stroke::new(1.2, color),
+        );
+    }
 }

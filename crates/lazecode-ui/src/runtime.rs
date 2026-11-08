@@ -366,6 +366,14 @@ pub struct UiRuntime {
     pub sidebar_drag: bool,
     pub panel_drag: bool,
     /// 分支比较页：pane 高度分隔条拖拽中（松手时落盘 settings）。
+    /// Diff 页边缘气球：文案 + 出现时刻（1.8s 后消失）。
+    pub diff_balloon: Option<(String, std::time::Instant)>,
+    /// Diff 页导航后的滚动定位请求（tab id, 组序号）。
+    pub diff_scroll: Option<(u64, usize)>,
+    /// Diff 视图模式下拉打开中的 tab。
+    pub diff_mode_open: Option<u64>,
+    /// Compare 抽屉视图选项弹层。
+    pub cmp_view_menu_open: bool,
     pub compare_split_drag: bool,
     /// 分支比较页：详情列宽度分隔条拖拽中。
     pub compare_details_drag: bool,
@@ -427,6 +435,10 @@ impl Default for UiRuntime {
             editor_drag: false,
             sidebar_drag: false,
             panel_drag: false,
+            diff_balloon: None,
+            diff_scroll: None,
+            diff_mode_open: None,
+            cmp_view_menu_open: false,
             compare_split_drag: false,
             compare_details_drag: false,
             settings_open: false,

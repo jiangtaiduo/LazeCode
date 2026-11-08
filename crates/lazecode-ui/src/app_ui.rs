@@ -34,6 +34,8 @@ pub struct Layout {
 fn drawer_width(model: &AppModel) -> f32 {
     match model.ui.sidebar_view {
         SidebarView::Git => model.ui.commit_width,
+        // 稳定版 .compare-drawer 固定 320px。
+        SidebarView::Compare => 320.0,
         SidebarView::Files | SidebarView::Consoles => model.ui.sidebar_width,
     }
 }
@@ -279,6 +281,7 @@ fn splitter_vertical(
         let width = drawer_width(model) + response.drag_delta().x;
         match model.ui.sidebar_view {
             SidebarView::Git => model.ui.commit_width = width.clamp(240.0, 640.0),
+            SidebarView::Compare => {}
             SidebarView::Files | SidebarView::Consoles => {
                 model.ui.sidebar_width = width.clamp(180.0, 520.0)
             }

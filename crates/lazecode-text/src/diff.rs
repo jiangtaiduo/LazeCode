@@ -298,3 +298,35 @@ mod tests {
         assert_eq!(diff.deletions, 0);
     }
 }
+
+/// Contiguous change-group count (Monaco `getLineChanges()` semantics): a
+/// maximal run of adjacent non-context lines is one group. Runs never span a
+/// hunk boundary (hunks are separated by ≥1 elided context line).
+pub fn count_change_groups(hunks: &[DiffHunk]) -> usize {
+    let mut groups = 0;
+    let mut prev_change = false;
+    for hunk in hunks {
+        for line in &hunk.lines {
+            let change = line.kind != DiffLineKind::Context;
+            if change && !prev_change {
+                groups += 1;
+            }
+            prev_change = change;
+        }
+        prev_change = false;
+    }
+    groups
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+
+    #[test]
+    fn groups_are_contiguous_runs() {
+        let diff = diff_text("a\nb\nc\nd\ne\nf\ng\nh\n", "a\nB\nc\nD\nE\nf\nG\nh\n");
+        // Two edit runs: b→B and d,e→D,E — plus g→G = 3 groups, 1 hunk.
+        assert_eq!(diff.hunks.len(), 1);
+        assert_eq!(count_change_groups(&diff.hunks), 3);
+    }
+}

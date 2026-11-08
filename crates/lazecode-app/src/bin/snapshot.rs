@@ -53,11 +53,57 @@ fn main() -> anyhow::Result<()> {
         if docs.exists() {
             let _ = project.open_file(docs, &settings);
         }
-        if mode == "diff" {
-            project.open_diff_source(lazecode_core::DiffSource::Commit {
-                commit: "e338822".to_string(),
-                path: "images.py".to_string(),
-            });
+        if mode == "diff" || mode == "cmpdiff" {
+            if mode == "cmpdiff" {
+                // Compare Versions 会话（稳定版 CompareDrawer + Diff 标签），
+                // 与用户提供的稳定版截图同一对提交/文件。
+                let from = "3cd41b6".to_string();
+                let to = "cddd4c3".to_string();
+                if let Ok(files) = lazecode_git::compare_commits(&project_root, &from, &to) {
+                    project.compare_session = Some(lazecode_core::model::CompareSession {
+                        from: from.clone(),
+                        to: to.clone(),
+                        files,
+                        nav_order: lazecode_core::model::compare_nav_order(
+                            &lazecode_git::compare_commits(&project_root, &from, &to)
+                                .unwrap_or_default(),
+                        ),
+                        group_by_dir: true,
+                        root_expanded: true,
+                        selected: Some("crates/lazecode-ui/src/app_ui.rs".to_string()),
+                        ..Default::default()
+                    });
+                    model.ui.sidebar_view = SidebarView::Compare;
+                    model.ui.sidebar_visible = true;
+                }
+                let source = lazecode_core::DiffSource::CompareCommits {
+                    from: from.clone(),
+                    to: to.clone(),
+                    path: "crates/lazecode-ui/src/app_ui.rs".to_string(),
+                };
+                project.open_diff_source(source.clone());
+                if let Ok(fd) = lazecode_git::diff_commits(
+                    &project_root,
+                    &from,
+                    &to,
+                    "crates/lazecode-ui/src/app_ui.rs",
+                ) {
+                    project.set_diff_for_source(&source, Ok(fd));
+                }
+                model.ui.terminal_visible = false;
+                model.ui.panel_visible = true;
+            } else {
+                let source = lazecode_core::DiffSource::Commit {
+                    commit: "e338822".to_string(),
+                    path: "images.py".to_string(),
+                };
+                project.open_diff_source(source.clone());
+                if let Ok(fd) =
+                    lazecode_git::commit_file_diff(&project_root, "e338822", "images.py")
+                {
+                    project.set_diff_for_source(&source, Ok(fd));
+                }
+            }
         }
         if mode == "compare" {
             // 分支比较页：开当前分支与 main 的比较（feat-rust 仓库内有效）。
@@ -104,6 +150,14 @@ fn main() -> anyhow::Result<()> {
                 model.ui.panel_visible = false;
                 model.ui.panel_visible = true;
                 model.ui.sidebar_view = SidebarView::Consoles;
+            }
+            "cmpdiff" => {
+                // 用户截图形态：Compare 抽屉 + Diff 标签 + Git 底部面板（无终端）。
+                model.ui.sidebar_view = SidebarView::Compare;
+                model.ui.sidebar_visible = true;
+                model.ui.terminal_visible = false;
+                model.ui.panel_visible = true;
+                model.ui.panel_height = 460.0;
             }
             _ => {
                 model.ui.panel_visible = true;

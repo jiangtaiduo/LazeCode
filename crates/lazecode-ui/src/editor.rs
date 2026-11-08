@@ -4,7 +4,7 @@ use egui::{
     Align2, Color32, Event, FontId, ImeEvent, Key, Modifiers, Pos2, Rect, Sense, Stroke,
     StrokeKind, TextEdit, Ui, Vec2,
 };
-use lazecode_core::{AppModel, Command, DiffSource, DiffViewMode, ProjectState, TabKind};
+use lazecode_core::{AppModel, Command, DiffSource, DiffTab, DiffViewMode, ProjectState, TabKind};
 use lazecode_text::{Cursor, Document, MatchOptions, Motion, Selection, TokenKind};
 
 use crate::icons::{paint as paint_icon, Icon};
@@ -1337,7 +1337,9 @@ fn draw_diff(
     let path = diff.path.clone();
     let diff_source = diff.source.clone();
     let view_mode = diff.view_mode;
-    let current_hunk = diff.current_hunk;
+    let current_group = diff.current_hunk;
+    let edge_pending = diff.edge_pending;
+    let revealed = diff.revealed;
     let status = diff.diff.as_ref().map(|d| d.kind);
     let additions = diff.diff.as_ref().map(|d| d.diff.additions).unwrap_or(0);
     let deletions = diff.diff.as_ref().map(|d| d.diff.deletions).unwrap_or(0);
@@ -1345,6 +1347,49 @@ fn draw_diff(
     let hunks = diff.diff.as_ref().map(|d| d.diff.hunks.clone());
     let binary = diff.diff.as_ref().map(|d| d.binary).unwrap_or(false);
     let loading = diff.loading;
+
+    // Monaco 语义：变更组（连续增删行）驱动导航/蓝框，git hunk 数驱动统计。
+    let (rows, groups) = hunks
+        .as_deref()
+        .map_or_else(|| (Vec::new(), 0usize), crate::diff_view::build_rows);
+
+    // ---- 跨文件导航清单（Compare 抽屉 / 提交详情文件树） ----
+    let nav_files: Vec<String> = match &diff_source {
+        DiffSource::CompareCommits { from, to, .. } => model.projects[index]
+            .compare_session
+            .as_ref()
+            .filter(|s| &s.from == from && &s.to == to)
+            .map(|s| s.nav_order.clone())
+            .unwrap_or_default(),
+        DiffSource::Commit { commit, .. } => model.projects[index]
+            .commit_details
+            .as_ref()
+            .filter(|d| &d.info.id == commit)
+            .map(|d| d.files.iter().map(|f| f.path.clone()).collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let has_nav = !nav_files.is_empty();
+    let nav_index = nav_files.iter().position(|f| *f == path);
+    let can_prev_file = has_nav && nav_index.is_some_and(|i| i > 0);
+    let can_next_file = has_nav && nav_index.is_some_and(|i| i + 1 < nav_files.len());
+
+    // F7 / Shift+F7（稳定版快捷键）。
+    let (f7, f7_shift) = ui.input(|input| {
+        (
+            input.key_pressed(egui::Key::F7),
+            input.modifiers.shift && input.key_pressed(egui::Key::F7),
+        )
+    });
+    let mut nav_request: i32 = 0;
+    if f7_shift {
+        nav_request = -1;
+    } else if f7 {
+        nav_request = 1;
+    }
+
+    let zh = model.settings.language.is_zh();
+    let worktree_mode = matches!(diff_source, DiffSource::Worktree { .. });
 
     // ----- 稳定版 DiffViewer：28px 工具栏 + 28px 等宽 pane 标题栏 -----
     let toolbar = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 28.0));
@@ -1365,9 +1410,9 @@ fn draw_diff(
         Stroke::new(1.0, p.border),
     );
 
-    let total_hunks = hunks.as_ref().map(|h| h.len()).unwrap_or(0);
+    let mut nav_target: Option<String> = None;
     let mut lx = toolbar.left() + 8.0;
-    let icon_btn = |ui: &mut Ui, x: &mut f32, icon: Icon, enabled: bool, _theme: &Theme| -> bool {
+    let icon_btn = |ui: &mut Ui, x: &mut f32, icon: Icon, enabled: bool| -> bool {
         let rect =
             Rect::from_center_size(Pos2::new(*x + 10.0, toolbar.center().y), Vec2::splat(20.0));
         *x += 22.0;
@@ -1392,9 +1437,46 @@ fn draw_diff(
         paint_icon(ui.painter(), rect.shrink(3.5), icon, p.text2);
         response.clicked()
     };
-    // 文件间导航占位（多文件 diff 列表导航，本里程碑恒禁用）。
-    let _ = icon_btn(ui, &mut lx, Icon::DoubleChevronLeft, false, theme);
-    let _ = icon_btn(ui, &mut lx, Icon::DoubleChevronRight, false, theme);
+    // 文件间导航 ←/→（清单来自 Compare 抽屉或提交详情文件树）。
+    let _ = icon_btn(ui, &mut lx, Icon::ArrowLeft, can_prev_file);
+    let _ = icon_btn(ui, &mut lx, Icon::ArrowRight, can_next_file);
+    if has_nav && nav_index.is_some() {
+        // 命中检测在下方单独处理（icon_btn 已渲染）；用位置重新交互一次。
+    }
+    let prev_file_rect = Rect::from_center_size(
+        Pos2::new(toolbar.left() + 8.0 + 10.0, toolbar.center().y),
+        Vec2::splat(20.0),
+    );
+    let next_file_rect = Rect::from_center_size(
+        Pos2::new(toolbar.left() + 8.0 + 22.0 + 10.0, toolbar.center().y),
+        Vec2::splat(20.0),
+    );
+    if can_prev_file
+        && ui
+            .interact(
+                prev_file_rect,
+                ui.scope_id().with("diff-prev-file"),
+                Sense::click(),
+            )
+            .clicked()
+    {
+        if let Some(i) = nav_index {
+            nav_target = Some(nav_files[i - 1].clone());
+        }
+    }
+    if can_next_file
+        && ui
+            .interact(
+                next_file_rect,
+                ui.scope_id().with("diff-next-file"),
+                Sense::click(),
+            )
+            .clicked()
+    {
+        if let Some(i) = nav_index {
+            nav_target = Some(nav_files[i + 1].clone());
+        }
+    }
     lx += 3.0;
     ui.painter().vline(
         lx,
@@ -1402,27 +1484,58 @@ fn draw_diff(
         Stroke::new(1.0, p.border_soft),
     );
     lx += 5.0;
-    let _ = icon_btn(ui, &mut lx, Icon::ChevronUp, total_hunks > 0, theme);
-    let _ = icon_btn(ui, &mut lx, Icon::ChevronDown, total_hunks > 0, theme);
-    if total_hunks > 0 {
-        // hunk 计数药丸："n / m"。
+    let can_hunk_nav = groups > 0;
+    let _ = icon_btn(ui, &mut lx, Icon::ChevronUp, can_hunk_nav);
+    let _ = icon_btn(ui, &mut lx, Icon::ChevronDown, can_hunk_nav);
+    let up_rect = Rect::from_center_size(
+        Pos2::new(lx - 44.0 + 10.0, toolbar.center().y),
+        Vec2::splat(20.0),
+    );
+    let down_rect = Rect::from_center_size(
+        Pos2::new(lx - 22.0 + 10.0, toolbar.center().y),
+        Vec2::splat(20.0),
+    );
+    if can_hunk_nav {
+        if ui
+            .interact(
+                up_rect,
+                ui.scope_id().with("diff-prev-hunk"),
+                Sense::click(),
+            )
+            .clicked()
+        {
+            nav_request -= 1;
+        }
+        if ui
+            .interact(
+                down_rect,
+                ui.scope_id().with("diff-next-hunk"),
+                Sense::click(),
+            )
+            .clicked()
+        {
+            nav_request += 1;
+        }
+    }
+    if groups > 0 {
+        // hunk 计数药丸："n / m"（Monaco 变更组数）。
         let counter = Rect::from_center_size(
             Pos2::new(lx + 24.0, toolbar.center().y),
             Vec2::new(44.0, 20.0),
         );
         lx += 50.0;
         ui.painter()
-            .rect_filled(counter, egui::CornerRadius::same(6), p.hover);
+            .rect_filled(counter, egui::CornerRadius::same(4), p.panel2);
         ui.painter().rect_stroke(
             counter,
-            egui::CornerRadius::same(6),
+            egui::CornerRadius::same(4),
             Stroke::new(1.0, p.border_soft),
             StrokeKind::Inside,
         );
         let hunk_text = format!(
             "{} / {}",
-            current_hunk.min(total_hunks.saturating_sub(1)) + 1,
-            total_hunks
+            current_group.min(groups.saturating_sub(1)) + 1,
+            groups
         );
         ui.painter().text(
             counter.center(),
@@ -1431,23 +1544,94 @@ fn draw_diff(
             FontId::proportional(11.0),
             p.text,
         );
+        // 工作区模式：当前组所在 hunk 的 Stage / Rollback（稳定版工具栏按钮）。
+        if worktree_mode {
+            let mut hunk_btn = |ui: &mut Ui,
+                                x: &mut f32,
+                                label: &str,
+                                patch: Option<String>,
+                                cached: bool,
+                                reverse: bool| {
+                let w = label.chars().count() as f32 * 6.2 + 14.0;
+                let rect = Rect::from_center_size(
+                    Pos2::new(*x + w / 2.0, toolbar.center().y),
+                    Vec2::new(w, 18.0),
+                );
+                *x += w + 4.0;
+                let response = ui.interact(
+                    rect,
+                    ui.scope_id().with(("diff-hunk-btn", label)),
+                    Sense::click(),
+                );
+                let bg = if response.hovered() {
+                    p.hover
+                } else {
+                    Color32::TRANSPARENT
+                };
+                ui.painter()
+                    .rect_filled(rect, egui::CornerRadius::same(4), bg);
+                ui.painter().rect_stroke(
+                    rect,
+                    egui::CornerRadius::same(4),
+                    Stroke::new(1.0, p.border_soft),
+                    StrokeKind::Inside,
+                );
+                ui.painter().text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    label,
+                    FontId::proportional(10.0),
+                    if response.hovered() {
+                        p.text_bright
+                    } else {
+                        p.text2
+                    },
+                );
+                if response.clicked() {
+                    if let Some(patch) = patch {
+                        model.queue(Command::ApplyPatch {
+                            patch,
+                            cached,
+                            reverse,
+                            root: model.projects[index].root.clone(),
+                        });
+                    }
+                }
+            };
+            let patch = hunks.as_ref().and_then(|h| {
+                let hi = crate::diff_view::hunk_of_group(h, current_group)?;
+                Some(lazecode_text::unified_patch(
+                    &path,
+                    &lazecode_text::TextDiff {
+                        hunks: vec![h[hi].clone()],
+                        ..Default::default()
+                    },
+                ))
+            });
+            let label_stage = if zh { "暂存此块" } else { "Stage hunk" };
+            let label_rollback = if zh { "回滚此块" } else { "Rollback hunk" };
+            let patch2 = patch.clone();
+            hunk_btn(ui, &mut lx, label_stage, patch, true, false);
+            hunk_btn(ui, &mut lx, label_rollback, patch2, false, true);
+        }
     }
-    // 视图选择（select 样式 20px）。
+    // 视图选择（select 样式 20px，点击弹 Unified/Side by Side 两项）。
     let mode_label = match view_mode {
-        DiffViewMode::Unified => crate::tr!(model, "Unified view", "统一视图"),
-        DiffViewMode::SideBySide => crate::tr!(model, "Side by Side", "并排对比"),
+        DiffViewMode::Unified => crate::tr!(model, "Unified view", "统一视图 (Unified)"),
+        DiffViewMode::SideBySide => crate::tr!(model, "Side by Side", "并排对比 (Side by Side)"),
     };
     let select_rect = Rect::from_center_size(
         Pos2::new(lx + 58.0, toolbar.center().y),
         Vec2::new(112.0, 20.0),
     );
     lx += 122.0;
+    let select_open = rt.diff_mode_open == Some(tab_id);
     ui.painter()
-        .rect_filled(select_rect, egui::CornerRadius::same(6), p.hover);
+        .rect_filled(select_rect, egui::CornerRadius::same(4), p.panel2);
     ui.painter().rect_stroke(
         select_rect,
-        egui::CornerRadius::same(6),
-        Stroke::new(1.0, p.border_soft),
+        egui::CornerRadius::same(4),
+        Stroke::new(1.0, if select_open { p.accent } else { p.border_soft }),
         StrokeKind::Inside,
     );
     text_clipped(
@@ -1458,25 +1642,38 @@ fn draw_diff(
         p.text,
         Align2::LEFT_CENTER,
     );
-    paint_icon(
-        ui.painter(),
-        Rect::from_center_size(
-            Pos2::new(select_rect.right() - 12.0, select_rect.center().y),
-            Vec2::splat(10.0),
-        ),
-        Icon::ChevronDown,
-        p.text3,
-    );
+    // 原生 select 的上下双箭头。
+    let chev_x = select_rect.right() - 11.0;
+    let chev_cy = select_rect.center().y;
+    for (dy, up) in [(-3.0, true), (3.0, false)] {
+        let c = Pos2::new(chev_x, chev_cy + dy);
+        let (a, b, d) = if up {
+            (
+                Pos2::new(c.x - 3.0, c.y + 1.5),
+                Pos2::new(c.x, c.y - 1.0),
+                Pos2::new(c.x + 3.0, c.y + 1.5),
+            )
+        } else {
+            (
+                Pos2::new(c.x - 3.0, c.y - 1.5),
+                Pos2::new(c.x, c.y + 1.0),
+                Pos2::new(c.x + 3.0, c.y - 1.5),
+            )
+        };
+        ui.painter().line_segment([a, b], Stroke::new(1.0, p.text3));
+        ui.painter().line_segment([b, d], Stroke::new(1.0, p.text3));
+    }
     if ui
         .interact(select_rect, ui.scope_id().with("diff-mode"), Sense::click())
         .clicked()
     {
-        model.queue(Command::ToggleDiffViewMode(tab_id));
+        rt.diff_mode_open = if select_open { None } else { Some(tab_id) };
     }
-    // 统计（muted，纯文本）。
+    // 统计：git hunk 数（对齐稳定版 t().diff.stats(a, d, hunkOffsets.length)）。
+    let total_hunks = hunks.as_ref().map_or(0, |h| h.len());
     let stats = if loading {
         crate::tr!(model, "Loading…", "加载中…").to_string()
-    } else if model.settings.language.is_zh() {
+    } else if zh {
         format!("{additions} 增 / {deletions} 删 · {total_hunks} 处差异")
     } else {
         format!("{additions} additions / {deletions} deletions · {total_hunks} differences")
@@ -1493,7 +1690,7 @@ fn draw_diff(
     let comparison = match &diff_source {
         DiffSource::Commit { commit, .. } => {
             let hash: String = commit.chars().take(8).collect();
-            if model.settings.language.is_zh() {
+            if zh {
                 format!("提交 {hash}")
             } else {
                 format!("Commit {hash}")
@@ -1501,7 +1698,7 @@ fn draw_diff(
         }
         DiffSource::CompareWithLocal { commit, .. } => {
             let hash: String = commit.chars().take(8).collect();
-            if model.settings.language.is_zh() {
+            if zh {
                 format!("{hash} → 工作区")
             } else {
                 format!("{hash} → working tree")
@@ -1510,15 +1707,15 @@ fn draw_diff(
         DiffSource::CompareCommits { from, to, .. } => {
             let f: String = from.chars().take(8).collect();
             let to8: String = to.chars().take(8).collect();
-            format!("{f} ↔ {to8}")
+            if zh {
+                format!("提交 {f} ↔ {to8}")
+            } else {
+                format!("{f} ↔ {to8}")
+            }
         }
         DiffSource::Files { .. } => crate::tr!(model, "File vs File", "两文件对比").to_string(),
         DiffSource::Worktree { .. } => {
-            if model.settings.language.is_zh() {
-                "工作区 vs 索引".to_string()
-            } else {
-                "Working tree vs index".to_string()
-            }
+            crate::tr!(model, "Working tree vs index", "工作区 vs 索引").to_string()
         }
     };
     ui.painter().text(
@@ -1529,12 +1726,48 @@ fn draw_diff(
         p.text3,
     );
 
+    // 边缘气球（PyCharm Balloon：工具栏下方悬浮，1.8s 自动消失）。
+    if let Some((text, at)) = &rt.diff_balloon {
+        if at.elapsed().as_secs_f32() < 1.8 {
+            let w = text.chars().count() as f32 * 6.4 + 26.0;
+            let b = Rect::from_min_size(
+                Pos2::new(rect.left() + 10.0, toolbar.bottom() + 5.0),
+                Vec2::new(w, 26.0),
+            );
+            ui.painter()
+                .rect_filled(b, egui::CornerRadius::same(4), p.balloon_bg);
+            ui.painter().rect_stroke(
+                b,
+                egui::CornerRadius::same(4),
+                Stroke::new(1.0, p.jb_accent),
+                StrokeKind::Inside,
+            );
+            ui.painter().text(
+                b.center(),
+                Align2::CENTER_CENTER,
+                text,
+                FontId::proportional(11.5),
+                p.balloon_text,
+            );
+            // 左上小箭头（旋转 45° 的方块描边）。
+            let tip = Pos2::new(b.left() + 18.0, b.top() - 3.5);
+            for (dx, dy) in [(-3.5, 0.0), (0.0, -3.5)] {
+                let _ = (dx, dy);
+            }
+            ui.painter().line_segment(
+                [Pos2::new(tip.x - 3.5, tip.y + 3.5), tip],
+                Stroke::new(1.0, p.jb_accent),
+            );
+            ui.painter().line_segment(
+                [tip, Pos2::new(tip.x + 3.5, tip.y + 3.5)],
+                Stroke::new(1.0, p.jb_accent),
+            );
+        }
+    }
+
     // ----- pane 标题栏：hash（或 "diff"）+ 路径 + 状态 tag -----
     let hash_text = match &diff_source {
-        DiffSource::Commit { commit, .. } => {
-            let hash: String = commit.chars().take(8).collect();
-            hash
-        }
+        DiffSource::Commit { commit, .. } => commit.chars().take(8).collect::<String>(),
         _ => "diff".to_string(),
     };
     let hash_w = hash_text.chars().count() as f32 * 6.6 + 8.0;
@@ -1556,7 +1789,14 @@ fn draw_diff(
         p.text_bright,
         Align2::LEFT_CENTER,
     );
-    if let Some(kind) = status {
+    let tag_kind = status.filter(|kind| {
+        matches!(
+            kind,
+            lazecode_git::ChangeKind::Added | lazecode_git::ChangeKind::Deleted
+        )
+    });
+    if let Some(kind) = tag_kind {
+        // 稳定版只渲染 Added/Deleted 标签（git-tag git-staged / git-del）。
         let label = kind.label();
         let tag_w = label.chars().count() as f32 * 10.0 + 12.0;
         let tag = Rect::from_center_size(
@@ -1587,12 +1827,86 @@ fn draw_diff(
         );
     }
 
-    let body = Rect::from_min_max(Pos2::new(rect.left(), toolbar.bottom()), rect.max);
+    // ----- 导航（点击 + F7）：组游标、边缘气球、二次点击跨文件 -----
+    if nav_request != 0 && groups > 0 {
+        let next = current_group as isize + nav_request as isize;
+        if (0..groups as isize).contains(&next) {
+            let next = next as usize;
+            diff_mut(model, index, tab_id, |d| {
+                d.current_hunk = next;
+                d.edge_pending = 0;
+            });
+            rt.diff_scroll = Some((tab_id, next));
+        } else if edge_pending == 0 {
+            let msg = if has_nav {
+                if nav_request > 0 {
+                    crate::tr!(
+                        model,
+                        "Already at the last difference — click again to open the next file",
+                        "已是最后一处差异，再次点击查看下一个文件的差异"
+                    )
+                } else {
+                    crate::tr!(
+                        model,
+                        "Already at the first difference — click again to open the previous file",
+                        "已是第一处差异，再次点击查看上一个文件的差异"
+                    )
+                }
+            } else if nav_request > 0 {
+                crate::tr!(model, "Already at the last difference", "已是最后一处差异")
+            } else {
+                crate::tr!(model, "Already at the first difference", "已是第一处差异")
+            };
+            rt.diff_balloon = Some((msg.to_string(), std::time::Instant::now()));
+            let sign = nav_request.signum() as i8;
+            diff_mut(model, index, tab_id, |d| d.edge_pending = sign);
+        } else if has_nav && nav_index.is_some() {
+            let target_i = if nav_request > 0 {
+                nav_index.unwrap_or(0) + 1
+            } else {
+                nav_index.unwrap_or(0).wrapping_sub(1)
+            };
+            if let Some(target) = nav_files.get(target_i) {
+                nav_target = Some(target.clone());
+            }
+        }
+    }
+
+    if let Some(target) = nav_target.clone() {
+        let cmd = match &diff_source {
+            DiffSource::CompareCommits { from, to, .. } => Some(Command::OpenCompareCommitsDiff {
+                from: from.clone(),
+                to: to.clone(),
+                path: target,
+            }),
+            DiffSource::Commit { commit, .. } => Some(Command::OpenCommitDiff {
+                commit: commit.clone(),
+                path: target,
+            }),
+            _ => None,
+        };
+        if let Some(cmd) = cmd {
+            model.queue(cmd);
+            diff_mut(model, index, tab_id, |d| {
+                d.edge_pending = 0;
+                d.revealed = true;
+            });
+            rt.diff_balloon = None;
+        }
+    }
+
+    // 首次显示：定位第一处差异（stable revealedRef 语义）。
+    if !revealed && !rows.is_empty() {
+        rt.diff_scroll = Some((tab_id, 0));
+        diff_mut(model, index, tab_id, |d| d.revealed = true);
+    }
+
+    let body = Rect::from_min_max(Pos2::new(rect.left(), titlebar.bottom()), rect.max);
     if loading {
         ui.painter().text(
             body.center(),
             Align2::CENTER_CENTER,
-            crate::tr!(model, "Loading diff…", "正在加载差异…"),
+            crate::tr!(model, "Loading diff…", "正在读取差异…"),
             FontId::proportional(11.5),
             p.text3,
         );
@@ -1614,557 +1928,156 @@ fn draw_diff(
             Align2::CENTER_CENTER,
             crate::tr!(
                 model,
-                "Binary file — no textual diff",
-                "二进制文件，无文本差异"
+                "Cannot show diff for an unknown file type",
+                "无法显示未知文件类型的差异"
             ),
             FontId::proportional(11.5),
             p.text3,
         );
         return;
     }
-    let Some(hunks) = hunks else {
+    if hunks.is_none() || rows.is_empty() {
+        let empty = match &diff_source {
+            DiffSource::Worktree { .. } => {
+                crate::tr!(
+                    model,
+                    "This file has no uncommitted changes",
+                    "该文件没有未提交的改动"
+                )
+            }
+            _ => crate::tr!(
+                model,
+                "This commit has no text difference",
+                "该提交没有文本差异"
+            ),
+        };
         ui.painter().text(
             body.center(),
             Align2::CENTER_CENTER,
-            crate::tr!(model, "No changes to display", "没有可显示的变更"),
+            empty,
             FontId::proportional(11.5),
             p.text3,
         );
         return;
-    };
-
-    match view_mode {
-        DiffViewMode::Unified => {
-            draw_unified_diff(
-                ui,
-                p,
-                theme,
-                model,
-                index,
-                tab_id,
-                &path,
-                &diff_source,
-                &hunks,
-                current_hunk,
-                body,
-            );
-        }
-        DiffViewMode::SideBySide => {
-            draw_side_by_side_diff(
-                ui,
-                p,
-                theme,
-                model,
-                index,
-                tab_id,
-                &path,
-                &diff_source,
-                &hunks,
-                current_hunk,
-                body,
-            );
-        }
     }
-    let _ = rt;
-}
 
-#[allow(clippy::too_many_arguments)]
-fn draw_hunk_header(
-    ui: &mut Ui,
-    p: crate::theme::Palette,
-    _theme: &Theme,
-    model: &mut AppModel,
-    index: usize,
-    path: &str,
-    diff_source: &DiffSource,
-    hunk: &lazecode_text::DiffHunk,
-    hunk_index: usize,
-    is_current: bool,
-) {
-    let (head_rect, _) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::hover());
-    // 稳定版 `@@` 头行：rgba(56,139,253,0.10) 底 + muted 等宽文字；
-    // 当前块额外 accent 描边。
-    let bg = Color32::from_rgba_unmultiplied(56, 139, 253, 26);
-    ui.painter().rect_filled(head_rect, 0.0, bg);
-    if is_current {
+    // 视图模式下拉（两行小菜单）。
+    if select_open {
+        let menu_w = 150.0;
+        let menu_rect = Rect::from_min_size(
+            Pos2::new(select_rect.left(), toolbar.bottom() + 2.0),
+            Vec2::new(menu_w, 48.0),
+        );
+        ui.painter()
+            .rect_filled(menu_rect, egui::CornerRadius::same(6), p.menu_bg);
         ui.painter().rect_stroke(
-            head_rect,
-            egui::CornerRadius::ZERO,
-            Stroke::new(1.0, p.accent),
+            menu_rect,
+            egui::CornerRadius::same(6),
+            Stroke::new(1.0, p.menu_border),
             StrokeKind::Inside,
         );
-    }
-    ui.painter().text(
-        Pos2::new(head_rect.left() + 12.0, head_rect.center().y),
-        Align2::LEFT_CENTER,
-        &hunk.header,
-        FontId::monospace(10.5),
-        p.text3,
-    );
-
-    if matches!(diff_source, DiffSource::Worktree { .. }) {
-        let project_root = model.projects[index].root.clone();
-        let file_path = path.to_string();
-        let patch = lazecode_text::diff::unified_patch(
-            &file_path,
-            &lazecode_text::TextDiff {
-                hunks: vec![hunk.clone()],
-                ..Default::default()
-            },
-        );
-        let hunk_btn = |ui: &mut Ui, label: &str, x: f32| -> bool {
-            let area = Rect::from_center_size(
-                Pos2::new(head_rect.right() - x, head_rect.center().y),
-                Vec2::new(56.0, 17.0),
+        for (row, mode, label) in [
+            (
+                0usize,
+                DiffViewMode::Unified,
+                crate::tr!(model, "Unified view", "统一视图 (Unified)"),
+            ),
+            (
+                1,
+                DiffViewMode::SideBySide,
+                crate::tr!(model, "Side by Side", "并排对比 (Side by Side)"),
+            ),
+        ] {
+            let row_rect = Rect::from_min_size(
+                Pos2::new(
+                    menu_rect.left() + 4.0,
+                    menu_rect.top() + 4.0 + row as f32 * 20.0,
+                ),
+                Vec2::new(menu_w - 8.0, 20.0),
             );
-            let response = ui.interact(
-                area,
-                ui.scope_id().with(("hunk", hunk_index, (x * 10.0) as i64)),
-                Sense::click(),
-            );
-            ui.painter()
-                .rect_filled(area, egui::CornerRadius::same(3), p.panel2);
-            if response.hovered() {
+            let hovered =
+                row_rect.contains(ui.input(|i| i.pointer.latest_pos().unwrap_or_default()));
+            if hovered {
                 ui.painter()
-                    .rect_filled(area, egui::CornerRadius::same(3), p.hover);
+                    .rect_filled(row_rect, egui::CornerRadius::same(4), p.menu_item_hover);
             }
             ui.painter().text(
-                area.center(),
-                Align2::CENTER_CENTER,
+                Pos2::new(row_rect.left() + 8.0, row_rect.center().y),
+                Align2::LEFT_CENTER,
                 label,
-                FontId::proportional(8.5),
-                p.text2,
+                FontId::proportional(11.0),
+                if view_mode == mode {
+                    p.text_bright
+                } else {
+                    p.text2
+                },
             );
-            response.clicked()
-        };
-        if hunk_btn(ui, crate::tr!(model, "Stage", "暂存"), 28.0) {
-            model.queue(Command::ApplyPatch {
-                patch: patch.clone(),
-                cached: true,
-                reverse: false,
-                root: project_root.clone(),
-            });
-        }
-        if hunk_btn(ui, crate::tr!(model, "Unstage", "取消暂存"), 88.0) {
-            model.queue(Command::ApplyPatch {
-                patch: patch.clone(),
-                cached: true,
-                reverse: true,
-                root: project_root.clone(),
-            });
-        }
-        if hunk_btn(ui, crate::tr!(model, "Discard", "放弃修改"), 148.0) {
-            model.queue(Command::ApplyPatch {
-                patch: patch.clone(),
-                cached: false,
-                reverse: true,
-                root: project_root.clone(),
-            });
-        }
-    }
-}
-
-fn draw_inline_chunks(
-    painter: &egui::Painter,
-    rect: Rect,
-    chunks: &[lazecode_text::InlineChunk],
-    font: FontId,
-    char_w: f32,
-    base_color: Color32,
-    highlight_bg: Color32,
-) {
-    let mut x = rect.left();
-    for chunk in chunks {
-        let chunk_w = chunk.text.chars().count() as f32 * char_w;
-        if x >= rect.right() {
-            break;
-        }
-        let max_x = (x + chunk_w).min(rect.right());
-        let chunk_rect = Rect::from_min_max(
-            Pos2::new(x, rect.top() + 1.0),
-            Pos2::new(max_x, rect.bottom() - 1.0),
-        );
-        if chunk.kind != lazecode_text::InlineChunkKind::Unchanged {
-            painter.rect_filled(chunk_rect, egui::CornerRadius::same(2), highlight_bg);
-        }
-        text_clipped(
-            painter,
-            chunk_rect,
-            &chunk.text,
-            font.clone(),
-            base_color,
-            Align2::LEFT_CENTER,
-        );
-        x += chunk_w;
-    }
-}
-
-struct SideBySideRow {
-    old: Option<lazecode_text::DiffLine>,
-    new: Option<lazecode_text::DiffLine>,
-}
-
-fn build_side_by_side_rows(hunk: &lazecode_text::DiffHunk) -> Vec<SideBySideRow> {
-    let mut sbs_rows: Vec<SideBySideRow> = Vec::new();
-    let lines = &hunk.lines;
-    let mut i = 0;
-    while i < lines.len() {
-        match lines[i].kind {
-            lazecode_text::DiffLineKind::Context => {
-                sbs_rows.push(SideBySideRow {
-                    old: Some(lines[i].clone()),
-                    new: Some(lines[i].clone()),
-                });
-                i += 1;
+            if view_mode == mode {
+                paint_icon(
+                    ui.painter(),
+                    Rect::from_center_size(
+                        Pos2::new(row_rect.right() - 12.0, row_rect.center().y),
+                        Vec2::splat(12.0),
+                    ),
+                    Icon::Check,
+                    p.text_bright,
+                );
             }
-            lazecode_text::DiffLineKind::Delete => {
-                let mut deletes = Vec::new();
-                while i < lines.len() && lines[i].kind == lazecode_text::DiffLineKind::Delete {
-                    deletes.push(lines[i].clone());
-                    i += 1;
-                }
-                let mut adds = Vec::new();
-                while i < lines.len() && lines[i].kind == lazecode_text::DiffLineKind::Add {
-                    adds.push(lines[i].clone());
-                    i += 1;
-                }
-                let max_len = deletes.len().max(adds.len());
-                for k in 0..max_len {
-                    sbs_rows.push(SideBySideRow {
-                        old: deletes.get(k).cloned(),
-                        new: adds.get(k).cloned(),
-                    });
-                }
-            }
-            lazecode_text::DiffLineKind::Add => {
-                sbs_rows.push(SideBySideRow {
-                    old: None,
-                    new: Some(lines[i].clone()),
-                });
-                i += 1;
-            }
-        }
-    }
-    sbs_rows
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_side_by_side_diff(
-    ui: &mut Ui,
-    p: crate::theme::Palette,
-    theme: &Theme,
-    model: &mut AppModel,
-    index: usize,
-    tab_id: u64,
-    path: &str,
-    diff_source: &DiffSource,
-    hunks: &[lazecode_text::DiffHunk],
-    current_hunk: usize,
-    body: Rect,
-) {
-    let line_h = 18.0;
-    let gutter_w = 42.0;
-    let font = FontId::monospace(13.0);
-    let char_w = mono_char_width(ui.ctx(), 13.0).max(7.0);
-    super::app_ui::region(ui, body, "diff-sbs-scroll", |ui| {
-        egui::ScrollArea::vertical()
-            .id_salt(("diff-sbs", tab_id))
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                let total_w = ui.available_width();
-                let col_w = ((total_w - 1.0) / 2.0).max(120.0);
-                for (hunk_index, hunk) in hunks.iter().enumerate() {
-                    let is_current = hunk_index == current_hunk;
-                    draw_hunk_header(
-                        ui,
-                        p,
-                        theme,
-                        model,
-                        index,
-                        path,
-                        diff_source,
-                        hunk,
-                        hunk_index,
-                        is_current,
-                    );
-                    let rows = build_side_by_side_rows(hunk);
-                    for row_item in rows {
-                        let (row_rect, _) =
-                            ui.allocate_exact_size(Vec2::new(total_w, line_h), Sense::hover());
-                        let left_rect = Rect::from_min_size(row_rect.min, Vec2::new(col_w, line_h));
-                        let right_rect = Rect::from_min_size(
-                            Pos2::new(row_rect.min.x + col_w + 1.0, row_rect.min.y),
-                            Vec2::new(col_w, line_h),
-                        );
-
-                        // Vertical divider
-                        ui.painter().vline(
-                            row_rect.min.x + col_w + 0.5,
-                            row_rect.y_range(),
-                            Stroke::new(1.0, p.border),
-                        );
-
-                        // Left (Old)
-                        if let Some(old) = &row_item.old {
-                            let is_del = old.kind == lazecode_text::DiffLineKind::Delete;
-                            if is_del {
-                                ui.painter().rect_filled(left_rect, 0.0, p.diff_del);
-                            }
-                            let num_str = old.old_lineno.map(|n| n.to_string()).unwrap_or_default();
-                            ui.painter().text(
-                                Pos2::new(left_rect.left() + gutter_w - 6.0, left_rect.center().y),
-                                Align2::RIGHT_CENTER,
-                                num_str,
-                                FontId::monospace(11.0),
-                                p.text3,
-                            );
-                            if is_del {
-                                ui.painter().text(
-                                    Pos2::new(
-                                        left_rect.left() + gutter_w + 2.0,
-                                        left_rect.center().y,
-                                    ),
-                                    Align2::LEFT_CENTER,
-                                    "−",
-                                    FontId::monospace(10.5),
-                                    p.rose,
-                                );
-                            }
-                            let text_rect = Rect::from_min_max(
-                                Pos2::new(left_rect.left() + gutter_w + 12.0, left_rect.top()),
-                                Pos2::new(left_rect.right() - 4.0, left_rect.bottom()),
-                            );
-                            if let (true, Some(new_line)) = (is_del, &row_item.new) {
-                                let (old_chunks, _) =
-                                    lazecode_text::inline_diff(&old.text, &new_line.text);
-                                draw_inline_chunks(
-                                    ui.painter(),
-                                    text_rect,
-                                    &old_chunks,
-                                    font.clone(),
-                                    char_w,
-                                    p.text,
-                                    p.rose.gamma_multiply(0.35),
-                                );
-                            } else {
-                                text_clipped(
-                                    ui.painter(),
-                                    text_rect,
-                                    &old.text,
-                                    font.clone(),
-                                    if is_del { p.text } else { p.text2 },
-                                    Align2::LEFT_CENTER,
-                                );
-                            }
-                        }
-
-                        // Right (New)
-                        if let Some(new) = &row_item.new {
-                            let is_add = new.kind == lazecode_text::DiffLineKind::Add;
-                            if is_add {
-                                ui.painter().rect_filled(right_rect, 0.0, p.diff_add);
-                            }
-                            let num_str = new.new_lineno.map(|n| n.to_string()).unwrap_or_default();
-                            ui.painter().text(
-                                Pos2::new(
-                                    right_rect.left() + gutter_w - 6.0,
-                                    right_rect.center().y,
-                                ),
-                                Align2::RIGHT_CENTER,
-                                num_str,
-                                FontId::monospace(11.0),
-                                p.text3,
-                            );
-                            if is_add {
-                                ui.painter().text(
-                                    Pos2::new(
-                                        right_rect.left() + gutter_w + 2.0,
-                                        right_rect.center().y,
-                                    ),
-                                    Align2::LEFT_CENTER,
-                                    "+",
-                                    FontId::monospace(10.5),
-                                    p.green,
-                                );
-                            }
-                            let text_rect = Rect::from_min_max(
-                                Pos2::new(right_rect.left() + gutter_w + 12.0, right_rect.top()),
-                                Pos2::new(right_rect.right() - 4.0, right_rect.bottom()),
-                            );
-                            if let (true, Some(old_line)) = (is_add, &row_item.old) {
-                                let (_, new_chunks) =
-                                    lazecode_text::inline_diff(&old_line.text, &new.text);
-                                draw_inline_chunks(
-                                    ui.painter(),
-                                    text_rect,
-                                    &new_chunks,
-                                    font.clone(),
-                                    char_w,
-                                    p.text,
-                                    p.green.gamma_multiply(0.35),
-                                );
-                            } else {
-                                text_clipped(
-                                    ui.painter(),
-                                    text_rect,
-                                    &new.text,
-                                    font.clone(),
-                                    if is_add { p.text } else { p.text2 },
-                                    Align2::LEFT_CENTER,
-                                );
-                            }
+            if ui
+                .interact(
+                    row_rect,
+                    ui.scope_id().with(("diff-mode-item", row)),
+                    Sense::click(),
+                )
+                .clicked()
+            {
+                if view_mode != mode {
+                    if let Some(tab) = model.projects[index].tab_mut_by_id(tab_id) {
+                        if let TabKind::Diff(d) = &mut tab.kind {
+                            d.view_mode = mode;
                         }
                     }
                 }
-                ui.add_space(40.0);
-            });
-    });
+                rt.diff_mode_open = None;
+            }
+        }
+        if ui
+            .interact(
+                rect.expand(40.0),
+                ui.scope_id().with("diff-mode-dismiss"),
+                Sense::click(),
+            )
+            .clicked()
+        {
+            rt.diff_mode_open = None;
+        }
+    }
+
+    let ctx = crate::diff_view::DiffBodyCtx {
+        tab_id,
+        rows: &rows,
+        groups,
+        current_group: current_group.min(groups.saturating_sub(1)),
+        scroll_to_group: rt.diff_scroll,
+    };
+    match view_mode {
+        DiffViewMode::Unified => {
+            crate::diff_view::draw_unified(ui, theme, body, ctx);
+        }
+        DiffViewMode::SideBySide => {
+            crate::diff_view::draw_split(ui, theme, body, ctx);
+        }
+    }
+    // 滚动请求为单帧语义。
+    rt.diff_scroll = None;
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_unified_diff(
-    ui: &mut Ui,
-    p: crate::theme::Palette,
-    theme: &Theme,
-    model: &mut AppModel,
-    index: usize,
-    tab_id: u64,
-    path: &str,
-    diff_source: &DiffSource,
-    hunks: &[lazecode_text::DiffHunk],
-    current_hunk: usize,
-    body: Rect,
-) {
-    let line_h = 18.0;
-    let font = FontId::monospace(13.0);
-    let char_w = mono_char_width(ui.ctx(), 13.0).max(7.0);
-    super::app_ui::region(ui, body, "diff-scroll", |ui| {
-        egui::ScrollArea::vertical()
-            .id_salt(("diff", tab_id))
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                for (hunk_index, hunk) in hunks.iter().enumerate() {
-                    let is_current = hunk_index == current_hunk;
-                    draw_hunk_header(
-                        ui,
-                        p,
-                        theme,
-                        model,
-                        index,
-                        path,
-                        diff_source,
-                        hunk,
-                        hunk_index,
-                        is_current,
-                    );
-                    let mut line_idx = 0;
-                    while line_idx < hunk.lines.len() {
-                        let line = &hunk.lines[line_idx];
-                        let (row, _) = ui.allocate_exact_size(
-                            Vec2::new(ui.available_width(), line_h),
-                            Sense::hover(),
-                        );
-                        match line.kind {
-                            lazecode_text::DiffLineKind::Add => {
-                                ui.painter().rect_filled(row, 0.0, p.diff_add);
-                            }
-                            lazecode_text::DiffLineKind::Delete => {
-                                ui.painter().rect_filled(row, 0.0, p.diff_del);
-                            }
-                            _ => {}
-                        }
-                        let old = line.old_lineno.map(|n| n.to_string()).unwrap_or_default();
-                        let new = line.new_lineno.map(|n| n.to_string()).unwrap_or_default();
-                        ui.painter().text(
-                            Pos2::new(row.left() + 46.0, row.center().y),
-                            Align2::RIGHT_CENTER,
-                            old,
-                            FontId::monospace(11.0),
-                            p.text3,
-                        );
-                        ui.painter().text(
-                            Pos2::new(row.left() + 92.0, row.center().y),
-                            Align2::RIGHT_CENTER,
-                            new,
-                            FontId::monospace(11.0),
-                            p.text3,
-                        );
-                        let sign = match line.kind {
-                            lazecode_text::DiffLineKind::Add => "+",
-                            lazecode_text::DiffLineKind::Delete => "−",
-                            _ => " ",
-                        };
-                        ui.painter().text(
-                            Pos2::new(row.left() + 106.0, row.center().y),
-                            Align2::LEFT_CENTER,
-                            sign,
-                            FontId::monospace(11.0),
-                            match line.kind {
-                                lazecode_text::DiffLineKind::Add => p.green,
-                                lazecode_text::DiffLineKind::Delete => p.rose,
-                                _ => p.text3,
-                            },
-                        );
-                        let text_rect = Rect::from_min_max(
-                            Pos2::new(row.left() + 120.0, row.top()),
-                            Pos2::new(row.right() - 12.0, row.bottom()),
-                        );
-
-                        // Check if paired delete + add for intra-line highlighting
-                        let paired_with_next = line.kind == lazecode_text::DiffLineKind::Delete
-                            && line_idx + 1 < hunk.lines.len()
-                            && hunk.lines[line_idx + 1].kind == lazecode_text::DiffLineKind::Add;
-                        let paired_with_prev = line.kind == lazecode_text::DiffLineKind::Add
-                            && line_idx > 0
-                            && hunk.lines[line_idx - 1].kind == lazecode_text::DiffLineKind::Delete;
-
-                        if paired_with_next {
-                            let next_line = &hunk.lines[line_idx + 1];
-                            let (old_chunks, _) =
-                                lazecode_text::inline_diff(&line.text, &next_line.text);
-                            draw_inline_chunks(
-                                ui.painter(),
-                                text_rect,
-                                &old_chunks,
-                                font.clone(),
-                                char_w,
-                                p.text,
-                                p.rose.gamma_multiply(0.35),
-                            );
-                        } else if paired_with_prev {
-                            let prev_line = &hunk.lines[line_idx - 1];
-                            let (_, new_chunks) =
-                                lazecode_text::inline_diff(&prev_line.text, &line.text);
-                            draw_inline_chunks(
-                                ui.painter(),
-                                text_rect,
-                                &new_chunks,
-                                font.clone(),
-                                char_w,
-                                p.text,
-                                p.green.gamma_multiply(0.35),
-                            );
-                        } else {
-                            text_clipped(
-                                ui.painter(),
-                                text_rect,
-                                &line.text,
-                                font.clone(),
-                                if line.kind == lazecode_text::DiffLineKind::Context {
-                                    p.text2
-                                } else {
-                                    p.text
-                                },
-                                Align2::LEFT_CENTER,
-                            );
-                        }
-                        line_idx += 1;
-                    }
-                }
-                ui.add_space(40.0);
-            });
-    });
+fn diff_mut(model: &mut AppModel, index: usize, tab_id: u64, f: impl FnOnce(&mut DiffTab)) {
+    if let Some(tab) = model.projects[index].tab_mut_by_id(tab_id) {
+        if let TabKind::Diff(diff) = &mut tab.kind {
+            f(diff);
+        }
+    }
 }
 
 fn draw_find(

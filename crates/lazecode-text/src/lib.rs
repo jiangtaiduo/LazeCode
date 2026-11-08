@@ -8,8 +8,8 @@ pub mod document;
 pub mod syntax;
 
 pub use diff::{
-    change_stats, diff_text, diff_text_with_context, inline_diff, unified_patch, DiffHunk,
-    DiffLine, DiffLineKind, InlineChunk, InlineChunkKind, TextDiff,
+    change_stats, count_change_groups, diff_text, diff_text_with_context, inline_diff,
+    unified_patch, DiffHunk, DiffLine, DiffLineKind, InlineChunk, InlineChunkKind, TextDiff,
 };
 pub use document::{Cursor, Document, MatchOptions, Motion, Selection};
 pub use lazecode_fs::{Eol, TextFile};

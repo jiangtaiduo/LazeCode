@@ -1350,6 +1350,43 @@ fn draw_git_log(
             }
         }
     }
+    tb_y += 24.0;
+
+    // 7. Checkout selected branch（⑂；当前分支禁用，renderRefRow 语义）。
+    let checkout_rect = Rect::from_min_size(
+        Pos2::new(toolbar_rect.left() + 3.0, tb_y),
+        Vec2::splat(20.0),
+    );
+    let checkout_target = model.projects[index].ref_selection.first().cloned();
+    let checkout_enabled = checkout_target
+        .as_ref()
+        .is_some_and(|name| name != &current_branch);
+    let checkout_resp = icon_button(ui, checkout_rect, Icon::Branch, checkout_enabled, theme);
+    if checkout_resp.hovered() {
+        checkout_resp.show_tooltip_text(crate::tr!(model, "Checkout", "检出"));
+    }
+    if checkout_resp.clicked() {
+        if let Some(name) = checkout_target {
+            model.queue(Command::CheckoutBranch(name));
+        }
+    }
+    tb_y += 24.0;
+
+    // 8. Search branches 🔍（branchSearchOpen 切换）。
+    let bsearch_rect = Rect::from_min_size(
+        Pos2::new(toolbar_rect.left() + 3.0, tb_y),
+        Vec2::splat(20.0),
+    );
+    let bsearch_resp = icon_button(ui, bsearch_rect, Icon::Search, false, theme);
+    if bsearch_resp.hovered() {
+        bsearch_resp.show_tooltip_text(crate::tr!(model, "Search branches", "搜索分支"));
+    }
+    if bsearch_resp.clicked() {
+        model.ui.branch_search_open = !model.ui.branch_search_open;
+        if !model.ui.branch_search_open {
+            model.projects[index].branch_query.clear();
+        }
+    }
 
     if show_branches {
         let splitter_rect = Rect::from_min_size(
@@ -1522,12 +1559,19 @@ fn draw_git_log(
                 let is_selected = selected.as_deref() == Some(commit.id.as_str())
                     || model.projects[index].selected_commits.contains(&commit.id);
                 if is_selected {
+                    // .log-row.active → --bg-selected-row #26415f。
                     ui.painter()
-                        .rect_filled(row, egui::CornerRadius::ZERO, p.active);
+                        .rect_filled(row, egui::CornerRadius::ZERO, p.selected_row);
                 } else if response.hovered() {
                     ui.painter()
                         .rect_filled(row, egui::CornerRadius::ZERO, p.hover);
                 }
+                // inset 底部分隔线（box-shadow: inset 0 -1px 0 overlay-faint）。
+                ui.painter().hline(
+                    row.x_range(),
+                    row.bottom() - 0.5,
+                    Stroke::new(1.0, p.hairline),
+                );
                 let dim = out_of_head && !is_selected;
 
                 // 1. DAG cell (100% continuous vertical lines, zero inter-row gaps)
@@ -1560,8 +1604,8 @@ fn draw_git_log(
                     msg_x += 16.0;
                 }
 
-                let author_w = 110.0;
-                let date_w = 110.0;
+                let author_w = 80.0;
+                let date_w = 108.0;
                 let refs_w = commit
                     .refs
                     .iter()
@@ -1577,72 +1621,72 @@ fn draw_git_log(
                         Pos2::new(msg_right.max(msg_x + 60.0), row.bottom()),
                     ),
                     &commit.message,
-                    FontId::proportional(12.5),
+                    FontId::proportional(12.0),
                     if dim {
                         p.text3.gamma_multiply(0.65)
-                    } else if is_selected {
-                        p.text
                     } else {
-                        p.text2
+                        p.text
                     },
                     Align2::LEFT_CENTER,
                 );
 
+                // log-ref：无底色的彩色 图标+名字（head 绿加粗 / local 绿 /
+                // remote 紫 / tag 琥珀），chip 间 gap 8。
                 let mut badge_x = msg_right.max(msg_x + 60.0) + 4.0;
                 for label in commit.refs.iter().take(3) {
-                    let width = label.label.chars().count() as f32 * 6.0 + 12.0;
-                    let ref_rect = Rect::from_min_size(
-                        Pos2::new(badge_x, row.center().y - 8.0),
-                        Vec2::new(width, 16.0),
-                    );
                     let color = match label.kind {
-                        RefKind::Head => p.accent,
+                        RefKind::Head => Color32::from_rgb(0x3f, 0xb9, 0x50),
                         RefKind::LocalBranch => Color32::from_rgb(0x3f, 0xb9, 0x50),
-                        RefKind::RemoteBranch => Color32::from_rgb(0xa3, 0x71, 0xf7),
-                        RefKind::Tag => Color32::from_rgb(0xe3, 0xb3, 0x41),
+                        RefKind::RemoteBranch => p.violet,
+                        RefKind::Tag => p.amber,
                     };
-                    ui.painter().rect_filled(
-                        ref_rect,
-                        egui::CornerRadius::same(3),
-                        color.gamma_multiply(0.18),
-                    );
-                    ui.painter().rect_stroke(
-                        ref_rect,
-                        egui::CornerRadius::same(3),
-                        Stroke::new(1.0, color),
-                        egui::StrokeKind::Inside,
-                    );
-                    ui.painter().text(
-                        ref_rect.center(),
-                        Align2::CENTER_CENTER,
-                        &label.label,
-                        FontId::monospace(10.0),
+                    let (icon, isize): (Icon, f32) = match label.kind {
+                        RefKind::Tag => (Icon::Tag, 10.0),
+                        RefKind::RemoteBranch => (Icon::Cloud, 11.0),
+                        _ => (Icon::Branch, 11.0),
+                    };
+                    paint_icon(
+                        ui.painter(),
+                        Rect::from_center_size(
+                            Pos2::new(badge_x + 5.0, row.center().y),
+                            Vec2::splat(isize),
+                        ),
+                        icon,
                         color,
                     );
-                    badge_x += width + 4.0;
+                    let text_x = badge_x + 12.0;
+                    let text_w = label.label.chars().count() as f32 * 6.0;
+                    ui.painter().text(
+                        Pos2::new(text_x, row.center().y),
+                        Align2::LEFT_CENTER,
+                        &label.label,
+                        FontId::proportional(11.0),
+                        color,
+                    );
+                    badge_x = text_x + text_w + 8.0;
                 }
 
                 // 3. Author column
                 let author_rect = Rect::from_min_max(
                     Pos2::new(row.right() - author_w - date_w, row.top()),
-                    Pos2::new(row.right() - date_w - 8.0, row.bottom()),
+                    Pos2::new(row.right() - date_w, row.bottom()),
                 );
                 text_clipped(
                     ui.painter(),
                     author_rect,
                     &commit.author,
-                    FontId::proportional(11.5),
-                    p.text3,
-                    Align2::LEFT_CENTER,
+                    FontId::proportional(11.0),
+                    p.text2,
+                    Align2::RIGHT_CENTER,
                 );
 
-                // 4. Exact date column: YYYY/M/D HH:mm
+                // 4. Date column: Today HH:MM / Yesterday / YYYY/M/D HH:MM
                 let date_str = format_commit_datetime(commit.time);
                 ui.painter().text(
                     Pos2::new(row.right() - 10.0, row.center().y),
                     Align2::RIGHT_CENTER,
                     date_str,
-                    FontId::monospace(11.0),
+                    FontId::proportional(11.0),
                     p.text3,
                 );
 
@@ -1776,7 +1820,7 @@ fn draw_branch_list(
     branches: &[lazecode_git::BranchInfo],
     current: &str,
     tags: &[String],
-    tag_targets: &[(String, String)],
+    _tag_targets: &[(String, String)],
 ) {
     let p = theme.palette;
     ui.painter().rect_filled(rect, 0.0, p.panel);
@@ -1786,35 +1830,45 @@ fn draw_branch_list(
         Stroke::new(1.0, p.border_soft),
     );
 
-    // Search field of the branch pane.
+    // 分支搜索框：稳定版 branchSearchOpen，🔍 工具条按钮切换显示。
+    let search_open = model.ui.branch_search_open;
+    let search_h = if search_open { 26.0 } else { 4.0 };
     let search_rect = Rect::from_min_size(
-        Pos2::new(rect.left() + 6.0, rect.top() + 6.0),
-        Vec2::new(rect.width() - 12.0, 24.0),
+        Pos2::new(rect.left() + 6.0, rect.top() + 5.0),
+        Vec2::new(rect.width() - 12.0, 22.0),
     );
-    ui.painter()
-        .rect_filled(search_rect, egui::CornerRadius::same(5), p.panel2);
-    paint_icon(
-        ui.painter(),
-        Rect::from_center_size(
-            Pos2::new(search_rect.left() + 12.0, search_rect.center().y),
-            Vec2::splat(11.0),
-        ),
-        Icon::Search,
-        p.text3,
-    );
-    let mut query_value = model.projects[index].branch_query.clone();
-    let response = ui.put(
-        Rect::from_min_max(
-            Pos2::new(search_rect.left() + 24.0, search_rect.top() + 2.0),
-            Pos2::new(search_rect.right() - 6.0, search_rect.bottom() - 2.0),
-        ),
-        TextEdit::singleline(&mut query_value)
-            .frame(egui::Frame::NONE)
-            .hint_text(crate::tr!(model, "Filter branches", "过滤分支"))
-            .font(FontId::proportional(12.0)),
-    );
-    if response.changed() {
-        model.projects[index].branch_query = query_value;
+    if search_open {
+        ui.painter()
+            .rect_filled(search_rect, egui::CornerRadius::same(4), p.scrim_subtle);
+        ui.painter().rect_stroke(
+            search_rect,
+            egui::CornerRadius::same(4),
+            Stroke::new(1.0, p.border_soft),
+            StrokeKind::Inside,
+        );
+        paint_icon(
+            ui.painter(),
+            Rect::from_center_size(
+                Pos2::new(search_rect.left() + 12.0, search_rect.center().y),
+                Vec2::splat(11.0),
+            ),
+            Icon::Search,
+            p.text3,
+        );
+        let mut query_value = model.projects[index].branch_query.clone();
+        let response = ui.put(
+            Rect::from_min_max(
+                Pos2::new(search_rect.left() + 24.0, search_rect.top() + 2.0),
+                Pos2::new(search_rect.right() - 6.0, search_rect.bottom() - 2.0),
+            ),
+            TextEdit::singleline(&mut query_value)
+                .frame(egui::Frame::NONE)
+                .hint_text(crate::tr!(model, "Filter branches", "过滤分支"))
+                .font(FontId::proportional(11.0)),
+        );
+        if response.changed() {
+            model.projects[index].branch_query = query_value;
+        }
     }
     let needle = model.projects[index].branch_query.to_lowercase();
     let matches = |name: &str| needle.is_empty() || name.to_lowercase().contains(&needle);
@@ -1833,7 +1887,7 @@ fn draw_branch_list(
     let tags: Vec<String> = tags.iter().filter(|tag| matches(tag)).cloned().collect();
 
     let rows_rect = Rect::from_min_max(
-        Pos2::new(rect.left(), search_rect.bottom() + 4.0),
+        Pos2::new(rect.left(), search_rect.top() + search_h),
         Pos2::new(rect.right(), rect.bottom()),
     );
     let row_h = 22.0;
@@ -1918,65 +1972,16 @@ fn draw_branch_list(
                         response.clicked()
                     };
 
-                // HEAD (Current Branch) section (Image #1)
+                // HEAD (Current Branch)：纯标签行（稳定版 b-head-label，
+                // 22px、padding-left 24、weight 500）；当前分支行在 Local 组里。
                 ui.painter().text(
-                    Pos2::new(container_rect.left() + 12.0, y + 8.0),
+                    Pos2::new(container_rect.left() + 24.0, y + 8.0),
                     Align2::LEFT_CENTER,
                     "HEAD (Current Branch)",
                     FontId::proportional(11.0),
-                    p.text3,
+                    p.text2,
                 );
                 y += 22.0;
-                if let Some(curr) = curr_branch {
-                    let row = Rect::from_min_size(
-                        Pos2::new(container_rect.left() + 4.0, y),
-                        Vec2::new(container_rect.width() - 8.0, 20.0),
-                    );
-                    let resp =
-                        ui.interact(row, ui.scope_id().with("head-branch-row"), Sense::click());
-                    if resp.hovered() {
-                        ui.painter()
-                            .rect_filled(row, egui::CornerRadius::same(3), p.hover);
-                    }
-                    let green = Color32::from_rgb(0x3f, 0xb9, 0x50);
-                    paint_icon(
-                        ui.painter(),
-                        Rect::from_center_size(
-                            Pos2::new(row.left() + 14.0, row.center().y),
-                            Vec2::splat(12.0),
-                        ),
-                        Icon::Branch,
-                        green,
-                    );
-                    ui.painter().text(
-                        Pos2::new(row.left() + 26.0, row.center().y),
-                        Align2::LEFT_CENTER,
-                        &curr.name,
-                        FontId::proportional(12.5),
-                        green,
-                    );
-                    if curr.ahead > 0 {
-                        ui.painter().text(
-                            Pos2::new(row.right() - 8.0, row.center().y),
-                            Align2::RIGHT_CENTER,
-                            format!("↑{}", curr.ahead),
-                            FontId::monospace(11.0),
-                            green,
-                        );
-                    }
-                    if resp.clicked() {
-                        pick_ref = Some((curr.name.clone(), false));
-                    }
-                    if resp.secondary_clicked() {
-                        let anchor = ui
-                            .input(|i| i.pointer.hover_pos())
-                            .map(|p| Rect::from_min_size(p, Vec2::splat(1.0)))
-                            .unwrap_or(row);
-                        open_menu = Some((curr.name.clone(), false, anchor));
-                    }
-                    y += row_h + 6.0;
-                }
-
                 // Local tree.
                 ui.painter().text(
                     Pos2::new(container_rect.left() + 12.0, y + 8.0),
@@ -2004,7 +2009,7 @@ fn draw_branch_list(
                             Pos2::new(container_rect.left() + 4.0, y),
                             Vec2::new(container_rect.width() - 8.0, 20.0),
                         );
-                        let indent = 18.0 + 14.0 * row_ref.depth as f32;
+                        let indent = 10.0 + 12.0 * row_ref.depth as f32;
                         let is_current = branch.name == current;
                         let is_fav = model.favorite_branches.contains(&branch.name);
                         let response = ui.interact(
@@ -2014,62 +2019,61 @@ fn draw_branch_list(
                         );
                         let is_selected =
                             model.projects[index].ref_selection.contains(&branch.name);
+                        // b-item：margin 1px 4px、radius 4；选中 #26415f。
+                        let row = row.shrink2(Vec2::new(2.0, 1.0));
                         if is_selected {
-                            ui.painter()
-                                .rect_filled(row, egui::CornerRadius::same(3), p.active);
+                            ui.painter().rect_filled(
+                                row,
+                                egui::CornerRadius::same(4),
+                                p.selected_row,
+                            );
                         } else if response.hovered() {
                             ui.painter()
-                                .rect_filled(row, egui::CornerRadius::same(3), p.hover);
+                                .rect_filled(row, egui::CornerRadius::same(4), p.hover);
                         }
-                        // Branch knob: filled dot for HEAD.
-                        if is_current {
-                            ui.painter().circle_filled(
-                                Pos2::new(row.left() + indent, row.center().y),
-                                3.0,
-                                p.accent,
-                            );
+                        // 图标规则（renderRefRow）：收藏→黄星；tag/当前→黄 tag；
+                        // 远程→云；本地→绿分支。
+                        let green = Color32::from_rgb(0x3f, 0xb9, 0x50);
+                        let amber = Color32::from_rgb(0xe3, 0xb3, 0x41);
+                        let (icon, tint, isize) = if is_fav && !is_current {
+                            (Icon::Star, amber, 12.0)
+                        } else if is_current {
+                            (Icon::Tag, amber, 12.0)
                         } else {
-                            ui.painter().circle_stroke(
-                                Pos2::new(row.left() + indent, row.center().y),
-                                3.0,
-                                Stroke::new(1.3, p.text3),
-                            );
-                        }
+                            (Icon::Branch, green, 13.0)
+                        };
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(row.left() + indent + 6.0, row.center().y),
+                                Vec2::splat(isize),
+                            ),
+                            icon,
+                            tint,
+                        );
                         let name_label = row_ref.label.clone();
                         ui.painter().text(
-                            Pos2::new(row.left() + indent + 8.0, row.center().y),
+                            Pos2::new(row.left() + indent + 18.0, row.center().y),
                             Align2::LEFT_CENTER,
                             &name_label,
-                            FontId::proportional(12.5),
-                            if is_current { p.text } else { p.text2 },
+                            FontId::proportional(11.0),
+                            if is_current { p.text_bright } else { p.text },
                         );
-                        // ahead/behind badge.
+                        // b-up-arrow：↑n ↓n 绿色 10px，margin-left auto。
+                        let mut badge = String::new();
                         if branch.ahead > 0 {
-                            let badge = format!("↑{}", branch.ahead);
+                            badge.push_str(&format!("↑{}", branch.ahead));
+                        }
+                        if branch.behind > 0 {
+                            badge.push_str(&format!(" ↓{}", branch.behind));
+                        }
+                        if !badge.is_empty() {
                             ui.painter().text(
-                                Pos2::new(
-                                    row.right() - (if is_fav { 24.0 } else { 8.0 }),
-                                    row.center().y,
-                                ),
+                                Pos2::new(row.right() - 6.0, row.center().y),
                                 Align2::RIGHT_CENTER,
                                 badge,
-                                FontId::monospace(11.0),
-                                Color32::from_rgb(0x3f, 0xb9, 0x50),
-                            );
-                        }
-                        // Favorite star.
-                        if is_fav {
-                            let star_offset = if branch.ahead > 0 || branch.behind > 0 {
-                                56.0
-                            } else {
-                                10.0
-                            };
-                            ui.painter().text(
-                                Pos2::new(row.right() - star_offset, row.center().y),
-                                Align2::RIGHT_CENTER,
-                                "★",
                                 FontId::proportional(10.0),
-                                p.amber,
+                                green,
                             );
                         }
                         if response.secondary_clicked() {
@@ -2160,7 +2164,7 @@ fn draw_branch_list(
                                 Pos2::new(container_rect.left() + 4.0, y),
                                 Vec2::new(container_rect.width() - 8.0, 20.0),
                             );
-                            let indent = 18.0 + 14.0 * row_ref.depth as f32;
+                            let indent = 10.0 + 12.0 * row_ref.depth as f32;
                             let response = ui.interact(
                                 row,
                                 ui.scope_id().with(("refrow", branch.name.clone())),
@@ -2168,27 +2172,33 @@ fn draw_branch_list(
                             );
                             let is_selected =
                                 model.projects[index].ref_selection.contains(&branch.name);
+                            let row = row.shrink2(Vec2::new(2.0, 1.0));
                             if is_selected {
                                 ui.painter().rect_filled(
                                     row,
-                                    egui::CornerRadius::same(3),
-                                    p.active,
+                                    egui::CornerRadius::same(4),
+                                    p.selected_row,
                                 );
                             } else if response.hovered() {
                                 ui.painter()
-                                    .rect_filled(row, egui::CornerRadius::same(3), p.hover);
+                                    .rect_filled(row, egui::CornerRadius::same(4), p.hover);
                             }
-                            ui.painter().circle_stroke(
-                                Pos2::new(row.left() + indent, row.center().y),
-                                3.0,
-                                Stroke::new(1.3, p.blue),
+                            // 远程分支：云图标 muted（renderRefRow）。
+                            paint_icon(
+                                ui.painter(),
+                                Rect::from_center_size(
+                                    Pos2::new(row.left() + indent + 6.0, row.center().y),
+                                    Vec2::splat(13.0),
+                                ),
+                                Icon::Cloud,
+                                p.text3,
                             );
                             ui.painter().text(
-                                Pos2::new(row.left() + indent + 8.0, row.center().y),
+                                Pos2::new(row.left() + indent + 18.0, row.center().y),
                                 Align2::LEFT_CENTER,
                                 &row_ref.label,
-                                FontId::proportional(10.5),
-                                p.text2,
+                                FontId::proportional(11.0),
+                                p.text,
                             );
                             if response.secondary_clicked() {
                                 if !model.projects[index].ref_selection.contains(&branch.name) {
@@ -2227,22 +2237,17 @@ fn draw_branch_list(
                     }
                 }
 
-                // Tags section.
+                // Tags section（b-group-row + tag 行：黄 tag 图标 + 11px 名字）。
                 if !tags.is_empty() {
                     ui.painter().text(
                         Pos2::new(container_rect.left() + 12.0, y + 8.0),
                         Align2::LEFT_CENTER,
                         crate::tr!(model, "Tags", "标签"),
-                        FontId::proportional(9.5),
-                        p.text3,
+                        FontId::proportional(11.0),
+                        p.text2,
                     );
                     y += 24.0;
                     for tag in tags.iter() {
-                        let tag_target = tag_targets
-                            .iter()
-                            .find(|(name, _)| name == tag)
-                            .map(|(_, target)| target.clone())
-                            .unwrap_or_default();
                         let row = Rect::from_min_size(
                             Pos2::new(container_rect.left() + 4.0, y),
                             Vec2::new(container_rect.width() - 8.0, 20.0),
@@ -2252,33 +2257,34 @@ fn draw_branch_list(
                             ui.scope_id().with(("tagrow", tag.clone())),
                             Sense::click(),
                         );
-                        if response.hovered() {
+                        let is_selected = model.projects[index].ref_selection.contains(tag);
+                        let row = row.shrink2(Vec2::new(2.0, 1.0));
+                        if is_selected {
+                            ui.painter().rect_filled(
+                                row,
+                                egui::CornerRadius::same(4),
+                                p.selected_row,
+                            );
+                        } else if response.hovered() {
                             ui.painter()
-                                .rect_filled(row, egui::CornerRadius::same(3), p.hover);
+                                .rect_filled(row, egui::CornerRadius::same(4), p.hover);
                         }
-                        ui.painter().text(
-                            Pos2::new(row.left() + 18.0, row.center().y),
-                            Align2::LEFT_CENTER,
-                            "◇",
-                            FontId::proportional(10.0),
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(row.left() + 16.0, row.center().y),
+                                Vec2::splat(12.0),
+                            ),
+                            Icon::Tag,
                             p.amber,
                         );
                         ui.painter().text(
-                            Pos2::new(row.left() + 32.0, row.center().y),
+                            Pos2::new(row.left() + 28.0, row.center().y),
                             Align2::LEFT_CENTER,
                             tag,
-                            FontId::proportional(10.5),
-                            p.text2,
+                            FontId::proportional(11.0),
+                            p.text,
                         );
-                        if !tag_target.is_empty() {
-                            ui.painter().text(
-                                Pos2::new(row.right() - 8.0, row.center().y),
-                                Align2::RIGHT_CENTER,
-                                &tag_target,
-                                FontId::monospace(8.5),
-                                p.text3,
-                            );
-                        }
                         y += row_h;
                     }
                 }

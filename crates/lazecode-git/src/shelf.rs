@@ -374,8 +374,122 @@ fn list_untracked(root: &Path) -> Vec<String> {
 }
 
 pub fn shelf_delete(root: &Path, name: &str) -> Result<()> {
-    let file = shelves_dir(root).join(format!("{}.patch", name.trim()));
-    std::fs::remove_file(&file).map_err(|err| anyhow!("cannot delete shelf: {err}"))
+    // 稳定版语义：删除先进入「Recently Deleted」，可恢复、可彻底清除。
+    let dir = shelves_dir(root);
+    let file = dir.join(format!("{}.patch", name.trim()));
+    let deleted_dir = dir.join("deleted");
+    std::fs::create_dir_all(&deleted_dir)
+        .map_err(|err| anyhow!("cannot create deleted dir: {err}"))?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let target = deleted_dir.join(format!("{}.{}.patch", name.trim(), stamp));
+    std::fs::rename(&file, &target).map_err(|err| anyhow!("cannot delete shelf: {err}"))
+}
+
+/// 「Recently Deleted」列表：`deleted/` 下的补丁（同名取最新一次删除）。
+pub fn shelf_list_deleted(root: &Path) -> Result<Vec<ShelfEntry>> {
+    let deleted_dir = shelves_dir(root).join("deleted");
+    let mut entries: Vec<ShelfEntry> = Vec::new();
+    let Ok(read) = std::fs::read_dir(&deleted_dir) else {
+        return Ok(entries);
+    };
+    for item in read.flatten() {
+        let file_name = item.file_name().to_string_lossy().to_string();
+        let Some(base) = file_name.strip_suffix(".patch") else {
+            continue;
+        };
+        // `{name}.{stamp}.patch` → name + stamp 作为删除时间。
+        let Some((name, stamp)) = base.rsplit_once('.') else {
+            continue;
+        };
+        let created = stamp.parse::<u64>().unwrap_or(0);
+        if let Ok(patch) = std::fs::read_to_string(item.path()) {
+            entries.push(ShelfEntry {
+                name: name.to_string(),
+                patch,
+                created,
+            });
+        }
+    }
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.created));
+    entries.dedup_by(|a, b| a.name == b.name);
+    Ok(entries)
+}
+
+/// 从「Recently Deleted」恢复架藏（重命名回主目录）。
+pub fn shelf_restore_deleted(root: &Path, name: &str) -> Result<()> {
+    let dir = shelves_dir(root);
+    let deleted_dir = dir.join("deleted");
+    let mut best: Option<(std::path::PathBuf, u64)> = None;
+    if let Ok(read) = std::fs::read_dir(&deleted_dir) {
+        for item in read.flatten() {
+            let file_name = item.file_name().to_string_lossy().to_string();
+            let Some(base) = file_name.strip_suffix(".patch") else {
+                continue;
+            };
+            if let Some((deleted_name, stamp)) = base.rsplit_once('.') {
+                if deleted_name == name.trim() {
+                    let stamp = stamp.parse::<u64>().unwrap_or(0);
+                    if best
+                        .as_ref()
+                        .is_none_or(|(_, best_stamp)| stamp > *best_stamp)
+                    {
+                        best = Some((item.path(), stamp));
+                    }
+                }
+            }
+        }
+    }
+    let Some((path, _)) = best else {
+        return Err(anyhow!("no deleted shelf named {name}"));
+    };
+    let target = dir.join(format!("{}.patch", name.trim()));
+    if target.exists() {
+        return Err(anyhow!("a shelf named {name} already exists"));
+    }
+    std::fs::rename(&path, &target).map_err(|err| anyhow!("cannot restore shelf: {err}"))
+}
+
+/// 彻底删除「最近删除」里的架藏（不可恢复）。
+pub fn shelf_purge_deleted(root: &Path, name: &str) -> Result<()> {
+    let deleted_dir = shelves_dir(root).join("deleted");
+    let mut removed = false;
+    if let Ok(read) = std::fs::read_dir(&deleted_dir) {
+        for item in read.flatten() {
+            let file_name = item.file_name().to_string_lossy().to_string();
+            let Some(base) = file_name.strip_suffix(".patch") else {
+                continue;
+            };
+            if base
+                .rsplit_once('.')
+                .is_some_and(|(deleted_name, _)| deleted_name == name.trim())
+            {
+                let _ = std::fs::remove_file(item.path());
+                removed = true;
+            }
+        }
+    }
+    if removed {
+        Ok(())
+    } else {
+        Err(anyhow!("no deleted shelf named {name}"))
+    }
+}
+
+/// 重命名架藏（重命名主目录下的补丁文件）。
+pub fn shelf_rename(root: &Path, from: &str, to: &str) -> Result<()> {
+    let dir = shelves_dir(root);
+    let from = dir.join(format!("{}.patch", from.trim()));
+    let to = dir.join(format!("{}.patch", to.trim()));
+    if !from.exists() {
+        return Err(anyhow!("no shelf to rename"));
+    }
+    if to.exists() {
+        return Err(anyhow!("a shelf named {} already exists", to.display()));
+    }
+    std::fs::rename(&from, &to).map_err(|err| anyhow!("cannot rename shelf: {err}"))
 }
 
 pub fn shelf_patch(root: &Path, name: &str) -> Result<String> {

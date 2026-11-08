@@ -5,7 +5,8 @@ use lazecode_core::{AppModel, Command, PanelTab, ProjectState, SidebarView, Toas
 use lazecode_fs::tree::{visible_rows, NodeKind, VisibleRow};
 
 use crate::icons::{paint as paint_icon, Icon};
-use crate::runtime::UiRuntime;
+use crate::overlays::{menu_frame, menu_row};
+use crate::runtime::{CommitTab, UiRuntime};
 use crate::theme::Theme;
 use crate::widgets::{
     checkbox, checkbox_tri, icon_button, live_dot, primary_button, secondary_button_enabled,
@@ -433,8 +434,10 @@ fn draw_tree_foot(ui: &mut Ui, model: &mut AppModel, theme: &Theme, rect: Rect) 
     );
 }
 
-/// 源控列表文件行。返回 (勾选翻转, 单击, 双击, 右键, hover-Rollback 点击)。
-/// 选中态/修饰键判定由调用方处理（需要跨行的 Shift 范围信息）。
+/// 源控列表文件行（稳定版 `.change-file-row` 22px 单行：勾选框 + 文件
+/// 图标 + 状态色文件名 + 右对齐目录提示 + hover 回滚）。返回
+/// (勾选翻转, 单击, 双击, 右键, hover-Rollback 点击)。
+#[allow(clippy::too_many_arguments)]
 fn change_row(
     ui: &mut Ui,
     theme: &Theme,
@@ -442,6 +445,8 @@ fn change_row(
     change: &lazecode_git::Change,
     checked: bool,
     selected: bool,
+    depth: usize,
+    show_dir_hint: bool,
 ) -> (bool, bool, bool, bool, bool) {
     let p = theme.palette;
     let response = ui.interact(
@@ -453,95 +458,78 @@ fn change_row(
         ui.painter().rect_filled(
             rect,
             egui::CornerRadius::same(4),
-            if selected { p.selection } else { p.hover },
+            if selected { p.selected_row } else { p.hover },
         );
     }
-    let checkbox_rect = Rect::from_center_size(
-        Pos2::new(rect.left() + 16.0, rect.center().y),
-        Vec2::splat(16.0),
-    );
+    let indent = rect.left() + 6.0 + depth as f32 * 14.0;
+    let checkbox_rect =
+        Rect::from_center_size(Pos2::new(indent + 7.0, rect.center().y), Vec2::splat(14.0));
     let mut checked = checked;
     let toggle = checkbox(ui, checkbox_rect, checked, theme);
     if toggle.clicked() {
         checked = !checked;
     }
     let name = change.path.rsplit('/').next().unwrap_or(&change.path);
-    let dir = {
-        let path = change.path.trim_end_matches(name);
-        path.trim_end_matches('/').to_string()
+    let icon_rect =
+        Rect::from_center_size(Pos2::new(indent + 22.0, rect.center().y), Vec2::splat(14.0));
+    paint_icon(ui.painter(), icon_rect, Icon::File, p.text3);
+    let text_left = indent + 34.0;
+    // 稳定版状态色：modified git-blue / added git-green / deleted git-del /
+    // unversioned #d08770（稳定版硬编码）/ conflict #ff7b72。
+    let letter = change.letter();
+    let name_color = if change.untracked {
+        Color32::from_rgb(0xd0, 0x87, 0x70)
+    } else {
+        match letter {
+            'A' | 'U' => p.green,
+            'D' => p.rose,
+            _ => p.blue,
+        }
     };
-    let text_left = rect.left() + 30.0;
-    let name_color = if change.untracked { p.orange } else { p.text };
-    ui.painter().text(
-        Pos2::new(text_left, rect.center().y - 5.0),
-        Align2::LEFT_CENTER,
-        name,
-        FontId::proportional(13.0),
-        name_color,
-    );
+    let name_right = if show_dir_hint {
+        rect.right() - 100.0
+    } else {
+        rect.right() - 26.0
+    };
     text_clipped(
         ui.painter(),
         Rect::from_min_max(
-            Pos2::new(text_left, rect.center().y + 2.0),
-            Pos2::new(rect.right() - 108.0, rect.bottom()),
+            Pos2::new(text_left, rect.top()),
+            Pos2::new(name_right, rect.bottom()),
         ),
-        &dir,
-        FontId::proportional(11.0),
-        p.text3,
+        name,
+        FontId::proportional(12.0),
+        name_color,
         Align2::LEFT_CENTER,
     );
-    let letter = change.letter();
-    let del = if change.deletions > 0 {
-        Some(format!("\u{2212}{}", change.deletions))
-    } else {
-        None
-    };
-    let del_width = del
-        .as_ref()
-        .map(|text| crate::widgets::text_width(ui.painter(), text, FontId::monospace(10.5)))
-        .unwrap_or(0.0);
-    let add_right = rect.right() - 24.0 - if del.is_some() { del_width + 6.0 } else { 0.0 };
-    ui.painter().text(
-        Pos2::new(add_right, rect.center().y),
-        Align2::RIGHT_CENTER,
-        format!("+{}", change.additions),
-        FontId::monospace(10.5),
-        p.green,
-    );
-    if let Some(del) = del {
-        ui.painter().text(
-            Pos2::new(rect.right() - 24.0, rect.center().y),
+    if show_dir_hint {
+        let dir = {
+            let path = change.path.trim_end_matches(name);
+            path.trim_end_matches('/').to_string()
+        };
+        text_clipped(
+            ui.painter(),
+            Rect::from_min_max(
+                Pos2::new(rect.right() - 220.0, rect.top()),
+                Pos2::new(rect.right() - 26.0, rect.bottom()),
+            ),
+            &dir,
+            FontId::proportional(11.0),
+            p.text3,
             Align2::RIGHT_CENTER,
-            del,
-            FontId::monospace(10.5),
-            p.rose,
         );
     }
-    // 行尾：hover 时把状态字母换成 Rollback 小按钮（稳定版 hover 回滚的
-    // 等价物；行宽有限，复用字母位避免布局挤压）。未跟踪文件没有可回滚
-    // 的基线，与稳定版一致不显示。
+    // 行尾 hover 回滚（稳定版：未跟踪/被忽略不显示）。
     let rollback_rect = Rect::from_center_size(
-        Pos2::new(rect.right() - 8.0, rect.center().y),
+        Pos2::new(rect.right() - 18.0, rect.center().y),
         Vec2::splat(16.0),
     );
     let mut discard_clicked = false;
-    if response.hovered() && !change.untracked {
-        if icon_button(ui, rollback_rect, Icon::Undo, false, theme).clicked() {
-            discard_clicked = true;
-        }
-    } else {
-        ui.painter().text(
-            Pos2::new(rect.right() - 8.0, rect.center().y),
-            Align2::CENTER_CENTER,
-            letter.to_string(),
-            FontId::monospace(11.0),
-            match letter {
-                'U' => p.green,
-                'D' => p.rose,
-                'A' => p.green,
-                _ => p.amber,
-            },
-        );
+    if response.hovered()
+        && !change.untracked
+        && icon_button(ui, rollback_rect, Icon::Undo, false, theme).clicked()
+    {
+        discard_clicked = true;
     }
     (
         checked,
@@ -570,42 +558,254 @@ fn source_control(
     rect: Rect,
 ) {
     let p = theme.palette;
-    let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), HEAD_H));
-    if let Some(action) = side_head(
-        ui,
-        theme,
-        head,
-        crate::tr!(model, "Source Control", "版本控制"),
-        &[
-            (Icon::Refresh, "refresh"),
-            (Icon::GitLog, "log"),
-            (Icon::CollapseAll, "collapse"),
-            (Icon::ExpandAll, "expand"),
-        ],
-    ) {
-        match action {
-            0 => {
-                model.queue(Command::ReloadGit);
-                model.queue(Command::ReloadTree);
+    let checked: HashSet<String> = model
+        .active_project()
+        .map(|project| project.checked_paths.clone())
+        .unwrap_or_default();
+
+    // ----- 稳定版 CommitDrawer 头部（34px）：Commit/Shelf 页签 + ⋮ + ——
+    let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 34.0));
+    let tab = rt.commit_tab;
+    let tab_x = |index: usize| head.left() + 10.0 + index as f32 * 62.0;
+    for (index, (label, kind)) in [
+        (crate::tr!(model, "Commit", "提交"), CommitTab::Commit),
+        (crate::tr!(model, "Shelf", "架藏"), CommitTab::Shelf),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let active = tab == kind;
+        let tab_rect = Rect::from_min_size(
+            Pos2::new(tab_x(index), head.top()),
+            Vec2::new(56.0, head.height()),
+        );
+        let response = ui.interact(
+            tab_rect,
+            ui.scope_id().with((
+                "commit-tab",
+                if matches!(kind, CommitTab::Commit) {
+                    0u8
+                } else {
+                    1u8
+                },
+            )),
+            Sense::click(),
+        );
+        ui.painter().text(
+            Pos2::new(tab_rect.center().x, tab_rect.center().y - 1.0),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(13.0),
+            if active { p.text_bright } else { p.text3 },
+        );
+        if active {
+            ui.painter().rect_filled(
+                Rect::from_min_max(
+                    Pos2::new(tab_rect.left() + 2.0, head.bottom() - 2.0),
+                    Pos2::new(tab_rect.right() - 2.0, head.bottom() - 1.0),
+                ),
+                egui::CornerRadius::ZERO,
+                p.accent,
+            );
+        }
+        if response.clicked() && !active {
+            rt.commit_tab = kind;
+            rt.shelf_file_sel.clear();
+            rt.shelf_selected = None;
+        }
+    }
+    // 右侧：⋮（扩展入口：贮藏/架藏库）+ 最小化（稳定版隐藏面板）。
+    let more_rect = Rect::from_center_size(
+        Pos2::new(head.right() - 40.0, head.center().y),
+        Vec2::splat(22.0),
+    );
+    if icon_button(ui, more_rect, Icon::More, false, theme).clicked() {
+        rt.open_menu(
+            crate::runtime::MenuKind::CommitExtras,
+            more_rect,
+            None::<String>,
+        );
+    }
+    let min_rect = Rect::from_center_size(
+        Pos2::new(head.right() - 16.0, head.center().y),
+        Vec2::splat(22.0),
+    );
+    if icon_button(ui, min_rect, Icon::Minimize, false, theme).clicked() {
+        model.ui.sidebar_visible = false;
+    }
+    ui.painter().hline(
+        head.x_range(),
+        head.bottom() - 0.5,
+        Stroke::new(1.0, p.border),
+    );
+
+    // ----- 工具栏（28px，22×22 图标按钮，稳定版 commit-toolbar） -----
+    let toolbar = Rect::from_min_size(
+        Pos2::new(rect.left(), head.bottom()),
+        Vec2::new(rect.width(), 28.0),
+    );
+    let tool_btn = |ui: &mut Ui, index: usize, icon: Icon, enabled: bool, theme: &Theme| {
+        let rect = Rect::from_center_size(
+            Pos2::new(
+                toolbar.left() + 12.0 + index as f32 * 24.0,
+                toolbar.center().y,
+            ),
+            Vec2::splat(22.0),
+        );
+        crate::widgets::icon_button(ui, rect, icon, false, theme)
+            .clicked()
+            .then_some(())
+            .filter(|_| enabled)
+            .is_some()
+    };
+    let mut expand_all = false;
+    let mut collapse_all = false;
+    if tab == CommitTab::Commit {
+        let refresh = tool_btn(ui, 0, Icon::Refresh, true, theme);
+        let rollback = tool_btn(ui, 1, Icon::Undo, true, theme);
+        let project_now = model.active_project().unwrap();
+        let has_selection = !project_now.change_selection.is_empty();
+        let shelve_enabled = tool_btn(ui, 2, Icon::ShelveIn, true, theme);
+        let eye = tool_btn(ui, 3, Icon::ViewOptions, true, theme);
+        expand_all |= tool_btn(ui, 4, Icon::ExpandAll, true, theme);
+        collapse_all |= tool_btn(ui, 5, Icon::CollapseAll, true, theme);
+        if refresh {
+            model.queue(Command::ReloadGit);
+            model.queue(Command::ReloadTree);
+        }
+        if rollback && has_selection {
+            let paths: Vec<String> = model
+                .active_project()
+                .unwrap()
+                .change_selection
+                .iter()
+                .cloned()
+                .collect();
+            rt.dialog = crate::runtime::DialogState::ConfirmDiscard { paths };
+        }
+        if shelve_enabled {
+            // Shelve：只架藏勾选文件；默认名单文件取文件名（稳定版规则）。
+            let checked_paths: Vec<String> = model
+                .active_project()
+                .unwrap()
+                .changes()
+                .iter()
+                .filter(|change| checked.contains(&change.path))
+                .map(|change| change.path.clone())
+                .collect();
+            if !checked_paths.is_empty() {
+                let default_name = if checked_paths.len() == 1 {
+                    checked_paths[0]
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("Default")
+                        .to_string()
+                } else {
+                    "Default".to_string()
+                };
+                rt.dialog = crate::runtime::DialogState::NewShelf {
+                    value: default_name,
+                    error: None,
+                    paths: checked_paths,
+                };
             }
-            1 => {
-                model.ui.panel_visible = true;
-                model.ui.panel_tab = PanelTab::Git;
-                model.queue(Command::RefreshLog);
+        }
+        if eye {
+            rt.commit_view_menu_open = !rt.commit_view_menu_open;
+        }
+    } else {
+        // Shelf 工具栏：静默恢复 / 视图选项。
+        let unshelve_silent = tool_btn(ui, 0, Icon::Undo, true, theme);
+        let eye = tool_btn(ui, 1, Icon::ViewOptions, true, theme);
+        expand_all |= tool_btn(ui, 2, Icon::ExpandAll, true, theme);
+        collapse_all |= tool_btn(ui, 3, Icon::CollapseAll, true, theme);
+        if unshelve_silent {
+            // ⌥⌘U：恢复到首个变更列表，不弹对话框（稳定版 Unshelve Silently）。
+            if let Some(name) = rt.shelf_selected.clone() {
+                let default_list = {
+                    let project = model.active_project().unwrap();
+                    lazecode_git::Changelists::open(&project.root)
+                        .lists()
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "Default".to_string())
+                };
+                let paths = if rt.shelf_file_sel.is_empty() {
+                    None
+                } else {
+                    Some(rt.shelf_file_sel.clone())
+                };
+                model.queue(Command::ShelfRestore {
+                    name,
+                    paths,
+                    target_list: Some(default_list),
+                    delete_after: false,
+                });
             }
-            // Expand / Collapse All（对齐稳定版）：作用于分组头 + 冲突子组。
-            2 => {
-                if let Some(project) = model.active_project_mut() {
-                    project.collapsed_lists.clear();
-                    project.collapsed_lists = all_list_keys(project);
-                }
-            }
-            3 => {
-                if let Some(project) = model.active_project_mut() {
-                    project.collapsed_lists.clear();
-                }
-            }
-            _ => {}
+        }
+        if eye {
+            rt.commit_view_menu_open = !rt.commit_view_menu_open;
+        }
+    }
+    ui.painter().hline(
+        toolbar.x_range(),
+        toolbar.bottom() - 0.5,
+        Stroke::new(1.0, p.border),
+    );
+    // 关闭视图选项弹层：下一帧在列表区域外点击时收起（简化处理：
+    // 任何点击都先复位，弹层自身在同帧处理点击）。
+    let view_menu = rt.commit_view_menu_open;
+    if view_menu {
+        // 弹层：Group By / 目录 ^P（稳定版 commit-view-menu）。
+        let menu_rect = Rect::from_min_size(
+            Pos2::new(toolbar.left() + 62.0, toolbar.bottom() + 4.0),
+            Vec2::new(180.0, 52.0),
+        );
+        menu_frame(ui, menu_rect, theme);
+        ui.painter().text(
+            Pos2::new(menu_rect.left() + 12.0, menu_rect.top() + 10.0),
+            Align2::LEFT_CENTER,
+            crate::tr!(model, "Group By", "分组依据"),
+            FontId::proportional(10.0),
+            p.text3,
+        );
+        let item = Rect::from_min_size(
+            Pos2::new(menu_rect.left() + 4.0, menu_rect.top() + 18.0),
+            Vec2::new(menu_rect.width() - 8.0, 24.0),
+        );
+        if menu_row(
+            ui,
+            theme,
+            item,
+            ui.scope_id().with("commit-view-tree"),
+            &*crate::tr!(model, "Directory", "目录"),
+            false,
+            true,
+        ) {
+            rt.commit_tree_view = !rt.commit_tree_view;
+            rt.commit_view_menu_open = false;
+        }
+        if rt.commit_tree_view {
+            ui.painter().text(
+                Pos2::new(item.left() + 10.0, item.center().y),
+                Align2::LEFT_CENTER,
+                "✓",
+                FontId::proportional(10.0),
+                p.menu_item_text,
+            );
+        }
+        ui.painter().text(
+            Pos2::new(item.right() - 10.0, item.center().y),
+            Align2::RIGHT_CENTER,
+            "^P",
+            FontId::proportional(10.0),
+            p.text3,
+        );
+        let outside = ui.input(|input| input.pointer.any_click())
+            && !menu_rect
+                .contains(ui.input(|input| input.pointer.interact_pos().unwrap_or_default()));
+        if outside {
+            rt.commit_view_menu_open = false;
         }
     }
 
@@ -625,7 +825,7 @@ fn source_control(
     let collapsed_lists: HashSet<String> = project.collapsed_lists.clone();
     let selection: HashSet<String> = project.change_selection.clone();
 
-    let dock_height = if changes.is_empty() { 0.0 } else { 196.0 };
+    let dock_height = if changes.is_empty() { 0.0 } else { 168.0 };
     let dock = Rect::from_min_max(
         Pos2::new(rect.left(), rect.bottom() - dock_height),
         rect.max,
@@ -680,6 +880,15 @@ fn source_control(
         return;
     }
 
+    if tab == CommitTab::Shelf {
+        let body = Rect::from_min_max(
+            Pos2::new(rect.left(), toolbar.bottom()),
+            Pos2::new(rect.right(), rect.bottom()),
+        );
+        crate::sidebar::shelf_view(ui, model, rt, theme, body);
+        return;
+    }
+
     if changes.is_empty() {
         if project.git_loading {
             // 稳定版加载中空态（Reading changes…），别把「工作区干净」
@@ -700,164 +909,6 @@ fn source_control(
         }
         draw_clean_state(ui, theme, list, last.as_ref(), model.settings.language);
         return;
-    }
-
-    let total_add: u32 = changes.iter().map(|change| change.additions).sum();
-    let total_del: u32 = changes.iter().map(|change| change.deletions).sum();
-    let summary = Rect::from_min_size(
-        Pos2::new(list.left() + 12.0, list.top() + 8.0),
-        Vec2::new(list.width() - 24.0, 18.0),
-    );
-    ui.painter().text(
-        Pos2::new(summary.left(), summary.center().y),
-        Align2::LEFT_CENTER,
-        if model.settings.language.is_zh() {
-            format!(
-                "{} 个文件 · {}",
-                changes.len(),
-                model.active_project().unwrap().name
-            )
-        } else {
-            format!(
-                "{} files in {}",
-                changes.len(),
-                model.active_project().unwrap().name
-            )
-        },
-        FontId::proportional(12.0),
-        p.text3,
-    );
-    ui.painter().text(
-        Pos2::new(summary.right(), summary.center().y),
-        Align2::RIGHT_CENTER,
-        format!("+{total_add} \u{2212}{total_del}"),
-        FontId::monospace(11.0),
-        p.text3,
-    );
-
-    // ----- 工具按钮行（流式布局：窄侧栏/中文标签下自动换行，避免裁剪） -----
-    let mut button_x = list.left() + 12.0;
-    let mut button_y = summary.bottom() + 3.0;
-    let place = |button_x: &mut f32, button_y: &mut f32, width: f32| -> Rect {
-        if *button_x + width > list.right() - 12.0 {
-            *button_x = list.left() + 12.0;
-            *button_y += 25.0;
-        }
-        let rect = Rect::from_min_size(Pos2::new(*button_x, *button_y), Vec2::new(width, 21.0));
-        *button_x += width + 4.0;
-        rect
-    };
-    let stage_rect = place(&mut button_x, &mut button_y, 76.0);
-    if crate::widgets::secondary_button(
-        ui,
-        stage_rect,
-        crate::tr!(model, "Stage all", "全部暂存"),
-        None,
-        theme,
-    )
-    .clicked()
-    {
-        let paths: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
-        model.queue(Command::Stage(paths));
-    }
-    let unstage_rect = place(&mut button_x, &mut button_y, 88.0);
-    if crate::widgets::secondary_button(
-        ui,
-        unstage_rect,
-        crate::tr!(model, "Unstage all", "全部取消暂存"),
-        None,
-        theme,
-    )
-    .clicked()
-    {
-        let paths: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
-        model.queue(Command::Unstage(paths));
-    }
-    let stash_rect = place(&mut button_x, &mut button_y, 56.0);
-    if crate::widgets::secondary_button(
-        ui,
-        stash_rect,
-        crate::tr!(model, "Stash", "贮藏"),
-        None,
-        theme,
-    )
-    .clicked()
-    {
-        // 对齐稳定版 StashDialog：先弹说明输入 + 未跟踪选项，而不是直接 push。
-        let has_untracked = changes.iter().any(|change| change.untracked);
-        rt.dialog = crate::runtime::DialogState::StashCreate {
-            message: String::new(),
-            include_untracked: has_untracked,
-            error: None,
-        };
-    }
-    let stashes_rect = place(&mut button_x, &mut button_y, 60.0);
-    if crate::widgets::secondary_button(
-        ui,
-        stashes_rect,
-        crate::tr!(model, "List…", "列表…"),
-        None,
-        theme,
-    )
-    .clicked()
-    {
-        rt.dialog = crate::runtime::DialogState::StashManager {
-            stashes: Vec::new(),
-            selected: 0,
-            error: None,
-            loaded: false,
-        };
-    }
-    // Shelve：只架藏勾选文件；默认名单文件取文件名、多文件取默认列表名
-    // （稳定版规则：单文件=文件名，多文件='Changes'，此处默认列表名为
-    // Default）。无勾选时禁用。
-    let checked_paths: Vec<String> = changes
-        .iter()
-        .filter(|change| checked.contains(&change.path))
-        .map(|change| change.path.clone())
-        .collect();
-    let shelf_default_name = if checked_paths.len() == 1 {
-        checked_paths[0]
-            .rsplit('/')
-            .next()
-            .unwrap_or("Default")
-            .to_string()
-    } else {
-        "Default".to_string()
-    };
-    let shelf_rect = place(&mut button_x, &mut button_y, 60.0);
-    if secondary_button_enabled(
-        ui,
-        shelf_rect,
-        crate::tr!(model, "Shelve", "架藏"),
-        None,
-        !checked_paths.is_empty(),
-        theme,
-    )
-    .clicked()
-    {
-        rt.dialog = crate::runtime::DialogState::NewShelf {
-            value: shelf_default_name,
-            error: None,
-            paths: checked_paths.clone(),
-        };
-    }
-    let shelves_rect = place(&mut button_x, &mut button_y, 72.0);
-    if crate::widgets::secondary_button(
-        ui,
-        shelves_rect,
-        crate::tr!(model, "Shelves…", "架藏库…"),
-        None,
-        theme,
-    )
-    .clicked()
-    {
-        rt.dialog = crate::runtime::DialogState::ShelfManager {
-            shelves: Vec::new(),
-            selected: 0,
-            error: None,
-            loaded: false,
-        };
     }
 
     // ----- 分组构建：Default（含冲突子组）→ 自定义列表 → Unversioned -----
@@ -939,7 +990,11 @@ fn source_control(
         group: usize,
         kind: RowKind,
         change: Option<usize>,
+        depth: usize,
+        dir_key: Option<String>,
     }
+    let tree_view = rt.commit_tree_view;
+    let show_dir_hint = !tree_view;
     let mut rows: Vec<ScRow> = Vec::new();
     let mut flat_order: Vec<usize> = Vec::new();
     for (group_index, group) in groups.iter().enumerate() {
@@ -947,6 +1002,8 @@ fn source_control(
             group: group_index,
             kind: RowKind::Header,
             change: None,
+            depth: 0,
+            dir_key: None,
         });
         let collapsed_group = collapsed_lists.contains(&group.key);
         if collapsed_group {
@@ -958,6 +1015,8 @@ fn source_control(
                 group: group_index,
                 kind: RowKind::ConflictHeader,
                 change: None,
+                depth: 1,
+                dir_key: None,
             });
             if !collapsed_lists.contains(&conflict_key) {
                 for index in &group.conflicts {
@@ -965,22 +1024,81 @@ fn source_control(
                         group: group_index,
                         kind: RowKind::File,
                         change: Some(*index),
+                        depth: 2,
+                        dir_key: None,
                     });
                     flat_order.push(*index);
                 }
             }
         }
-        for index in &group.files {
-            rows.push(ScRow {
-                group: group_index,
-                kind: RowKind::File,
-                change: Some(*index),
-            });
-            flat_order.push(*index);
+        if tree_view {
+            // 稳定版 Group by Directory：组内按目录折叠；折叠键 = 组名::目录。
+            let mut files: Vec<&usize> = group.files.iter().collect();
+            files.sort_by(|a, b| changes[**a].path.cmp(&changes[**b].path));
+            let mut emitted: Vec<String> = Vec::new();
+            for index in files {
+                let path = &changes[*index].path;
+                let comps: Vec<&str> = path.split('/').collect();
+                let dirs = &comps[..comps.len().saturating_sub(1)];
+                // 祖先目录被折叠 → 跳过该文件。
+                let mut ancestor_collapsed = false;
+                for depth in 1..=dirs.len() {
+                    let key = format!("{}::{}", group.key, dirs[..depth].join("/"));
+                    if collapsed_lists.contains(&key) {
+                        ancestor_collapsed = true;
+                        break;
+                    }
+                }
+                if ancestor_collapsed {
+                    continue;
+                }
+                for depth in 1..=dirs.len() {
+                    let key = format!("{}::{}", group.key, dirs[..depth].join("/"));
+                    if !emitted.contains(&key) {
+                        rows.push(ScRow {
+                            group: group_index,
+                            kind: RowKind::File,
+                            change: None,
+                            dir_key: None,
+                            depth,
+                        });
+                        emitted.push(key);
+                    }
+                }
+                rows.push(ScRow {
+                    group: group_index,
+                    kind: RowKind::File,
+                    change: Some(*index),
+                    depth: dirs.len() + 1,
+                    dir_key: None,
+                });
+                flat_order.push(*index);
+            }
+        } else {
+            for index in &group.files {
+                rows.push(ScRow {
+                    group: group_index,
+                    kind: RowKind::File,
+                    change: Some(*index),
+                    depth: 1,
+                    dir_key: None,
+                });
+                flat_order.push(*index);
+            }
         }
     }
 
-    let header_bottom = shelves_rect.bottom() + 4.0;
+    if expand_all {
+        if let Some(project) = model.active_project_mut() {
+            project.collapsed_lists.clear();
+        }
+    }
+    if collapse_all {
+        if let Some(project) = model.active_project_mut() {
+            project.collapsed_lists = all_list_keys(project);
+        }
+    }
+    let header_bottom = toolbar.bottom() + 4.0;
     let rows_rect = Rect::from_min_max(Pos2::new(list.left(), header_bottom), list.max);
     let mut toggled: Option<(String, bool)> = None;
     let mut group_toggle: Option<(Vec<String>, bool)> = None;
@@ -993,7 +1111,7 @@ fn source_control(
         egui::ScrollArea::vertical()
             .id_salt("changes")
             .auto_shrink([false, false])
-            .show_rows(ui, 38.0, rows.len(), |ui, range| {
+            .show_rows(ui, 24.0, rows.len(), |ui, range| {
                 for row_index in range {
                     let Some(row) = rows.get(row_index) else {
                         continue;
@@ -1002,7 +1120,7 @@ fn source_control(
                     match row.kind {
                         RowKind::Header => {
                             let (rect, response) = ui.allocate_exact_size(
-                                Vec2::new(ui.available_width(), 38.0),
+                                Vec2::new(ui.available_width(), 24.0),
                                 Sense::click(),
                             );
                             // 组头右键 payload = 组名 + 全组文件路径（稳定版
@@ -1078,7 +1196,7 @@ fn source_control(
                         RowKind::ConflictHeader => {
                             let conflict_key = format!("__conflicts__::{}", group.key);
                             let (rect, response) = ui.allocate_exact_size(
-                                Vec2::new(ui.available_width(), 38.0),
+                                Vec2::new(ui.available_width(), 24.0),
                                 Sense::click(),
                             );
                             let mut paths: Vec<String> = group
@@ -1165,10 +1283,88 @@ fn source_control(
                             }
                         }
                         RowKind::File => {
-                            let change_index = row.change.expect("File row carries a change");
+                            let Some(change_index) = row.change else {
+                                // 树视图目录行（稳定版 commit-dir-row）。
+                                let (rect, response) = ui.allocate_exact_size(
+                                    Vec2::new(ui.available_width(), 24.0),
+                                    Sense::click(),
+                                );
+                                if response.hovered() {
+                                    ui.painter().rect_filled(
+                                        rect.shrink2(Vec2::new(4.0, 0.0)),
+                                        egui::CornerRadius::same(4),
+                                        p.hover,
+                                    );
+                                }
+                                if let Some(key) = &row.dir_key {
+                                    let dir_path = key
+                                        .split_once("::")
+                                        .map(|(_, rest)| rest.to_string())
+                                        .unwrap_or_default();
+                                    let indent = rect.left() + 6.0 + row.depth as f32 * 14.0;
+                                    let expanded = !collapsed_lists.contains(key);
+                                    paint_icon(
+                                        ui.painter(),
+                                        Rect::from_center_size(
+                                            Pos2::new(indent + 5.0, rect.center().y),
+                                            Vec2::splat(10.0),
+                                        ),
+                                        if expanded {
+                                            Icon::ChevronDown
+                                        } else {
+                                            Icon::ChevronRight
+                                        },
+                                        p.text3,
+                                    );
+                                    paint_icon(
+                                        ui.painter(),
+                                        Rect::from_center_size(
+                                            Pos2::new(indent + 20.0, rect.center().y),
+                                            Vec2::splat(13.0),
+                                        ),
+                                        Icon::Folder,
+                                        p.text3,
+                                    );
+                                    ui.painter().text(
+                                        Pos2::new(indent + 32.0, rect.center().y),
+                                        Align2::LEFT_CENTER,
+                                        dir_path.rsplit('/').next().unwrap_or(&dir_path),
+                                        FontId::proportional(12.0),
+                                        p.text,
+                                    );
+                                    let count = group
+                                        .files
+                                        .iter()
+                                        .filter(|index| {
+                                            changes[**index].path.starts_with(&dir_path)
+                                        })
+                                        .count();
+                                    ui.painter().text(
+                                        Pos2::new(rect.right() - 12.0, rect.center().y),
+                                        Align2::RIGHT_CENTER,
+                                        if model.settings.language.is_zh() {
+                                            format!("{count} 个文件")
+                                        } else if count == 1 {
+                                            "1 file".to_string()
+                                        } else {
+                                            format!("{count} files")
+                                        },
+                                        FontId::proportional(11.0),
+                                        p.text3,
+                                    );
+                                    if response.clicked() {
+                                        let project = model.active_project_mut().unwrap();
+                                        if !project.collapsed_lists.remove(key) {
+                                            project.collapsed_lists.insert(key.clone());
+                                        }
+                                    }
+                                }
+                                continue;
+                            };
+
                             let change = &changes[change_index];
                             let (rect, _) = ui.allocate_exact_size(
-                                Vec2::new(ui.available_width(), 38.0),
+                                Vec2::new(ui.available_width(), 24.0),
                                 Sense::hover(),
                             );
                             let rect = rect.shrink2(Vec2::new(4.0, 1.0));
@@ -1176,7 +1372,16 @@ fn source_control(
                             let is_checked = checked.contains(&path);
                             let is_selected = selection.contains(&path);
                             let (new_checked, clicked, double_clicked, secondary, discard) =
-                                change_row(ui, theme, rect, change, is_checked, is_selected);
+                                change_row(
+                                    ui,
+                                    theme,
+                                    rect,
+                                    change,
+                                    is_checked,
+                                    is_selected,
+                                    row.depth,
+                                    show_dir_hint,
+                                );
                             if secondary {
                                 // 右键行不在多选内→只选中它（稳定版规则）；
                                 // 在多选内→对整个选择生效。
@@ -1423,20 +1628,63 @@ fn draw_commit_dock(
     rect: Rect,
     changes: &[lazecode_git::Change],
     message: &str,
-    amend: bool,
+    _amend: bool,
     checked: usize,
     can_commit: bool,
 ) {
     let p = theme.palette;
-    ui.painter().rect_filled(rect, 0.0, p.sidebar);
-    ui.painter()
-        .hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, p.border));
+    let _ = changes;
+    ui.painter().hline(
+        rect.x_range(),
+        rect.top() + 0.5,
+        Stroke::new(1.0, p.border_soft),
+    );
+    // 稳定版 commit-bottom-box：padding 10 / gap 8。
+    // 1) 选项行：提交信息历史按钮（右对齐，无历史时禁用态）。
+    let options_row = Rect::from_min_size(
+        Pos2::new(rect.left() + 10.0, rect.top() + 8.0),
+        Vec2::new(rect.width() - 20.0, 20.0),
+    );
+    let history_empty = model.settings.commit_history.is_empty();
+    let history_rect = Rect::from_center_size(
+        Pos2::new(options_row.right() - 10.0, options_row.center().y),
+        Vec2::splat(20.0),
+    );
+    let history_response = ui.interact(
+        history_rect,
+        ui.scope_id().with("dock-history"),
+        Sense::click(),
+    );
+    if history_response.hovered() && !history_empty {
+        ui.painter()
+            .rect_filled(history_rect, egui::CornerRadius::same(4), p.hover);
+    }
+    paint_icon(
+        ui.painter(),
+        history_rect.shrink(3.0),
+        Icon::History,
+        if history_empty { p.text3 } else { p.text2 },
+    );
+    if history_response.clicked() && !history_empty {
+        let anchor = Rect::from_min_size(
+            Pos2::new(history_rect.left(), history_rect.top()),
+            Vec2::splat(1.0),
+        );
+        rt.open_menu(
+            crate::runtime::MenuKind::CommitHistory {
+                project: model.active_project.unwrap_or(0),
+            },
+            anchor,
+            None::<String>,
+        );
+    }
+    // 2) 提交信息输入（80px，placeholder "Commit Message"）。
     let input = Rect::from_min_size(
-        Pos2::new(rect.left() + 12.0, rect.top() + 10.0),
-        Vec2::new(rect.width() - 24.0, 66.0),
+        Pos2::new(rect.left() + 10.0, options_row.bottom() + 4.0),
+        Vec2::new(rect.width() - 20.0, 80.0),
     );
     ui.painter()
-        .rect_filled(input, egui::CornerRadius::same(6), p.panel);
+        .rect_filled(input, egui::CornerRadius::same(6), p.titlebar);
     ui.painter().rect_stroke(
         input,
         egui::CornerRadius::same(6),
@@ -1449,95 +1697,34 @@ fn draw_commit_dock(
         editor_rect,
         TextEdit::multiline(&mut value)
             .frame(egui::Frame::NONE)
-            .hint_text(crate::tr!(model, "Commit message", "提交信息"))
-            .font(FontId::proportional(12.5))
+            .hint_text("Commit Message")
+            .font(FontId::proportional(12.0))
             .desired_width(editor_rect.width()),
     );
     if response.changed() {
         model.active_project_mut().unwrap().commit_message = value;
     }
-
-    let amend_rect = Rect::from_min_size(
-        Pos2::new(rect.left() + 12.0, input.bottom() + 8.0),
-        Vec2::new(70.0, 20.0),
-    );
-    // 提交信息历史入口（对齐稳定版 useCommitMessageHistory 下拉）。
-    let history_rect = Rect::from_center_size(
-        Pos2::new(amend_rect.left() + 10.0, amend_rect.center().y),
-        Vec2::splat(20.0),
-    );
-    if icon_button(ui, history_rect, Icon::Clock, false, theme).clicked() {
-        let anchor = Rect::from_min_size(
-            Pos2::new(history_rect.left(), amend_rect.bottom()),
-            Vec2::splat(1.0),
-        );
-        rt.toggle_menu(
-            crate::runtime::MenuKind::CommitHistory {
-                project: model.active_project.unwrap_or(0),
-            },
-            anchor,
-            None,
-        );
-    }
-    let mut amend_value = amend;
-    let checkbox_rect = Rect::from_center_size(
-        Pos2::new(amend_rect.left() + 28.0, amend_rect.center().y),
-        Vec2::splat(16.0),
-    );
-    if checkbox(ui, checkbox_rect, amend_value, theme).clicked() {
-        amend_value = !amend_value;
-        model.active_project_mut().unwrap().amend = amend_value;
-    }
-    ui.painter().text(
-        Pos2::new(amend_rect.left() + 40.0, amend_rect.center().y),
-        Align2::LEFT_CENTER,
-        crate::tr!(model, "Amend", "修订"),
-        FontId::proportional(12.0),
-        p.text3,
-    );
-
-    ui.painter().text(
-        Pos2::new(rect.right() - 12.0, amend_rect.center().y),
-        Align2::RIGHT_CENTER,
-        if model.settings.language.is_zh() {
-            format!("{} / {} 个文件", checked, changes.len())
-        } else {
-            format!("{checked} / {} files", changes.len())
-        },
-        FontId::proportional(11.5),
-        p.text3,
-    );
-
-    // Commit + Commit & Push 两按钮（对齐稳定版 commit-bottom-box）。
-    let push_w = 96.0f32;
+    // 3) 按钮行：Commit（主）+ Commit and Push...（次，flex:1）。
+    let actions_y = input.bottom() + 8.0;
+    let commit_w = 96.0f32;
     let commit_rect = Rect::from_min_size(
-        Pos2::new(rect.left() + 12.0, amend_rect.bottom() + 8.0),
-        Vec2::new(rect.width() - 24.0 - push_w - 6.0, 30.0),
+        Pos2::new(rect.left() + 10.0, actions_y),
+        Vec2::new(commit_w, 28.0),
     );
-    let push_rect = Rect::from_min_size(
-        Pos2::new(commit_rect.right() + 6.0, commit_rect.top()),
-        Vec2::new(push_w, 30.0),
+    let push_rect = Rect::from_min_max(
+        Pos2::new(commit_rect.right() + 6.0, actions_y),
+        Pos2::new(rect.right() - 10.0, actions_y + 28.0),
     );
-    let enabled =
-        can_commit && (!message.trim().is_empty() || amend_value) && (checked > 0 || amend_value);
-    let label = if amend_value {
-        crate::tr!(model, "Amend commit", "修订提交").to_string()
-    } else {
-        if model.settings.language.is_zh() {
-            format!("提交 {} 个文件", checked)
-        } else {
-            format!("Commit {checked} files")
-        }
-    };
-    let response = primary_button(ui, commit_rect, &label, Some(Icon::Commit), enabled, theme);
+    let enabled = can_commit && !message.trim().is_empty() && checked > 0;
+    let label = crate::tr!(model, "Commit", "提交").to_string();
+    let response = primary_button(ui, commit_rect, &label, None, enabled, theme);
     if response.clicked() && enabled {
         model.queue(Command::Commit);
     }
-    let push_label = crate::tr!(model, "Commit & Push", "提交并推送").to_string();
+    let push_label = crate::tr!(model, "Commit and Push...", "提交并推送…").to_string();
     let push_response = secondary_button_enabled(ui, push_rect, &push_label, None, enabled, theme);
     if push_response.clicked() && enabled {
-        // 提交成功后由 JobResult 消费点置位 UiState::open_push_dialog，
-        // shell 随后打开 Push 对话框（对齐稳定版 Commit and Push...）。
+        // 提交成功后由 JobResult 消费点置位 UiState::open_push_dialog。
         if let Some(project) = model.active_project_mut() {
             project.open_push_after_commit = true;
         }
@@ -1805,4 +1992,314 @@ fn format_elapsed(seconds: u64) -> String {
     } else {
         format!("{}h {:02}m", seconds / 3600, (seconds % 3600) / 60)
     }
+}
+
+/// 解析补丁文本里的文件路径（`+++ b/<path>` 行）。
+fn shelf_entry_files(patch: &str) -> Vec<String> {
+    patch
+        .lines()
+        .filter_map(|line| line.strip_prefix("+++ b/"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// 架藏时间：unix 秒 → YYYY/M/D。
+fn shelf_date(seconds: u64) -> String {
+    unsafe {
+        let t = seconds as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&t, &mut tm).is_null() {
+            return String::new();
+        }
+        format!("{}/{}/{}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday)
+    }
+}
+
+/// 稳定版 Shelf 页签：架藏列表（可展开文件）+ Recently Deleted + 右键。
+fn shelf_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, rect: Rect) {
+    let p = theme.palette;
+    let root = model.active_project().unwrap().root.clone();
+    if rt.shelf_loaded.as_deref() != Some(root.as_path()) {
+        rt.shelf_entries = lazecode_git::shelf_list(&root).unwrap_or_default();
+        rt.shelf_deleted = lazecode_git::shelf_list_deleted(&root).unwrap_or_default();
+        rt.shelf_files_map.clear();
+        for entry in &rt.shelf_entries {
+            rt.shelf_files_map
+                .insert(entry.name.clone(), shelf_entry_files(&entry.patch));
+        }
+        rt.shelf_loaded = Some(root.clone());
+        rt.shelf_selected = None;
+        rt.shelf_file_sel.clear();
+    }
+
+    #[derive(Clone)]
+    enum ShRow {
+        Header {
+            name: String,
+            deleted: bool,
+            count: usize,
+        },
+        File {
+            shelf: String,
+            path: String,
+            last: bool,
+        },
+        DeletedBanner {
+            count: usize,
+        },
+    }
+    let mut rows: Vec<ShRow> = Vec::new();
+    let collapsed = model
+        .active_project()
+        .map(|project| project.collapsed_lists.clone())
+        .unwrap_or_default();
+    for entry in &rt.shelf_entries {
+        let files = rt
+            .shelf_files_map
+            .get(&entry.name)
+            .cloned()
+            .unwrap_or_default();
+        rows.push(ShRow::Header {
+            name: entry.name.clone(),
+            deleted: false,
+            count: files.len(),
+        });
+        if !collapsed.contains(&format!("__shelf__::{}", entry.name)) {
+            let total = files.len();
+            for (i, path) in files.iter().enumerate() {
+                rows.push(ShRow::File {
+                    shelf: entry.name.clone(),
+                    path: path.clone(),
+                    last: i + 1 == total,
+                });
+            }
+        }
+    }
+    if !rt.shelf_deleted.is_empty() {
+        rows.push(ShRow::DeletedBanner {
+            count: rt.shelf_deleted.len(),
+        });
+        for entry in &rt.shelf_deleted {
+            let files = shelf_entry_files(&entry.patch);
+            rows.push(ShRow::Header {
+                name: entry.name.clone(),
+                deleted: true,
+                count: files.len(),
+            });
+        }
+    }
+
+    super::app_ui::region(ui, rect, "shelf-rows", |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("shelf-scroll")
+            .auto_shrink([false, false])
+            .show_rows(ui, 24.0, rows.len(), |ui, range| {
+                for row_index in range {
+                    let Some(row) = rows.get(row_index) else {
+                        continue;
+                    };
+                    match row {
+                        ShRow::DeletedBanner { count } => {
+                            let (rect, _) = ui.allocate_exact_size(
+                                Vec2::new(ui.available_width(), 24.0),
+                                Sense::hover(),
+                            );
+                            ui.painter().hline(
+                                rect.x_range(),
+                                rect.top() + 4.0,
+                                Stroke::new(1.0, p.border_soft),
+                            );
+                            ui.painter().text(
+                                Pos2::new(rect.left() + 12.0, rect.center().y + 2.0),
+                                Align2::LEFT_CENTER,
+                                crate::tr!(
+                                    model,
+                                    "Recently Deleted · {count}",
+                                    "最近删除 · {count}"
+                                )
+                                .replace("{count}", &count.to_string()),
+                                FontId::proportional(12.0),
+                                p.text2,
+                            );
+                        }
+                        ShRow::Header {
+                            name,
+                            deleted,
+                            count,
+                        } => {
+                            let (rect, response) = ui.allocate_exact_size(
+                                Vec2::new(ui.available_width(), 24.0),
+                                Sense::click(),
+                            );
+                            let selected = rt.shelf_selected.as_deref() == Some(name.as_str())
+                                && rt.shelf_file_sel.is_empty();
+                            if selected || response.hovered() {
+                                ui.painter().rect_filled(
+                                    rect.shrink2(Vec2::new(2.0, 0.0)),
+                                    egui::CornerRadius::same(4),
+                                    if selected { p.selected_row } else { p.hover },
+                                );
+                            }
+                            let expanded =
+                                !collapsed.contains(&format!("__shelf__::{name}")) && !deleted;
+                            paint_icon(
+                                ui.painter(),
+                                Rect::from_center_size(
+                                    Pos2::new(rect.left() + 10.0, rect.center().y),
+                                    Vec2::splat(11.0),
+                                ),
+                                if expanded {
+                                    Icon::ChevronDown
+                                } else {
+                                    Icon::ChevronRight
+                                },
+                                p.text3,
+                            );
+                            let mut name_rect = rect;
+                            name_rect.min.x = rect.left() + 24.0;
+                            name_rect.max.x = rect.right() - 140.0;
+                            let mut name_color = if *deleted { p.text3 } else { p.text };
+                            if response.hovered() && !selected {
+                                name_color = p.text_bright;
+                            }
+                            text_clipped(
+                                ui.painter(),
+                                name_rect,
+                                name,
+                                FontId::proportional(12.5),
+                                name_color,
+                                Align2::LEFT_CENTER,
+                            );
+                            if *deleted {
+                                // 删除行：删除线（稳定版 line-through 近似）。
+                                ui.painter().hline(
+                                    (rect.left() + 24.0)
+                                        ..=(rect.left() + 24.0 + 7.0 * name.chars().count() as f32),
+                                    rect.center().y,
+                                    Stroke::new(1.0, p.text3),
+                                );
+                            }
+                            ui.painter().text(
+                                Pos2::new(rect.right() - 10.0, rect.center().y),
+                                Align2::RIGHT_CENTER,
+                                crate::tr!(model, "{n} files, {date}", "{n} 个文件，{date}")
+                                    .replace("{n}", &count.to_string())
+                                    .replace(
+                                        "{date}",
+                                        &shelf_date(
+                                            rt.shelf_deleted
+                                                .iter()
+                                                .chain(rt.shelf_entries.iter())
+                                                .find(|entry| &entry.name == name)
+                                                .map(|entry| entry.created)
+                                                .unwrap_or(0),
+                                        ),
+                                    ),
+                                FontId::proportional(11.0),
+                                p.text3,
+                            );
+                            if response.clicked() {
+                                rt.shelf_selected = Some(name.clone());
+                                rt.shelf_file_sel.clear();
+                            }
+                            if response.secondary_clicked() {
+                                let payload = format!("{name}\u{1}{}\u{1}", u8::from(*deleted));
+                                rt.open_menu(
+                                    crate::runtime::MenuKind::ShelfContext {
+                                        project: model.active_project.unwrap_or(0),
+                                    },
+                                    rect,
+                                    Some(payload),
+                                );
+                            }
+                        }
+                        ShRow::File {
+                            shelf, path, last, ..
+                        } => {
+                            let (rect, response) = ui.allocate_exact_size(
+                                Vec2::new(ui.available_width(), 24.0),
+                                Sense::click(),
+                            );
+                            let row_rect = Rect::from_min_max(
+                                Pos2::new(rect.left() + 22.0, rect.top() + 1.0),
+                                Pos2::new(rect.right() - 2.0, rect.bottom() - 1.0),
+                            );
+                            let selected = rt.shelf_file_sel.contains(path);
+                            if selected || response.hovered() {
+                                ui.painter().rect_filled(
+                                    row_rect,
+                                    egui::CornerRadius::same(4),
+                                    if selected { p.selected_row } else { p.hover },
+                                );
+                            }
+                            let name = path.rsplit('/').next().unwrap_or(path);
+                            paint_icon(
+                                ui.painter(),
+                                Rect::from_center_size(
+                                    Pos2::new(row_rect.left() + 16.0, row_rect.center().y),
+                                    Vec2::splat(13.0),
+                                ),
+                                Icon::File,
+                                p.text3,
+                            );
+                            text_clipped(
+                                ui.painter(),
+                                Rect::from_min_max(
+                                    Pos2::new(row_rect.left() + 28.0, row_rect.top()),
+                                    Pos2::new(row_rect.right() - 120.0, row_rect.bottom()),
+                                ),
+                                name,
+                                FontId::proportional(12.0),
+                                p.text,
+                                Align2::LEFT_CENTER,
+                            );
+                            text_clipped(
+                                ui.painter(),
+                                Rect::from_min_max(
+                                    Pos2::new(row_rect.right() - 220.0, row_rect.top()),
+                                    Pos2::new(row_rect.right() - 10.0, row_rect.bottom()),
+                                ),
+                                path.trim_end_matches(name).trim_end_matches('/'),
+                                FontId::proportional(11.0),
+                                p.text3,
+                                Align2::RIGHT_CENTER,
+                            );
+                            if response.clicked() {
+                                if !rt.shelf_selected.as_deref().is_some_and(|s| s == shelf) {
+                                    rt.shelf_selected = Some(shelf.clone());
+                                    rt.shelf_file_sel.clear();
+                                }
+                                if let Some(pos) =
+                                    rt.shelf_file_sel.iter().position(|entry| entry == path)
+                                {
+                                    rt.shelf_file_sel.remove(pos);
+                                } else {
+                                    rt.shelf_file_sel.push(path.clone());
+                                }
+                            }
+                            if response.secondary_clicked() {
+                                let paths = if rt.shelf_file_sel.contains(path) {
+                                    rt.shelf_file_sel.clone()
+                                } else {
+                                    vec![path.clone()]
+                                };
+                                let payload = std::iter::once(shelf.clone())
+                                    .chain(std::iter::once("0".to_string()))
+                                    .chain(paths)
+                                    .collect::<Vec<_>>()
+                                    .join("\u{1}");
+                                rt.open_menu(
+                                    crate::runtime::MenuKind::ShelfContext {
+                                        project: model.active_project.unwrap_or(0),
+                                    },
+                                    row_rect,
+                                    Some(payload),
+                                );
+                            }
+                            let _ = last;
+                        }
+                    }
+                }
+            });
+    });
 }

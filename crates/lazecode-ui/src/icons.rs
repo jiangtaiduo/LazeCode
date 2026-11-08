@@ -59,6 +59,8 @@ pub enum Icon {
     DoubleChevronRight,
     Merge,
     Compare,
+    ShelveIn,
+    ViewOptions,
 }
 
 /// Map an icon to its stable-app SVG source ("icons_svg::SVGS").
@@ -106,6 +108,8 @@ fn svg_of(icon: Icon) -> Option<(&'static str, bool)> {
         Icon::DoubleChevronRight => ("double_chevron_right", false),
         Icon::Merge => ("merge", false),
         Icon::Compare => ("compare", false),
+        Icon::ShelveIn => ("shelve_in", false),
+        Icon::ViewOptions => ("view_options", false),
         _ => return None,
     })
 }

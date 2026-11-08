@@ -79,6 +79,8 @@ pub struct Palette {
     pub menu_bg: Color32,
     pub menu_border: Color32,
     pub menu_item_hover: Color32,
+    /// `--menu-item-active-text` (white in both variants).
+    pub menu_item_text: Color32,
     // --- scrims (--scrim-*) ---
     pub scrim_subtle: Color32,
     pub scrim: Color32,
@@ -191,9 +193,10 @@ impl Palette {
             menu_bg: rgba(30, 30, 32, 245),           // --menu-bg 0.96
             menu_border: rgba(255, 255, 255, 26),
             menu_item_hover: rgba(10, 132, 255, 230), // 0.90
-            scrim_subtle: rgba(0, 0, 0, 71),          // 0.28
-            scrim: rgba(0, 0, 0, 107),                // 0.42
-            scrim_strong: rgba(0, 0, 0, 140),         // 0.55
+            menu_item_text: Color32::from_rgb(0xff, 0xff, 0xff),
+            scrim_subtle: rgba(0, 0, 0, 71),             // 0.28
+            scrim: rgba(0, 0, 0, 107),                   // 0.42
+            scrim_strong: rgba(0, 0, 0, 140),            // 0.55
             dialog: Color32::from_rgb(0x28, 0x28, 0x2b), // --bg-dialog
             dialog_sidebar: Color32::from_rgb(0x20, 0x20, 0x23),
             dialog_footer: Color32::from_rgb(0x22, 0x22, 0x25),
@@ -271,6 +274,7 @@ impl Palette {
             menu_bg: rgba(250, 250, 252, 245),
             menu_border: rgba(0, 0, 0, 31),
             menu_item_hover: Color32::from_rgb(0x00, 0x71, 0xe3),
+            menu_item_text: Color32::from_rgb(0xff, 0xff, 0xff),
             scrim_subtle: rgba(255, 255, 255, 115), // 0.45
             scrim: rgba(255, 255, 255, 140),        // 0.55
             scrim_strong: rgba(255, 255, 255, 166), // 0.65

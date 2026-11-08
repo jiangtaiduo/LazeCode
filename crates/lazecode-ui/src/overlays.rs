@@ -118,6 +118,22 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             MenuKind::CommitHistory { project } => {
                 draw_commit_history_menu(ui, model, rt, theme, screen, menu, project);
             }
+            MenuKind::CommitExtras => {
+                draw_commit_extras_menu(ui, model, rt, theme, screen, menu);
+            }
+            MenuKind::ShelfContext { project } => {
+                let payload = menu.payload.clone();
+                draw_shelf_context_menu(
+                    ui,
+                    model,
+                    rt,
+                    theme,
+                    screen,
+                    menu,
+                    project,
+                    payload.as_deref().unwrap_or(""),
+                );
+            }
             MenuKind::CompareUserFilter { side } => {
                 draw_compare_user_menu(ui, model, rt, theme, screen, menu, side);
             }
@@ -162,16 +178,100 @@ fn popover_rect(screen: Rect, anchor: Rect, width: f32, height: f32) -> Rect {
     Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, height))
 }
 
+/// Stable `.py-dialog-window` material: opaque dialog surface, radius 12,
+/// hairline border, heavy drop shadow.
 fn frame(ui: &Ui, rect: Rect, theme: &Theme) {
     let p = theme.palette;
+    dialog_shadow(ui.painter(), rect, 24.0, 80.0, 153);
     ui.painter()
-        .rect_filled(rect, egui::CornerRadius::same(9), p.elev);
+        .rect_filled(rect, egui::CornerRadius::same(12), p.dialog);
     ui.painter().rect_stroke(
         rect,
-        egui::CornerRadius::same(9),
-        Stroke::new(1.0, p.border_strong),
+        egui::CornerRadius::same(12),
+        Stroke::new(1.0, p.menu_border),
         StrokeKind::Inside,
     );
+}
+
+/// Stable `.branch-ctx-menu` material: `--menu-bg` glass at 0.96, radius 8,
+/// menu shadow. (Menus and dialogs share `frame()` call sites; menus use
+/// this lighter material instead.)
+pub(crate) fn menu_frame(ui: &Ui, rect: Rect, theme: &Theme) {
+    let p = theme.palette;
+    dialog_shadow(ui.painter(), rect, 12.0, 40.0, 128);
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(8), p.menu_bg);
+    ui.painter().rect_stroke(
+        rect,
+        egui::CornerRadius::same(8),
+        Stroke::new(1.0, p.menu_border),
+        StrokeKind::Inside,
+    );
+}
+
+/// Approximate a CSS drop shadow `0 {dy}px {blur}px rgba(0,0,0,a/255)` with
+/// a blurred rect edge (epaint's linear edge blur).
+fn dialog_shadow(painter: &egui::Painter, rect: Rect, dy: f32, blur: f32, alpha: u8) {
+    let shape = egui::epaint::RectShape {
+        rect: rect.translate(egui::vec2(0.0, dy)).expand(blur * 0.4),
+        corner_radius: egui::CornerRadius::same(16),
+        fill: Color32::from_black_alpha(alpha),
+        stroke: Stroke::NONE,
+        stroke_kind: egui::StrokeKind::Inside,
+        round_to_pixels: None,
+        blur_width: blur * 0.55,
+        brush: None,
+        angle: 0.0,
+    };
+    painter.add(egui::Shape::Rect(shape));
+}
+
+/// Stable context-menu row height (12px text + 2×5px padding).
+pub(crate) const MENU_ROW_H: f32 = 24.0;
+
+/// One stable CtxMenuShell row: 12px text, radius 6, macOS hover = solid
+/// accent fill + white text; danger rows use `--git-del`. Returns clicked.
+pub(crate) fn menu_row(
+    ui: &mut Ui,
+    theme: &Theme,
+    row: Rect,
+    id_salt: egui::Id,
+    label: &str,
+    danger: bool,
+    enabled: bool,
+) -> bool {
+    let p = theme.palette;
+    let response = ui.interact(
+        row,
+        id_salt,
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    let hovered = response.hovered() && enabled;
+    if hovered {
+        ui.painter()
+            .rect_filled(row, egui::CornerRadius::same(6), p.menu_item_hover);
+    }
+    let color = if !enabled {
+        p.text3
+    } else if hovered {
+        p.menu_item_text
+    } else if danger {
+        p.rose
+    } else {
+        p.text
+    };
+    ui.painter().text(
+        Pos2::new(row.left() + 10.0, row.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(12.0),
+        color,
+    );
+    response.clicked() && enabled
 }
 
 fn should_dismiss(ui: &Ui, rect: Rect, opened_frame: u64, current_frame: u64) -> bool {
@@ -202,7 +302,7 @@ fn draw_project_menu(
     let count = model.projects.len();
     let height = 46.0 + (count as f32 * 46.0).min(300.0) + 74.0;
     let rect = popover_rect(screen, menu.anchor, 326.0, height);
-    frame(ui, rect, theme);
+    menu_frame(ui, rect, theme);
     ui.painter().text(
         Pos2::new(rect.left() + 14.0, rect.top() + 20.0),
         Align2::LEFT_CENTER,
@@ -401,7 +501,7 @@ fn draw_worktree_menu(
     let count = model.projects[index].worktrees.len();
     let height = 86.0 + (count as f32 * 36.0).min(320.0) + 74.0;
     let rect = popover_rect(screen, menu.anchor, 324.0, height);
-    frame(ui, rect, theme);
+    menu_frame(ui, rect, theme);
     ui.painter().text(
         Pos2::new(rect.left() + 14.0, rect.top() + 18.0),
         Align2::LEFT_CENTER,
@@ -597,9 +697,9 @@ fn draw_log_branch_menu(
     };
     // The immutable borrow of `model.projects` ended above; the overlay only
     // reads cloned data afterwards.
-    let height = 66.0 + (rows_vec.len() as f32 * 30.0).min(320.0) + 8.0;
+    let height = 66.0 + (rows_vec.len() as f32 * 22.0).min(320.0) + 8.0;
     let rect = popover_rect(screen, menu.anchor, 300.0, height);
-    frame(ui, rect, theme);
+    menu_frame(ui, rect, theme);
     ui.painter().text(
         Pos2::new(rect.left() + 14.0, rect.top() + 18.0),
         Align2::LEFT_CENTER,
@@ -632,7 +732,7 @@ fn draw_log_branch_menu(
                 if is_author_menu {
                     // Author rows. "All" row first.
                     let (row, response) = ui
-                        .allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::click());
                     if response.hovered() {
                         ui.painter()
                             .rect_filled(row, egui::CornerRadius::same(4), p.hover);
@@ -660,7 +760,7 @@ fn draw_log_branch_menu(
                     }
                     for name in &rows_vec {
                         let (row, response) = ui.allocate_exact_size(
-                            Vec2::new(ui.available_width(), 30.0),
+                            Vec2::new(ui.available_width(), 22.0),
                             Sense::click(),
                         );
                         if response.hovered() {
@@ -698,7 +798,7 @@ fn draw_log_branch_menu(
                 }
                 // Branch menu: All branches row.
                 let (row, response) =
-                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::click());
                 if response.hovered() {
                     ui.painter()
                         .rect_filled(row, egui::CornerRadius::same(4), p.hover);
@@ -735,7 +835,7 @@ fn draw_log_branch_menu(
                 }
                 for name in &rows_vec {
                     let (row, response) = ui
-                        .allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::click());
                     if response.hovered() {
                         ui.painter()
                             .rect_filled(row, egui::CornerRadius::same(4), p.hover);
@@ -769,7 +869,7 @@ fn draw_log_branch_menu(
                 }
                 // Head row (default).
                 let (row, response) =
-                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::click());
                 if response.hovered() {
                     ui.painter()
                         .rect_filled(row, egui::CornerRadius::same(4), p.hover);
@@ -833,7 +933,7 @@ fn draw_commit_menu(
     commit_id: Option<&str>,
 ) {
     let Some(commit_id) = commit_id else { return };
-    let p = theme.palette;
+    let _p = theme.palette;
     let Some(commit) = model.projects[index]
         .log
         .iter()
@@ -918,29 +1018,26 @@ fn draw_commit_menu(
         }
         list
     };
-    let height = items.len() as f32 * 30.0 + 16.0;
-    let rect = popover_rect(screen, menu.anchor, 250.0, height);
-    frame(ui, rect, theme);
+    let height = items.len() as f32 * MENU_ROW_H + 8.0;
+    let rect = popover_rect(screen, menu.anchor, 260.0, height);
+    menu_frame(ui, rect, theme);
     // 稳定版提交右键菜单（CommitContextMenu）没有标题行。
     let mut action: Option<u8> = None;
     for (i, (label, code)) in items.iter().enumerate() {
         let row = Rect::from_min_size(
-            Pos2::new(rect.left() + 8.0, rect.top() + 8.0 + i as f32 * 30.0),
-            Vec2::new(rect.width() - 16.0, 28.0),
+            Pos2::new(rect.left() + 4.0, rect.top() + 4.0 + i as f32 * MENU_ROW_H),
+            Vec2::new(rect.width() - 8.0, MENU_ROW_H),
         );
-        let response = ui.interact(row, ui.scope_id().with(("commitmenu", i)), Sense::click());
-        if response.hovered() {
-            ui.painter()
-                .rect_filled(row, egui::CornerRadius::same(4), p.hover);
-        }
-        ui.painter().text(
-            Pos2::new(row.left() + 8.0, row.center().y),
-            Align2::LEFT_CENTER,
-            *label,
-            FontId::proportional(12.5),
-            p.text2,
-        );
-        if response.clicked() {
+        let danger = matches!(*code, 6 | 23 | 14);
+        if menu_row(
+            ui,
+            theme,
+            row,
+            ui.scope_id().with(("commitmenu", i)),
+            label,
+            danger,
+            true,
+        ) {
             action = Some(*code);
         }
     }
@@ -1117,7 +1214,7 @@ fn draw_branch_context_menu(
         return;
     };
     let remote = remote_flag == "remote";
-    let p = theme.palette;
+    let _p = theme.palette;
     let selected_refs: Vec<String> = model.projects[index].ref_selection.clone();
     let is_multi = selected_refs.len() > 1;
     let items: Vec<(&str, u8)> = if is_multi {
@@ -1173,53 +1270,49 @@ fn draw_branch_context_menu(
     } else {
         crate::tr!(model, "Mark favorite", "标记收藏")
     };
-    let height = items.len() as f32 * 28.0 + 16.0;
-    let rect = popover_rect(screen, menu.anchor, 246.0, height);
-    frame(ui, rect, theme);
+    let height = items.len() as f32 * MENU_ROW_H + 8.0;
+    let rect = popover_rect(screen, menu.anchor, 260.0, height);
+    menu_frame(ui, rect, theme);
     // 稳定版分支右键菜单没有标题行（BranchContextMenu 无 header）。
     let mut action: Option<u8> = None;
     let mut toggle_fav = false;
-    let row_start = rect.top() + 8.0;
+    let row_start = rect.top() + 4.0;
     for (i, (label, code)) in items.iter().enumerate() {
         let row = Rect::from_min_size(
-            Pos2::new(rect.left() + 8.0, row_start + i as f32 * 28.0),
-            Vec2::new(rect.width() - 16.0, 28.0),
+            Pos2::new(rect.left() + 4.0, row_start + i as f32 * MENU_ROW_H),
+            Vec2::new(rect.width() - 8.0, MENU_ROW_H),
         );
-        let response = ui.interact(row, ui.scope_id().with(("bctx", i)), Sense::click());
-        if response.hovered() {
-            ui.painter()
-                .rect_filled(row, egui::CornerRadius::same(3), p.hover);
-        }
-        ui.painter().text(
-            Pos2::new(row.left() + 8.0, row.center().y),
-            Align2::LEFT_CENTER,
-            *label,
-            FontId::proportional(12.5),
-            p.text2,
-        );
-        if response.clicked() {
+        let danger = matches!(*code, 3 | 71);
+        if menu_row(
+            ui,
+            theme,
+            row,
+            ui.scope_id().with(("bctx", i)),
+            label,
+            danger,
+            true,
+        ) {
             action = Some(*code);
         }
     }
     // favorite row last.
     if !is_multi {
         let fav_row = Rect::from_min_size(
-            Pos2::new(rect.left() + 8.0, row_start + items.len() as f32 * 28.0),
-            Vec2::new(rect.width() - 16.0, 28.0),
+            Pos2::new(
+                rect.left() + 4.0,
+                row_start + items.len() as f32 * MENU_ROW_H,
+            ),
+            Vec2::new(rect.width() - 8.0, MENU_ROW_H),
         );
-        let fav_response = ui.interact(fav_row, ui.scope_id().with("bctx-fav"), Sense::click());
-        if fav_response.hovered() {
-            ui.painter()
-                .rect_filled(fav_row, egui::CornerRadius::same(3), p.hover);
-        }
-        ui.painter().text(
-            Pos2::new(fav_row.left() + 8.0, fav_row.center().y),
-            Align2::LEFT_CENTER,
+        if menu_row(
+            ui,
+            theme,
+            fav_row,
+            ui.scope_id().with("bctx-fav"),
             fav_label,
-            FontId::proportional(12.5),
-            p.text2,
-        );
-        if fav_response.clicked() {
+            false,
+            true,
+        ) {
             toggle_fav = true;
         }
     }
@@ -1413,17 +1506,17 @@ fn draw_tree_context_menu(
         11,
     ));
 
-    let height = items.len() as f32 * 28.0 + 16.0;
+    let height = items.len() as f32 * MENU_ROW_H + 8.0;
     let rect = popover_rect(screen, menu.anchor, 220.0, height);
-    frame(ui, rect, theme);
+    menu_frame(ui, rect, theme);
 
     // 稳定版项目树右键菜单（ProjectTreeContextMenu）没有标题行。
     let mut action: Option<u8> = None;
     let mut close = false;
-    let row_start = rect.top() + 8.0;
+    let row_start = rect.top() + 4.0;
     for (i, (label, code)) in items.iter().enumerate() {
         let row = Rect::from_min_size(
-            Pos2::new(rect.left() + 8.0, row_start + i as f32 * 28.0),
+            Pos2::new(rect.left() + 8.0, row_start + i as f32 * MENU_ROW_H),
             Vec2::new(rect.width() - 16.0, 26.0),
         );
         let response = ui.interact(row, ui.scope_id().with(("tctx", i)), Sense::click());
@@ -1633,17 +1726,17 @@ fn draw_editor_tab_context_menu(
         ),
     ];
 
-    let height = items.len() as f32 * 28.0 + 16.0;
+    let height = items.len() as f32 * MENU_ROW_H + 8.0;
     let rect = popover_rect(screen, menu.anchor, 200.0, height);
-    frame(ui, rect, theme);
+    menu_frame(ui, rect, theme);
 
     // 稳定版右键菜单没有标题行（对齐 EditorTabBar ctx menu），直接列菜单项。
     let mut action: Option<u8> = None;
     let mut close = false;
-    let row_start = rect.top() + 8.0;
+    let row_start = rect.top() + 4.0;
     for (i, (label, code, enabled)) in items.iter().enumerate() {
         let row = Rect::from_min_size(
-            Pos2::new(rect.left() + 8.0, row_start + i as f32 * 28.0),
+            Pos2::new(rect.left() + 8.0, row_start + i as f32 * MENU_ROW_H),
             Vec2::new(rect.width() - 16.0, 26.0),
         );
         if *code == u8::MAX {
@@ -1754,17 +1847,17 @@ fn draw_terminal_tab_context_menu(
         (crate::tr!(model, "Close all", "关闭全部"), 4),
     ];
 
-    let height = items.len() as f32 * 28.0 + 16.0;
+    let height = items.len() as f32 * MENU_ROW_H + 8.0;
     let rect = popover_rect(screen, menu.anchor, 200.0, height);
-    frame(ui, rect, theme);
+    menu_frame(ui, rect, theme);
 
     // 稳定版右键菜单没有标题行，直接列菜单项。
     let mut action: Option<u8> = None;
     let mut close = false;
-    let row_start = rect.top() + 8.0;
+    let row_start = rect.top() + 4.0;
     for (i, (label, code)) in items.iter().enumerate() {
         let row = Rect::from_min_size(
-            Pos2::new(rect.left() + 8.0, row_start + i as f32 * 28.0),
+            Pos2::new(rect.left() + 8.0, row_start + i as f32 * MENU_ROW_H),
             Vec2::new(rect.width() - 16.0, 26.0),
         );
         let response = ui.interact(row, ui.scope_id().with(("ttab_ctx", i)), Sense::click());
@@ -1860,7 +1953,7 @@ fn draw_commit_history_menu(
 
     let height = items.len() as f32 * 26.0 + 24.0;
     let rect = popover_rect(screen, menu.anchor, 320.0, height);
-    frame(ui, rect, theme);
+    menu_frame(ui, rect, theme);
 
     let mut action: Option<u8> = None;
     let mut close = false;
@@ -1963,9 +2056,9 @@ fn draw_changelist_header_menu(
         ));
     }
 
-    let height = items.len() as f32 * 28.0 + 16.0;
-    let rect = popover_rect(screen, menu.anchor, 280.0, height);
-    frame(ui, rect, theme);
+    let height = items.len() as f32 * MENU_ROW_H + 8.0;
+    let rect = popover_rect(screen, menu.anchor, 260.0, height);
+    menu_frame(ui, rect, theme);
 
     // 稳定版右键菜单没有标题行，直接列菜单项。
     let mut close = false;
@@ -2428,8 +2521,8 @@ fn render_change_menu_items(
     let mut action: Option<u8> = None;
     for (i, item) in items.iter().enumerate() {
         let row = Rect::from_min_size(
-            Pos2::new(rect.left() + 8.0, row_start + i as f32 * 28.0),
-            Vec2::new(rect.width() - 16.0, 26.0),
+            Pos2::new(rect.left() + 4.0, row_start + i as f32 * MENU_ROW_H),
+            Vec2::new(rect.width() - 8.0, MENU_ROW_H),
         );
         if item.code == CHANGE_MENU_SEP {
             ui.painter().line_segment(
@@ -2437,33 +2530,248 @@ fn render_change_menu_items(
                     Pos2::new(row.left() + 8.0, row.center().y),
                     Pos2::new(row.right() - 8.0, row.center().y),
                 ],
-                egui::Stroke::new(1.0, p.border),
+                egui::Stroke::new(1.0, p.menu_border),
             );
             continue;
         }
-        let response = ui.interact(row, ui.scope_id().with((id_salt, i)), Sense::click());
-        if response.hovered() && item.enabled {
-            ui.painter()
-                .rect_filled(row, egui::CornerRadius::same(3), p.hover);
-        }
-        ui.painter().text(
-            Pos2::new(row.left() + 10.0, row.center().y),
-            Align2::LEFT_CENTER,
+        if menu_row(
+            ui,
+            theme,
+            row,
+            ui.scope_id().with((id_salt, i)),
             &item.label,
-            FontId::proportional(12.5),
-            if !item.enabled {
-                p.text3
-            } else if item.danger {
-                p.rose
-            } else {
-                p.text
-            },
-        );
-        if response.clicked() && item.enabled {
+            item.danger,
+            item.enabled,
+        ) {
             action = Some(item.code);
         }
     }
     action
+}
+
+#[allow(clippy::too_many_arguments)]
+/// 提交抽屉 ⋮ 扩展入口：稳定版抽屉没有这些按钮，保留功能入口
+/// （Stash Changes… / Stash Manager…）。
+fn draw_commit_extras_menu(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    screen: Rect,
+    menu: MenuState,
+) {
+    let items = [
+        (crate::tr!(model, "Stash Changes…", "贮藏更改…"), 0u8, false),
+        (crate::tr!(model, "Stash Manager…", "贮藏管理器…"), 1, false),
+    ];
+    let height = items.len() as f32 * MENU_ROW_H + 8.0;
+    let rect = popover_rect(screen, menu.anchor, 220.0, height);
+    menu_frame(ui, rect, theme);
+    let mut picked: Option<u8> = None;
+    for (i, (label, code, danger)) in items.iter().enumerate() {
+        let row = Rect::from_min_size(
+            Pos2::new(rect.left() + 4.0, rect.top() + 4.0 + i as f32 * MENU_ROW_H),
+            Vec2::new(rect.width() - 8.0, MENU_ROW_H),
+        );
+        if menu_row(
+            ui,
+            theme,
+            row,
+            ui.scope_id().with(("cextras", i)),
+            label,
+            *danger,
+            true,
+        ) {
+            picked = Some(*code);
+        }
+    }
+    let mut close = false;
+    match picked {
+        Some(0) => {
+            let has_untracked = model
+                .active_project()
+                .is_some_and(|project| project.changes().iter().any(|change| change.untracked));
+            rt.dialog = crate::runtime::DialogState::StashCreate {
+                message: String::new(),
+                include_untracked: has_untracked,
+                error: None,
+            };
+            close = true;
+        }
+        Some(1) => {
+            rt.dialog = crate::runtime::DialogState::StashManager {
+                stashes: Vec::new(),
+                selected: 0,
+                error: None,
+                loaded: false,
+            };
+            close = true;
+        }
+        _ => {}
+    }
+    if should_dismiss(ui, rect, menu.opened_frame, rt.frame_count) {
+        close = true;
+    }
+    if !close {
+        rt.menu = Some(menu);
+    }
+}
+
+/// 架藏右键菜单（稳定版 Shelf 页签）：恢复 / 补丁 / 重命名 / 删除。
+#[allow(clippy::too_many_arguments)]
+fn draw_shelf_context_menu(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    screen: Rect,
+    menu: MenuState,
+    project_idx: usize,
+    payload: &str,
+) {
+    let mut segments = payload.split('\u{1}');
+    let Some(name) = segments.next().filter(|name| !name.is_empty()) else {
+        return;
+    };
+    let name = name.to_string();
+    let deleted = segments.next() == Some("1");
+    let paths: Vec<String> = segments
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect();
+    let _ = project_idx;
+
+    // (label, code, danger, enabled)
+    let mut items: Vec<(String, u8, bool, bool)> = Vec::new();
+    if deleted {
+        items.push((
+            crate::tr!(model, "Restore", "恢复").to_string(),
+            0,
+            false,
+            true,
+        ));
+        items.push((
+            crate::tr!(model, "Delete…", "删除…").to_string(),
+            3,
+            true,
+            true,
+        ));
+    } else {
+        items.push((
+            crate::tr!(model, "Unshelve…", "恢复贮藏…").to_string(),
+            1,
+            false,
+            true,
+        ));
+        items.push((
+            crate::tr!(model, "Copy as Patch to Clipboard", "以补丁复制到剪贴板").to_string(),
+            2,
+            false,
+            true,
+        ));
+        items.push((
+            crate::tr!(model, "Rename…", "重命名…").to_string(),
+            4,
+            false,
+            paths.is_empty(),
+        ));
+        items.push((
+            crate::tr!(model, "Delete…", "删除…").to_string(),
+            3,
+            true,
+            true,
+        ));
+    }
+    let height = items.len() as f32 * MENU_ROW_H + 8.0;
+    let rect = popover_rect(screen, menu.anchor, 260.0, height);
+    menu_frame(ui, rect, theme);
+    let mut picked: Option<u8> = None;
+    for (i, (label, code, danger, enabled)) in items.iter().enumerate() {
+        let row = Rect::from_min_size(
+            Pos2::new(rect.left() + 4.0, rect.top() + 4.0 + i as f32 * MENU_ROW_H),
+            Vec2::new(rect.width() - 8.0, MENU_ROW_H),
+        );
+        if menu_row(
+            ui,
+            theme,
+            row,
+            ui.scope_id().with(("shelf-ctx", i)),
+            label,
+            *danger,
+            *enabled,
+        ) {
+            picked = Some(*code);
+        }
+    }
+    let mut close = false;
+    match picked {
+        // Restore（最近删除 → 恢复）
+        Some(0) => {
+            model.queue(Command::ShelfRestoreDeleted(name.clone()));
+            rt.shelf_loaded = None;
+            close = true;
+        }
+        // Unshelve…
+        Some(1) => {
+            {
+                let files: Vec<(String, bool)> =
+                    paths.iter().map(|path| (path.clone(), true)).collect();
+                rt.dialog = crate::runtime::DialogState::Unshelve {
+                    name: name.clone(),
+                    files,
+                    target: None,
+                    new_name: name.clone(),
+                    error: None,
+                };
+            }
+            close = true;
+        }
+        // Copy as Patch（补丁读取是本地小文件，同步可接受）
+        Some(2) => {
+            if let Some(project) = model.projects.get(model.active_project.unwrap_or(0)) {
+                match lazecode_git::shelf_patch(&project.root, &name) {
+                    Ok(patch) => {
+                        ui.ctx().copy_text(patch);
+                        let zh = model.settings.language.is_zh();
+                        model.toast(
+                            if zh {
+                                "补丁已复制到剪贴板"
+                            } else {
+                                "Patch copied to clipboard"
+                            },
+                            ToastKind::Success,
+                        );
+                    }
+                    Err(err) => model.toast(err.to_string(), ToastKind::Error),
+                }
+            }
+            close = true;
+        }
+        // Delete…（确认）
+        Some(3) => {
+            rt.dialog = crate::runtime::DialogState::ConfirmDeleteShelf {
+                name: name.clone(),
+                purge: deleted,
+            };
+            close = true;
+        }
+        // Rename…
+        Some(4) => {
+            rt.dialog = crate::runtime::DialogState::RenameShelf {
+                from: name.clone(),
+                value: name.clone(),
+                error: None,
+            };
+            close = true;
+        }
+        _ => {}
+    }
+    if should_dismiss(ui, rect, menu.opened_frame, rt.frame_count) {
+        close = true;
+    }
+    if !close {
+        rt.menu = Some(menu);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2491,9 +2799,9 @@ fn draw_change_file_menu(
     }
     let (items, ctx) = change_menu_items(model, project, &paths);
 
-    let height = items.len() as f32 * 28.0 + 16.0;
-    let rect = popover_rect(screen, menu.anchor, 280.0, height);
-    frame(ui, rect, theme);
+    let height = items.len() as f32 * MENU_ROW_H + 8.0;
+    let rect = popover_rect(screen, menu.anchor, 260.0, height);
+    menu_frame(ui, rect, theme);
 
     // 稳定版右键菜单没有标题行，直接列菜单项。
     let mut close = false;
@@ -2525,7 +2833,7 @@ fn draw_branch_menu(
     };
     let height = 380.0;
     let rect = popover_rect(screen, menu.anchor, 324.0, height);
-    frame(ui, rect, theme);
+    menu_frame(ui, rect, theme);
     ui.painter().text(
         Pos2::new(rect.left() + 14.0, rect.top() + 18.0),
         Align2::LEFT_CENTER,
@@ -2785,7 +3093,7 @@ fn draw_agent_menu(
     ];
     let height = 52.0 + options.len() as f32 * 46.0 + 24.0;
     let rect = popover_rect(screen, anchor, 320.0, height);
-    frame(ui, rect, theme);
+    menu_frame(ui, rect, theme);
     ui.painter().text(
         Pos2::new(rect.left() + 14.0, rect.top() + 20.0),
         Align2::LEFT_CENTER,
@@ -3148,7 +3456,7 @@ fn draw_compare_user_menu(
     authors.insert(0, crate::tr!(model, "All authors", "全部作者").to_string());
     let height = (authors.len() as f32 * 24.0 + 20.0).min(320.0);
     let rect = popover_rect(screen, menu.anchor, 200.0, height);
-    frame(ui, rect, theme);
+    menu_frame(ui, rect, theme);
     let mut picked: Option<Option<String>> = None;
     for (i, author) in authors.iter().enumerate() {
         let row = Rect::from_min_size(
@@ -3215,7 +3523,7 @@ fn draw_compare_date_menu(
     ];
     let height = items.len() as f32 * 24.0 + 20.0;
     let rect = popover_rect(screen, menu.anchor, 160.0, height);
-    frame(ui, rect, theme);
+    menu_frame(ui, rect, theme);
     let mut picked: Option<Option<lazecode_core::CompareDateFilter>> = None;
     for (i, (label, value)) in items.iter().enumerate() {
         let row = Rect::from_min_size(
@@ -3273,7 +3581,7 @@ fn draw_compare_ref_menu(
     refs.insert(0, crate::tr!(model, "All Branches", "全部分支").to_string());
     let height = (refs.len() as f32 * 24.0 + 20.0).min(320.0);
     let rect = popover_rect(screen, menu.anchor, 220.0, height);
-    frame(ui, rect, theme);
+    menu_frame(ui, rect, theme);
     let mut picked: Option<Option<String>> = None;
     for (i, name) in refs.iter().enumerate() {
         let row = Rect::from_min_size(
@@ -3685,6 +3993,7 @@ fn draw_shelf_manager_dialog(
             // 删除前确认（稳定版语义）；确认后回到重新懒加载的管理器。
             rt.dialog = DialogState::ConfirmDeleteShelf {
                 name: shelf_name.clone(),
+                purge: false,
             };
             *close = true;
         }
@@ -5916,7 +6225,9 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         DialogState::NewFile { .. } | DialogState::NewDirectory { .. } => {
             crate::tr!(model, "Create", "创建")
         }
-        DialogState::RenamePath { .. } => crate::tr!(model, "Rename", "重命名"),
+        DialogState::RenamePath { .. } | DialogState::RenameShelf { .. } => {
+            crate::tr!(model, "Rename", "重命名")
+        }
         DialogState::DeletePath { .. }
         | DialogState::ConfirmDeleteUntracked { .. }
         | DialogState::ConfirmDeleteShelf { .. } => {
@@ -6187,29 +6498,68 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 delete_paths_to_trash(model, paths);
                 close = true;
             }
-            DialogState::ConfirmDeleteShelf { name } => {
-                // 稳定版删除架藏前有确认；确认后删除并回到（重新懒加载的）
-                // 架藏管理器。
+            DialogState::ConfirmDeleteShelf { name, purge } => {
+                // 稳定版删除架藏前有确认；删除进入「最近删除」（可恢复），
+                // purge = 彻底删除。确认后重新加载架藏数据。
                 if let Some(project) = model.active_project() {
                     let root = project.root.clone();
-                    let _ = lazecode_git::shelf_delete(&root, name);
+                    let result = if *purge {
+                        lazecode_git::shelf_purge_deleted(&root, name)
+                    } else {
+                        lazecode_git::shelf_delete(&root, name)
+                    };
                     let zh = model.settings.language.is_zh();
                     model.toast(
-                        if zh {
-                            format!("已删除架藏 {name}")
-                        } else {
-                            format!("Deleted shelf {name}")
+                        match &result {
+                            Ok(_) if !purge => {
+                                if zh {
+                                    format!("已删除架藏 {name}（可在最近删除中恢复）")
+                                } else {
+                                    format!("Deleted shelf {name} (restorable)")
+                                }
+                            }
+                            Ok(_) => "Purged".to_string(),
+                            Err(err) => err.to_string(),
                         },
-                        ToastKind::Info,
+                        if result.is_ok() {
+                            ToastKind::Info
+                        } else {
+                            ToastKind::Error
+                        },
                     );
+                    rt.shelf_loaded = None;
                 }
-                rt.dialog = DialogState::ShelfManager {
-                    shelves: Vec::new(),
-                    selected: 0,
-                    error: None,
-                    loaded: false,
-                };
+                if *purge {
+                    rt.dialog = DialogState::None;
+                } else {
+                    rt.dialog = DialogState::ShelfManager {
+                        shelves: Vec::new(),
+                        selected: 0,
+                        error: None,
+                        loaded: false,
+                    };
+                }
                 close = true;
+            }
+            DialogState::RenameShelf { from, value, .. } => {
+                let name = value.trim().to_string();
+                if name.is_empty() {
+                    rt.dialog = DialogState::RenameShelf {
+                        from: from.clone(),
+                        value: name,
+                        error: Some(
+                            crate::tr!(model, "Enter a shelf name", "请输入架藏名称").to_string(),
+                        ),
+                    };
+                    close = true;
+                } else {
+                    model.queue(Command::ShelfRename {
+                        from: from.clone(),
+                        to: name,
+                    });
+                    rt.shelf_loaded = None;
+                    close = true;
+                }
             }
             DialogState::NewShelf { value, paths, .. } => {
                 let name = value.trim().to_string();

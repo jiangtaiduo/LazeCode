@@ -7,9 +7,7 @@
 //! glow) and the right-edge overview ruler. Rows measure
 //! `round(fontSize * 1.5)` with the default `editorFontSize: 13` → 20px.
 
-use egui::{
-    Align, Align2, Color32, FontId, Pos2, Rect, ScrollArea, Sense, Stroke, StrokeKind, Vec2,
-};
+use egui::{Align2, Color32, FontId, Pos2, Rect, ScrollArea, Sense, Stroke, StrokeKind, Vec2};
 use lazecode_text::{count_change_groups, inline_diff, DiffHunk, DiffLineKind, InlineChunkKind};
 
 use crate::theme::Theme;
@@ -216,96 +214,109 @@ pub fn draw_unified(ui: &mut egui::Ui, theme: &Theme, body: Rect, ctx: DiffBodyC
     }
     let mut cache: ChunkCache = ChunkCache::new();
 
+    // Monaco revealLineInCenter 是瞬时定位：关掉 egui 滚动动画。
+    let mut style = egui::Style::clone(ui.style());
+    style.scroll_animation = egui::style::ScrollAnimation::none();
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(body)
+            .style(style)
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
-    let scroll = ScrollArea::vertical()
-        .id_salt(("diff-body", ctx.tab_id))
-        .auto_shrink([false, false])
-        .show(&mut child, |ui| {
-            if let Some((tab, group)) = ctx.scroll_to_group {
-                if tab == ctx.tab_id {
-                    let starts = group_starts(ctx.rows, ctx.groups);
-                    if let Some(row_idx) = starts.get(group).copied() {
-                        if row_idx < ctx.rows.len() {
-                            let target = Rect::from_min_size(
-                                Pos2::new(body.left(), body.top() + row_idx as f32 * ROW_H),
-                                Vec2::new(1.0, ROW_H),
-                            );
-                            ui.scroll_to_rect(target, Some(Align::Center));
-                        }
-                    }
-                }
-            }
-            let total_h = ctx.rows.len() as f32 * ROW_H;
-            let (_, inner) =
-                ui.allocate_exact_size(Vec2::new(body.width(), total_h), Sense::hover());
-            let num_font = FontId::monospace(11.0);
-            for (i, row) in ctx.rows.iter().enumerate() {
-                let row_rect = Rect::from_min_size(
-                    Pos2::new(body.left(), inner.rect.top() + i as f32 * ROW_H),
-                    Vec2::new(body.width(), ROW_H),
-                );
-                let y = row_rect.center().y;
-                let line_bg = match row.kind {
-                    RowKind::Add => Some(p.diff_line_add),
-                    RowKind::Del => Some(p.diff_line_del),
-                    RowKind::Context => None,
-                };
-                if let Some(bg) = line_bg {
-                    ui.painter().rect_filled(row_rect, 0.0, bg);
-                }
-                ui.painter().text(
-                    Pos2::new(gutter_x0 + col_w - 8.0, y),
-                    Align2::RIGHT_CENTER,
-                    row.old_no.map(|n| n.to_string()).unwrap_or_default(),
-                    num_font.clone(),
-                    p.text3,
-                );
-                ui.painter().text(
-                    Pos2::new(gutter_x0 + col_w * 2.0 - 8.0, y),
-                    Align2::RIGHT_CENTER,
-                    row.new_no.map(|n| n.to_string()).unwrap_or_default(),
-                    num_font.clone(),
-                    p.text3,
-                );
-                let chunks = match row.kind {
-                    RowKind::Del => pair_of[i]
-                        .ne(&usize::MAX)
-                        .then(|| pairs[pair_of[i]])
-                        .filter(|(d, _)| *d == i)
-                        .map(|(_, a)| chunks_of(&mut cache, &row.text, &ctx.rows[a].text, true))
-                        .unwrap_or_default(),
-                    RowKind::Add => pair_of[i]
-                        .ne(&usize::MAX)
-                        .then(|| pairs[pair_of[i]])
-                        .filter(|(_, a)| *a == i)
-                        .map(|(d, _)| chunks_of(&mut cache, &ctx.rows[d].text, &row.text, false))
-                        .unwrap_or_default(),
-                    RowKind::Context => Vec::new(),
-                };
-                let char_bg = match row.kind {
-                    RowKind::Add => p.diff_char_add,
-                    RowKind::Del => p.diff_char_del,
-                    RowKind::Context => Color32::TRANSPARENT,
-                };
-                paint_line(
-                    ui.painter(),
-                    content_x,
-                    y,
-                    &row.text,
-                    char_w,
-                    &font,
-                    p.tok_punc,
-                    &chunks,
-                    char_bg,
-                );
-            }
+    // 导航定位：直接给 ScrollArea 设初始 offset（同帧生效，Monaco 的
+    // revealLineInCenter 也是瞬时定位）。offset 以「视口内居中」计算。
+    let jump_offset = ctx
+        .scroll_to_group
+        .filter(|(tab, _)| *tab == ctx.tab_id)
+        .and_then(|(_, group)| {
+            let starts = group_starts(ctx.rows, ctx.groups);
+            starts.get(group).copied().map(|row_idx| {
+                let top = row_idx as f32 * ROW_H;
+                (top - (body.height() - ROW_H) / 2.0).max(0.0)
+            })
         });
-
-    draw_group_box(ui, theme, body, &ctx, gutter_end, content_right + 2.0);
+    let mut scroll_area = ScrollArea::vertical()
+        .id_salt(("diff-body", ctx.tab_id))
+        .auto_shrink([false, false]);
+    if let Some(offset) = jump_offset {
+        scroll_area = scroll_area.vertical_scroll_offset(offset);
+    }
+    let scroll = scroll_area.show(&mut child, |ui| {
+        let total_h = ctx.rows.len() as f32 * ROW_H;
+        let (_, inner) = ui.allocate_exact_size(Vec2::new(body.width(), total_h), Sense::hover());
+        let content_top = inner.rect.top();
+        let num_font = FontId::monospace(11.0);
+        for (i, row) in ctx.rows.iter().enumerate() {
+            let row_rect = Rect::from_min_size(
+                Pos2::new(body.left(), content_top + i as f32 * ROW_H),
+                Vec2::new(body.width(), ROW_H),
+            );
+            let y = row_rect.center().y;
+            let line_bg = match row.kind {
+                RowKind::Add => Some(p.diff_line_add),
+                RowKind::Del => Some(p.diff_line_del),
+                RowKind::Context => None,
+            };
+            if let Some(bg) = line_bg {
+                ui.painter().rect_filled(row_rect, 0.0, bg);
+            }
+            ui.painter().text(
+                Pos2::new(gutter_x0 + col_w - 8.0, y),
+                Align2::RIGHT_CENTER,
+                row.old_no.map(|n| n.to_string()).unwrap_or_default(),
+                num_font.clone(),
+                p.text3,
+            );
+            ui.painter().text(
+                Pos2::new(gutter_x0 + col_w * 2.0 - 8.0, y),
+                Align2::RIGHT_CENTER,
+                row.new_no.map(|n| n.to_string()).unwrap_or_default(),
+                num_font.clone(),
+                p.text3,
+            );
+            let chunks = match row.kind {
+                RowKind::Del => pair_of[i]
+                    .ne(&usize::MAX)
+                    .then(|| pairs[pair_of[i]])
+                    .filter(|(d, _)| *d == i)
+                    .map(|(_, a)| chunks_of(&mut cache, &row.text, &ctx.rows[a].text, true))
+                    .unwrap_or_default(),
+                RowKind::Add => pair_of[i]
+                    .ne(&usize::MAX)
+                    .then(|| pairs[pair_of[i]])
+                    .filter(|(_, a)| *a == i)
+                    .map(|(d, _)| chunks_of(&mut cache, &ctx.rows[d].text, &row.text, false))
+                    .unwrap_or_default(),
+                RowKind::Context => Vec::new(),
+            };
+            let char_bg = match row.kind {
+                RowKind::Add => p.diff_char_add,
+                RowKind::Del => p.diff_char_del,
+                RowKind::Context => Color32::TRANSPARENT,
+            };
+            paint_line(
+                ui.painter(),
+                content_x,
+                y,
+                &row.text,
+                char_w,
+                &font,
+                p.tok_punc,
+                &chunks,
+                char_bg,
+            );
+        }
+        // 当前组蓝框：画在滚动内容坐标系内（与行同一 content_top），
+        // 随内容滚动、被视口裁剪 —— 稳定版 box 挂在 lines-content 上。
+        draw_group_box(
+            ui,
+            theme,
+            &ctx,
+            gutter_end,
+            content_right + 2.0,
+            content_top,
+        );
+    });
 
     // Overview ruler: del marks left half (rose), add marks right half
     // (green); current group outlined; viewport band overlaid.
@@ -404,10 +415,10 @@ fn current_group_band(ctx: &DiffBodyCtx<'_>, body: Rect, total: usize) -> Option
 fn draw_group_box(
     ui: &mut egui::Ui,
     theme: &Theme,
-    body: Rect,
     ctx: &DiffBodyCtx<'_>,
     x0: f32,
     x1: f32,
+    content_top: f32,
 ) {
     let p = theme.palette;
     let total = ctx.rows.len();
@@ -426,8 +437,10 @@ fn draw_group_box(
     if first > last || first >= total {
         return;
     }
-    let top = body.top() + first as f32 * ROW_H;
-    let bottom = body.top() + (last as f32 + 1.0) * ROW_H;
+    // content_top = 视口内第 0 行的屏幕 y（随滚动移动），框必须画在同一
+    // 坐标系里才会跟着内容滚动（稳定版 box 挂在 lines-content 上）。
+    let top = content_top + first as f32 * ROW_H;
+    let bottom = content_top + (last as f32 + 1.0) * ROW_H;
     let rects: Vec<Rect> = vec![Rect::from_min_max(
         Pos2::new(x0, top),
         Pos2::new(x1, bottom),
@@ -552,128 +565,131 @@ pub fn draw_split(ui: &mut egui::Ui, theme: &Theme, body: Rect, ctx: DiffBodyCtx
         });
     let mut cache: ChunkCache = ChunkCache::new();
 
+    let mut style = egui::Style::clone(ui.style());
+    style.scroll_animation = egui::style::ScrollAnimation::none();
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(body)
+            .style(style)
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
-    let scroll = ScrollArea::vertical()
+    let jump_offset = scroll_to_row.map(|row_idx| {
+        let top = row_idx as f32 * ROW_H;
+        (top - (body.height() - ROW_H) / 2.0).max(0.0)
+    });
+    let mut scroll_area = ScrollArea::vertical()
         .id_salt(("diff-split", ctx.tab_id))
-        .auto_shrink([false, false])
-        .show(&mut child, |ui| {
-            if let Some(row_idx) = scroll_to_row {
-                let target = Rect::from_min_size(
-                    Pos2::new(body.left(), body.top() + row_idx as f32 * ROW_H),
-                    Vec2::new(1.0, ROW_H),
-                );
-                ui.scroll_to_rect(target, Some(Align::Center));
-            }
-            let total_h = pairs.len() as f32 * ROW_H;
-            let (_, inner) =
-                ui.allocate_exact_size(Vec2::new(body.width(), total_h), Sense::hover());
-            let num_font = FontId::monospace(11.0);
-            for (i, (left, right)) in pairs.iter().enumerate() {
-                let y_top = inner.rect.top() + i as f32 * ROW_H;
-                let y = y_top + ROW_H / 2.0;
-                // Left pane.
-                let l_rect =
-                    Rect::from_min_size(Pos2::new(body.left(), y_top), Vec2::new(half, ROW_H));
-                if let Some(li) = left {
-                    let row = &ctx.rows[*li];
-                    if row.kind == RowKind::Del {
-                        ui.painter().rect_filled(l_rect, 0.0, p.diff_line_del);
-                    }
-                    ui.painter().text(
-                        Pos2::new(num_l - 8.0, y),
-                        Align2::RIGHT_CENTER,
-                        row.old_no.map(|n| n.to_string()).unwrap_or_default(),
-                        num_font.clone(),
-                        p.text3,
-                    );
-                    let chunks = match row.kind {
-                        RowKind::Del => right
-                            .map(|ri| chunks_of(&mut cache, &row.text, &ctx.rows[ri].text, true))
-                            .unwrap_or_default(),
-                        _ => Vec::new(),
-                    };
-                    paint_line(
-                        ui.painter(),
-                        text_l,
-                        y,
-                        &row.text,
-                        char_w,
-                        &font,
-                        p.tok_punc,
-                        &chunks,
-                        p.diff_char_del,
-                    );
-                } else {
-                    ui.painter().rect_filled(l_rect, 0.0, p.hover);
+        .auto_shrink([false, false]);
+    if let Some(offset) = jump_offset {
+        scroll_area = scroll_area.vertical_scroll_offset(offset);
+    }
+    let scroll = scroll_area.show(&mut child, |ui| {
+        let total_h = pairs.len() as f32 * ROW_H;
+        let (_, inner) = ui.allocate_exact_size(Vec2::new(body.width(), total_h), Sense::hover());
+        let content_top = inner.rect.top();
+        let num_font = FontId::monospace(11.0);
+        for (i, (left, right)) in pairs.iter().enumerate() {
+            let y_top = content_top + i as f32 * ROW_H;
+            let y = y_top + ROW_H / 2.0;
+            // Left pane.
+            let l_rect = Rect::from_min_size(Pos2::new(body.left(), y_top), Vec2::new(half, ROW_H));
+            if let Some(li) = left {
+                let row = &ctx.rows[*li];
+                if row.kind == RowKind::Del {
+                    ui.painter().rect_filled(l_rect, 0.0, p.diff_line_del);
                 }
-                ui.painter()
-                    .vline(mid, y_top..=y_top + ROW_H, Stroke::new(1.0, p.border));
-                // Right pane.
-                let r_rect =
-                    Rect::from_min_size(Pos2::new(mid, y_top), Vec2::new(ruler_left - mid, ROW_H));
-                if let Some(ri) = right {
-                    let row = &ctx.rows[*ri];
-                    if row.kind == RowKind::Add {
-                        ui.painter().rect_filled(r_rect, 0.0, p.diff_line_add);
-                    }
-                    ui.painter().text(
-                        Pos2::new(num_r - 8.0, y),
-                        Align2::RIGHT_CENTER,
-                        row.new_no.map(|n| n.to_string()).unwrap_or_default(),
-                        num_font.clone(),
-                        p.text3,
-                    );
-                    let chunks = match row.kind {
-                        RowKind::Add => left
-                            .map(|li| chunks_of(&mut cache, &ctx.rows[li].text, &row.text, false))
-                            .unwrap_or_default(),
-                        _ => Vec::new(),
-                    };
-                    paint_line(
-                        ui.painter(),
-                        text_r,
-                        y,
-                        &row.text,
-                        char_w,
-                        &font,
-                        p.tok_punc,
-                        &chunks,
-                        p.diff_char_add,
-                    );
-                } else {
-                    ui.painter().rect_filled(r_rect, 0.0, p.hover);
-                }
+                ui.painter().text(
+                    Pos2::new(num_l - 8.0, y),
+                    Align2::RIGHT_CENTER,
+                    row.old_no.map(|n| n.to_string()).unwrap_or_default(),
+                    num_font.clone(),
+                    p.text3,
+                );
+                let chunks = match row.kind {
+                    RowKind::Del => right
+                        .map(|ri| chunks_of(&mut cache, &row.text, &ctx.rows[ri].text, true))
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                paint_line(
+                    ui.painter(),
+                    text_l,
+                    y,
+                    &row.text,
+                    char_w,
+                    &font,
+                    p.tok_punc,
+                    &chunks,
+                    p.diff_char_del,
+                );
+            } else {
+                ui.painter().rect_filled(l_rect, 0.0, p.hover);
             }
-        });
-    let _ = scroll;
-
-    // Current-group outlines on both panes.
-    if ctx.current_group < ctx.groups && !ctx.rows.is_empty() {
-        if let Some((top, bottom)) = split_group_band(&ctx, &pairs) {
-            for (x0, x1) in [
-                (body.left() + 1.0, mid - 1.0),
-                (mid + 1.0, ruler_left - 1.0),
-            ] {
-                let rect = Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x1, bottom));
-                ui.painter().rect_stroke(
-                    rect,
-                    egui::CornerRadius::ZERO,
-                    Stroke::new(1.0, p.jb_accent.gamma_multiply(0.25)),
-                    StrokeKind::Outside,
+            ui.painter()
+                .vline(mid, y_top..=y_top + ROW_H, Stroke::new(1.0, p.border));
+            // Right pane.
+            let r_rect =
+                Rect::from_min_size(Pos2::new(mid, y_top), Vec2::new(ruler_left - mid, ROW_H));
+            if let Some(ri) = right {
+                let row = &ctx.rows[*ri];
+                if row.kind == RowKind::Add {
+                    ui.painter().rect_filled(r_rect, 0.0, p.diff_line_add);
+                }
+                ui.painter().text(
+                    Pos2::new(num_r - 8.0, y),
+                    Align2::RIGHT_CENTER,
+                    row.new_no.map(|n| n.to_string()).unwrap_or_default(),
+                    num_font.clone(),
+                    p.text3,
                 );
-                ui.painter().rect_stroke(
-                    rect,
-                    egui::CornerRadius::ZERO,
-                    Stroke::new(1.0, p.jb_accent),
-                    StrokeKind::Outside,
+                let chunks = match row.kind {
+                    RowKind::Add => left
+                        .map(|li| chunks_of(&mut cache, &ctx.rows[li].text, &row.text, false))
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                paint_line(
+                    ui.painter(),
+                    text_r,
+                    y,
+                    &row.text,
+                    char_w,
+                    &font,
+                    p.tok_punc,
+                    &chunks,
+                    p.diff_char_add,
                 );
+            } else {
+                ui.painter().rect_filled(r_rect, 0.0, p.hover);
             }
         }
-    }
+        // 当前组蓝框（两栏各一个）：滚动内容坐标系，随内容滚动。
+        if ctx.current_group < ctx.groups && !ctx.rows.is_empty() {
+            if let Some((top, bottom)) = split_group_band(&ctx, &pairs) {
+                let top = content_top + top;
+                let bottom = content_top + bottom;
+                for (x0, x1) in [
+                    (body.left() + 1.0, mid - 1.0),
+                    (mid + 1.0, ruler_left - 1.0),
+                ] {
+                    let rect = Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x1, bottom));
+                    ui.painter().rect_stroke(
+                        rect,
+                        egui::CornerRadius::ZERO,
+                        Stroke::new(1.0, p.jb_accent.gamma_multiply(0.25)),
+                        StrokeKind::Outside,
+                    );
+                    ui.painter().rect_stroke(
+                        rect,
+                        egui::CornerRadius::ZERO,
+                        Stroke::new(1.0, p.jb_accent),
+                        StrokeKind::Outside,
+                    );
+                }
+            }
+        }
+    });
+    let _ = scroll;
 
     // Overview ruler.
     let ruler = Rect::from_min_max(

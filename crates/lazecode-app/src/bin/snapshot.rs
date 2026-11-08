@@ -148,6 +148,7 @@ fn main() -> anyhow::Result<()> {
                 model.ui.compare_branches.sides = Some(data);
             }
             model.ui.panel_visible = false;
+            model.ui.terminal_visible = false;
         }
         if let Some(commit) = project.log.first() {
             let id = commit.id.clone();
@@ -165,6 +166,12 @@ fn main() -> anyhow::Result<()> {
                 model.ui.panel_visible = false;
                 model.ui.panel_visible = true;
                 model.ui.sidebar_view = SidebarView::Consoles;
+            }
+            "compare" => {
+                // 分支比较页：无终端、无底部面板。
+                model.ui.terminal_visible = false;
+                model.ui.panel_visible = false;
+                model.ui.sidebar_view = SidebarView::Files;
             }
             "cmpdiff" | "cmpdiff3" => {
                 // 用户截图形态：Compare 抽屉 + Diff 标签 + Git 底部面板（无终端）。

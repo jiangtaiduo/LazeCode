@@ -5,7 +5,7 @@ use egui::{
     StrokeKind, TextEdit, Ui, Vec2,
 };
 use lazecode_core::{
-    AppModel, Command, DiffSource, DiffViewMode, ProjectState, TabKind, ToastKind,
+    AppModel, Command, DiffSource, DiffViewMode, ProjectState, TabKind,
 };
 use lazecode_text::{Cursor, Document, MatchOptions, Motion, Selection, TokenKind};
 
@@ -1348,189 +1348,245 @@ fn draw_diff(
     let binary = diff.diff.as_ref().map(|d| d.binary).unwrap_or(false);
     let loading = diff.loading;
 
-    let toolbar = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 34.0));
-    ui.painter().rect_filled(toolbar, 0.0, p.tabstrip);
+    // ----- 稳定版 DiffViewer：28px 工具栏 + 28px 等宽 pane 标题栏 -----
+    let toolbar = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 28.0));
+    ui.painter().rect_filled(toolbar, 0.0, p.sidebar);
     ui.painter().hline(
         toolbar.x_range(),
         toolbar.bottom() - 0.5,
         Stroke::new(1.0, p.border),
     );
-    let (icon, tone) = tab_icon(&path, theme);
-    paint_icon(
-        ui.painter(),
-        Rect::from_center_size(
-            Pos2::new(toolbar.left() + 18.0, toolbar.center().y),
-            Vec2::splat(14.0),
-        ),
-        icon,
-        tone,
+    let titlebar = Rect::from_min_size(
+        Pos2::new(rect.left(), toolbar.bottom()),
+        Vec2::new(rect.width(), 28.0),
     );
-    let name = path.rsplit('/').next().unwrap_or(&path);
-    ui.painter().text(
-        Pos2::new(toolbar.left() + 30.0, toolbar.center().y),
-        Align2::LEFT_CENTER,
-        name,
-        FontId::proportional(13.0),
-        p.text,
+    ui.painter().rect_filled(titlebar, 0.0, p.sidebar);
+    ui.painter().hline(
+        titlebar.x_range(),
+        titlebar.bottom() - 0.5,
+        Stroke::new(1.0, p.border),
     );
-    if let Some(kind) = status {
-        ui.painter().text(
-            Pos2::new(
-                toolbar.left() + 30.0 + name.chars().count() as f32 * 6.5 + 10.0,
-                toolbar.center().y,
-            ),
-            Align2::LEFT_CENTER,
-            kind.label(),
-            FontId::proportional(11.5),
-            p.text3,
-        );
-    }
-
-    // Source description label
-    let source_label = match &diff_source {
-        DiffSource::Worktree { .. } => {
-            if model.settings.language.is_zh() {
-                format!("HEAD → 工作区 · +{additions} −{deletions}")
-            } else {
-                format!("HEAD → Working tree · +{additions} −{deletions}")
-            }
-        }
-        DiffSource::Commit { commit, .. } => {
-            if model.settings.language.is_zh() {
-                format!(
-                    "提交 {} · +{additions} −{deletions}",
-                    &commit[..commit.len().min(7)]
-                )
-            } else {
-                format!(
-                    "Commit {} · +{additions} −{deletions}",
-                    &commit[..commit.len().min(7)]
-                )
-            }
-        }
-        DiffSource::CompareWithLocal { commit, .. } => {
-            if model.settings.language.is_zh() {
-                format!(
-                    "本地 ↔ 提交 {} · +{additions} −{deletions}",
-                    &commit[..commit.len().min(7)]
-                )
-            } else {
-                format!(
-                    "Local ↔ Commit {} · +{additions} −{deletions}",
-                    &commit[..commit.len().min(7)]
-                )
-            }
-        }
-        DiffSource::CompareCommits { from, to, .. } => {
-            if model.settings.language.is_zh() {
-                format!(
-                    "比较 {}..{} · +{additions} −{deletions}",
-                    &from[..from.len().min(7)],
-                    &to[..to.len().min(7)]
-                )
-            } else {
-                format!(
-                    "Compare {}..{} · +{additions} −{deletions}",
-                    &from[..from.len().min(7)],
-                    &to[..to.len().min(7)]
-                )
-            }
-        }
-        DiffSource::Files { .. } => {
-            if model.settings.language.is_zh() {
-                format!("两文件对比 · +{additions} −{deletions}")
-            } else {
-                format!("Compare Files · +{additions} −{deletions}")
-            }
-        }
-    };
-    ui.painter().text(
-        Pos2::new(toolbar.center().x, toolbar.center().y),
-        Align2::CENTER_CENTER,
-        source_label,
-        FontId::monospace(11.5),
-        p.text3,
-    );
-
-    // Toolbar controls on right: Open File, Mode Toggle, Next / Prev Hunk
-    let mut btn_x = toolbar.right() - 8.0;
-    if matches!(
-        &diff_source,
-        DiffSource::Worktree { .. } | DiffSource::Files { .. }
-    ) {
-        btn_x -= 76.0;
-        let open_rect = Rect::from_min_size(
-            Pos2::new(btn_x, toolbar.center().y - 11.0),
-            Vec2::new(72.0, 22.0),
-        );
-        if secondary_button(
-            ui,
-            open_rect,
-            crate::tr!(model, "Open file", "打开文件"),
-            None,
-            theme,
-        )
-        .clicked()
-        {
-            let settings = model.settings.clone();
-            let target_path = match &diff_source {
-                DiffSource::Files { new_path, .. } => new_path.clone(),
-                _ => model.projects[index].root.join(&path),
-            };
-            if let Err(err) = model.projects[index].open_file(target_path, &settings) {
-                model.toast(err, ToastKind::Error);
-            }
-        }
-        btn_x -= 6.0;
-    }
-
-    let mode_label = match view_mode {
-        DiffViewMode::Unified => crate::tr!(model, "⬚ Split", "⬚ 并排"),
-        DiffViewMode::SideBySide => crate::tr!(model, "☰ Unified", "☰ 统一"),
-    };
-    btn_x -= 82.0;
-    let mode_rect = Rect::from_min_size(
-        Pos2::new(btn_x, toolbar.center().y - 11.0),
-        Vec2::new(78.0, 22.0),
-    );
-    if secondary_button(ui, mode_rect, mode_label, None, theme).clicked() {
-        model.queue(Command::ToggleDiffViewMode(tab_id));
-    }
-    btn_x -= 6.0;
 
     let total_hunks = hunks.as_ref().map(|h| h.len()).unwrap_or(0);
-    if total_hunks > 0 {
-        btn_x -= 24.0;
-        let next_rect = Rect::from_min_size(
-            Pos2::new(btn_x, toolbar.center().y - 11.0),
-            Vec2::new(24.0, 22.0),
-        );
-        if secondary_button(ui, next_rect, "▼", None, theme).clicked() {
-            model.queue(Command::NextDiffHunk(tab_id));
+    let mut lx = toolbar.left() + 8.0;
+    let icon_btn = |ui: &mut Ui, x: &mut f32, icon: Icon, enabled: bool, _theme: &Theme| -> bool {
+        let rect =
+            Rect::from_center_size(Pos2::new(*x + 10.0, toolbar.center().y), Vec2::splat(20.0));
+        *x += 22.0;
+        if !enabled {
+            paint_icon(
+                ui.painter(),
+                rect.shrink(3.5),
+                icon,
+                p.text3.gamma_multiply(0.5),
+            );
+            return false;
         }
-
-        btn_x -= 46.0;
+        let response = ui.interact(
+            rect,
+            ui.scope_id().with(("diff-tb", *x as u32, icon as u8)),
+            Sense::click(),
+        );
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(rect, egui::CornerRadius::same(6), p.hover);
+        }
+        paint_icon(ui.painter(), rect.shrink(3.5), icon, p.text2);
+        response.clicked()
+    };
+    // 文件间导航占位（多文件 diff 列表导航，本里程碑恒禁用）。
+    let _ = icon_btn(ui, &mut lx, Icon::DoubleChevronLeft, false, theme);
+    let _ = icon_btn(ui, &mut lx, Icon::DoubleChevronRight, false, theme);
+    lx += 3.0;
+    ui.painter().vline(
+        lx,
+        (toolbar.center().y - 7.0)..=(toolbar.center().y + 7.0),
+        Stroke::new(1.0, p.border_soft),
+    );
+    lx += 5.0;
+    let _ = icon_btn(ui, &mut lx, Icon::ChevronUp, total_hunks > 0, theme);
+    let _ = icon_btn(ui, &mut lx, Icon::ChevronDown, total_hunks > 0, theme);
+    if total_hunks > 0 {
+        // hunk 计数药丸："n / m"。
+        let counter = Rect::from_center_size(
+            Pos2::new(lx + 24.0, toolbar.center().y),
+            Vec2::new(44.0, 20.0),
+        );
+        lx += 50.0;
+        ui.painter()
+            .rect_filled(counter, egui::CornerRadius::same(6), p.hover);
+        ui.painter().rect_stroke(
+            counter,
+            egui::CornerRadius::same(6),
+            Stroke::new(1.0, p.border_soft),
+            StrokeKind::Inside,
+        );
         let hunk_text = format!(
-            "{}/{}",
+            "{} / {}",
             current_hunk.min(total_hunks.saturating_sub(1)) + 1,
             total_hunks
         );
         ui.painter().text(
-            Pos2::new(btn_x + 23.0, toolbar.center().y),
+            counter.center(),
             Align2::CENTER_CENTER,
             hunk_text,
-            FontId::monospace(11.5),
-            p.text3,
+            FontId::proportional(11.0),
+            p.text,
         );
+    }
+    // 视图选择（select 样式 20px）。
+    let mode_label = match view_mode {
+        DiffViewMode::Unified => crate::tr!(model, "Unified view", "统一视图"),
+        DiffViewMode::SideBySide => crate::tr!(model, "Side by Side", "并排对比"),
+    };
+    let select_rect = Rect::from_center_size(
+        Pos2::new(lx + 58.0, toolbar.center().y),
+        Vec2::new(112.0, 20.0),
+    );
+    lx += 122.0;
+    ui.painter()
+        .rect_filled(select_rect, egui::CornerRadius::same(6), p.hover);
+    ui.painter().rect_stroke(
+        select_rect,
+        egui::CornerRadius::same(6),
+        Stroke::new(1.0, p.border_soft),
+        StrokeKind::Inside,
+    );
+    text_clipped(
+        ui.painter(),
+        select_rect.shrink2(Vec2::new(8.0, 0.0)),
+        mode_label,
+        FontId::proportional(11.0),
+        p.text,
+        Align2::LEFT_CENTER,
+    );
+    paint_icon(
+        ui.painter(),
+        Rect::from_center_size(
+            Pos2::new(select_rect.right() - 12.0, select_rect.center().y),
+            Vec2::splat(10.0),
+        ),
+        Icon::ChevronDown,
+        p.text3,
+    );
+    if ui
+        .interact(select_rect, ui.scope_id().with("diff-mode"), Sense::click())
+        .clicked()
+    {
+        model.queue(Command::ToggleDiffViewMode(tab_id));
+    }
+    // 统计（muted，纯文本）。
+    let stats = if loading {
+        crate::tr!(model, "Loading…", "加载中…").to_string()
+    } else if model.settings.language.is_zh() {
+        format!("{additions} 增 / {deletions} 删 · {total_hunks} 处差异")
+    } else {
+        format!("{additions} additions / {deletions} deletions · {total_hunks} differences")
+    };
+    ui.painter().text(
+        Pos2::new(lx + 8.0, toolbar.center().y),
+        Align2::LEFT_CENTER,
+        stats,
+        FontId::proportional(11.0),
+        p.text3,
+    );
 
-        btn_x -= 24.0;
-        let prev_rect = Rect::from_min_size(
-            Pos2::new(btn_x, toolbar.center().y - 11.0),
-            Vec2::new(24.0, 22.0),
-        );
-        if secondary_button(ui, prev_rect, "▲", None, theme).clicked() {
-            model.queue(Command::PrevDiffHunk(tab_id));
+    // 右组：比较标签（muted 11px）。
+    let comparison = match &diff_source {
+        DiffSource::Commit { commit, .. } => {
+            let hash: String = commit.chars().take(8).collect();
+            if model.settings.language.is_zh() {
+                format!("提交 {hash}")
+            } else {
+                format!("Commit {hash}")
+            }
         }
+        DiffSource::CompareWithLocal { commit, .. } => {
+            let hash: String = commit.chars().take(8).collect();
+            if model.settings.language.is_zh() {
+                format!("{hash} → 工作区")
+            } else {
+                format!("{hash} → working tree")
+            }
+        }
+        DiffSource::CompareCommits { from, to, .. } => {
+            let f: String = from.chars().take(8).collect();
+            let to8: String = to.chars().take(8).collect();
+            format!("{f} ↔ {to8}")
+        }
+        DiffSource::Files { .. } => crate::tr!(model, "File vs File", "两文件对比").to_string(),
+        DiffSource::Worktree { .. } => {
+            if model.settings.language.is_zh() {
+                "工作区 vs 索引".to_string()
+            } else {
+                "Working tree vs index".to_string()
+            }
+        }
+    };
+    ui.painter().text(
+        Pos2::new(toolbar.right() - 10.0, toolbar.center().y),
+        Align2::RIGHT_CENTER,
+        comparison,
+        FontId::proportional(11.0),
+        p.text3,
+    );
+
+    // ----- pane 标题栏：hash（或 "diff"）+ 路径 + 状态 tag -----
+    let hash_text = match &diff_source {
+        DiffSource::Commit { commit, .. } => {
+            let hash: String = commit.chars().take(8).collect();
+            hash
+        }
+        _ => "diff".to_string(),
+    };
+    let hash_w = hash_text.chars().count() as f32 * 6.6 + 8.0;
+    ui.painter().text(
+        Pos2::new(titlebar.left() + 8.0, titlebar.center().y),
+        Align2::LEFT_CENTER,
+        &hash_text,
+        FontId::monospace(11.0),
+        p.text3,
+    );
+    text_clipped(
+        ui.painter(),
+        Rect::from_min_max(
+            Pos2::new(titlebar.left() + 8.0 + hash_w, titlebar.top()),
+            Pos2::new(titlebar.right() - 60.0, titlebar.bottom()),
+        ),
+        &path,
+        FontId::monospace(12.0),
+        p.text_bright,
+        Align2::LEFT_CENTER,
+    );
+    if let Some(kind) = status {
+        let label = kind.label();
+        let tag_w = label.chars().count() as f32 * 10.0 + 12.0;
+        let tag = Rect::from_center_size(
+            Pos2::new(titlebar.right() - 10.0 - tag_w * 0.5, titlebar.center().y),
+            Vec2::new(tag_w, 15.0),
+        );
+        let (tag_color, tag_bg, tag_border) = match kind {
+            lazecode_git::ChangeKind::Added | lazecode_git::ChangeKind::Renamed => {
+                (p.green, p.diff_add, p.diff_add_strong)
+            }
+            lazecode_git::ChangeKind::Deleted => (p.rose, p.diff_del, p.diff_del_strong),
+            _ => (p.text3, p.hover, p.border_soft),
+        };
+        ui.painter()
+            .rect_filled(tag, egui::CornerRadius::same(3), tag_bg);
+        ui.painter().rect_stroke(
+            tag,
+            egui::CornerRadius::same(3),
+            Stroke::new(1.0, tag_border),
+            StrokeKind::Inside,
+        );
+        ui.painter().text(
+            tag.center(),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(10.0),
+            tag_color,
+        );
     }
 
     let body = Rect::from_min_max(Pos2::new(rect.left(), toolbar.bottom()), rect.max);
@@ -1629,18 +1685,24 @@ fn draw_hunk_header(
 ) {
     let (head_rect, _) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::hover());
-    let bg = if is_current {
-        p.accent.gamma_multiply(0.2)
-    } else {
-        p.panel2
-    };
+    // 稳定版 `@@` 头行：rgba(56,139,253,0.10) 底 + muted 等宽文字；
+    // 当前块额外 accent 描边。
+    let bg = Color32::from_rgba_unmultiplied(56, 139, 253, 26);
     ui.painter().rect_filled(head_rect, 0.0, bg);
+    if is_current {
+        ui.painter().rect_stroke(
+            head_rect,
+            egui::CornerRadius::ZERO,
+            Stroke::new(1.0, p.accent),
+            StrokeKind::Inside,
+        );
+    }
     ui.painter().text(
         Pos2::new(head_rect.left() + 12.0, head_rect.center().y),
         Align2::LEFT_CENTER,
         &hunk.header,
-        FontId::monospace(10.0),
-        if is_current { p.accent } else { p.text3 },
+        FontId::monospace(10.5),
+        p.text3,
     );
 
     if matches!(diff_source, DiffSource::Worktree { .. }) {

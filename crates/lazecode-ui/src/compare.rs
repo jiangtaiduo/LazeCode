@@ -244,26 +244,30 @@ pub fn flatten_file_tree(
 
 // ================= 页面渲染（稳定版 CompareBranchesView 的移植） =================
 //
-// 页面设计对齐稳定版：编辑器区常驻标签页；上下两个 pane（各是一条独立
-// 提交日志），中间 8px 拖拽分隔条（split 持久化到 settings.compare_split）；
-// 每个 pane = banner（方向语义 + Swap）→ 过滤工具行 → [提交日志 | 详情列]，
-// 详情列宽度两侧共用、可拖（settings.compare_details_width）。视觉使用新版
-// 设计令牌（palette/widgets/i18n tr!）。
+// 1:1 对齐稳定版 cb-* 视觉规格：
+//   上下两个 pane（grid split，8px 分隔条持久化 settings.compare_split），
+//   每个 pane = 28px 琥珀色 banner（方向语义 + 上侧 Swap）→ 30px 过滤工具行
+//   （搜索框内嵌 .*/Cc、⑂/User/Date/Paths、清除 ×、右侧 graph/refresh）→
+//   [26px 提交日志（DAG + 引用章 + 作者/日期）| 详情列（26px 头部 + 文件树
+//   + 元信息，宽度两侧共用 24-62%）]。
 
 use crate::icons::{paint as paint_icon, Icon};
 use crate::runtime::UiRuntime;
 use crate::theme::Theme;
-use crate::widgets::{icon_button, secondary_button, secondary_button_enabled, text_clipped};
-use egui::{Align2, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2};
+use crate::widgets::{secondary_button, text_clipped};
+use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2};
 use lazecode_core::{AppModel, Command};
 
 const SPLITTER_H: f32 = 8.0;
-const BANNER_H: f32 = 24.0;
-const TOOLBAR_H: f32 = 26.0;
-const LIST_HEADER_H: f32 = 20.0;
-const ROW_H: f32 = 24.0;
-const FILE_ROW_H: f32 = 20.0;
-const META_H: f32 = 18.0;
+const BANNER_H: f32 = 28.0;
+const TOOLBAR_H: f32 = 30.0;
+const ROW_H: f32 = 26.0;
+const DETAILS_HEAD_H: f32 = 26.0;
+const ROOT_ROW_H: f32 = 24.0;
+const FILE_ROW_H: f32 = 21.0;
+const AUTHOR_W: f32 = 80.0;
+const DATE_W: f32 = 108.0;
+const RULER_GAP: f32 = 10.0;
 
 /// 分支比较页主入口（TabKind::Compare 的内容区）。
 pub fn draw_page(
@@ -276,13 +280,13 @@ pub fn draw_page(
     right: &str,
 ) {
     let p = theme.palette;
-    ui.painter().rect_filled(rect, 0.0, p.editor);
+    ui.painter().rect_filled(rect, 0.0, p.bg);
 
     // ---- 会话同步：项目/方向/路径不一致（新会话）时重置并触发后台比较。
     // root 必须参与：不同项目可能有同名分支，refs 相同不等于同一会话。----
     let session_root = model
         .active_project()
-        .map(|p| p.root.clone())
+        .map(|project| project.root.clone())
         .unwrap_or_default();
     {
         let state = &model.ui.compare_branches;
@@ -307,7 +311,7 @@ pub fn draw_page(
         }
     }
 
-    // ---- 全局 loading / error+Retry（覆盖整页）----
+    // ---- 全局 loading / error+Retry（覆盖整页，cb-state 居中态）----
     if model.ui.compare_branches.loading {
         ui.painter().text(
             rect.center(),
@@ -472,18 +476,15 @@ pub fn draw_page(
         now,
     );
 
-    // 拖拽分隔条（稳定版 resizeSplit：调整两条提交日志的高度）。
-    let drag = ui.interact(splitter, ui.scope_id().with(("cb-split",)), Sense::drag());
+    // 8px 分隔条（.cb-splitter：bg-app + 居中 2px 发丝线，hover 变 accent）。
+    let drag = ui.interact(splitter, ui.scope_id().with("cb-split"), Sense::drag());
     let hovered = drag.hovered() || drag.dragged();
-    ui.painter().rect_filled(
-        splitter,
-        0.0,
-        if hovered { p.accent_soft } else { p.panel2 },
-    );
+    ui.painter().rect_filled(splitter, 0.0, p.bg);
+    let line_y = splitter.top() + 3.0;
     ui.painter().hline(
         splitter.x_range(),
-        splitter.center().y,
-        Stroke::new(1.0, p.border),
+        line_y,
+        Stroke::new(2.0, if hovered { p.accent } else { p.border_soft }),
     );
     if drag.dragged() {
         let total = (rect.height() - SPLITTER_H).max(1.0);
@@ -494,6 +495,62 @@ pub fn draw_page(
         rt.compare_split_drag = false;
         model.save_settings();
     }
+}
+
+/// 20px 图标按钮（cb-icon-btn：hover bg-hover，active accent-soft+蓝）。
+fn cb_icon_btn(
+    ui: &mut Ui,
+    rect: Rect,
+    key: (&'static str, u8),
+    icon: Icon,
+    active: bool,
+    enabled: bool,
+) -> bool {
+    let p = crate::theme::Palette::dark();
+    let response = ui.interact(rect, ui.scope_id().with(key), Sense::click());
+    if enabled && response.hovered() {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(4), p.hover);
+    } else if active {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(4), p.accent_soft);
+    }
+    let tint = if active {
+        p.blue
+    } else if enabled {
+        p.text2
+    } else {
+        p.text3.gamma_multiply(0.4)
+    };
+    paint_icon(ui.painter(), rect.shrink(3.0), icon, tint);
+    response.clicked() && enabled
+}
+
+/// h22 过滤文字按钮（cb-filter-btn）。
+fn cb_filter_btn(
+    ui: &mut Ui,
+    rect: Rect,
+    key: (&'static str, u8),
+    label: &str,
+    active: bool,
+) -> bool {
+    let p = crate::theme::Palette::dark();
+    let response = ui.interact(rect, ui.scope_id().with(key), Sense::click());
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(4), p.hover);
+    } else if active {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(4), p.accent_soft);
+    }
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(11.0),
+        if active { p.blue } else { p.text2 },
+    );
+    response.clicked()
 }
 
 /// 单侧 pane：banner（方向语义，left 侧带 Swap）→ 过滤工具行 →
@@ -514,43 +571,82 @@ fn draw_pane(
 ) {
     let p = theme.palette;
     let zh = model.settings.language.is_zh();
-    let accent = if side_index == 0 { p.accent } else { p.rose };
+    let side_index_us = usize::from(side_index);
 
-    // ---- banner：方向语义（对齐稳定版 commitsOnlyIn）+ left 侧 Swap ----
+    // ---- banner：28px 琥珀色提示条（rgba(227,179,65,0.1)）----
     let banner = Rect::from_min_size(rect.min, Vec2::new(rect.width(), BANNER_H));
-    ui.painter().rect_filled(banner, 0.0, p.panel2);
+    ui.painter()
+        .rect_filled(banner, 0.0, p.amber.gamma_multiply(0.10));
+    ui.painter().hline(
+        banner.x_range(),
+        banner.bottom() - 0.5,
+        Stroke::new(1.0, p.border_soft),
+    );
     paint_icon(
         ui.painter(),
         Rect::from_center_size(
-            Pos2::new(banner.left() + 12.0, banner.center().y),
-            Vec2::splat(12.0),
+            Pos2::new(banner.left() + 16.0, banner.center().y),
+            Vec2::splat(13.0),
         ),
         Icon::Alert,
         p.amber,
     );
+    let banner_text = if zh {
+        format!("存在于 {ref_name} 但不存在于 {other_ref} 的提交")
+    } else {
+        format!("Commits that exist in {ref_name} but don't exist in {other_ref}")
+    };
+    let text_right = if side_index == 0 {
+        banner.right() - 100.0
+    } else {
+        banner.right() - 10.0
+    };
     text_clipped(
         ui.painter(),
         Rect::from_min_max(
-            Pos2::new(banner.left() + 26.0, banner.top()),
-            Pos2::new(banner.right() - 8.0, banner.bottom()),
+            Pos2::new(banner.left() + 28.0, banner.top()),
+            Pos2::new(text_right, banner.bottom()),
         ),
-        &if zh {
-            format!("存在于 {ref_name} 但不存在于 {other_ref} 的提交")
-        } else {
-            format!("Commits that exist in {ref_name} but don't exist in {other_ref}")
-        },
-        FontId::proportional(10.5),
-        p.text2,
+        &banner_text,
+        FontId::proportional(12.0),
+        p.amber,
         Align2::LEFT_CENTER,
     );
     if side_index == 0 {
-        // 稳定版 Swap 只出现在 left（上）pane。
+        // 稳定版 Swap 只出现在 left（上）pane：cb-swap-btn [⇄ Swap Branches]。
+        let label = if zh {
+            "⇄ 交换分支"
+        } else {
+            "⇄ Swap Branches"
+        };
+        let w = label.chars().count() as f32 * 6.0 + 18.0;
         let swap = Rect::from_min_size(
-            Pos2::new(banner.right() - 96.0, banner.center().y - 9.0),
-            Vec2::new(90.0, 18.0),
+            Pos2::new(banner.right() - 8.0 - w, banner.center().y - 10.0),
+            Vec2::new(w, 20.0),
         );
-        if secondary_button(ui, swap, crate::tr!(model, "⇄ Swap", "⇄ 交换"), None, theme).clicked()
-        {
+        let resp = ui.interact(swap, ui.scope_id().with("cb-swap"), Sense::click());
+        if resp.hovered() {
+            ui.painter()
+                .rect_filled(swap, egui::CornerRadius::same(4), p.hover);
+            ui.painter().rect_stroke(
+                swap,
+                egui::CornerRadius::same(4),
+                Stroke::new(1.0, p.border_soft),
+                StrokeKind::Inside,
+            );
+        }
+        ui.painter().text(
+            swap.center(),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(11.0),
+            if resp.hovered() {
+                p.text_bright
+            } else {
+                p.text2
+            },
+        );
+        if resp.clicked() {
             {
                 let state = &mut model.ui.compare_branches;
                 std::mem::swap(&mut state.left_ref, &mut state.right_ref);
@@ -584,222 +680,55 @@ fn draw_pane(
         }
     }
 
-    // ---- 过滤工具行 ----
+    // ---- 过滤工具行（30px，bg-app，搜索框内嵌 .*/Cc）----
     let toolbar = Rect::from_min_size(
         Pos2::new(rect.left(), banner.bottom()),
         Vec2::new(rect.width(), TOOLBAR_H),
     );
-    let mut need_reload = false;
-    {
-        let view = if side_index == 0 {
-            &mut model.ui.compare_branches.left_view
-        } else {
-            &mut model.ui.compare_branches.right_view
-        };
-        let search_right = toolbar.right() - 8.0;
-        let paths_w = 48.0;
-        let ref_w = 52.0;
-        let date_w = 46.0;
-        let user_w = 46.0;
-        let toggle_w = 24.0;
-        let menus_w = user_w + 4.0 + date_w + 4.0 + ref_w + 4.0 + paths_w + 24.0 + 8.0;
-        let search_rect = Rect::from_min_max(
-            Pos2::new(toolbar.left() + 8.0, toolbar.top() + 3.0),
-            Pos2::new(search_right - menus_w, toolbar.bottom() - 3.0),
-        );
-        let mut query = view.query.clone();
-        let search_resp = ui.put(
-            search_rect,
-            TextEdit::singleline(&mut query)
-                .frame(egui::Frame::NONE)
-                .hint_text(crate::tr!(model, "Filter commits", "过滤提交"))
-                .font(FontId::proportional(10.5)),
-        );
-        if search_resp.changed() {
-            view.query = query;
-        }
-        let regex_rect = Rect::from_min_size(
-            Pos2::new(search_rect.right() + 4.0, toolbar.top() + 3.0),
-            Vec2::new(toggle_w, 20.0),
-        );
-        if secondary_button_enabled(ui, regex_rect, ".*", None, view.regex, theme).clicked() {
-            view.regex = !view.regex;
-        }
-        let case_rect = Rect::from_min_size(
-            Pos2::new(regex_rect.right() + 4.0, toolbar.top() + 3.0),
-            Vec2::new(toggle_w, 20.0),
-        );
-        if secondary_button_enabled(ui, case_rect, "Cc", None, view.match_case, theme).clicked() {
-            view.match_case = !view.match_case;
-        }
-        let user_rect = Rect::from_min_size(
-            Pos2::new(case_rect.right() + 4.0, toolbar.top() + 3.0),
-            Vec2::new(user_w, 20.0),
-        );
-        let user_active = view.author.is_some();
-        if secondary_button_enabled(
-            ui,
-            user_rect,
-            crate::tr!(model, "User", "作者"),
-            None,
-            user_active,
-            theme,
-        )
-        .clicked()
-        {
-            rt.open_menu(
-                crate::runtime::MenuKind::CompareUserFilter { side: side_index },
-                user_rect,
-                None,
-            );
-        }
-        let date_rect = Rect::from_min_size(
-            Pos2::new(user_rect.right() + 4.0, toolbar.top() + 3.0),
-            Vec2::new(date_w, 20.0),
-        );
-        let date_active = view.date.is_some();
-        if secondary_button_enabled(
-            ui,
-            date_rect,
-            crate::tr!(model, "Date", "日期"),
-            None,
-            date_active,
-            theme,
-        )
-        .clicked()
-        {
-            rt.open_menu(
-                crate::runtime::MenuKind::CompareDateFilter { side: side_index },
-                date_rect,
-                None,
-            );
-        }
-        let ref_rect = Rect::from_min_size(
-            Pos2::new(date_rect.right() + 4.0, toolbar.top() + 3.0),
-            Vec2::new(ref_w, 20.0),
-        );
-        let ref_active = view.selected_ref_filter.is_some();
-        if secondary_button_enabled(
-            ui,
-            ref_rect,
-            crate::tr!(model, "Branch", "分支"),
-            None,
-            ref_active,
-            theme,
-        )
-        .clicked()
-        {
-            rt.open_menu(
-                crate::runtime::MenuKind::CompareRefFilter { side: side_index },
-                ref_rect,
-                None,
-            );
-        }
-        let paths_rect = Rect::from_min_size(
-            Pos2::new(ref_rect.right() + 4.0, toolbar.top() + 3.0),
-            Vec2::new(paths_w, 20.0),
-        );
-        let paths_active = !view.path.is_empty() || view.path_edit_open;
-        if secondary_button_enabled(
-            ui,
-            paths_rect,
-            crate::tr!(model, "Paths", "路径"),
-            None,
-            paths_active,
-            theme,
-        )
-        .clicked()
-        {
-            view.path_edit_open = !view.path_edit_open;
-            view.path_edit = view.path.clone();
-        }
-        if user_active || date_active || ref_active || !view.query.is_empty() {
-            let clear_rect = Rect::from_min_size(
-                Pos2::new(paths_rect.right() + 4.0, toolbar.top() + 3.0),
-                Vec2::new(20.0, 20.0),
-            );
-            if icon_button(ui, clear_rect, Icon::X, false, theme).clicked() {
-                view.author = None;
-                view.date = None;
-                view.selected_ref_filter = None;
-                view.query.clear();
-            }
-        }
-        // 路径过滤输入行（展开时占一行）。
-        if view.path_edit_open {
-            let path_row = Rect::from_min_size(
-                Pos2::new(rect.left(), toolbar.bottom()),
-                Vec2::new(rect.width(), TOOLBAR_H),
-            );
-            let input = Rect::from_min_max(
-                Pos2::new(path_row.left() + 8.0, path_row.top() + 3.0),
-                Pos2::new(path_row.right() - 116.0, path_row.bottom() - 3.0),
-            );
-            ui.painter()
-                .rect_filled(input, egui::CornerRadius::same(4), p.panel);
-            ui.painter().rect_stroke(
-                input,
-                egui::CornerRadius::same(4),
-                Stroke::new(1.0, p.border),
-                StrokeKind::Inside,
-            );
-            let mut edit = view.path_edit.clone();
-            let resp = ui.put(
-                input.shrink2(Vec2::new(6.0, 2.0)),
-                TextEdit::singleline(&mut edit)
-                    .frame(egui::Frame::NONE)
-                    .hint_text(crate::tr!(model, "path", "路径"))
-                    .font(FontId::monospace(10.5)),
-            );
-            if resp.changed() {
-                view.path_edit = edit.clone();
-            }
-            let apply = Rect::from_min_size(
-                Pos2::new(input.right() + 6.0, path_row.top() + 3.0),
-                Vec2::new(50.0, 20.0),
-            );
-            let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
-            let apply_clicked =
-                secondary_button(ui, apply, crate::tr!(model, "Apply", "应用"), None, theme)
-                    .clicked();
-            let clear_clicked = secondary_button(
-                ui,
-                Rect::from_min_size(
-                    Pos2::new(apply.right() + 4.0, path_row.top() + 3.0),
-                    Vec2::new(50.0, 20.0),
-                ),
-                crate::tr!(model, "Clear", "清空"),
-                None,
-                theme,
-            )
-            .clicked();
-            if apply_clicked || (enter && !edit.trim().is_empty()) {
-                view.path_edit_open = false;
-                if view.path_edit != view.path {
-                    view.path = view.path_edit.clone();
-                    need_reload = true;
-                }
-            }
-            if clear_clicked {
-                view.path_edit_open = false;
-                if !view.path.is_empty() {
-                    view.path.clear();
-                    view.path_edit.clear();
-                    need_reload = true;
-                }
-            }
-        }
-    }
-    if need_reload {
+    ui.painter().rect_filled(toolbar, 0.0, p.bg);
+    ui.painter().hline(
+        toolbar.x_range(),
+        toolbar.bottom() - 0.5,
+        Stroke::new(1.0, p.border_soft),
+    );
+
+    let view_ref = if side_index == 0 {
+        &model.ui.compare_branches.left_view
+    } else {
+        &model.ui.compare_branches.right_view
+    };
+    let user_active = view_ref.author.is_some();
+    let date_active = view_ref.date.is_some();
+    let ref_active = view_ref.selected_ref_filter.is_some();
+    let path_active = !view_ref.path.is_empty();
+    let filter_count =
+        usize::from(user_active) + usize::from(date_active) + usize::from(ref_active);
+    let show_graph = rt.cb_show_graph[side_index_us];
+    let has_side_data = !side.commits.is_empty() || !side.files.is_empty();
+    let _ = has_side_data;
+    let _ = view_ref;
+
+    // 右组：refresh 20 + graph 20（margin-left auto 语义，从右往左布）。
+    let mut rx = toolbar.right() - 6.0;
+    let refresh_rect =
+        Rect::from_min_size(Pos2::new(rx - 20.0, toolbar.top() + 5.0), Vec2::splat(20.0));
+    rx -= 22.0;
+    let graph_rect =
+        Rect::from_min_size(Pos2::new(rx - 20.0, toolbar.top() + 5.0), Vec2::splat(20.0));
+    rx -= 20.0;
+    let clear_rect =
+        Rect::from_min_size(Pos2::new(rx - 18.0, toolbar.top() + 6.0), Vec2::splat(18.0));
+    let clear_w = if filter_count > 0 { 20.0 } else { 0.0 };
+    // 从右往左的按钮组（先画右侧固定组）。
+    if cb_icon_btn(
+        ui,
+        refresh_rect,
+        ("cb-refresh", side_index),
+        Icon::Refresh,
+        false,
+        true,
+    ) {
         let state = &mut model.ui.compare_branches;
-        state.sides = None;
-        for view in [&mut state.left_view, &mut state.right_view] {
-            view.selected.clear();
-            view.anchor = None;
-            view.select_all = false;
-            view.selected_file = None;
-            view.detail = None;
-        }
         state.loading = true;
         let (l, r, lp, rp) = (
             state.left_ref.clone(),
@@ -815,8 +744,335 @@ fn draw_pane(
         });
         return;
     }
+    if cb_icon_btn(
+        ui,
+        graph_rect,
+        ("cb-graph", side_index),
+        Icon::GitLog,
+        show_graph,
+        true,
+    ) {
+        rt.cb_show_graph[side_index_us] = !show_graph;
+    }
+    let lx_left = toolbar.left() + 6.0;
+    if filter_count > 0
+        && cb_icon_btn(
+            ui,
+            clear_rect,
+            ("cb-clear", side_index),
+            Icon::X,
+            false,
+            true,
+        )
+    {
+        // 稳定版 Clear 只清 author/date/ref/path，不动搜索词。
+        let view = if side_index == 0 {
+            &mut model.ui.compare_branches.left_view
+        } else {
+            &mut model.ui.compare_branches.right_view
+        };
+        view.author = None;
+        view.date = None;
+        view.selected_ref_filter = None;
+        if !view.path.is_empty() {
+            view.path.clear();
+            state_reload(model);
+            return;
+        }
+    }
+    // Paths / User / Date / ⑂（从右往左排）。
+    let paths_label = crate::tr!(model, "Paths", "路径");
+    let user_label = crate::tr!(model, "User", "用户");
+    let date_label = crate::tr!(model, "Date", "日期");
+    let btn_w = |label: &str| label.chars().count() as f32 * 6.2 + 14.0;
+    let paths_w = btn_w(paths_label);
+    let user_w = btn_w(user_label);
+    let date_w = btn_w(date_label);
+    let ref_w = 24.0;
+    let mut fx = rx - clear_w - 2.0;
+    let paths_rect = Rect::from_min_size(
+        Pos2::new(fx - paths_w, toolbar.top() + 4.0),
+        Vec2::new(paths_w, 22.0),
+    );
+    fx -= paths_w + 3.0;
+    let date_rect = Rect::from_min_size(
+        Pos2::new(fx - date_w, toolbar.top() + 4.0),
+        Vec2::new(date_w, 22.0),
+    );
+    fx -= date_w + 3.0;
+    let user_rect = Rect::from_min_size(
+        Pos2::new(fx - user_w, toolbar.top() + 4.0),
+        Vec2::new(user_w, 22.0),
+    );
+    fx -= user_w + 3.0;
+    let ref_rect = Rect::from_min_size(
+        Pos2::new(fx - ref_w, toolbar.top() + 4.0),
+        Vec2::new(ref_w, 22.0),
+    );
+    let search_right = ref_rect.left() - 3.0;
 
-    // 过滤后的可见提交（搜索/作者/日期/引用过滤，保持显示顺序）。
+    if cb_filter_btn(
+        ui,
+        paths_rect,
+        ("cb-paths", side_index),
+        paths_label,
+        path_active,
+    ) {
+        let view = if side_index == 0 {
+            &mut model.ui.compare_branches.left_view
+        } else {
+            &mut model.ui.compare_branches.right_view
+        };
+        view.path_edit_open = !view.path_edit_open;
+        view.path_edit = view.path.clone();
+    }
+    if cb_filter_btn(
+        ui,
+        user_rect,
+        ("cb-user", side_index),
+        user_label,
+        user_active,
+    ) {
+        rt.open_menu(
+            crate::runtime::MenuKind::CompareUserFilter { side: side_index },
+            user_rect,
+            None,
+        );
+    }
+    if cb_filter_btn(
+        ui,
+        date_rect,
+        ("cb-date", side_index),
+        date_label,
+        date_active,
+    ) {
+        rt.open_menu(
+            crate::runtime::MenuKind::CompareDateFilter { side: side_index },
+            date_rect,
+            None,
+        );
+    }
+    // Ref 过滤：仅图标按钮（GitBranchIcon 11）。
+    if cb_icon_btn(
+        ui,
+        ref_rect,
+        ("cb-ref", side_index),
+        Icon::Branch,
+        ref_active,
+        true,
+    ) {
+        rt.open_menu(
+            crate::runtime::MenuKind::CompareRefFilter { side: side_index },
+            ref_rect,
+            None,
+        );
+    }
+
+    // 搜索框（cb-search-box：flex 1 1 120px，h22，内嵌 Q▾ + .*/Cc）。
+    let search_rect = Rect::from_min_max(
+        Pos2::new(lx_left, toolbar.top() + 4.0),
+        Pos2::new(search_right, toolbar.bottom() - 4.0),
+    );
+    if search_rect.width() > 60.0 {
+        ui.painter()
+            .rect_filled(search_rect, egui::CornerRadius::same(4), p.hairline);
+        paint_icon(
+            ui.painter(),
+            Rect::from_center_size(
+                Pos2::new(search_rect.left() + 10.0, search_rect.center().y),
+                Vec2::splat(12.0),
+            ),
+            Icon::Search,
+            p.text3,
+        );
+        let toggle_w = 22.0;
+        let mut query = {
+            let view = if side_index == 0 {
+                &model.ui.compare_branches.left_view
+            } else {
+                &model.ui.compare_branches.right_view
+            };
+            view.query.clone()
+        };
+        let input = Rect::from_min_max(
+            Pos2::new(search_rect.left() + 20.0, search_rect.top() + 1.0),
+            Pos2::new(
+                search_rect.right() - toggle_w * 2.0 - 4.0,
+                search_rect.bottom() - 1.0,
+            ),
+        );
+        let resp = ui.put(
+            input,
+            TextEdit::singleline(&mut query)
+                .frame(egui::Frame::NONE)
+                .hint_text(crate::tr!(model, "Text or hash", "搜索提交、哈希或作者"))
+                .font(FontId::proportional(11.0)),
+        );
+        if resp.changed() {
+            let view = if side_index == 0 {
+                &mut model.ui.compare_branches.left_view
+            } else {
+                &mut model.ui.compare_branches.right_view
+            };
+            view.query = query;
+        }
+        let (use_regex, match_case) = {
+            let view = if side_index == 0 {
+                &model.ui.compare_branches.left_view
+            } else {
+                &model.ui.compare_branches.right_view
+            };
+            (view.regex, view.match_case)
+        };
+        let regex_rect = Rect::from_min_size(
+            Pos2::new(
+                search_rect.right() - toggle_w * 2.0 - 2.0,
+                search_rect.center().y - 9.0,
+            ),
+            Vec2::new(toggle_w, 18.0),
+        );
+        let case_rect = Rect::from_min_size(
+            Pos2::new(
+                search_rect.right() - toggle_w - 2.0,
+                search_rect.center().y - 9.0,
+            ),
+            Vec2::new(toggle_w, 18.0),
+        );
+        let _ = has_side_data;
+        if cb_toggle(ui, regex_rect, ("cb-regex", side_index), ".*", use_regex) {
+            let view = if side_index == 0 {
+                &mut model.ui.compare_branches.left_view
+            } else {
+                &mut model.ui.compare_branches.right_view
+            };
+            view.regex = !view.regex;
+        }
+        if cb_toggle(ui, case_rect, ("cb-case", side_index), "Cc", match_case) {
+            let view = if side_index == 0 {
+                &mut model.ui.compare_branches.left_view
+            } else {
+                &mut model.ui.compare_branches.right_view
+            };
+            view.match_case = !view.match_case;
+        }
+    }
+
+    // 路径过滤浮层（cb-path-form：250px 菜单壳 + 输入 + Apply/Clear）。
+    let path_open = {
+        let view = if side_index == 0 {
+            &model.ui.compare_branches.left_view
+        } else {
+            &model.ui.compare_branches.right_view
+        };
+        view.path_edit_open
+    };
+    if path_open {
+        let form_w = 250.0;
+        let form = Rect::from_min_size(
+            Pos2::new(
+                paths_rect.left().min(toolbar.right() - form_w - 4.0),
+                toolbar.bottom() + 2.0,
+            ),
+            Vec2::new(form_w, 78.0),
+        );
+        crate::overlays::menu_frame(ui, form, theme);
+        let input = Rect::from_min_size(
+            Pos2::new(form.left() + 8.0, form.top() + 8.0),
+            Vec2::new(form_w - 16.0, 22.0),
+        );
+        ui.painter()
+            .rect_filled(input, egui::CornerRadius::same(4), p.scrim_subtle);
+        ui.painter().rect_stroke(
+            input,
+            egui::CornerRadius::same(4),
+            Stroke::new(1.0, p.border_soft),
+            StrokeKind::Inside,
+        );
+        let mut edit = {
+            let view = if side_index == 0 {
+                &model.ui.compare_branches.left_view
+            } else {
+                &model.ui.compare_branches.right_view
+            };
+            view.path_edit.clone()
+        };
+        let resp = ui.put(
+            input.shrink2(Vec2::new(6.0, 2.0)),
+            TextEdit::singleline(&mut edit)
+                .frame(egui::Frame::NONE)
+                .hint_text(crate::tr!(model, "path", "路径"))
+                .font(FontId::proportional(11.0)),
+        );
+        if resp.changed() {
+            let view = if side_index == 0 {
+                &mut model.ui.compare_branches.left_view
+            } else {
+                &mut model.ui.compare_branches.right_view
+            };
+            view.path_edit = edit.clone();
+        }
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let view = if side_index == 0 {
+                &mut model.ui.compare_branches.left_view
+            } else {
+                &mut model.ui.compare_branches.right_view
+            };
+            view.path = view.path_edit.trim().to_string();
+            view.path_edit_open = false;
+            state_reload(model);
+            return;
+        }
+        let apply = Rect::from_min_size(
+            Pos2::new(form.right() - 118.0, form.bottom() - 30.0),
+            Vec2::new(52.0, 20.0),
+        );
+        let clear = Rect::from_min_size(
+            Pos2::new(form.right() - 60.0, form.bottom() - 30.0),
+            Vec2::new(52.0, 20.0),
+        );
+        if secondary_button(ui, apply, crate::tr!(model, "Apply", "应用"), None, theme).clicked()
+        {
+            let view = if side_index == 0 {
+                &mut model.ui.compare_branches.left_view
+            } else {
+                &mut model.ui.compare_branches.right_view
+            };
+            view.path = view.path_edit.trim().to_string();
+            view.path_edit_open = false;
+            state_reload(model);
+            return;
+        }
+        if secondary_button(ui, clear, crate::tr!(model, "Clear", "清除"), None, theme).clicked()
+        {
+            let view = if side_index == 0 {
+                &mut model.ui.compare_branches.left_view
+            } else {
+                &mut model.ui.compare_branches.right_view
+            };
+            view.path_edit.clear();
+            view.path.clear();
+            view.path_edit_open = false;
+            state_reload(model);
+            return;
+        }
+        if ui
+            .interact(
+                rect.expand(80.0),
+                ui.scope_id().with(("cb-path-dismiss", side_index)),
+                Sense::click(),
+            )
+            .clicked()
+        {
+            let view = if side_index == 0 {
+                &mut model.ui.compare_branches.left_view
+            } else {
+                &mut model.ui.compare_branches.right_view
+            };
+            view.path_edit_open = false;
+        }
+    }
+
+    // ---- 过滤后的可见提交（搜索/作者/日期/引用过滤，保持显示顺序）----
     let visible: Vec<usize> = {
         let view = if side_index == 0 {
             &model.ui.compare_branches.left_view
@@ -835,35 +1091,19 @@ fn draw_pane(
         indices
     };
 
-    let path_edit_open = {
-        let view = if side_index == 0 {
-            &model.ui.compare_branches.left_view
-        } else {
-            &model.ui.compare_branches.right_view
-        };
-        view.path_edit_open
-    };
-    let body_top = if path_edit_open {
-        toolbar.bottom() + TOOLBAR_H
-    } else {
-        toolbar.bottom()
-    };
-    let body = Rect::from_min_max(Pos2::new(rect.left(), body_top), rect.max);
+    let body = Rect::from_min_max(Pos2::new(rect.left(), toolbar.bottom()), rect.max);
 
     // ---- [提交日志 | 详情列]（详情宽两侧共用、可拖，稳定版 24-62%）----
     let details_frac = (model.settings.compare_details_width / 100.0).clamp(0.24, 0.62);
-    let details_w = (body.width() * details_frac).max(180.0);
+    let details_w = (body.width() * details_frac).max(170.0);
     let list = Rect::from_min_max(body.min, Pos2::new(body.right() - details_w, body.bottom()));
     let details = Rect::from_min_max(Pos2::new(list.right() + 1.0, body.min.y), body.max);
-    let divider_x = list.right();
     let divider = Rect::from_min_size(
-        Pos2::new(divider_x - 3.0, body.min.y),
-        Vec2::new(7.0, body.height()),
+        Pos2::new(list.right() - 4.0, body.min.y),
+        Vec2::new(8.0, body.height()),
     );
 
-    // 提交日志列。
-    let list_header = Rect::from_min_size(list.min, Vec2::new(list.width(), LIST_HEADER_H));
-    ui.painter().rect_filled(list_header, 0.0, p.panel2);
+    // 提交日志列（无表头；空态居中偏上提示）。
     let filter_active = {
         let view = if side_index == 0 {
             &model.ui.compare_branches.left_view
@@ -882,29 +1122,7 @@ fn draw_pane(
     } else {
         format!("No commits unique to {ref_name}")
     };
-    ui.painter().text(
-        Pos2::new(list_header.left() + 10.0, list_header.center().y),
-        Align2::LEFT_CENTER,
-        format!(
-            "{} · {} {}",
-            ref_name,
-            visible.len(),
-            if zh {
-                "个特有提交"
-            } else if visible.len() == 1 {
-                "commit"
-            } else {
-                "commits"
-            }
-        ),
-        FontId::proportional(10.0),
-        accent,
-    );
-    let list_body = Rect::from_min_max(
-        Pos2::new(list.left(), list_header.bottom()),
-        Pos2::new(list.right(), list.bottom()),
-    );
-    let (selected, _anchor) = {
+    let (selected, anchor) = {
         let view = if side_index == 0 {
             &model.ui.compare_branches.left_view
         } else {
@@ -917,51 +1135,87 @@ fn draw_pane(
     let mut double_click: Option<String> = None;
     let footer_row = side.truncated;
     let row_total = visible.len() + usize::from(footer_row);
-    crate::app_ui::region(ui, list_body, "cb-list", |ui| {
+    let show_graph = rt.cb_show_graph[side_index_us];
+    // 稳定版每 pane 独立 graphLayout（computeGraphLayout）。
+    let dag = if show_graph {
+        lazecode_git::compute_dag(&side.commits)
+    } else {
+        lazecode_git::DagLayout::default()
+    };
+    crate::app_ui::region(ui, list, "cb-list", |ui| {
+        if visible.is_empty() {
+            ui.painter().text(
+                Pos2::new(list.left() + 16.0, list.top() + 30.0),
+                Align2::LEFT_CENTER,
+                empty_reason,
+                FontId::proportional(11.0),
+                p.text3,
+            );
+        }
         egui::ScrollArea::vertical()
             .id_salt(("cb-list", side_index))
             .auto_shrink([false, false])
             .show_rows(ui, ROW_H, row_total.max(1), |ui, range| {
-                if visible.is_empty() {
-                    ui.painter().text(
-                        Pos2::new(list_body.left() + 10.0, list_body.top() + 30.0),
-                        Align2::LEFT_CENTER,
-                        empty_reason,
-                        FontId::proportional(10.0),
-                        p.text3,
-                    );
-                }
                 for row_index in range {
                     if row_index == visible.len() && footer_row {
                         let (row, _) = ui.allocate_exact_size(
                             Vec2::new(ui.available_width(), ROW_H),
                             Sense::hover(),
                         );
-                        if model.ui.compare_branches.loading_more[side_index as usize] {
-                            ui.painter().text(
-                                Pos2::new(row.left() + 8.0, row.center().y),
-                                Align2::LEFT_CENTER,
-                                crate::tr!(model, "Loading…", "加载中…"),
-                                FontId::proportional(10.0),
-                                p.text3,
-                            );
+                        // cb-load-more-wrap：居中按钮 + 截断提示。
+                        let loading_more = model.ui.compare_branches.loading_more[side_index_us];
+                        let more_label = if loading_more {
+                            crate::tr!(model, "Loading…", "加载中…").to_string()
                         } else {
-                            let more = Rect::from_min_size(
-                                Pos2::new(row.left() + 8.0, row.center().y - 10.0),
-                                Vec2::new(90.0, 20.0),
-                            );
-                            if secondary_button(
-                                ui,
+                            crate::tr!(model, "Load more", "加载更多").to_string()
+                        };
+                        let more_w = more_label.chars().count() as f32 * 6.2 + 24.0;
+                        let note = if zh {
+                            format!("仅显示前 {} 个提交", side.commits.len())
+                        } else {
+                            format!("Showing the first {} commits", side.commits.len())
+                        };
+                        let total_w = more_w + 8.0 + note.chars().count() as f32 * 5.6;
+                        let mut bx = row.center().x - total_w / 2.0;
+                        let more = Rect::from_min_size(
+                            Pos2::new(bx, row.center().y - 11.0),
+                            Vec2::new(more_w, 22.0),
+                        );
+                        bx += more_w + 8.0;
+                        if !loading_more {
+                            let resp = ui.interact(
                                 more,
-                                crate::tr!(model, "Load more", "加载更多"),
-                                None,
-                                theme,
-                            )
-                            .clicked()
-                            {
+                                ui.scope_id().with(("cb-more", side_index)),
+                                Sense::click(),
+                            );
+                            ui.painter().rect_stroke(
+                                more,
+                                egui::CornerRadius::same(4),
+                                Stroke::new(1.0, p.border_soft),
+                                StrokeKind::Inside,
+                            );
+                            if resp.hovered() {
+                                ui.painter().rect_filled(
+                                    more,
+                                    egui::CornerRadius::same(4),
+                                    p.hover,
+                                );
+                            }
+                            ui.painter().text(
+                                more.center(),
+                                Align2::CENTER_CENTER,
+                                more_label,
+                                FontId::proportional(11.0),
+                                if resp.hovered() {
+                                    p.text_bright
+                                } else {
+                                    p.text2
+                                },
+                            );
+                            if resp.clicked() {
                                 let path = {
                                     let state = &mut model.ui.compare_branches;
-                                    state.loading_more[side_index as usize] = true;
+                                    state.loading_more[side_index_us] = true;
                                     if side_index == 0 {
                                         state.left_path.clone()
                                     } else {
@@ -976,18 +1230,22 @@ fn draw_pane(
                                     path,
                                 });
                             }
+                        } else {
                             ui.painter().text(
-                                Pos2::new(row.left() + 106.0, row.center().y),
-                                Align2::LEFT_CENTER,
-                                if zh {
-                                    format!("仅显示前 {} 个提交", side.commits.len())
-                                } else {
-                                    format!("Showing the first {} commits", side.commits.len())
-                                },
-                                FontId::proportional(9.0),
+                                more.center(),
+                                Align2::CENTER_CENTER,
+                                more_label,
+                                FontId::proportional(11.0),
                                 p.text3,
                             );
                         }
+                        ui.painter().text(
+                            Pos2::new(bx, row.center().y),
+                            Align2::LEFT_CENTER,
+                            note,
+                            FontId::proportional(10.0),
+                            p.text3,
+                        );
                         continue;
                     }
                     let Some(commit_index) = visible.get(row_index) else {
@@ -1000,105 +1258,177 @@ fn draw_pane(
                     );
                     let is_selected = selected.contains(&commit.id);
                     if is_selected {
+                        // .log-row.active → #26415f。
                         ui.painter()
-                            .rect_filled(row, egui::CornerRadius::same(3), p.accent_soft);
+                            .rect_filled(row, egui::CornerRadius::ZERO, p.selected_row);
                     } else if response.hovered() {
                         ui.painter()
-                            .rect_filled(row, egui::CornerRadius::same(3), p.hover);
+                            .rect_filled(row, egui::CornerRadius::ZERO, p.hover);
                     }
-                    ui.painter().text(
-                        Pos2::new(row.left() + 8.0, row.center().y),
-                        Align2::LEFT_CENTER,
-                        &commit.short,
-                        FontId::monospace(9.5),
-                        if is_selected { p.accent } else { p.text3 },
+                    ui.painter().hline(
+                        row.x_range(),
+                        row.bottom() - 0.5,
+                        Stroke::new(1.0, p.hairline),
                     );
+
+                    // DAG cell（26px，与行高等高）。
+                    if show_graph {
+                        let cell_rect = Rect::from_min_size(row.min, Vec2::new(36.0, ROW_H));
+                        crate::panel::draw_dag_cell(
+                            ui.painter(),
+                            cell_rect,
+                            dag.rows.get(&commit.id),
+                            dag.breaks.get(&commit.id),
+                            commit,
+                        );
+                    }
+
+                    // 主题 + merge 图标 + 引用章。
+                    let mut msg_x = row.left() + RULER_GAP + if show_graph { 30.0 } else { 0.0 };
+                    if commit.parents.len() > 1 {
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(msg_x + 6.0, row.center().y),
+                                Vec2::splat(12.0),
+                            ),
+                            Icon::Merge,
+                            p.text3,
+                        );
+                        msg_x += 16.0;
+                    }
+                    let refs_w: f32 = commit
+                        .refs
+                        .iter()
+                        .take(3)
+                        .map(|r| r.label.chars().count() as f32 * 6.0 + 20.0)
+                        .sum();
+                    let msg_right = row.right() - AUTHOR_W - DATE_W - refs_w - 12.0;
                     text_clipped(
                         ui.painter(),
                         Rect::from_min_max(
-                            Pos2::new(row.left() + 52.0, row.top()),
-                            Pos2::new(row.right() - 160.0, row.bottom()),
+                            Pos2::new(msg_x, row.top()),
+                            Pos2::new(msg_right.max(msg_x + 60.0), row.bottom()),
                         ),
                         &commit.message,
-                        FontId::proportional(10.5),
+                        FontId::proportional(12.0),
                         p.text,
                         Align2::LEFT_CENTER,
                     );
+                    let mut badge_x = msg_right.max(msg_x + 60.0) + 4.0;
+                    for label in commit.refs.iter().take(3) {
+                        let color = match label.kind {
+                            lazecode_git::RefKind::Head => p.green,
+                            lazecode_git::RefKind::LocalBranch => p.green,
+                            lazecode_git::RefKind::RemoteBranch => p.violet,
+                            lazecode_git::RefKind::Tag => p.amber,
+                        };
+                        let (icon, isize): (Icon, f32) = match label.kind {
+                            lazecode_git::RefKind::Tag => (Icon::Tag, 10.0),
+                            lazecode_git::RefKind::RemoteBranch => (Icon::Cloud, 11.0),
+                            _ => (Icon::Branch, 11.0),
+                        };
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(badge_x + 5.0, row.center().y),
+                                Vec2::splat(isize),
+                            ),
+                            icon,
+                            color,
+                        );
+                        let text_x = badge_x + 12.0;
+                        let text_w = label.label.chars().count() as f32 * 6.0;
+                        ui.painter().text(
+                            Pos2::new(text_x, row.center().y),
+                            Align2::LEFT_CENTER,
+                            &label.label,
+                            FontId::proportional(11.0),
+                            color,
+                        );
+                        badge_x = text_x + text_w + 8.0;
+                    }
+                    // 作者（76px 右对齐）+ 日期（104px 右对齐）。
+                    let author_rect = Rect::from_min_max(
+                        Pos2::new(row.right() - AUTHOR_W - DATE_W, row.top()),
+                        Pos2::new(row.right() - DATE_W, row.bottom()),
+                    );
                     text_clipped(
                         ui.painter(),
-                        Rect::from_min_max(
-                            Pos2::new(row.right() - 156.0, row.top()),
-                            Pos2::new(row.right() - 64.0, row.bottom()),
-                        ),
+                        author_rect,
                         &commit.author,
-                        FontId::proportional(9.5),
-                        p.text3,
-                        Align2::LEFT_CENTER,
-                    );
-                    ui.painter().text(
-                        Pos2::new(row.right() - 8.0, row.center().y),
+                        FontId::proportional(11.0),
+                        p.text2,
                         Align2::RIGHT_CENTER,
-                        crate::panel::time_ago(commit.time, zh),
-                        FontId::proportional(9.0),
+                    );
+                    let date_str = crate::panel::format_commit_datetime(commit.time);
+                    ui.painter().text(
+                        Pos2::new(row.right() - 10.0, row.center().y),
+                        Align2::RIGHT_CENTER,
+                        date_str,
+                        FontId::proportional(11.0),
                         p.text3,
                     );
+
+                    // 选择（单击/Shift 范围/⌘ 多选）+ 双击开整提交 diff。
+                    if response.clicked() {
+                        let cmd = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
+                        let shift = ui.input(|i| i.modifiers.shift);
+                        if shift && anchor.is_some() {
+                            click = Some((commit.id.clone(), true, cmd));
+                        } else {
+                            click = Some((commit.id.clone(), false, cmd));
+                        }
+                    }
                     if response.double_clicked() {
                         double_click = Some(commit.id.clone());
-                    } else if response.clicked() {
-                        let (cmd, shift) =
-                            ui.input(|input| (input.modifiers.command, input.modifiers.shift));
-                        click = Some((commit.id.clone(), cmd, shift));
                     }
                 }
             });
     });
 
-    // 选择语义（稳定版）：普通点击单选、Cmd 切换、Shift 自锚点范围。
-    if let Some((id, cmd, shift)) = click {
-        {
-            let state = &mut model.ui.compare_branches;
-            let view = if side_index == 0 {
-                &mut state.left_view
-            } else {
-                &mut state.right_view
-            };
-            view.select_all = false;
-            if cmd {
-                if let Some(pos) = view.selected.iter().position(|probe| probe == &id) {
-                    view.selected.remove(pos);
-                } else {
-                    view.selected.push(id.clone());
-                }
-                view.anchor = Some(id);
-            } else if shift {
-                let anchor_pos = view.anchor.as_ref().and_then(|anchor| {
-                    visible
-                        .iter()
-                        .position(|index| &side.commits[*index].id == anchor)
-                });
-                let end = visible
+    // ---- 选择落地（对齐稳定版 handleCommitClick）----
+    if let Some((hash, shift, cmd)) = click {
+        let state = &mut model.ui.compare_branches;
+        let view = if side_index == 0 {
+            &mut state.left_view
+        } else {
+            &mut state.right_view
+        };
+        view.select_all = false;
+        if shift && view.anchor.is_some() {
+            let anchor_id = view.anchor.clone().unwrap_or_default();
+            let pos_anchor = visible
+                .iter()
+                .position(|index| side.commits[*index].id == anchor_id);
+            let pos_curr = visible
+                .iter()
+                .position(|index| side.commits[*index].id == hash);
+            if let (Some(a), Some(c)) = (pos_anchor, pos_curr) {
+                let (lo, hi) = if a < c { (a, c) } else { (c, a) };
+                view.selected = visible[lo..=hi]
                     .iter()
-                    .position(|index| side.commits[*index].id == id);
-                if let (Some(start), Some(end)) = (anchor_pos, end) {
-                    let (lo, hi) = if start <= end {
-                        (start, end)
-                    } else {
-                        (end, start)
-                    };
-                    view.selected = (lo..=hi)
-                        .map(|pos| side.commits[visible[pos]].id.clone())
-                        .collect();
-                } else {
-                    view.selected = vec![id.clone()];
-                    view.anchor = Some(id);
+                    .map(|index| side.commits[*index].id.clone())
+                    .collect();
+            } else {
+                view.selected = vec![hash.clone()];
+            }
+            view.anchor = Some(hash);
+        } else if cmd {
+            if let Some(pos) = view.selected.iter().position(|id| id == &hash) {
+                if view.selected.len() > 1 {
+                    view.selected.remove(pos);
                 }
             } else {
-                view.selected = vec![id.clone()];
-                view.anchor = Some(id);
+                view.selected.push(hash.clone());
             }
-            view.selected_file = None;
-            view.detail = None;
+            view.anchor = Some(hash);
+        } else {
+            view.selected = vec![hash.clone()];
+            view.anchor = Some(hash);
         }
+        view.selected_file = None;
+        view.detail = None;
     }
     if let Some(id) = double_click {
         model.queue(Command::OpenCommitDiff {
@@ -1143,9 +1473,7 @@ fn draw_pane(
             };
             if !key.is_empty() {
                 // key 变化即重查（含加载中切换提交的场景）：旧请求的结果
-                // 回填时按 key 匹配会被丢弃，不会污染新选择。`&& !loading`
-                // 会让「加载中换选」永远卡在加载态（旧结果被丢、新请求
-                // 又不发），是本次审计修掉的竞态。
+                // 回填时按 key 匹配会被丢弃，不会污染新选择。
                 let mismatch = match &view.detail {
                     Some(detail) => detail.key != key,
                     None => true,
@@ -1191,6 +1519,7 @@ fn draw_pane(
     draw_details(
         ui,
         model,
+        rt,
         theme,
         details,
         ref_name,
@@ -1204,7 +1533,7 @@ fn draw_pane(
         &selected_file,
     );
 
-    // 详情列宽度分隔条（稳定版 resizeDetails：两侧共用一个宽度）。
+    // 详情列宽度分隔条（8px strip，hover 时左缘 2px accent 线）。
     let drag = ui.interact(
         divider,
         ui.scope_id().with(("cb-details", side_index)),
@@ -1212,13 +1541,12 @@ fn draw_pane(
     );
     let hovered = drag.hovered() || drag.dragged();
     if hovered {
-        ui.painter().rect_filled(divider, 0.0, p.accent_soft);
+        ui.painter().vline(
+            divider.left() + 3.0,
+            divider.y_range(),
+            Stroke::new(2.0, p.accent),
+        );
     }
-    ui.painter().vline(
-        divider.center().x,
-        divider.y_range(),
-        Stroke::new(1.0, if hovered { p.accent } else { p.border }),
-    );
     if drag.dragged() {
         model.settings.compare_details_width = (model.settings.compare_details_width
             - drag.drag_delta().x / body.width() * 100.0)
@@ -1230,11 +1558,57 @@ fn draw_pane(
     }
 }
 
-/// 详情列：标题行（计数 + Expand/Collapse All + Diff）→ 文件树 → 元信息。
+/// 过滤条件变化后的整页重查（稳定版 onPathFilterChange 触发重载）。
+fn state_reload(model: &mut AppModel) {
+    let state = &mut model.ui.compare_branches;
+    state.loading = true;
+    let (l, r, lp, rp) = (
+        state.left_ref.clone(),
+        state.right_ref.clone(),
+        state.left_path.clone(),
+        state.right_path.clone(),
+    );
+    model.queue(Command::CompareBranches {
+        left: l,
+        right: r,
+        left_path: lp,
+        right_path: rp,
+    });
+}
+
+/// h18 内嵌小开关（cb-toggle：.* / Cc，active accent-soft+蓝）。
+fn cb_toggle(ui: &mut Ui, rect: Rect, key: (&'static str, u8), label: &str, active: bool) -> bool {
+    let p = crate::theme::Palette::dark();
+    let response = ui.interact(rect, ui.scope_id().with(key), Sense::click());
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(3), p.hover);
+    } else if active {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(3), p.accent_soft);
+    }
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::monospace(10.0),
+        if active {
+            p.blue
+        } else if response.hovered() {
+            p.text_bright
+        } else {
+            p.text3
+        },
+    );
+    response.clicked()
+}
+
+/// 详情列：26px 头部（计数 + Expand/Collapse All + Diff）→ 文件树 → 元信息。
 #[allow(clippy::too_many_arguments)]
 fn draw_details(
     ui: &mut Ui,
     model: &mut AppModel,
+    rt: &mut UiRuntime,
     theme: &Theme,
     rect: Rect,
     ref_name: &str,
@@ -1249,326 +1623,604 @@ fn draw_details(
 ) {
     let p = theme.palette;
     let zh = model.settings.language.is_zh();
-    ui.painter().rect_filled(rect, 0.0, p.panel);
-    ui.painter()
-        .hline(rect.x_range(), rect.top() + 0.5, Stroke::new(1.0, p.border));
-    ui.painter()
-        .vline(rect.left(), rect.y_range(), Stroke::new(1.0, p.border));
+    let side_index_us = usize::from(side_index);
+    // .cb-details：bg-sidebar + 左缘分隔。
+    ui.painter().rect_filled(rect, 0.0, p.sidebar);
 
-    let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 22.0));
     let view = if side_index == 0 {
         &model.ui.compare_branches.left_view
     } else {
         &model.ui.compare_branches.right_view
     };
     let detail = view.detail.clone();
-    let title = if select_all {
-        if zh {
-            format!("已选择整侧 · {} 个文件", side.files.len())
-        } else {
-            format!("Whole side · {} files", side.files.len())
-        }
-    } else if selected.len() > 1 {
-        if zh {
-            format!("已选择 {} 个提交", selected.len())
-        } else {
-            format!("{} commits selected", selected.len())
-        }
-    } else if selected.len() == 1 {
-        match &detail {
-            Some(detail) if detail.loading => crate::tr!(model, "Loading…", "加载中…").to_string(),
-            Some(detail) if detail.error.is_some() => {
-                crate::tr!(model, "Load failed", "加载失败").to_string()
-            }
-            _ => crate::tr!(model, "Files changed", "变更文件").to_string(),
-        }
+    let _ = view;
+
+    // 详情文件清单：⌘A = 整侧；单选/范围 = detail.files。
+    let details_files: Vec<lazecode_git::CompareFile> = if select_all {
+        side.files.clone()
     } else {
-        crate::tr!(model, "No commit selected", "未选择提交").to_string()
+        match &detail {
+            Some(detail) if !detail.loading && detail.error.is_none() => detail.files.clone(),
+            _ => Vec::new(),
+        }
     };
-    ui.painter().text(
-        Pos2::new(head.left() + 10.0, head.center().y),
-        Align2::LEFT_CENTER,
-        title,
-        FontId::proportional(10.0),
+    let files_loading =
+        !select_all && matches!(&detail, Some(detail) if detail.loading) && !selected.is_empty();
+
+    // 头部 26px。
+    let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), DETAILS_HEAD_H));
+    ui.painter().hline(
+        head.x_range(),
+        head.bottom() - 0.5,
+        Stroke::new(1.0, p.border_soft),
+    );
+    let files_label = if zh {
+        format!("{} 个文件变更", details_files.len())
+    } else if details_files.len() == 1 {
+        "1 file changed".to_string()
+    } else {
+        format!("{} files changed", details_files.len())
+    };
+    let title = if files_loading {
+        crate::tr!(model, "Loading…", "加载中…").to_string()
+    } else if select_all {
+        let all = if zh {
+            format!("已选择全部 {} 个提交 · ", side.commits.len())
+        } else {
+            format!("All {} selected · ", side.commits.len())
+        };
+        format!("{all}{files_label}")
+    } else if selected.len() > 1 {
+        let all = if zh {
+            format!("已选择 {} 个提交 · ", selected.len())
+        } else {
+            format!("{} selected · ", selected.len())
+        };
+        format!("{all}{files_label}")
+    } else if selected.len() == 1 && detail.as_ref().is_some_and(|d| d.error.is_some()) {
+        crate::tr!(model, "Load failed", "加载失败").to_string()
+    } else {
+        files_label
+    };
+    text_clipped(
+        ui.painter(),
+        Rect::from_min_max(
+            Pos2::new(head.left() + 10.0, head.top()),
+            Pos2::new(head.right() - 70.0, head.bottom()),
+        ),
+        &title,
+        FontId::proportional(11.0),
         p.text2,
+        Align2::LEFT_CENTER,
     );
+    // 展开全部目录路径（禁用判定：无目录时 Expand/Collapse 置灰）。
+    let all_rows =
+        crate::compare::flatten_file_tree(&details_files, &std::collections::HashSet::new());
+    let has_dirs = all_rows.iter().any(|row| row.is_dir);
+    let mut rx = head.right() - 4.0;
+    let diff_rect = Rect::from_min_size(
+        Pos2::new(rx - 20.0, head.center().y - 10.0),
+        Vec2::splat(20.0),
+    );
+    rx -= 21.0;
+    let collapse_rect = Rect::from_min_size(
+        Pos2::new(rx - 20.0, head.center().y - 10.0),
+        Vec2::splat(20.0),
+    );
+    rx -= 21.0;
     let expand_rect = Rect::from_min_size(
-        Pos2::new(head.right() - 66.0, head.center().y - 9.0),
-        Vec2::splat(18.0),
+        Pos2::new(rx - 20.0, head.center().y - 10.0),
+        Vec2::splat(20.0),
     );
-    if icon_button(ui, expand_rect, Icon::ExpandAll, false, theme).clicked() {
+    let diff_enabled = selected_file.is_some() || !selected.is_empty() || select_all;
+    if cb_icon_btn(
+        ui,
+        diff_rect,
+        ("cb-diff", side_index),
+        Icon::Diff,
+        false,
+        diff_enabled,
+    ) {
+        if let Some(path) = selected_file {
+            open_file_diff(
+                model, side_index, side, merge_base, select_all, selected, path, other_ref,
+            );
+        } else {
+            open_file_diff(
+                model, side_index, side, merge_base, select_all, selected, "", other_ref,
+            );
+        }
+    }
+    if cb_icon_btn(
+        ui,
+        collapse_rect,
+        ("cb-collapse", side_index),
+        Icon::CollapseAll,
+        false,
+        has_dirs,
+    ) {
+        let view = if side_index == 0 {
+            &mut model.ui.compare_branches.left_view
+        } else {
+            &mut model.ui.compare_branches.right_view
+        };
+        view.collapsed_dirs = all_rows
+            .iter()
+            .filter(|row| row.is_dir)
+            .map(|row| row.key.clone())
+            .collect();
+        rt.cb_root_collapsed[side_index_us] = true;
+    }
+    if cb_icon_btn(
+        ui,
+        expand_rect,
+        ("cb-expand", side_index),
+        Icon::ExpandAll,
+        false,
+        has_dirs,
+    ) {
         let view = if side_index == 0 {
             &mut model.ui.compare_branches.left_view
         } else {
             &mut model.ui.compare_branches.right_view
         };
         view.collapsed_dirs.clear();
+        rt.cb_root_collapsed[side_index_us] = false;
     }
-    let collapse_rect = Rect::from_min_size(
-        Pos2::new(head.right() - 44.0, head.center().y - 9.0),
-        Vec2::splat(18.0),
+
+    // ---- 文件树（root 行 24px + 目录/文件行 21px）----
+    let tree_rect = Rect::from_min_max(
+        Pos2::new(rect.left(), head.bottom()),
+        Pos2::new(rect.right(), rect.bottom()),
     );
-    if icon_button(ui, collapse_rect, Icon::CollapseAll, false, theme).clicked() {
-        let dirs: std::collections::HashSet<String> =
-            flatten_file_tree(&side.files, &std::collections::HashSet::new())
-                .into_iter()
-                .filter(|row| row.is_dir)
-                .map(|row| row.key)
-                .collect();
-        let view = if side_index == 0 {
-            &mut model.ui.compare_branches.left_view
-        } else {
-            &mut model.ui.compare_branches.right_view
-        };
-        view.collapsed_dirs = dirs;
+    // 元信息高度（内容自适应，最大 44%）。
+    let meta = meta_rect_content(
+        model,
+        side_index,
+        ref_name,
+        &side.commits,
+        select_all,
+        selected,
+    );
+    let meta_h = meta.1.min(tree_rect.height() * 0.44);
+    let list_rect = Rect::from_min_max(
+        tree_rect.min,
+        Pos2::new(tree_rect.right(), tree_rect.bottom() - meta_h),
+    );
+
+    let root_collapsed = rt.cb_root_collapsed[side_index_us];
+    let mut rows: Vec<crate::compare::FileRow> = Vec::new();
+    if !details_files.is_empty() && !root_collapsed {
+        rows = crate::compare::flatten_file_tree(&details_files, collapsed);
     }
-    let diff_rect = Rect::from_min_size(
-        Pos2::new(head.right() - 62.0, head.center().y - 9.0),
-        Vec2::new(54.0, 18.0),
-    );
-    let diff_enabled = selected_file.is_some();
-    if secondary_button_enabled(
-        ui,
-        diff_rect,
-        crate::tr!(model, "Diff", "差异"),
-        None,
-        diff_enabled,
-        theme,
-    )
-    .clicked()
-        && diff_enabled
-    {
-        if let Some(path) = selected_file {
+    crate::app_ui::region(ui, list_rect, "cb-tree", |ui| {
+        if details_files.is_empty() && !files_loading {
+            ui.painter().text(
+                Pos2::new(rect.left() + 10.0, list_rect.top() + 24.0),
+                Align2::LEFT_CENTER,
+                crate::tr!(model, "No changed files", "没有变更文件"),
+                FontId::proportional(11.0),
+                p.text3,
+            );
+        }
+        let mut open_click: Option<String> = None;
+        let mut select_click: Option<String> = None;
+        let mut toggle_click: Option<String> = None;
+        egui::ScrollArea::vertical()
+            .id_salt(("cb-tree", side_index))
+            .auto_shrink([false, false])
+            .show_rows(
+                ui,
+                FILE_ROW_H,
+                rows.len() + usize::from(!details_files.is_empty()),
+                |ui, range| {
+                    for row_index in range.clone() {
+                        if row_index == 0 {
+                            // 根行（cb-root-row）：chevron + folder + 仓库名 + 计数。
+                            let (row, response) = ui.allocate_exact_size(
+                                Vec2::new(list_rect.width(), ROOT_ROW_H),
+                                Sense::click(),
+                            );
+                            if response.hovered() {
+                                ui.painter()
+                                    .rect_filled(row, egui::CornerRadius::ZERO, p.hover);
+                            }
+                            draw_chevron(
+                                ui.painter(),
+                                Pos2::new(row.left() + 11.0, row.center().y),
+                                root_collapsed,
+                                p.text3,
+                            );
+                            paint_icon(
+                                ui.painter(),
+                                Rect::from_center_size(
+                                    Pos2::new(row.left() + 24.0, row.center().y),
+                                    Vec2::splat(13.0),
+                                ),
+                                Icon::Folder,
+                                Color32::from_rgb(0xdc, 0xd7, 0xaa),
+                            );
+                            let repo_name = model
+                                .active_project()
+                                .map(|pr| pr.name.clone())
+                                .unwrap_or_else(|| "Repository".to_string());
+                            ui.painter().text(
+                                Pos2::new(row.left() + 36.0, row.center().y),
+                                Align2::LEFT_CENTER,
+                                repo_name,
+                                FontId::proportional(11.0),
+                                p.text_bright,
+                            );
+                            let count = if zh {
+                                format!("{} 个文件", details_files.len())
+                            } else if details_files.len() == 1 {
+                                "1 file".to_string()
+                            } else {
+                                format!("{} files", details_files.len())
+                            };
+                            ui.painter().text(
+                                Pos2::new(row.right() - 8.0, row.center().y),
+                                Align2::RIGHT_CENTER,
+                                count,
+                                FontId::proportional(10.0),
+                                p.text3,
+                            );
+                            if response.clicked() {
+                                rt.cb_root_collapsed[side_index_us] =
+                                    !rt.cb_root_collapsed[side_index_us];
+                            }
+                            if range.end <= 1 {
+                                break;
+                            }
+                            continue;
+                        }
+                        let Some(file_row) = rows.get(row_index - 1) else {
+                            continue;
+                        };
+                        let (row, response) = ui.allocate_exact_size(
+                            Vec2::new(list_rect.width(), FILE_ROW_H),
+                            Sense::click(),
+                        );
+                        let indent = 8.0 + file_row.depth as f32 * 12.0;
+                        let is_selected = !file_row.is_dir
+                            && selected_file.as_deref() == Some(file_row.key.as_str());
+                        if is_selected {
+                            ui.painter()
+                                .rect_filled(row, egui::CornerRadius::ZERO, p.jb_accent);
+                        } else if response.hovered() {
+                            ui.painter()
+                                .rect_filled(row, egui::CornerRadius::ZERO, p.hover);
+                        }
+                        if file_row.is_dir {
+                            let open = !collapsed.contains(&file_row.key);
+                            draw_chevron(
+                                ui.painter(),
+                                Pos2::new(row.left() + indent + 5.0, row.center().y),
+                                open,
+                                p.text3,
+                            );
+                            paint_icon(
+                                ui.painter(),
+                                Rect::from_center_size(
+                                    Pos2::new(row.left() + indent + 18.0, row.center().y),
+                                    Vec2::splat(13.0),
+                                ),
+                                Icon::Folder,
+                                Color32::from_rgb(0xdc, 0xd7, 0xaa),
+                            );
+                            ui.painter().text(
+                                Pos2::new(row.left() + indent + 30.0, row.center().y),
+                                Align2::LEFT_CENTER,
+                                &file_row.label,
+                                FontId::proportional(11.0),
+                                p.text,
+                            );
+                            let count = if zh {
+                                format!("{} 个文件", file_row.count)
+                            } else if file_row.count == 1 {
+                                "1 file".to_string()
+                            } else {
+                                format!("{} files", file_row.count)
+                            };
+                            ui.painter().text(
+                                Pos2::new(row.right() - 8.0, row.center().y),
+                                Align2::RIGHT_CENTER,
+                                count,
+                                FontId::proportional(10.0),
+                                p.text3,
+                            );
+                            if response.clicked() {
+                                toggle_click = Some(file_row.key.clone());
+                            }
+                        } else {
+                            let Some(file) = &file_row.file else { continue };
+                            let status = file.status.to_ascii_uppercase();
+                            let name_color = if is_selected {
+                                Color32::WHITE
+                            } else if status == 'A' || status == '?' || status == 'R' {
+                                p.green
+                            } else if status == 'D' {
+                                p.rose
+                            } else {
+                                p.blue
+                            };
+                            paint_icon(
+                                ui.painter(),
+                                Rect::from_center_size(
+                                    Pos2::new(row.left() + indent + 7.0, row.center().y),
+                                    Vec2::splat(13.0),
+                                ),
+                                Icon::File,
+                                if is_selected { Color32::WHITE } else { p.text3 },
+                            );
+                            ui.painter().text(
+                                Pos2::new(row.left() + indent + 19.0, row.center().y),
+                                Align2::LEFT_CENTER,
+                                &file_row.label,
+                                FontId::proportional(11.0),
+                                name_color,
+                            );
+                            // numstat（mono 10px，+绿 / -红，仅 >0）。
+                            let mut nx = row.right() - 8.0;
+                            if file.deletions > 0 {
+                                let label = format!("-{}", file.deletions);
+                                nx -= label.chars().count() as f32 * 6.0;
+                                ui.painter().text(
+                                    Pos2::new(nx, row.center().y),
+                                    Align2::LEFT_CENTER,
+                                    label,
+                                    FontId::monospace(10.0),
+                                    if is_selected {
+                                        Color32::from_rgba_unmultiplied(255, 255, 255, 219)
+                                    } else {
+                                        p.rose
+                                    },
+                                );
+                                nx -= 5.0;
+                            }
+                            if file.additions > 0 || file.deletions == 0 {
+                                let label = format!("+{}", file.additions);
+                                nx -= label.chars().count() as f32 * 6.0;
+                                ui.painter().text(
+                                    Pos2::new(nx, row.center().y),
+                                    Align2::LEFT_CENTER,
+                                    label,
+                                    FontId::monospace(10.0),
+                                    if is_selected {
+                                        Color32::from_rgba_unmultiplied(255, 255, 255, 219)
+                                    } else {
+                                        p.green
+                                    },
+                                );
+                            }
+                            if response.clicked() {
+                                select_click = Some(file_row.key.clone());
+                            }
+                            if response.double_clicked() {
+                                open_click = Some(file_row.key.clone());
+                            }
+                        }
+                    }
+                },
+            );
+        if let Some(key) = toggle_click {
+            let view = if side_index == 0 {
+                &mut model.ui.compare_branches.left_view
+            } else {
+                &mut model.ui.compare_branches.right_view
+            };
+            if view.collapsed_dirs.contains(&key) {
+                view.collapsed_dirs.remove(&key);
+            } else {
+                view.collapsed_dirs.insert(key);
+            }
+        }
+        if let Some(path) = select_click {
+            let view = if side_index == 0 {
+                &mut model.ui.compare_branches.left_view
+            } else {
+                &mut model.ui.compare_branches.right_view
+            };
+            view.selected_file = Some(path);
+        }
+        if let Some(path) = open_click {
             open_file_diff(
-                model, side_index, side, merge_base, select_all, selected, path, other_ref,
+                model, side_index, side, merge_base, select_all, selected, &path, other_ref,
+            );
+        }
+    });
+
+    // ---- 元信息（cb-details-meta：message/hash/email/date/inBranches）----
+    if meta_h > 0.0 {
+        let meta_rect = Rect::from_min_max(Pos2::new(rect.left(), list_rect.bottom()), rect.max);
+        ui.painter().hline(
+            meta_rect.x_range(),
+            meta_rect.top() + 0.5,
+            Stroke::new(1.0, p.border_soft),
+        );
+        let (message, hash, email, date_line, branches_line) = meta.0;
+        let mut y = meta_rect.top() + 7.0;
+        text_clipped(
+            ui.painter(),
+            Rect::from_min_max(
+                Pos2::new(meta_rect.left() + 10.0, y),
+                Pos2::new(meta_rect.right() - 10.0, y + 17.0),
+            ),
+            &message,
+            FontId::proportional(12.0),
+            p.text_bright,
+            Align2::LEFT_TOP,
+        );
+        y += 20.0;
+        if !hash.is_empty() {
+            ui.painter().text(
+                Pos2::new(meta_rect.left() + 10.0, y + 7.0),
+                Align2::LEFT_CENTER,
+                &hash,
+                FontId::monospace(10.0),
+                p.accent,
+            );
+            let hash_w = hash.chars().count() as f32 * 6.0 + 10.0;
+            ui.painter().text(
+                Pos2::new(meta_rect.left() + 10.0 + hash_w, y + 7.0),
+                Align2::LEFT_CENTER,
+                &email,
+                FontId::proportional(10.0),
+                p.text2,
+            );
+            y += 16.0;
+        }
+        if !date_line.is_empty() {
+            ui.painter().text(
+                Pos2::new(meta_rect.left() + 10.0, y + 7.0),
+                Align2::LEFT_CENTER,
+                &date_line,
+                FontId::proportional(10.0),
+                p.text3,
+            );
+            y += 16.0;
+        }
+        if !branches_line.is_empty() {
+            ui.painter().hline(
+                meta_rect.x_range(),
+                y + 2.0,
+                Stroke::new(1.0, p.border_soft),
+            );
+            ui.painter().text(
+                Pos2::new(meta_rect.left() + 10.0, y + 12.0),
+                Align2::LEFT_CENTER,
+                &branches_line,
+                FontId::proportional(10.0),
+                p.text3,
             );
         }
     }
+}
 
-    let rows_rect = Rect::from_min_max(
-        Pos2::new(rect.left(), head.bottom()),
-        Pos2::new(rect.right(), rect.bottom() - META_H),
-    );
-    // 文件来源：⌘A=整侧清单；选中=本侧详情缓存；**未选中=必空**（详情
-    // 缓存是每侧独立的，未选择时不得回退到缓存——那会画出另一侧的文件）。
-    let (files, loading, error): (Vec<lazecode_git::CompareFile>, bool, Option<String>) =
-        if select_all {
-            (side.files.clone(), false, None)
-        } else if selected.is_empty() {
-            (Vec::new(), false, None)
-        } else {
-            match &detail {
-                Some(detail) => (detail.files.clone(), detail.loading, detail.error.clone()),
-                None => (Vec::new(), false, None),
-            }
-        };
-    if let Some(err) = error {
-        ui.painter().text(
-            Pos2::new(rows_rect.left() + 10.0, rows_rect.center().y),
-            Align2::LEFT_CENTER,
-            err,
-            FontId::proportional(9.5),
-            p.rose,
-        );
-        return;
-    }
-    if loading {
-        ui.painter().text(
-            Pos2::new(rows_rect.left() + 10.0, rows_rect.center().y),
-            Align2::LEFT_CENTER,
-            crate::tr!(model, "Loading…", "加载中…"),
-            FontId::proportional(10.0),
-            p.text3,
-        );
-        return;
-    }
-    if files.is_empty() {
-        // 未选择提交时标题与页脚已表达状态，正文留白（避免三重重复文案）。
-        if !select_all && selected.is_empty() {
-            return;
-        }
-        ui.painter().text(
-            Pos2::new(rows_rect.left() + 10.0, rows_rect.center().y),
-            Align2::LEFT_CENTER,
-            crate::tr!(model, "No changed files", "没有变更文件"),
-            FontId::proportional(10.0),
-            p.text3,
-        );
-        return;
-    }
-    let rows = flatten_file_tree(&files, collapsed);
-    let mut file_clicked: Option<String> = None;
-    let mut file_double_clicked: Option<String> = None;
-    let mut dir_toggled: Option<String> = None;
-    crate::app_ui::region(ui, rows_rect, "cb-files", |ui| {
-        egui::ScrollArea::vertical()
-            .id_salt(("cb-files", side_index))
-            .auto_shrink([false, false])
-            .show_rows(ui, FILE_ROW_H, rows.len(), |ui, range| {
-                for row_index in range {
-                    let Some(row) = rows.get(row_index) else {
-                        continue;
-                    };
-                    let (rect, response) = ui.allocate_exact_size(
-                        Vec2::new(ui.available_width(), FILE_ROW_H),
-                        Sense::click(),
-                    );
-                    let indent = 8.0 + row.depth as f32 * 14.0;
-                    if row.is_dir {
-                        if response.hovered() {
-                            ui.painter()
-                                .rect_filled(rect, egui::CornerRadius::same(3), p.hover);
-                        }
-                        let expanded = !collapsed.contains(&row.key);
-                        paint_icon(
-                            ui.painter(),
-                            Rect::from_center_size(
-                                Pos2::new(rect.left() + indent + 5.0, rect.center().y),
-                                Vec2::splat(10.0),
-                            ),
-                            if expanded {
-                                Icon::ChevronDown
-                            } else {
-                                Icon::ChevronRight
-                            },
-                            p.text3,
-                        );
-                        ui.painter().text(
-                            Pos2::new(rect.left() + indent + 16.0, rect.center().y),
-                            Align2::LEFT_CENTER,
-                            &row.label,
-                            FontId::proportional(10.0),
-                            p.text2,
-                        );
-                        ui.painter().text(
-                            Pos2::new(rect.right() - 8.0, rect.center().y),
-                            Align2::RIGHT_CENTER,
-                            row.count.to_string(),
-                            FontId::monospace(9.0),
-                            p.text3,
-                        );
-                        if response.clicked() {
-                            dir_toggled = Some(row.key.clone());
-                        }
-                    } else {
-                        let is_sel = selected_file.as_deref() == Some(row.key.as_str());
-                        if is_sel || response.hovered() {
-                            ui.painter().rect_filled(
-                                rect,
-                                egui::CornerRadius::same(3),
-                                if is_sel { p.selection } else { p.hover },
-                            );
-                        }
-                        let file = row.file.clone().expect("file row carries a file");
-                        let status_color = match file.status {
-                            'A' | '?' => p.green,
-                            'D' => p.rose,
-                            _ => p.blue,
-                        };
-                        ui.painter().text(
-                            Pos2::new(rect.left() + indent + 8.0, rect.center().y),
-                            Align2::LEFT_CENTER,
-                            file.status.to_string(),
-                            FontId::monospace(9.5),
-                            status_color,
-                        );
-                        text_clipped(
-                            ui.painter(),
-                            Rect::from_min_max(
-                                Pos2::new(rect.left() + indent + 24.0, rect.top()),
-                                Pos2::new(rect.right() - 90.0, rect.bottom()),
-                            ),
-                            &row.label,
-                            FontId::proportional(10.0),
-                            p.text,
-                            Align2::LEFT_CENTER,
-                        );
-                        let stats = format!("+{} −{}", file.additions, file.deletions);
-                        ui.painter().text(
-                            Pos2::new(rect.right() - 8.0, rect.center().y),
-                            Align2::RIGHT_CENTER,
-                            stats,
-                            FontId::monospace(9.0),
-                            p.text3,
-                        );
-                        if response.double_clicked() {
-                            file_double_clicked = Some(row.key.clone());
-                        } else if response.clicked() {
-                            file_clicked = Some(row.key.clone());
-                        }
-                    }
-                }
-            });
-    });
-    if let Some(dir) = dir_toggled {
-        let view = if side_index == 0 {
-            &mut model.ui.compare_branches.left_view
-        } else {
-            &mut model.ui.compare_branches.right_view
-        };
-        if !view.collapsed_dirs.remove(&dir) {
-            view.collapsed_dirs.insert(dir);
-        }
-    }
-    if let Some(path) = file_clicked {
-        let view = if side_index == 0 {
-            &mut model.ui.compare_branches.left_view
-        } else {
-            &mut model.ui.compare_branches.right_view
-        };
-        view.selected_file = Some(path);
-    }
-    if let Some(path) = file_double_clicked {
-        open_file_diff(
-            model, side_index, side, merge_base, select_all, selected, &path, other_ref,
-        );
-    }
+type MetaContent = (String, String, String, String, String);
 
-    let footer = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - META_H), rect.max);
-    let meta = if select_all {
-        if zh {
-            format!("整侧差异 {ref_name} ⟷ {other_ref}")
+/// 元信息内容 + 估算高度（cb-details-meta）。
+#[allow(clippy::type_complexity)]
+fn meta_rect_content(
+    model: &AppModel,
+    _side_index: u8,
+    ref_name: &str,
+    commits: &[lazecode_git::CommitInfo],
+    select_all: bool,
+    selected: &[String],
+) -> (MetaContent, f32) {
+    let zh = model.settings.language.is_zh();
+    if select_all {
+        let message = if zh {
+            format!("已选择全部 {} 个提交", commits.len())
         } else {
-            format!("Side diff {ref_name} ⟷ {other_ref}")
-        }
-    } else if selected.len() >= 2 {
-        if zh {
-            format!("范围差异 {} 个提交", selected.len())
-        } else {
-            format!("Range diff over {} commits", selected.len())
-        }
-    } else if selected.len() == 1 {
-        let id = &selected[0];
-        match side.commits.iter().find(|commit| &commit.id == id) {
-            Some(commit) => {
-                if zh {
-                    format!(
-                        "{} · {} 于 {}",
-                        commit.author,
-                        commit.email,
-                        crate::panel::time_ago(commit.time, zh)
-                    )
-                } else {
-                    format!(
-                        "{} · {} on {}",
-                        commit.author,
-                        commit.email,
-                        crate::panel::time_ago(commit.time, zh)
-                    )
-                }
-            }
-            None => String::new(),
-        }
-    } else {
-        crate::tr!(model, "No commit selected", "未选择提交").to_string()
+            format!("All {} commits selected", commits.len())
+        };
+        return (
+            (
+                message,
+                String::new(),
+                String::new(),
+                ref_name.to_string(),
+                String::new(),
+            ),
+            46.0,
+        );
+    }
+    // 详情展示第一个被选中的提交（显示序 = 最新在前）。
+    let Some(details_commit) = selected
+        .first()
+        .and_then(|id| commits.iter().find(|commit| &commit.id == id))
+    else {
+        return (
+            (
+                crate::tr!(model, "No commit selected", "未选择提交").to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
+            32.0,
+        );
     };
-    ui.painter().text(
-        Pos2::new(footer.left() + 10.0, footer.center().y),
-        Align2::LEFT_CENTER,
-        meta,
-        FontId::proportional(9.0),
-        p.text3,
-    );
+    let message = details_commit.message.clone();
+    let hash = details_commit.short.clone();
+    let email = details_commit.email.clone();
+    let date_line = if zh {
+        format!(
+            "{email} 于 {}",
+            crate::panel::format_commit_datetime(details_commit.time)
+        )
+    } else {
+        format!(
+            "{email} on {}",
+            crate::panel::format_commit_datetime(details_commit.time)
+        )
+    };
+    let branches: Vec<String> = details_commit
+        .refs
+        .iter()
+        .filter(|r| {
+            matches!(
+                r.kind,
+                lazecode_git::RefKind::LocalBranch
+                    | lazecode_git::RefKind::Head
+                    | lazecode_git::RefKind::RemoteBranch
+            )
+        })
+        .map(|r| r.label.clone())
+        .collect();
+    let branches_line = if branches.is_empty() {
+        String::new()
+    } else if zh {
+        format!("存在于 {} 个分支：{}", branches.len(), branches.join(", "))
+    } else if branches.len() == 1 {
+        format!("In 1 branch: {}", branches.join(", "))
+    } else {
+        format!("In {} branches: {}", branches.len(), branches.join(", "))
+    };
+    let height = 27.0
+        + 16.0
+        + usize::from(!date_line.is_empty()) as f32 * 16.0
+        + usize::from(!branches_line.is_empty()) as f32 * 20.0;
+    ((message, hash, email, date_line, branches_line), height)
+}
+
+/// 10px 折叠箭头。
+fn draw_chevron(painter: &egui::Painter, center: Pos2, open: bool, color: Color32) {
+    use egui::Stroke;
+    let r = 3.2;
+    if open {
+        painter.line_segment(
+            [
+                Pos2::new(center.x - r, center.y - r * 0.6),
+                Pos2::new(center.x, center.y + r * 0.6),
+            ],
+            Stroke::new(1.2, color),
+        );
+        painter.line_segment(
+            [
+                Pos2::new(center.x, center.y + r * 0.6),
+                Pos2::new(center.x + r, center.y - r * 0.6),
+            ],
+            Stroke::new(1.2, color),
+        );
+    } else {
+        painter.line_segment(
+            [
+                Pos2::new(center.x - r * 0.6, center.y - r),
+                Pos2::new(center.x + r * 0.6, center.y),
+            ],
+            Stroke::new(1.2, color),
+        );
+        painter.line_segment(
+            [
+                Pos2::new(center.x + r * 0.6, center.y),
+                Pos2::new(center.x - r * 0.6, center.y + r),
+            ],
+            Stroke::new(1.2, color),
+        );
+    }
 }
 
 /// 按稳定版规则打开文件 diff：

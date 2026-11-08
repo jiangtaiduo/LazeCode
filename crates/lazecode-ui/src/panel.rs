@@ -14,7 +14,7 @@ use crate::widgets::{icon_button, text_clipped};
 
 /// 稳定版 commitDate：今天 → "Today HH:MM"，昨天 → "Yesterday HH:MM"，
 /// 其余 → "YYYY/M/D HH:MM"（月/日不补零，时分补零）。
-fn format_commit_datetime(seconds: i64) -> String {
+pub(crate) fn format_commit_datetime(seconds: i64) -> String {
     unsafe {
         let t = seconds as libc::time_t;
         let mut tm: libc::tm = std::mem::zeroed();
@@ -82,7 +82,7 @@ fn fold_arrow_hit(start_x: f32, row_y: f32, row_h: f32, lane: usize, is_down: bo
     Rect::from_min_max(Pos2::new(x - 10.0, y0), Pos2::new(x + 10.0, y1))
 }
 
-fn draw_dag_cell(
+pub(crate) fn draw_dag_cell(
     painter: &egui::Painter,
     row_rect: Rect,
     layout: Option<&GraphRowLayout>,

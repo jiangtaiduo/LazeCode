@@ -374,6 +374,9 @@ pub struct UiRuntime {
     pub diff_mode_open: Option<u64>,
     /// Compare 抽屉视图选项弹层。
     pub cmp_view_menu_open: bool,
+    /// 分支比较页：每侧的 DAG 图开关与详情根行折叠（会话内瞬时态）。
+    pub cb_show_graph: [bool; 2],
+    pub cb_root_collapsed: [bool; 2],
     pub compare_split_drag: bool,
     /// 分支比较页：详情列宽度分隔条拖拽中。
     pub compare_details_drag: bool,
@@ -439,6 +442,8 @@ impl Default for UiRuntime {
             diff_scroll: None,
             diff_mode_open: None,
             cmp_view_menu_open: false,
+            cb_show_graph: [true, true],
+            cb_root_collapsed: [false, false],
             compare_split_drag: false,
             compare_details_drag: false,
             settings_open: false,

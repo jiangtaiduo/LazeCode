@@ -25,6 +25,7 @@ fn main() -> anyhow::Result<()> {
     if language == "zh" {
         settings.language = lazecode_core::Language::Chinese;
     }
+    let mut pending_jump: Option<(u64, usize)> = None;
     let mut model = AppModel {
         settings: settings.clone(),
         projects: Vec::new(),
@@ -53,8 +54,8 @@ fn main() -> anyhow::Result<()> {
         if docs.exists() {
             let _ = project.open_file(docs, &settings);
         }
-        if mode == "diff" || mode == "cmpdiff" {
-            if mode == "cmpdiff" {
+        if mode == "diff" || mode == "cmpdiff" || mode == "cmpdiff3" {
+            if mode == "cmpdiff" || mode == "cmpdiff3" {
                 // Compare Versions 会话（稳定版 CompareDrawer + Diff 标签），
                 // 与用户提供的稳定版截图同一对提交/文件。
                 let from = "3cd41b6".to_string();
@@ -81,6 +82,7 @@ fn main() -> anyhow::Result<()> {
                     to: to.clone(),
                     path: "crates/lazecode-ui/src/app_ui.rs".to_string(),
                 };
+                let jump_group: usize = if mode == "cmpdiff3" { 24 } else { 0 };
                 project.open_diff_source(source.clone());
                 if let Ok(fd) = lazecode_git::diff_commits(
                     &project_root,
@@ -89,6 +91,19 @@ fn main() -> anyhow::Result<()> {
                     "crates/lazecode-ui/src/app_ui.rs",
                 ) {
                     project.set_diff_for_source(&source, Ok(fd));
+                }
+                if let Some(diff_tab) =
+                    project.tabs.iter_mut().find_map(|tab| match &mut tab.kind {
+                        lazecode_core::TabKind::Diff(diff) => Some(diff),
+                        _ => None,
+                    })
+                {
+                    // 跳到第 3 组并保留（非首开），验证滚动后蓝框跟随内容。
+                    diff_tab.current_hunk = jump_group;
+                    diff_tab.revealed = true;
+                    if jump_group > 0 {
+                        pending_jump = Some((project.active_tab.unwrap_or(0), jump_group));
+                    }
                 }
                 model.ui.terminal_visible = false;
                 model.ui.panel_visible = true;
@@ -151,7 +166,7 @@ fn main() -> anyhow::Result<()> {
                 model.ui.panel_visible = true;
                 model.ui.sidebar_view = SidebarView::Consoles;
             }
-            "cmpdiff" => {
+            "cmpdiff" | "cmpdiff3" => {
                 // 用户截图形态：Compare 抽屉 + Diff 标签 + Git 底部面板（无终端）。
                 model.ui.sidebar_view = SidebarView::Compare;
                 model.ui.sidebar_visible = true;
@@ -172,6 +187,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut runtime = UiRuntime::default();
+    if let Some((tab_id, group)) = pending_jump {
+        runtime.diff_scroll = Some((tab_id, group));
+    }
     match mode.as_str() {
         "settings" => runtime.settings_open = true,
         "palette" => model.ui.command_palette_open = true,

@@ -70,6 +70,10 @@ pub enum JobResult {
         root: PathBuf,
         result: Result<RepoSnapshot, String>,
     },
+    CmpSessionLoaded {
+        root: PathBuf,
+        result: Result<Vec<lazecode_git::CompareFile>, String>,
+    },
     LogLoaded {
         root: PathBuf,
         branch: Option<String>,
@@ -2182,6 +2186,85 @@ impl JobQueue {
                     },
                 );
             }
+            Command::CompareOpen { from, to } => {
+                let Some(project) = model.active_project_mut() else {
+                    return;
+                };
+                project.compare_session = Some(lazecode_core::model::CompareSession {
+                    from: from.clone(),
+                    to: to.clone(),
+                    loading: true,
+                    group_by_dir: true,
+                    root_expanded: true,
+                    ..Default::default()
+                });
+                let root = project.root.clone();
+                model.ui.sidebar_view = lazecode_core::model::SidebarView::Compare;
+                model.ui.sidebar_visible = true;
+                self.spawn(
+                    "compare-files",
+                    format!("cmp:{root:?}:{from}:{to}"),
+                    move || {
+                        let result = lazecode_git::compare_commits(&root, &from, &to)
+                            .map_err(|err| err.to_string());
+                        JobResult::CmpSessionLoaded { root, result }
+                    },
+                );
+            }
+            Command::CompareSwap => {
+                let Some(project) = model.active_project_mut() else {
+                    return;
+                };
+                let Some(session) = project.compare_session.as_mut() else {
+                    return;
+                };
+                let old_from = session.from.clone();
+                let old_to = session.to.clone();
+                std::mem::swap(&mut session.from, &mut session.to);
+                session.selected = None;
+                session.loading = true;
+                let (from, to) = (session.from.clone(), session.to.clone());
+                let root = project.root.clone();
+                // 已打开的 diff 单例标签同步换向并重载。
+                let open_diff = project.tabs.iter_mut().find_map(|tab| match &mut tab.kind {
+                    TabKind::Diff(diff) => match &diff.source {
+                        DiffSource::CompareCommits { from: f, to: t, .. }
+                            if *f == old_from && *t == old_to =>
+                        {
+                            Some(diff.path.clone())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                });
+                if let Some(path) = open_diff {
+                    let source = DiffSource::CompareCommits {
+                        from: to.clone(),
+                        to: from.clone(),
+                        path,
+                    };
+                    if let Some(project) = model.active_project_mut() {
+                        project.open_diff_source(source.clone());
+                    }
+                    self.diff_source(root.clone(), source);
+                }
+                self.spawn(
+                    "compare-files",
+                    format!("cmp:{root:?}:{from}:{to}"),
+                    move || {
+                        let result = lazecode_git::compare_commits(&root, &from, &to)
+                            .map_err(|err| err.to_string());
+                        JobResult::CmpSessionLoaded { root, result }
+                    },
+                );
+            }
+            Command::CompareClose => {
+                if let Some(project) = model.active_project_mut() {
+                    project.compare_session = None;
+                }
+                model.ui.sidebar_view = lazecode_core::model::SidebarView::Git;
+                model.ui.sidebar_visible = true;
+            }
             Command::RefreshLog | Command::LogFilterChanged => {
                 if let Some(project) = model.active_project_mut() {
                     project.log_loading = true;
@@ -2633,6 +2716,28 @@ impl JobQueue {
                     ToastKind::Error,
                 ),
             },
+            JobResult::CmpSessionLoaded { root, result } => {
+                if let Some(project) = model
+                    .projects
+                    .iter_mut()
+                    .find(|project| project.root == root)
+                {
+                    if let Some(session) = project.compare_session.as_mut() {
+                        match result {
+                            Ok(files) => {
+                                session.nav_order = lazecode_core::model::compare_nav_order(&files);
+                                session.files = files;
+                                session.loading = false;
+                            }
+                            Err(_err) => {
+                                session.files.clear();
+                                session.nav_order.clear();
+                                session.loading = false;
+                            }
+                        }
+                    }
+                }
+            }
             JobResult::GitRefreshed { root, result } => {
                 if let Some(project) = model
                     .projects

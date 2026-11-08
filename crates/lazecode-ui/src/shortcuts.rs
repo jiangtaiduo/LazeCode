@@ -178,11 +178,19 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
             error: None,
         };
     }
-    if toggle_tree_view
-        && model.ui.sidebar_visible
-        && model.ui.sidebar_view == lazecode_core::SidebarView::Git
-    {
-        rt.commit_tree_view = !rt.commit_tree_view;
+    if toggle_tree_view && model.ui.sidebar_visible {
+        match model.ui.sidebar_view {
+            lazecode_core::SidebarView::Git => rt.commit_tree_view = !rt.commit_tree_view,
+            // Compare 抽屉的同名快捷键（稳定版 ^P：Group By Directory）。
+            lazecode_core::SidebarView::Compare => {
+                if let Some(project) = model.active_project_mut() {
+                    if let Some(session) = project.compare_session.as_mut() {
+                        session.group_by_dir = !session.group_by_dir;
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     if new_file {

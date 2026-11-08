@@ -21,6 +21,8 @@ pub enum SidebarView {
     Files,
     Git,
     Consoles,
+    /// 稳定版 Compare Versions：Changes Between 抽屉（专属会话）。
+    Compare,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +55,8 @@ pub struct UiState {
     pub panel_visible: bool,
     /// 终端 dock 独立可见（稳定版 grid：main / dock / bottom / status 四行）。
     pub terminal_visible: bool,
+    /// Git log 分支树搜索框开关（稳定版 branchSearchOpen，🔍 按钮切换）。
+    pub branch_search_open: bool,
     pub panel_tab: PanelTab,
     pub panel_height: f32,
     /// 终端 dock 高度（稳定版默认 340）。
@@ -165,6 +169,7 @@ impl Default for UiState {
             commit_width: 330.0,
             panel_visible: true,
             terminal_visible: true,
+            branch_search_open: false,
             panel_tab: PanelTab::Console,
             panel_height: 248.0,
             terminal_height: 340.0,
@@ -249,7 +254,15 @@ pub struct DiffTab {
     pub loading: bool,
     pub error: Option<String>,
     pub view_mode: DiffViewMode,
+    /// Current change-group index (Monaco `getLineChanges()` semantics:
+    /// contiguous edit runs, not git hunks — see `count_change_groups`).
     pub current_hunk: usize,
+    /// Edge-escalation state for the balloon: 0 none, +1 = "last difference"
+    /// shown (next ▼ opens the next file), -1 = first-difference shown.
+    pub edge_pending: i8,
+    /// First reveal done: after load, the first group is scrolled into view
+    /// exactly once (stable `revealedRef`).
+    pub revealed: bool,
 }
 
 pub enum TabKind {
@@ -260,6 +273,63 @@ pub enum TabKind {
 }
 
 /// 分支比较标签页：只保存方向身份，数据在 `UiState::compare_branches`。
+/// 稳定版 CompareDrawer 的会话状态：两个提交间的差异文件清单。
+#[derive(Clone, Debug, Default)]
+pub struct CompareSession {
+    pub from: String,
+    pub to: String,
+    pub minimized: bool,
+    pub loading: bool,
+    pub files: Vec<lazecode_git::CompareFile>,
+    /// 目录树展开序（目录优先、字典序），供 diff 页 ←/→ 跨文件导航。
+    pub nav_order: Vec<String>,
+    pub group_by_dir: bool,
+    pub selected: Option<String>,
+    pub root_expanded: bool,
+    pub collapsed: std::collections::HashSet<String>,
+}
+
+/// 目录树展开序：与稳定版 CompareDrawer renderDirNodes 一致 —— 每层
+/// 目录在前、文件在后，同层按名字排序。
+pub fn compare_nav_order(files: &[lazecode_git::CompareFile]) -> Vec<String> {
+    #[derive(Default)]
+    struct Node {
+        dirs: std::collections::BTreeMap<String, Node>,
+        files: Vec<String>,
+    }
+    let mut root = Node::default();
+    for file in files {
+        let parts: Vec<&str> = file.path.split('/').filter(|p| !p.is_empty()).collect();
+        let mut cur = &mut root;
+        for part in &parts[..parts.len().saturating_sub(1)] {
+            cur = cur.dirs.entry((*part).to_string()).or_default();
+        }
+        if let Some(name) = parts.last() {
+            cur.files.push((*name).to_string());
+        }
+    }
+    fn walk(node: &Node, prefix: &str, out: &mut Vec<String>) {
+        for (name, dir) in &node.dirs {
+            let child = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            walk(dir, &child, out);
+        }
+        for name in &node.files {
+            out.push(if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            });
+        }
+    }
+    let mut out = Vec::new();
+    walk(&root, "", &mut out);
+    out
+}
+
 #[derive(Clone, Debug)]
 pub struct CompareTab {
     pub left: String,
@@ -541,6 +611,8 @@ pub struct ProjectState {
     pub last_watch_poll: Instant,
     pub git_loading: bool,
     pub log_loading: bool,
+    /// Compare Versions 会话（稳定版 CompareDrawer）。
+    pub compare_session: Option<CompareSession>,
 }
 
 impl ProjectState {
@@ -646,6 +718,7 @@ impl ProjectState {
             last_watch_poll: Instant::now(),
             git_loading: false,
             log_loading: false,
+            compare_session: None,
         };
         if let Some(first) = project.log.first() {
             project.selected_commit = Some(first.id.clone());
@@ -999,6 +1072,8 @@ impl ProjectState {
                     diff.loading = true;
                     diff.error = None;
                     diff.current_hunk = 0;
+                    diff.edge_pending = 0;
+                    diff.revealed = false;
                 }
                 self.active_tab = Some(self.tabs[index].id);
                 return self.tabs[index].id;
@@ -1015,6 +1090,8 @@ impl ProjectState {
                 error: None,
                 view_mode: DiffViewMode::Unified,
                 current_hunk: 0,
+                edge_pending: 0,
+                revealed: false,
             }),
         });
         self.active_tab = Some(id);
@@ -1579,6 +1656,8 @@ impl AppModel {
                     SidebarView::Files => "files",
                     SidebarView::Git => "git",
                     SidebarView::Consoles => "consoles",
+                    // Compare 会话不跨重启保留：落回 Git 视图。
+                    SidebarView::Compare => "git",
                 }
                 .to_string(),
             ),

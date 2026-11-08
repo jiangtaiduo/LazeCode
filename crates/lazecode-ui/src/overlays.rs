@@ -1160,10 +1160,11 @@ fn draw_commit_menu(
                 }
             }
             24 if selected_commits.len() == 2 => {
-                model.queue(Command::OpenCompareCommitsDiff {
-                    from: selected_commits[0].clone(),
-                    to: selected_commits[1].clone(),
-                    path: String::new(),
+                // 稳定版 handleCompareVersions：from=后选的（旧），to=先选的（新），
+                // 打开 CompareDrawer 会话而非直接开 diff。
+                model.queue(Command::CompareOpen {
+                    from: selected_commits[1].clone(),
+                    to: selected_commits[0].clone(),
                 });
             }
             15 => {

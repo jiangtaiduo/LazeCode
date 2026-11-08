@@ -176,6 +176,15 @@ pub enum Command {
     RefreshLog,
     /// The log filter changed: re-query with the new options.
     LogFilterChanged,
+    /// 打开 Compare Versions 会话（稳定版 CompareDrawer）。
+    CompareOpen {
+        from: String,
+        to: String,
+    },
+    /// 交换比较方向（工具栏 ⇆），重载文件清单并换向已打开的 diff。
+    CompareSwap,
+    /// 关闭会话：抽屉切回 Git 视图，diff 单例标签保留内容但导航清单失效。
+    CompareClose,
     /// Load the next page of commits into the current log view.
     LogLoadMore,
     SelectCommit(String),

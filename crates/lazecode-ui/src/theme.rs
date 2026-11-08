@@ -56,6 +56,19 @@ pub struct Palette {
     pub diff_add_strong: Color32,
     pub diff_del: Color32,
     pub diff_del_strong: Color32,
+    /// Monaco DiffEditor overrides in stable theme.css: `.line-insert` #2c4134,
+    /// `.line-delete` #482b2b, `.char-insert` #385542, `.char-delete` #5e3436.
+    /// Hard-coded (not theme vars) in stable — identical in both variants.
+    pub diff_line_add: Color32,
+    pub diff_line_del: Color32,
+    pub diff_char_add: Color32,
+    pub diff_char_del: Color32,
+    /// PyCharm blue used by `.diff-hunk-active-box` / `.compare-file-row.selected`
+    /// / `.diff-edge-balloon` borders — deliberately not --accent in stable.
+    pub jb_accent: Color32,
+    /// `.diff-edge-balloon` background #23272e, text #dfe1e5.
+    pub balloon_bg: Color32,
+    pub balloon_text: Color32,
     pub conflict_bg: Color32,
     pub tok_kw: Color32,
     pub tok_type: Color32,
@@ -75,6 +88,8 @@ pub struct Palette {
     pub ansi: [Color32; 16],
     pub scrollbar: Color32,
     pub scrollbar_hover: Color32,
+    /// --overlay-faint rgba(255,255,255,0.06)（行分隔 hairline / counter 底）。
+    pub hairline: Color32,
     // --- menu family (--menu-*) ---
     pub menu_bg: Color32,
     pub menu_border: Color32,
@@ -148,11 +163,18 @@ impl Palette {
             diff_add_strong: rgba(50, 215, 75, 89), // --git-add-line 0.35
             diff_del: rgba(255, 69, 58, 46), // --git-del-bg 0.18
             diff_del_strong: rgba(255, 69, 58, 89), // --git-del-line 0.35
+            diff_line_add: Color32::from_rgb(0x2c, 0x41, 0x34),
+            diff_line_del: Color32::from_rgb(0x48, 0x2b, 0x2b),
+            diff_char_add: Color32::from_rgb(0x38, 0x55, 0x42),
+            diff_char_del: Color32::from_rgb(0x5e, 0x34, 0x36),
+            jb_accent: Color32::from_rgb(0x35, 0x74, 0xf0),
+            balloon_bg: Color32::from_rgb(0x23, 0x27, 0x2e),
+            balloon_text: Color32::from_rgb(0xdf, 0xe1, 0xe5),
             conflict_bg: Color32::from_rgb(0x54, 0x26, 0x28), // --git-conflict-bg
-            tok_kw: Color32::from_rgb(0xcf, 0x8e, 0x6d), // monaco ide-jetbrains-dark keyword
-            tok_type: Color32::from_rgb(0x56, 0xa8, 0xf5), // type/function
-            tok_str: Color32::from_rgb(0x6a, 0xab, 0x73), // string
-            tok_num: Color32::from_rgb(0x2a, 0xac, 0xb8), // number
+            tok_kw: Color32::from_rgb(0xcf, 0x8e, 0x6d),      // monaco ide-jetbrains-dark keyword
+            tok_type: Color32::from_rgb(0x56, 0xa8, 0xf5),    // type/function
+            tok_str: Color32::from_rgb(0x6a, 0xab, 0x73),     // string
+            tok_num: Color32::from_rgb(0x2a, 0xac, 0xb8),     // number
             tok_fn: Color32::from_rgb(0x56, 0xa8, 0xf5),
             tok_com: Color32::from_rgb(0x7a, 0x7e, 0x85), // comment (italic)
             tok_punc: Color32::from_rgb(0xbc, 0xbe, 0xc4), // default foreground
@@ -188,6 +210,7 @@ impl Palette {
                 Color32::from_rgb(0x70, 0xc0, 0xb0),
                 Color32::from_rgb(0xea, 0xea, 0xea),
             ],
+            hairline: rgba(255, 255, 255, 15),
             scrollbar: rgba(255, 255, 255, 46),       // 0.18
             scrollbar_hover: rgba(255, 255, 255, 77), // 0.30
             menu_bg: rgba(30, 30, 32, 245),           // --menu-bg 0.96
@@ -255,6 +278,15 @@ impl Palette {
             diff_add_strong: rgba(36, 138, 61, 89), // 0.35
             diff_del: rgba(215, 0, 21, 31),         // 0.12
             diff_del_strong: rgba(215, 0, 21, 77),  // 0.30
+            // Stable never overrides the Monaco diff colours per variant — the
+            // theme.css values apply to light too. Mirror that verbatim.
+            diff_line_add: Color32::from_rgb(0x2c, 0x41, 0x34),
+            diff_line_del: Color32::from_rgb(0x48, 0x2b, 0x2b),
+            diff_char_add: Color32::from_rgb(0x38, 0x55, 0x42),
+            diff_char_del: Color32::from_rgb(0x5e, 0x34, 0x36),
+            jb_accent: Color32::from_rgb(0x35, 0x74, 0xf0),
+            balloon_bg: Color32::from_rgb(0xff, 0xff, 0xff),
+            balloon_text: Color32::from_rgb(0x1e, 0x1f, 0x22),
             conflict_bg: Color32::from_rgb(0xff, 0xdc, 0xdc),
             tok_kw: Color32::from_rgb(0x9a, 0x34, 0xc4), // monaco ide-light keyword
             tok_type: Color32::from_rgb(0x0b, 0x4f, 0x8a), // type/function
@@ -269,7 +301,8 @@ impl Palette {
             tok_attr: Color32::from_rgb(0x9a, 0x34, 0xc4),
             lane: Palette::dark().lane, // stable GRAPH_PALETTE is theme-independent
             ansi: Palette::dark().ansi, // terminal canvas stays dark in light theme
-            scrollbar: rgba(0, 0, 0, 56), // 0.22
+            hairline: rgba(0, 0, 0, 18),
+            scrollbar: rgba(0, 0, 0, 56),       // 0.22
             scrollbar_hover: rgba(0, 0, 0, 89), // 0.35
             menu_bg: rgba(250, 250, 252, 245),
             menu_border: rgba(0, 0, 0, 31),

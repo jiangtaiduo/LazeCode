@@ -177,8 +177,23 @@ static SVGS: &[(&str, &str, bool)] = &[
         false,
     ),
     (
+        "arrow_left",
+        mono!("1.5", "<path d=\"M12.5 8H3.5M8 3.5L3.5 8L8 12.5\"/>"),
+        false,
+    ),
+    (
         "tag",
         mono!("1.4", "<path d=\"M2.5 7V3a.5.5 0 0 1 .5-.5h4a1 1 0 0 1 .71.29l5.79 5.8a1 1 0 0 1 0 1.41l-4 4a1 1 0 0 1-1.41 0l-5.8-5.8a1 1 0 0 1-.29-.7z\"/><circle cx=\"5.5\" cy=\"5.5\" r=\"1.1\" fill=\"#fff\" stroke=\"none\"/>"),
+        false,
+    ),
+    (
+        "cloud",
+        mono!("1.5", "<path d=\"M11.5 12.5a3.2 3.2 0 0 0 .3-6.4 4.9 4.9 0 0 0-9.35 1.33A3.2 3.2 0 0 0 3.6 12.5h7.9z\"/>"),
+        false,
+    ),
+    (
+        "star_filled",
+        "<svg viewBox=\"0 0 16 16\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M8 1.8l1.9 3.85 4.25.62-3.07 3 .72 4.23L8 11.53l-3.8 1.97.72-4.23-3.07-3 4.25-.62L8 1.8z\" fill=\"#ffffff\"/></svg>",
         false,
     ),
     (

@@ -14,7 +14,7 @@ use crate::runtime::{DialogState, UiRuntime};
 use crate::theme::{Theme, MONO};
 use crate::widgets::{mono_char_width, primary_button, secondary_button, text_clipped};
 
-const TABBAR_H: f32 = 35.0;
+const TABBAR_H: f32 = 30.0;
 const CRUMBS_H: f32 = 26.0;
 const GUTTER: f32 = 52.0;
 const SCROLLBAR_W: f32 = 9.0;

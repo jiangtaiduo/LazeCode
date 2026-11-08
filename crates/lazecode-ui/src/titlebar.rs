@@ -31,8 +31,119 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             .send_viewport_cmd(ViewportCommand::Maximized(!maximized));
     }
 
-    let mut x = rect.left() + 12.0;
+    // macOS traffic lights overlay the first ~70px of the full-width
+    // titlebar (stable `padding-left: 78px`).
+    let mut x = rect.left() + 78.0;
     let mut open_project_dialog = false;
+
+    // App logo → command palette. (The stable logo opens its project menu;
+    // that lands with the titlebar replication batch.)
+    let logo_rect = Rect::from_center_size(Pos2::new(x + 14.0, top + 20.0), Vec2::splat(28.0));
+    let logo_response = ui.interact(logo_rect, ui.scope_id().with("title-logo"), Sense::click());
+    let logo_fill = if logo_response.hovered() {
+        p.accent.gamma_multiply(1.06)
+    } else {
+        p.accent
+    };
+    painter.rect_filled(logo_rect, egui::CornerRadius::same(8), logo_fill);
+    painter.text(
+        logo_rect.center(),
+        Align2::CENTER_CENTER,
+        ">_",
+        FontId::monospace(12.0),
+        p.accent_on_fill,
+    );
+    if logo_response.clicked() {
+        rt.open_palette();
+        model.ui.command_palette_open = true;
+    }
+    logo_response.on_hover_text(crate::tr!(model, "Command palette · ⌘K", "命令面板 · ⌘K"));
+    x = logo_rect.right() + 10.0;
+
+    // Project avatars, moved here from the old 58px rail until the stable
+    // project tab bar replaces them in the titlebar batch.
+    for index in 0..model.projects.len() {
+        let (tone, active, running, initials, project_name, project_branch) = {
+            let project = &model.projects[index];
+            (
+                Color32::from_rgb(project.tone.0, project.tone.1, project.tone.2),
+                model.active_project == Some(index),
+                project
+                    .worktrees
+                    .iter()
+                    .flat_map(|worktree| worktree.terminals.iter())
+                    .filter(|terminal| terminal.session.is_running())
+                    .count(),
+                project.initials.clone(),
+                project.name.clone(),
+                project.branch(),
+            )
+        };
+        let tile = Rect::from_center_size(Pos2::new(x + 12.0, top + 20.0), Vec2::splat(24.0));
+        let response = ui.interact(
+            tile,
+            ui.scope_id().with(("title-project", index)),
+            Sense::click(),
+        );
+        if active {
+            painter.rect_filled(tile, egui::CornerRadius::same(7), tone);
+        } else {
+            painter.rect_filled(
+                tile,
+                egui::CornerRadius::same(7),
+                tone.gamma_multiply(if response.hovered() { 0.24 } else { 0.15 }),
+            );
+            painter.rect_stroke(
+                tile,
+                egui::CornerRadius::same(7),
+                Stroke::new(1.0, tone.gamma_multiply(0.35)),
+                StrokeKind::Inside,
+            );
+        }
+        painter.text(
+            tile.center(),
+            Align2::CENTER_CENTER,
+            &initials,
+            FontId::proportional(10.0),
+            if active { p.accent_on_fill } else { tone },
+        );
+        if running > 0 {
+            painter.circle_filled(
+                Pos2::new(tile.right() - 1.0, tile.top() + 1.0),
+                4.0,
+                p.running,
+            );
+        }
+        if response.clicked() {
+            model.switch_project(index);
+            rt.clear_terminal_cache();
+        }
+        response.on_hover_text(format!("{project_name} · {project_branch}"));
+        x += 28.0;
+    }
+    if !model.projects.is_empty() {
+        x += 4.0;
+    }
+
+    let add_rect = Rect::from_center_size(Pos2::new(x + 11.0, top + 20.0), Vec2::splat(22.0));
+    let add_response = ui.interact(add_rect, ui.scope_id().with("title-add"), Sense::click());
+    if add_response.hovered() {
+        painter.rect_filled(add_rect, egui::CornerRadius::same(6), p.hover);
+    }
+    paint_icon(ui.painter(), add_rect.shrink(5.0), Icon::Plus, p.text3);
+    if add_response.clicked() {
+        open_project_dialog = true;
+    }
+    add_response.on_hover_text(crate::tr!(model, "Open another project", "打开其他项目"));
+    x = add_rect.right() + 9.0;
+
+    painter.vline(
+        x - 2.0,
+        (top + 11.0)..=(rect.bottom() - 11.0),
+        Stroke::new(1.0, p.border),
+    );
+    x += 6.0;
+
     let project = model.active_project();
     let has_project = project.is_some();
     let project_name = project

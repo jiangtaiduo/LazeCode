@@ -232,6 +232,11 @@ static SVGS: &[(&str, &str, bool)] = &[
         false,
     ),
     (
+        "compare",
+        mono!("1.3", "<path d=\"M2.5 4.5h5.5M2.5 8h3.5M2.5 11.5h5.5\"/><path d=\"M6.5 8h6.5M10.5 5.5l2.5 2.5-2.5 2.5\"/>"),
+        false,
+    ),
+    (
         "rollback",
         mono!("1.4", "<path d=\"M5.5 3.5L2 7l3.5 3.5\"/><path d=\"M2 7h7.2a3.8 3.8 0 0 1 3.8 3.8v0a3.8 3.8 0 0 1-3.8 3.8H6.5\"/>"),
         false,

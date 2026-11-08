@@ -204,7 +204,7 @@ fn draw_dag_cell(
         }
     }
 }
-const HEAD_H: f32 = 33.0;
+const HEAD_H: f32 = 34.0;
 
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, rect: Rect) {
     let p = theme.palette;

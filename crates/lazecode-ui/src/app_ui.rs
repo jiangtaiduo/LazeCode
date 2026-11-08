@@ -1,25 +1,25 @@
-use egui::{pos2, vec2, Rect, Ui};
+use egui::{pos2, vec2, Rect, Stroke, Ui};
 
 use lazecode_core::{AppModel, PanelTab, SidebarView};
 
 use crate::runtime::UiRuntime;
-use crate::theme::{Theme, BODY, SMALL};
+use crate::theme::Theme;
 
-pub const RAIL_W: f32 = 58.0;
+/// Stable window skeleton: a full-width 40px titlebar, a 40px LeftStrip,
+/// one exclusive full-height drawer, and the center workspace grid
+/// (main / bottom panel / status).
+pub const STRIP_W: f32 = 40.0;
 pub const TITLEBAR_H: f32 = 40.0;
-pub const ACTIVITY_W: f32 = 44.0;
-pub const STATUS_H: f32 = 24.0;
-pub const TABBAR_H: f32 = 35.0;
-pub const PANEL_HEAD_H: f32 = 33.0;
+pub const STATUS_H: f32 = 26.0;
+pub const TABBAR_H: f32 = 30.0;
+pub const PANEL_HEAD_H: f32 = 34.0;
 pub const SPLITTER: f32 = 4.0;
 
 pub struct Layout {
     pub full: Rect,
-    pub rail: Rect,
-    pub main: Rect,
     pub titlebar: Rect,
     pub workspace: Rect,
-    pub activity: Rect,
+    pub strip: Rect,
     pub sidebar: Option<Rect>,
     pub stage: Rect,
     pub editor: Rect,
@@ -27,24 +27,28 @@ pub struct Layout {
     pub status: Rect,
 }
 
+/// Drawer width for the active view: the Commit drawer persists its own
+/// width (stable `ide_commit_drawer_width`), the file tree keeps the
+/// classic sidebar width.
+fn drawer_width(model: &AppModel) -> f32 {
+    match model.ui.sidebar_view {
+        SidebarView::Git => model.ui.commit_width,
+        SidebarView::Files | SidebarView::Consoles => model.ui.sidebar_width,
+    }
+}
+
 pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
-    let rail = Rect::from_min_max(full.min, pos2(full.left() + RAIL_W, full.bottom()));
-    let main = Rect::from_min_max(pos2(full.left() + RAIL_W, full.top()), full.max);
-    let titlebar = Rect::from_min_max(main.min, pos2(main.right(), main.top() + TITLEBAR_H));
-    let status = Rect::from_min_max(pos2(main.left(), main.bottom() - STATUS_H), main.max);
-    let workspace = Rect::from_min_max(
-        pos2(main.left(), titlebar.bottom()),
-        pos2(main.right(), status.top()),
-    );
-    let activity = Rect::from_min_max(
+    let titlebar = Rect::from_min_max(full.min, pos2(full.right(), full.top() + TITLEBAR_H));
+    let workspace = Rect::from_min_max(pos2(full.left(), titlebar.bottom()), full.max);
+    let strip = Rect::from_min_max(
         workspace.min,
-        pos2(workspace.left() + ACTIVITY_W, workspace.bottom()),
+        pos2(workspace.left() + STRIP_W, workspace.bottom()),
     );
-    let mut stage_left = activity.right();
+    let mut stage_left = strip.right();
     let has_project = !model.projects.is_empty();
     let sidebar = if model.ui.sidebar_visible && has_project {
-        let max_width = (workspace.width() - ACTIVITY_W - 360.0).max(180.0);
-        let width = model.ui.sidebar_width.clamp(180.0, max_width);
+        let max_width = (workspace.width() - STRIP_W - 360.0).max(180.0);
+        let width = drawer_width(model).clamp(180.0, max_width);
         let rect = Rect::from_min_max(
             pos2(stage_left, workspace.top()),
             pos2(stage_left + width, workspace.bottom()),
@@ -55,6 +59,12 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
         None
     };
     let stage = Rect::from_min_max(pos2(stage_left, workspace.top()), workspace.max);
+    // The statusbar lives inside the center workspace (right of the
+    // drawer), like the stable grid's `status` row.
+    let status = Rect::from_min_max(
+        pos2(stage.left(), full.bottom() - STATUS_H),
+        pos2(stage.right(), full.bottom()),
+    );
     let panel_height = if model.ui.panel_visible {
         let max_height = (stage.height() - TABBAR_H - 120.0).max(120.0);
         if model.ui.panel_maximised {
@@ -67,8 +77,8 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
     };
     let panel = if model.ui.panel_visible && has_project {
         Some(Rect::from_min_max(
-            pos2(stage.left(), stage.bottom() - panel_height),
-            stage.max,
+            pos2(stage.left(), status.top() - panel_height),
+            pos2(stage.right(), status.top()),
         ))
     } else {
         None
@@ -76,15 +86,13 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
     let editor = if let Some(panel) = panel {
         Rect::from_min_max(stage.min, pos2(stage.right(), panel.top() - SPLITTER))
     } else {
-        stage
+        Rect::from_min_max(stage.min, pos2(stage.right(), status.top()))
     };
     Layout {
         full,
-        rail,
-        main,
         titlebar,
         workspace,
-        activity,
+        strip,
         sidebar,
         stage,
         editor,
@@ -140,41 +148,39 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     // Stable Liquid Glass: the window body carries the stable gradient and
     // the glass panels draw as translucent fills on top of it.
     crate::theme::body_gradient(painter, layout.full, theme.dark);
-    painter.rect_filled(layout.rail, 0.0, p.rail);
     painter.rect_filled(layout.titlebar, 0.0, p.titlebar);
-    painter.rect_filled(layout.activity, 0.0, p.panel);
+    painter.rect_filled(layout.strip, 0.0, p.rail);
+    painter.vline(
+        layout.strip.right() - 0.5,
+        layout.strip.y_range(),
+        Stroke::new(1.0, p.border_soft),
+    );
     if let Some(sidebar) = layout.sidebar {
         painter.rect_filled(sidebar, 0.0, p.sidebar);
         painter.vline(
             sidebar.right() - 0.5,
             sidebar.y_range(),
-            egui::Stroke::new(1.0, p.border),
+            Stroke::new(1.0, p.border),
         );
     }
     painter.rect_filled(layout.stage, 0.0, p.editor);
+    painter.rect_filled(layout.status, 0.0, p.statusbar);
+    painter.hline(
+        layout.status.x_range(),
+        layout.status.top() + 0.5,
+        Stroke::new(1.0, p.border),
+    );
     if let Some(panel) = layout.panel {
         painter.rect_filled(panel, 0.0, p.panel);
         painter.hline(
             panel.x_range(),
             panel.top() + 0.5,
-            egui::Stroke::new(1.0, p.border),
+            Stroke::new(1.0, p.border),
         );
     }
-    painter.rect_filled(layout.status, 0.0, p.statusbar);
-    painter.hline(
-        layout.status.x_range(),
-        layout.status.top() + 0.5,
-        egui::Stroke::new(1.0, p.border),
-    );
-    painter.vline(
-        layout.titlebar.right() - 0.5,
-        layout.titlebar.y_range(),
-        egui::Stroke::new(1.0, p.border_soft),
-    );
 
-    crate::rail::draw(ui, model, rt, &theme, layout.rail);
+    crate::strip::draw(ui, model, rt, &theme, layout.strip);
     crate::titlebar::draw(ui, model, rt, &theme, layout.titlebar);
-    crate::activity::draw(ui, model, rt, &theme, layout.activity);
     if let Some(sidebar) = layout.sidebar {
         crate::sidebar::draw(ui, model, rt, &theme, sidebar);
         splitter_vertical(ui, model, rt, &theme, sidebar.y_range(), sidebar.right());
@@ -216,7 +222,9 @@ fn splitter_vertical(
     y_range: egui::Rangef,
     x: f32,
 ) {
-    let rect = Rect::from_min_max(pos2(x - 3.0, y_range.min), pos2(x + 3.0, y_range.max));
+    // Stable `.drawer-resizer-v`: 12px hit area with a 2px hairline that
+    // turns accent on hover.
+    let rect = Rect::from_min_max(pos2(x - 6.0, y_range.min), pos2(x + 6.0, y_range.max));
     let response = ui.interact(
         rect,
         ui.scope_id().with("sidebar-splitter"),
@@ -225,19 +233,25 @@ fn splitter_vertical(
     let active = response.hovered() || response.dragged();
     if active {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-        ui.painter().vline(
-            x - 0.5,
-            y_range,
-            egui::Stroke::new(2.0, theme.palette.accent),
+        ui.painter().rect_filled(
+            Rect::from_min_max(pos2(x - 1.0, y_range.min), pos2(x + 1.0, y_range.max)),
+            egui::CornerRadius::same(1),
+            theme.palette.accent,
         );
     }
     if response.dragged() {
-        model.ui.sidebar_width =
-            (model.ui.sidebar_width + response.drag_delta().x).clamp(180.0, 520.0);
+        let width = drawer_width(model) + response.drag_delta().x;
+        match model.ui.sidebar_view {
+            SidebarView::Git => model.ui.commit_width = width.clamp(240.0, 640.0),
+            SidebarView::Files | SidebarView::Consoles => {
+                model.ui.sidebar_width = width.clamp(180.0, 520.0)
+            }
+        }
         rt.sidebar_drag = true;
     } else if rt.sidebar_drag {
         rt.sidebar_drag = false;
         model.settings.sidebar_width = model.ui.sidebar_width;
+        model.settings.commit_drawer_width = model.ui.commit_width;
         model.save_settings();
     }
 }
@@ -262,10 +276,10 @@ fn splitter_horizontal(
     let active = response.hovered() || response.dragged();
     if active {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-        ui.painter().hline(
-            x_range,
-            y + SPLITTER * 0.5,
-            egui::Stroke::new(2.0, theme.palette.accent),
+        ui.painter().rect_filled(
+            Rect::from_min_max(pos2(x_range.min, y + 1.0), pos2(x_range.max, y + 3.0)),
+            egui::CornerRadius::same(1),
+            theme.palette.accent,
         );
     }
     if response.dragged() {
@@ -304,6 +318,3 @@ pub fn sidebar_view(model: &AppModel) -> SidebarView {
 pub fn placeholder_size() -> egui::Vec2 {
     vec2(0.0, 0.0)
 }
-
-pub const _TEXT: f32 = BODY;
-pub const _SMALL: f32 = SMALL;

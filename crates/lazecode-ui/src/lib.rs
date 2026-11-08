@@ -1,6 +1,5 @@
 //! egui rendering for LazeCode.
 
-pub mod activity;
 pub mod app_ui;
 pub mod compare;
 pub mod editor;
@@ -10,13 +9,13 @@ pub mod icons_svg;
 pub mod overlays;
 pub mod palette;
 pub mod panel;
-pub mod rail;
 pub mod runtime;
 pub mod search;
 pub mod settings;
 pub mod shortcuts;
 pub mod sidebar;
 pub mod statusbar;
+pub mod strip;
 pub mod terminal;
 pub mod theme;
 pub mod titlebar;

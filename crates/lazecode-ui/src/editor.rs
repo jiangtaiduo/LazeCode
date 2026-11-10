@@ -18,6 +18,9 @@ const GUTTER: f32 = 52.0;
 const SCROLLBAR_W: f32 = 9.0;
 
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, rect: Rect) {
+    if rect.height() < 35.0 || rect.width() < 10.0 {
+        return;
+    }
     let p = theme.palette;
     ui.painter().rect_filled(rect, 0.0, p.editor);
     let Some(index) = model.active_project else {
@@ -38,30 +41,69 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         draw_welcome(ui, model, rt, theme, rect, Some(index));
         return;
     };
-    let is_file = model.projects[index]
-        .tab_by_id(active)
-        .map(|tab| matches!(tab.kind, TabKind::File(_)))
-        .unwrap_or(false);
     let content = Rect::from_min_max(Pos2::new(rect.left(), tabbar.bottom()), rect.max);
-    let is_compare = model.projects[index]
+    enum ActiveKind {
+        Compare(String, String),
+        File,
+        Image(lazecode_core::ImageTab),
+        Diff,
+    }
+    let kind = model.projects[index]
         .tab_by_id(active)
-        .map(|tab| matches!(tab.kind, lazecode_core::TabKind::Compare(_)))
-        .unwrap_or(false);
-    if is_compare {
-        // 分支比较页（稳定版 compare-branches 中央标签页）。
-        if let Some(tab) = model.projects[index].tab_by_id(active) {
-            if let lazecode_core::TabKind::Compare(compare) = &tab.kind {
-                let (left, right) = (compare.left.clone(), compare.right.clone());
+        .map(|tab| match &tab.kind {
+            lazecode_core::TabKind::Compare(c) => {
+                ActiveKind::Compare(c.left.clone(), c.right.clone())
+            }
+            lazecode_core::TabKind::File(_) => ActiveKind::File,
+            lazecode_core::TabKind::Image(img) => ActiveKind::Image(img.clone()),
+            lazecode_core::TabKind::Diff(_) => ActiveKind::Diff,
+        });
+    if let Some(kind) = kind {
+        match kind {
+            ActiveKind::Compare(left, right) => {
                 crate::compare::draw_page(ui, model, rt, theme, content, &left, &right);
             }
+            ActiveKind::File => {
+                let is_md =
+                    model.projects[index]
+                        .tab_by_id(active)
+                        .is_some_and(|tab| match &tab.kind {
+                            TabKind::File(file) => file
+                                .doc
+                                .path
+                                .extension()
+                                .is_some_and(|ext| ext == "md" || ext == "markdown"),
+                            _ => false,
+                        });
+                if is_md {
+                    let toolbar_rect =
+                        Rect::from_min_size(content.min, Vec2::new(content.width(), 32.0));
+                    draw_markdown_toolbar(ui, model, theme, toolbar_rect, index, active);
+                    let body = Rect::from_min_max(
+                        Pos2::new(content.left(), toolbar_rect.bottom()),
+                        content.max,
+                    );
+                    draw_file(ui, model, rt, theme, body, index, active);
+                } else {
+                    let crumbs =
+                        Rect::from_min_size(content.min, Vec2::new(content.width(), CRUMBS_H));
+                    draw_crumbs(ui, model, theme, crumbs, index, active);
+                    let body =
+                        Rect::from_min_max(Pos2::new(content.left(), crumbs.bottom()), content.max);
+                    draw_file(ui, model, rt, theme, body, index, active);
+                }
+            }
+            ActiveKind::Image(img) => {
+                let crumbs = Rect::from_min_size(content.min, Vec2::new(content.width(), CRUMBS_H));
+                draw_crumbs(ui, model, theme, crumbs, index, active);
+                let body =
+                    Rect::from_min_max(Pos2::new(content.left(), crumbs.bottom()), content.max);
+                draw_image_tab(ui, rt, p, theme, body, &img, active);
+            }
+            ActiveKind::Diff => {
+                draw_diff(ui, model, rt, theme, content, index, active);
+            }
         }
-    } else if is_file {
-        let crumbs = Rect::from_min_size(content.min, Vec2::new(content.width(), CRUMBS_H));
-        draw_crumbs(ui, model, theme, crumbs, index, active);
-        let body = Rect::from_min_max(Pos2::new(content.left(), crumbs.bottom()), content.max);
-        draw_file(ui, model, rt, theme, body, index, active);
-    } else {
-        draw_diff(ui, model, rt, theme, content, index, active);
     }
 }
 
@@ -122,157 +164,186 @@ fn draw_tabbar(
                 TabKind::File(file) if file.external => Some("diff"),
                 TabKind::Diff(_) => Some("diff"),
                 TabKind::Compare(_) => Some("cmp"),
+                TabKind::Image(_) => None,
                 TabKind::File(_) => None,
             };
             (tab.id, tab.title(), path, tab.is_dirty(), badge)
         })
         .collect();
     let active = project.active_tab;
-    let mut x = rect.left();
     let mut pending: Option<Command> = None;
     let mut close: Option<u64> = None;
-    for (id, title, path, dirty, badge) in tabs {
-        let extra = if badge.is_some() { 36.0 } else { 0.0 };
-        let width = (title.chars().count() as f32 * 6.8 + 62.0 + extra).clamp(96.0, 240.0);
-        let tab_rect =
-            Rect::from_min_size(Pos2::new(x, rect.top()), Vec2::new(width, rect.height()));
-        if tab_rect.right() > rect.right() - 4.0 {
-            break;
-        }
-        let is_active = active == Some(id);
-        let body = Rect::from_min_max(
-            tab_rect.min,
-            Pos2::new(tab_rect.right() - 24.0, tab_rect.bottom()),
-        );
-        let close_rect = Rect::from_min_max(
-            Pos2::new(tab_rect.right() - 24.0, tab_rect.top()),
-            tab_rect.max,
-        );
-        let response = ui.interact(body, ui.scope_id().with(("tab", id)), Sense::click());
-        let close_response = ui.interact(
-            close_rect,
-            ui.scope_id().with(("tab-close", id)),
-            Sense::click(),
-        );
-        if is_active {
-            ui.painter()
-                .rect_filled(tab_rect, egui::CornerRadius::ZERO, p.tabstrip);
-            ui.painter()
-                .rect_filled(tab_rect, egui::CornerRadius::ZERO, p.editor);
-            // Current file status line at the bottom of the tab
-            ui.painter().rect_filled(
-                Rect::from_min_size(
-                    Pos2::new(tab_rect.left(), tab_rect.bottom() - 2.0),
-                    Vec2::new(tab_rect.width(), 2.0),
-                ),
-                egui::CornerRadius::ZERO,
-                p.accent,
-            );
-        } else if response.hovered() || close_response.hovered() {
-            ui.painter()
-                .rect_filled(tab_rect, egui::CornerRadius::ZERO, p.hover);
-        } else {
-            ui.painter().rect_filled(
-                tab_rect,
-                egui::CornerRadius::ZERO,
-                p.tabstrip.gamma_multiply(0.98),
-            );
-        }
-        let (icon, tone) = tab_icon(path.as_deref().unwrap_or_default(), theme);
-        paint_icon(
-            ui.painter(),
-            Rect::from_center_size(
-                Pos2::new(tab_rect.left() + 14.0, tab_rect.center().y),
-                Vec2::splat(13.0),
-            ),
-            icon,
-            if is_active {
-                tone
-            } else {
-                tone.gamma_multiply(0.8)
-            },
-        );
-        let text_right = if badge.is_some() {
-            close_rect.left() - 38.0
-        } else if dirty {
-            close_rect.left() - 18.0
-        } else {
-            close_rect.left() - 4.0
-        };
-        let text_rect = Rect::from_min_max(
-            Pos2::new(tab_rect.left() + 24.0, tab_rect.top()),
-            Pos2::new(text_right, tab_rect.bottom()),
-        );
-        text_clipped(
-            ui.painter(),
-            text_rect,
-            &title,
-            FontId::proportional(13.0),
-            if is_active { p.text } else { p.text2 },
-            Align2::LEFT_CENTER,
-        );
-        if let Some(badge) = badge {
-            let badge_rect = Rect::from_center_size(
-                Pos2::new(close_rect.left() - 20.0, tab_rect.center().y),
-                Vec2::new(30.0, 14.0),
-            );
-            ui.painter()
-                .rect_filled(badge_rect, egui::CornerRadius::same(3), p.accent_soft);
-            ui.painter().text(
-                badge_rect.center(),
-                Align2::CENTER_CENTER,
-                badge,
-                FontId::monospace(10.0),
-                p.accent,
-            );
-        } else if dirty {
-            ui.painter().circle_filled(
-                Pos2::new(close_rect.left() - 10.0, tab_rect.center().y),
-                2.6,
-                p.accent,
-            );
-        }
-        if close_response.hovered() || (is_active && !dirty) {
-            paint_icon(
-                ui.painter(),
-                Rect::from_center_size(close_rect.center(), Vec2::splat(12.0)),
-                Icon::X,
-                if close_response.hovered() {
-                    p.text
-                } else {
-                    p.text3
-                },
-            );
-        }
-        if close_response.clicked() || response.middle_clicked() {
-            close = Some(id);
-        } else if response.clicked() {
-            model.projects[index].active_tab = Some(id);
-            rt.set_editor_focus(id);
-        } else if response.secondary_clicked() {
-            rt.open_menu(
-                crate::runtime::MenuKind::EditorTabContext {
-                    project: index,
-                    tab_id: id,
-                },
-                tab_rect,
-                path.clone(),
-            );
-        }
-        x = tab_rect.right() + 1.0;
-    }
-    // Keep the rest of the bar draggable / empty.
-    let rest = Rect::from_min_max(Pos2::new(x, rect.top()), rect.max);
-    if rest.width() > 4.0 {
-        let drag = ui.interact(
-            rest,
-            ui.scope_id().with("tabbar-drag"),
-            Sense::click_and_drag(),
-        );
-        if drag.dragged() {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-        }
-    }
+    super::app_ui::region(ui, rect, "editor-tabbar-scroll-region", |ui| {
+        egui::ScrollArea::horizontal()
+            .id_salt(("editor-tabs-scroll", index))
+            .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| {
+                let total_width: f32 = tabs
+                    .iter()
+                    .map(|(_, title, _, _, badge)| {
+                        let extra = if badge.is_some() { 36.0 } else { 0.0 };
+                        (title.chars().count() as f32 * 6.8 + 62.0 + extra).clamp(96.0, 240.0) + 1.0
+                    })
+                    .sum();
+                let bar_width = total_width.max(rect.width());
+                let (canvas_rect, _) =
+                    ui.allocate_exact_size(Vec2::new(bar_width, rect.height()), Sense::hover());
+                let mut x = canvas_rect.left();
+                for (id, title, path, dirty, badge) in tabs {
+                    let extra = if badge.is_some() { 36.0 } else { 0.0 };
+                    let width =
+                        (title.chars().count() as f32 * 6.8 + 62.0 + extra).clamp(96.0, 240.0);
+                    let tab_rect = Rect::from_min_size(
+                        Pos2::new(x, canvas_rect.top()),
+                        Vec2::new(width, canvas_rect.height()),
+                    );
+                    if active == Some(id) {
+                        ui.scroll_to_rect(tab_rect, Some(egui::Align::Center));
+                    }
+                    let is_active = active == Some(id);
+                    let body = Rect::from_min_max(
+                        tab_rect.min,
+                        Pos2::new(tab_rect.right() - 24.0, tab_rect.bottom()),
+                    );
+                    let close_rect = Rect::from_min_max(
+                        Pos2::new(tab_rect.right() - 24.0, tab_rect.top()),
+                        tab_rect.max,
+                    );
+                    let response =
+                        ui.interact(body, ui.scope_id().with(("tab", id)), Sense::click());
+                    let close_response = ui.interact(
+                        close_rect,
+                        ui.scope_id().with(("tab-close", id)),
+                        Sense::click(),
+                    );
+                    if is_active {
+                        ui.painter()
+                            .rect_filled(tab_rect, egui::CornerRadius::ZERO, p.tabstrip);
+                        ui.painter()
+                            .rect_filled(tab_rect, egui::CornerRadius::ZERO, p.editor);
+                        // Current file status line at the bottom of the tab
+                        ui.painter().rect_filled(
+                            Rect::from_min_size(
+                                Pos2::new(tab_rect.left(), tab_rect.bottom() - 2.0),
+                                Vec2::new(tab_rect.width(), 2.0),
+                            ),
+                            egui::CornerRadius::ZERO,
+                            p.accent,
+                        );
+                    } else if response.hovered() || close_response.hovered() {
+                        ui.painter()
+                            .rect_filled(tab_rect, egui::CornerRadius::ZERO, p.hover);
+                    } else {
+                        ui.painter().rect_filled(
+                            tab_rect,
+                            egui::CornerRadius::ZERO,
+                            p.tabstrip.gamma_multiply(0.98),
+                        );
+                    }
+                    let (icon, tone) = tab_icon(path.as_deref().unwrap_or_default(), theme);
+                    paint_icon(
+                        ui.painter(),
+                        Rect::from_center_size(
+                            Pos2::new(tab_rect.left() + 14.0, tab_rect.center().y),
+                            Vec2::splat(13.0),
+                        ),
+                        icon,
+                        if is_active {
+                            tone
+                        } else {
+                            tone.gamma_multiply(0.8)
+                        },
+                    );
+                    let text_right = if badge.is_some() {
+                        close_rect.left() - 38.0
+                    } else if dirty {
+                        close_rect.left() - 18.0
+                    } else {
+                        close_rect.left() - 4.0
+                    };
+                    let text_rect = Rect::from_min_max(
+                        Pos2::new(tab_rect.left() + 24.0, tab_rect.top()),
+                        Pos2::new(text_right, tab_rect.bottom()),
+                    );
+                    text_clipped(
+                        ui.painter(),
+                        text_rect,
+                        &title,
+                        FontId::proportional(13.0),
+                        if is_active { p.text } else { p.text2 },
+                        Align2::LEFT_CENTER,
+                    );
+                    if let Some(badge) = badge {
+                        let badge_rect = Rect::from_center_size(
+                            Pos2::new(close_rect.left() - 20.0, tab_rect.center().y),
+                            Vec2::new(30.0, 14.0),
+                        );
+                        ui.painter().rect_filled(
+                            badge_rect,
+                            egui::CornerRadius::same(3),
+                            p.accent_soft,
+                        );
+                        ui.painter().text(
+                            badge_rect.center(),
+                            Align2::CENTER_CENTER,
+                            badge,
+                            FontId::monospace(10.0),
+                            p.accent,
+                        );
+                    } else if dirty {
+                        ui.painter().circle_filled(
+                            Pos2::new(close_rect.left() - 10.0, tab_rect.center().y),
+                            2.6,
+                            p.accent,
+                        );
+                    }
+                    if close_response.hovered() || (is_active && !dirty) {
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(close_rect.center(), Vec2::splat(12.0)),
+                            Icon::X,
+                            if close_response.hovered() {
+                                p.text
+                            } else {
+                                p.text3
+                            },
+                        );
+                    }
+                    if close_response.clicked() || response.middle_clicked() {
+                        close = Some(id);
+                    } else if response.clicked() {
+                        model.projects[index].active_tab = Some(id);
+                        rt.set_editor_focus(id);
+                        if model.ui.auto_locate {
+                            model.locate_active_file(true);
+                        }
+                    } else if response.secondary_clicked() {
+                        rt.open_menu(
+                            crate::runtime::MenuKind::EditorTabContext {
+                                project: index,
+                                tab_id: id,
+                            },
+                            tab_rect,
+                            path.clone(),
+                        );
+                    }
+                    x = tab_rect.right() + 1.0;
+                }
+                // Keep the rest of the bar draggable / empty.
+                let rest = Rect::from_min_max(Pos2::new(x, canvas_rect.top()), canvas_rect.max);
+                if rest.width() > 4.0 {
+                    let drag = ui.interact(
+                        rest,
+                        ui.scope_id().with("tabbar-drag"),
+                        Sense::click_and_drag(),
+                    );
+                    if drag.dragged() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                }
+            });
+    });
     if let Some(id) = close {
         if let Some(tab) = model.projects[index].tab_by_id(id) {
             if tab.is_dirty() {
@@ -314,13 +385,18 @@ fn draw_crumbs(
         Stroke::new(1.0, p.border_soft),
     );
     let project_root = model.projects[index].root.clone();
-    let (is_annotated, cur_mode, path, file_path) = {
+    let (is_annotated, _cur_mode, path, file_path) = {
         let Some(tab) = model.projects[index].tab_by_id(tab_id) else {
             return;
         };
         let p_str = tab.path().unwrap_or_default().to_string();
         let (ann, mode, fp) = match &tab.kind {
             TabKind::File(f) => (f.annotate, f.md_mode, f.doc.path.clone()),
+            TabKind::Image(img) => (
+                false,
+                lazecode_core::MarkdownViewMode::Code,
+                img.path.clone(),
+            ),
             _ => (false, lazecode_core::MarkdownViewMode::Code, PathBuf::new()),
         };
         (ann, mode, p_str, fp)
@@ -376,36 +452,6 @@ fn draw_crumbs(
     if secondary_button(ui, blame_rect, b_label, None, theme).clicked() {
         toggle_blame = true;
     }
-    btn_x -= 6.0;
-
-    // Markdown mode switcher if markdown
-    let is_md = path.ends_with(".md") || path.ends_with(".markdown");
-    let mut change_md_mode = None;
-    if is_md {
-        for (m, lbl) in [
-            (lazecode_core::MarkdownViewMode::Split, "Split"),
-            (lazecode_core::MarkdownViewMode::Preview, "Preview"),
-            (lazecode_core::MarkdownViewMode::Code, "Code"),
-        ] {
-            btn_x -= 48.0;
-            let m_rect = Rect::from_min_size(
-                Pos2::new(btn_x, rect.center().y - 10.0),
-                Vec2::new(44.0, 20.0),
-            );
-            if secondary_button(ui, m_rect, lbl, None, theme).clicked() {
-                change_md_mode = Some(m);
-            }
-            if cur_mode == m {
-                ui.painter().rect_stroke(
-                    m_rect,
-                    egui::CornerRadius::same(3),
-                    Stroke::new(1.0, p.accent),
-                    StrokeKind::Inside,
-                );
-            }
-            btn_x -= 4.0;
-        }
-    }
 
     if toggle_blame {
         if let Some(tab) = model.projects[index].tab_mut_by_id(tab_id) {
@@ -419,13 +465,6 @@ fn draw_crumbs(
                         .to_string();
                     file.blame = lazecode_git::blame(&project_root, &rel).ok();
                 }
-            }
-        }
-    }
-    if let Some(m) = change_md_mode {
-        if let Some(tab) = model.projects[index].tab_mut_by_id(tab_id) {
-            if let TabKind::File(file) = &mut tab.kind {
-                file.md_mode = m;
             }
         }
     }
@@ -478,135 +517,211 @@ fn token_color(kind: TokenKind, theme: &Theme) -> Color32 {
         TokenKind::Attribute => p.tok_attr,
     }
 }
+fn draw_markdown_toolbar(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    theme: &Theme,
+    rect: Rect,
+    index: usize,
+    tab_id: u64,
+) {
+    let p = theme.palette;
+    ui.painter().rect_filled(rect, 0.0, p.panel);
+    ui.painter().hline(
+        rect.x_range(),
+        rect.bottom() - 0.5,
+        Stroke::new(1.0, p.border),
+    );
+
+    // Left title: "Markdown"
+    ui.painter().text(
+        Pos2::new(rect.left() + 14.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        crate::tr!(model, "Markdown", "Markdown"),
+        FontId::proportional(12.0),
+        p.text2,
+    );
+
+    let cur_mode = model.projects[index]
+        .tab_by_id(tab_id)
+        .and_then(|tab| match &tab.kind {
+            TabKind::File(file) => Some(file.md_mode),
+            _ => None,
+        })
+        .unwrap_or(lazecode_core::MarkdownViewMode::Preview);
+
+    let modes = [
+        (
+            lazecode_core::MarkdownViewMode::Code,
+            crate::tr!(model, "Source", "源码"),
+        ),
+        (
+            lazecode_core::MarkdownViewMode::Preview,
+            crate::tr!(model, "Preview", "预览"),
+        ),
+        (
+            lazecode_core::MarkdownViewMode::Split,
+            crate::tr!(model, "Split", "分栏"),
+        ),
+    ];
+
+    let pill_w = 186.0;
+    let pill_h = 24.0;
+    let pill_rect = Rect::from_min_size(
+        Pos2::new(rect.right() - pill_w - 12.0, rect.center().y - pill_h * 0.5),
+        Vec2::new(pill_w, pill_h),
+    );
+    ui.painter()
+        .rect_filled(pill_rect, egui::CornerRadius::same(4), p.panel);
+    ui.painter().rect_stroke(
+        pill_rect,
+        egui::CornerRadius::same(4),
+        Stroke::new(1.0, p.border),
+        StrokeKind::Inside,
+    );
+
+    let btn_w = (pill_w - 4.0) / 3.0;
+    let mut change_mode = None;
+    for (i, (m, label)) in modes.into_iter().enumerate() {
+        let btn_rect = Rect::from_min_size(
+            Pos2::new(
+                pill_rect.left() + 2.0 + i as f32 * btn_w,
+                pill_rect.top() + 2.0,
+            ),
+            Vec2::new(btn_w, pill_h - 4.0),
+        );
+        let is_active = cur_mode == m;
+        let resp = ui.interact(btn_rect, ui.scope_id().with(("md-mode", i)), Sense::click());
+        if is_active {
+            ui.painter()
+                .rect_filled(btn_rect, egui::CornerRadius::same(3), p.active);
+        } else if resp.hovered() {
+            ui.painter()
+                .rect_filled(btn_rect, egui::CornerRadius::same(3), p.hover);
+        }
+        ui.painter().text(
+            btn_rect.center(),
+            Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(11.5),
+            if is_active { p.text_bright } else { p.text2 },
+        );
+        if resp.clicked() {
+            change_mode = Some(m);
+        }
+    }
+
+    if let Some(m) = change_mode {
+        if let Some(tab) = model.projects[index].tab_mut_by_id(tab_id) {
+            if let TabKind::File(file) = &mut tab.kind {
+                file.md_mode = m;
+            }
+        }
+    }
+}
 
 fn draw_markdown_view(
     ui: &mut Ui,
+    rt: &mut UiRuntime,
     p: crate::theme::Palette,
     _theme: &Theme,
     rect: Rect,
     text: &str,
 ) {
     ui.painter().rect_filled(rect, 0.0, p.editor);
-    let inner = rect.shrink2(Vec2::new(24.0, 16.0));
-    super::app_ui::region(ui, inner, "md-view", |ui| {
+    super::app_ui::region(ui, rect, "md-view", |ui| {
         egui::ScrollArea::vertical()
             .id_salt("md-preview-scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let mut in_code_block = false;
-                let mut code_buf = String::new();
-                for line in text.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with("```") {
-                        if in_code_block {
-                            let (block_rect, _) = ui.allocate_exact_size(
-                                Vec2::new(
-                                    ui.available_width(),
-                                    (code_buf.lines().count() as f32 * 16.0 + 14.0).max(28.0),
-                                ),
-                                Sense::hover(),
-                            );
-                            ui.painter().rect_filled(
-                                block_rect,
-                                egui::CornerRadius::same(5),
-                                p.panel2,
-                            );
-                            ui.painter().rect_stroke(
-                                block_rect,
-                                egui::CornerRadius::same(5),
-                                Stroke::new(1.0, p.border),
-                                StrokeKind::Inside,
-                            );
-                            text_clipped(
-                                ui.painter(),
-                                block_rect.shrink(6.0),
-                                &code_buf,
-                                FontId::monospace(10.5),
-                                p.text,
-                                Align2::LEFT_TOP,
-                            );
-                            code_buf.clear();
-                            in_code_block = false;
-                        } else {
-                            in_code_block = true;
-                        }
-                        continue;
-                    }
-                    if in_code_block {
-                        code_buf.push_str(line);
-                        code_buf.push('\n');
-                        continue;
-                    }
+                let avail_w = ui.available_width();
+                let doc_w = avail_w.min(960.0);
+                let side_pad = ((avail_w - doc_w) * 0.5).max(38.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(side_pad);
+                    ui.vertical(|ui| {
+                        ui.set_max_width(doc_w - 76.0);
+                        ui.add_space(26.0);
+                        egui_commonmark::CommonMarkViewer::new().show(ui, &mut rt.md_cache, text);
+                        ui.add_space(72.0);
+                    });
+                    ui.add_space(side_pad);
+                });
+            });
+    });
+}
 
-                    if let Some(h1) = trimmed.strip_prefix("# ") {
-                        ui.add_space(8.0);
-                        ui.label(
-                            egui::RichText::new(h1)
-                                .font(FontId::proportional(18.0))
-                                .strong()
-                                .color(p.text),
-                        );
-                        ui.add_space(4.0);
-                    } else if let Some(h2) = trimmed.strip_prefix("## ") {
-                        ui.add_space(6.0);
-                        ui.label(
-                            egui::RichText::new(h2)
-                                .font(FontId::proportional(15.0))
-                                .strong()
-                                .color(p.text),
-                        );
-                        ui.add_space(3.0);
-                    } else if let Some(h3) = trimmed.strip_prefix("### ") {
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(h3)
-                                .font(FontId::proportional(13.0))
-                                .color(p.text),
-                        );
-                    } else if let Some(quote) = trimmed.strip_prefix("> ") {
-                        let (q_rect, _) = ui.allocate_exact_size(
-                            Vec2::new(ui.available_width(), 20.0),
-                            Sense::hover(),
-                        );
-                        ui.painter().vline(
-                            q_rect.left() + 4.0,
-                            q_rect.y_range(),
-                            Stroke::new(2.5, p.accent),
-                        );
-                        ui.painter().text(
-                            Pos2::new(q_rect.left() + 14.0, q_rect.center().y),
-                            Align2::LEFT_CENTER,
-                            quote,
-                            FontId::proportional(11.0),
-                            p.text2,
-                        );
-                    } else if let Some(bullet) = trimmed
-                        .strip_prefix("- ")
-                        .or_else(|| trimmed.strip_prefix("* "))
-                    {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new("•")
-                                    .font(FontId::proportional(12.0))
-                                    .color(p.accent),
-                            );
-                            ui.label(
-                                egui::RichText::new(bullet)
-                                    .font(FontId::proportional(11.5))
-                                    .color(p.text),
-                            );
-                        });
-                    } else if trimmed.is_empty() {
-                        ui.add_space(6.0);
-                    } else {
-                        ui.label(
-                            egui::RichText::new(line)
-                                .font(FontId::proportional(11.5))
-                                .color(p.text),
-                        );
-                    }
-                }
-                ui.add_space(20.0);
+fn draw_image_tab(
+    ui: &mut Ui,
+    _rt: &mut UiRuntime,
+    p: crate::theme::Palette,
+    _theme: &Theme,
+    rect: Rect,
+    img: &lazecode_core::ImageTab,
+    tab_id: u64,
+) {
+    ui.painter().rect_filled(rect, 0.0, p.editor);
+
+    let file_size_str = std::fs::metadata(&img.path)
+        .map(|m| {
+            let bytes = m.len();
+            if bytes >= 1024 * 1024 {
+                format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+            } else if bytes >= 1024 {
+                format!("{:.1} KB", bytes as f64 / 1024.0)
+            } else {
+                format!("{} B", bytes)
+            }
+        })
+        .unwrap_or_default();
+
+    let dims = image::image_dimensions(&img.path).ok();
+    let dims_str = dims
+        .map(|(w, h)| format!("{} × {} px", w, h))
+        .unwrap_or_default();
+
+    let bottom_h = 26.0;
+    let canvas_rect =
+        Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.bottom() - bottom_h));
+    let bar_rect = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - bottom_h), rect.max);
+
+    ui.painter().hline(
+        bar_rect.x_range(),
+        bar_rect.top() + 0.5,
+        Stroke::new(1.0, p.border),
+    );
+    ui.painter().rect_filled(bar_rect, 0.0, p.panel);
+
+    let info_text = if !dims_str.is_empty() && !file_size_str.is_empty() {
+        format!("{}  ·  {}", dims_str, file_size_str)
+    } else if !dims_str.is_empty() {
+        dims_str
+    } else {
+        file_size_str
+    };
+
+    ui.painter().text(
+        Pos2::new(bar_rect.left() + 14.0, bar_rect.center().y),
+        Align2::LEFT_CENTER,
+        &info_text,
+        FontId::proportional(11.5),
+        p.text3,
+    );
+
+    let uri = format!("file://{}", img.path.display());
+    super::app_ui::region(ui, canvas_rect, "image-viewer", |ui| {
+        egui::ScrollArea::both()
+            .id_salt(ui.scope_id().with(("img-scroll", tab_id)))
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.centered_and_justified(|ui| {
+                    let max_size = (canvas_rect.size() - Vec2::splat(32.0)).max(Vec2::splat(10.0));
+                    ui.add(
+                        egui::Image::new(&uri)
+                            .max_size(max_size)
+                            .maintain_aspect_ratio(true),
+                    );
+                });
             });
     });
 }
@@ -645,7 +760,7 @@ fn draw_file(
             return;
         };
         let text = file.doc.rope.to_string();
-        draw_markdown_view(ui, p, theme, rect, &text);
+        draw_markdown_view(ui, rt, p, theme, rect, &text);
         return;
     }
 
@@ -673,7 +788,7 @@ fn draw_file(
             return;
         };
         let text = file.doc.rope.to_string();
-        draw_markdown_view(ui, p, theme, right_rect, &text);
+        draw_markdown_view(ui, rt, p, theme, right_rect, &text);
         return;
     }
 
@@ -701,7 +816,7 @@ fn draw_file_inner(
         settings.highlight_current_line,
         model.ui.show_minimap,
     );
-    let line_h = (font_size * 1.62).round().max(16.0);
+    let line_h = (font_size * 1.54).round().max(18.0);
     let char_w = mono_char_width(ui.ctx(), font_size);
     let font = FontId::monospace(font_size);
 
@@ -721,6 +836,11 @@ fn draw_file_inner(
         Pos2::new(rect.right() - SCROLLBAR_W, rect.bottom()),
     );
     ui.painter().rect_filled(gutter, 0.0, p.editor);
+    ui.painter().vline(
+        gutter.right() - 0.5,
+        gutter.y_range(),
+        Stroke::new(1.0, p.hairline),
+    );
     if minimap {
         ui.painter()
             .rect_filled(minimap_rect, 0.0, p.editor.gamma_multiply(0.98));
@@ -781,6 +901,12 @@ fn draw_file_inner(
             ui.scope_id().with(("editor", tab_id)),
             Sense::click_and_drag(),
         );
+        let is_hovering = ui
+            .input(|i| i.pointer.hover_pos())
+            .is_some_and(|pos| input_rect.contains(pos));
+        if is_hovering || response.hovered() || response.dragged() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+        }
         if response.clicked() || response.dragged() {
             rt.set_editor_focus(tab_id);
         }
@@ -801,7 +927,18 @@ fn draw_file_inner(
                 select_word(doc, cursor);
             }
         }
-
+        if response.secondary_clicked() {
+            let path_str = doc.path.to_string_lossy().to_string();
+            let anchor = ui
+                .input(|i| i.pointer.hover_pos())
+                .map(|p| Rect::from_min_size(p, Vec2::splat(1.0)))
+                .unwrap_or(input_rect);
+            rt.open_menu(
+                crate::runtime::MenuKind::EditorContext { project: index },
+                anchor,
+                Some(path_str),
+            );
+        }
         // Wheel scrolling.
         if response.hovered() {
             let (dy, dx, shift) = ui.input(|input| {
@@ -895,11 +1032,6 @@ fn draw_file_inner(
                 }
             }
             if line_numbers {
-                painter.rect_filled(
-                    Rect::from_min_size(Pos2::new(gutter.right() - 2.5, y), Vec2::new(2.5, line_h)),
-                    0.0,
-                    p.accent_soft,
-                );
                 painter.text(
                     Pos2::new(gutter.right() - 10.0, y + line_h * 0.5),
                     Align2::RIGHT_CENTER,
@@ -926,6 +1058,21 @@ fn draw_file_inner(
                 &font,
                 theme,
             );
+            let leading_spaces = text.chars().take_while(|c| *c == ' ').count();
+            let leading_tabs = text.chars().take_while(|c| *c == '\t').count();
+            let total_indent_cols = leading_tabs * tab_w + leading_spaces;
+            if total_indent_cols >= tab_w {
+                for col in (tab_w..total_indent_cols).step_by(tab_w) {
+                    let gx = content.left() + col as f32 * char_w - scroll_x;
+                    if gx >= content.left() && gx <= content.right() {
+                        painter.vline(
+                            gx,
+                            egui::Rangef::new(y, y + line_h),
+                            Stroke::new(1.0, p.hairline),
+                        );
+                    }
+                }
+            }
         }
 
         // Cursor + preedit + IME activation.
@@ -978,7 +1125,7 @@ fn draw_file_inner(
         }
 
         if minimap {
-            draw_minimap(ui, doc, theme, minimap_rect);
+            draw_minimap(ui, doc, theme, minimap_rect, view_h, line_h);
         }
         let _ = MONO;
     }
@@ -1273,47 +1420,116 @@ fn handle_editor_key(
     true
 }
 
-fn draw_minimap(ui: &mut Ui, doc: &Document, theme: &Theme, rect: Rect) {
+fn draw_minimap(
+    ui: &mut Ui,
+    doc: &mut Document,
+    theme: &Theme,
+    rect: Rect,
+    view_h: f32,
+    line_h: f32,
+) {
     let p = theme.palette;
     let total = doc.line_count().max(1);
-    let mini_h = (rect.height() / total as f32).clamp(0.8, 3.0);
-    let lines_to_draw = ((rect.height() / mini_h).floor() as usize).min(total);
+    let visible_lines = (view_h / line_h).max(1.0);
     let painter = ui.painter().with_clip_rect(rect);
-    for index in 0..lines_to_draw {
-        let line_index =
-            index + (doc.scroll_line as usize * total / total.max(1)).min(total.saturating_sub(1));
-        if line_index >= total {
+
+    // 对齐 Monaco Editor Minimap 核心机制：
+    // 每行固定行高 2.0px（Monaco scale: 1 默认值），缩进与代码宽度等比投影。
+    const MINIMAP_LINE_H: f32 = 2.0;
+    let minimap_content_h = total as f32 * MINIMAP_LINE_H;
+    let max_editor_scroll = ((total as f32 * line_h) - view_h).max(0.0) / line_h;
+    let scroll_ratio = if max_editor_scroll > 0.0 {
+        (doc.scroll_line / max_editor_scroll).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    let (minimap_scroll_y, slider_top, slider_h) = if minimap_content_h <= rect.height() {
+        // 短文件：Minimap 不滚动，代码从顶部画起；滑块高度与当前可见行严格同比例覆盖
+        let s_top = rect.top() + doc.scroll_line * MINIMAP_LINE_H;
+        let s_h = (visible_lines * MINIMAP_LINE_H).clamp(18.0, minimap_content_h.max(18.0));
+        let s_top = s_top.clamp(
+            rect.top(),
+            (rect.top() + minimap_content_h - s_h).max(rect.top()),
+        );
+        (0.0, s_top, s_h)
+    } else {
+        // 长文件：Minimap 随编辑器滚动同步平滑滚动（Monaco 滚动映射）
+        let max_minimap_scroll = minimap_content_h - rect.height();
+        let m_scroll = scroll_ratio * max_minimap_scroll;
+        let s_h = (visible_lines * MINIMAP_LINE_H).clamp(20.0, rect.height());
+        let s_top = rect.top() + doc.scroll_line * MINIMAP_LINE_H - m_scroll;
+        let s_top = s_top.clamp(rect.top(), (rect.bottom() - s_h).max(rect.top()));
+        (m_scroll, s_top, s_h)
+    };
+
+    // 绘制代码微缩行（带缩进投影，与编辑器代码轮廓一比一对应）
+    for line_index in 0..total {
+        let y = rect.top() + line_index as f32 * MINIMAP_LINE_H - minimap_scroll_y;
+        if y + MINIMAP_LINE_H < rect.top() {
+            continue;
+        }
+        if y > rect.bottom() {
             break;
         }
         let text = doc.line_content(line_index);
-        let width = (text.trim().chars().count() as f32 * 0.7).clamp(0.0, rect.width() - 8.0);
+        let trimmed = text.trim_start();
+        let indent = text.len() - trimmed.len();
+        let indent_x = (indent as f32 * 0.8).min(rect.width() * 0.35);
+        let width = (trimmed.trim_end().chars().count() as f32 * 0.65)
+            .clamp(0.0, rect.width() - 8.0 - indent_x);
         if width > 1.0 {
-            let y = rect.top() + index as f32 * mini_h;
-            let color = if text.trim_start().starts_with("//") || text.trim_start().starts_with('#')
-            {
+            let color = if trimmed.starts_with("//") || trimmed.starts_with('#') {
                 p.tok_com
             } else {
                 p.text3
             };
             painter.rect_filled(
                 Rect::from_min_size(
-                    Pos2::new(rect.left() + 4.0, y),
-                    Vec2::new(width, mini_h.max(1.0)),
+                    Pos2::new(rect.left() + 4.0 + indent_x, y),
+                    Vec2::new(width, 1.5),
                 ),
                 0.0,
                 color.gamma_multiply(0.32),
             );
         }
     }
-    let view_top = doc.scroll_line / total as f32 * rect.height();
-    let view_h = (rect.height() / total as f32 * rect.height()).max(12.0);
+
+    let slider_rect = Rect::from_min_size(
+        Pos2::new(rect.left() + 1.0, slider_top),
+        Vec2::new(rect.width() - 2.0, slider_h),
+    );
+
+    // 交互：点击或拖拽 minimap 滚动编辑器
+    let response = ui.interact(rect, ui.scope_id().with("minimap"), Sense::click_and_drag());
+    if (response.clicked() || response.dragged()) && max_editor_scroll > 0.0 {
+        if let Some(pos) = response.interact_pointer_pos() {
+            if minimap_content_h <= rect.height() {
+                let clicked_line = ((pos.y - rect.top()) / MINIMAP_LINE_H).max(0.0);
+                let target_line = clicked_line - visible_lines * 0.5;
+                doc.scroll_line = target_line.clamp(0.0, max_editor_scroll);
+            } else {
+                let rel_y = ((pos.y - rect.top() - slider_h * 0.5)
+                    / (rect.height() - slider_h).max(1.0))
+                .clamp(0.0, 1.0);
+                doc.scroll_line = (rel_y * max_editor_scroll).clamp(0.0, max_editor_scroll);
+            }
+        }
+    }
+
+    let slider_bg = if response.dragged() {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 36)
+    } else if response.hovered() {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 26)
+    } else {
+        Color32::from_rgba_unmultiplied(255, 255, 255, 16)
+    };
+    ui.painter()
+        .rect_filled(slider_rect, egui::CornerRadius::same(3), slider_bg);
     ui.painter().rect_stroke(
-        Rect::from_min_size(
-            Pos2::new(rect.left() + 1.0, rect.top() + view_top),
-            Vec2::new(rect.width() - 2.0, view_h),
-        ),
-        egui::CornerRadius::same(2),
-        Stroke::new(1.0, p.border_strong),
+        slider_rect,
+        egui::CornerRadius::same(3),
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 45)),
         StrokeKind::Inside,
     );
 }
@@ -1367,6 +1583,30 @@ fn draw_diff(
             .filter(|d| &d.info.id == commit)
             .map(|d| d.files.iter().map(|f| f.path.clone()).collect())
             .unwrap_or_default(),
+        DiffSource::Worktree { .. } => {
+            let project = &model.projects[index];
+            let lists = lazecode_git::Changelists::open(&project.root);
+            let changes = project.changes();
+            let mut ordered = Vec::new();
+            for list_name in lists.lists() {
+                for c in changes {
+                    if !c.untracked && lists.list_of(&c.path) == *list_name {
+                        ordered.push(c.path.clone());
+                    }
+                }
+            }
+            for c in changes {
+                if !c.untracked && !ordered.contains(&c.path) {
+                    ordered.push(c.path.clone());
+                }
+            }
+            for c in changes {
+                if c.untracked && !ordered.contains(&c.path) {
+                    ordered.push(c.path.clone());
+                }
+            }
+            ordered
+        }
         _ => Vec::new(),
     };
     let has_nav = !nav_files.is_empty();
@@ -1617,8 +1857,8 @@ fn draw_diff(
     }
     // 视图选择（select 样式 20px，点击弹 Unified/Side by Side 两项）。
     let mode_label = match view_mode {
-        DiffViewMode::Unified => crate::tr!(model, "Unified view", "统一视图 (Unified)"),
-        DiffViewMode::SideBySide => crate::tr!(model, "Side by Side", "并排对比 (Side by Side)"),
+        DiffViewMode::Unified => crate::tr!(model, "Unified view", "统一视图"),
+        DiffViewMode::SideBySide => crate::tr!(model, "Side by Side", "并排对比"),
     };
     let select_rect = Rect::from_center_size(
         Pos2::new(lx + 58.0, toolbar.center().y),
@@ -1727,39 +1967,73 @@ fn draw_diff(
     );
 
     // 边缘气球（PyCharm Balloon：工具栏下方悬浮，1.8s 自动消失）。
+    // 采用 Order::Tooltip 顶层绘制，绝对不透明背景 + 实心箭头 + 阴影，避免被底层代码穿透。
     if let Some((text, at)) = &rt.diff_balloon {
         if at.elapsed().as_secs_f32() < 1.8 {
-            let w = text.chars().count() as f32 * 6.4 + 26.0;
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                egui::Order::Tooltip,
+                ui.scope_id().with("diff-balloon"),
+            ));
+            let w = text.chars().count() as f32 * 7.2 + 32.0;
             let b = Rect::from_min_size(
-                Pos2::new(rect.left() + 10.0, toolbar.bottom() + 5.0),
-                Vec2::new(w, 26.0),
+                Pos2::new(rect.left() + 10.0, toolbar.bottom() + 6.0),
+                Vec2::new(w, 28.0),
             );
-            ui.painter()
-                .rect_filled(b, egui::CornerRadius::same(4), p.balloon_bg);
-            ui.painter().rect_stroke(
+            let solid_bg = if theme.dark {
+                Color32::from_rgb(0x2b, 0x2d, 0x30)
+            } else {
+                Color32::from_rgb(0xff, 0xff, 0xff)
+            };
+            let text_color = if theme.dark {
+                Color32::from_rgb(0xdf, 0xe1, 0xe5)
+            } else {
+                Color32::from_rgb(0x1e, 0x1f, 0x22)
+            };
+            // 阴影
+            let shape = egui::epaint::RectShape {
+                rect: b.translate(egui::vec2(0.0, 3.0)).expand(4.0),
+                corner_radius: egui::CornerRadius::same(6),
+                fill: Color32::from_black_alpha(150),
+                stroke: Stroke::NONE,
+                stroke_kind: egui::StrokeKind::Inside,
+                round_to_pixels: None,
+                blur_width: 6.0,
+                brush: None,
+                angle: 0.0,
+            };
+            painter.add(egui::Shape::Rect(shape));
+            painter.rect_filled(b, egui::CornerRadius::same(5), solid_bg);
+            painter.rect_stroke(
                 b,
-                egui::CornerRadius::same(4),
+                egui::CornerRadius::same(5),
                 Stroke::new(1.0, p.jb_accent),
                 StrokeKind::Inside,
             );
-            ui.painter().text(
+            painter.text(
                 b.center(),
                 Align2::CENTER_CENTER,
                 text,
-                FontId::proportional(11.5),
-                p.balloon_text,
+                FontId::proportional(12.5),
+                text_color,
             );
-            // 左上小箭头（旋转 45° 的方块描边）。
-            let tip = Pos2::new(b.left() + 18.0, b.top() - 3.5);
-            for (dx, dy) in [(-3.5, 0.0), (0.0, -3.5)] {
-                let _ = (dx, dy);
-            }
-            ui.painter().line_segment(
-                [Pos2::new(tip.x - 3.5, tip.y + 3.5), tip],
+            // 顶部实心小三角形
+            let tip = Pos2::new(b.left() + 20.0, b.top() - 4.0);
+            let arrow_poly = vec![
+                tip,
+                Pos2::new(tip.x - 4.5, b.top() + 0.5),
+                Pos2::new(tip.x + 4.5, b.top() + 0.5),
+            ];
+            painter.add(egui::Shape::convex_polygon(
+                arrow_poly,
+                solid_bg,
+                Stroke::NONE,
+            ));
+            painter.line_segment(
+                [Pos2::new(tip.x - 4.5, b.top()), tip],
                 Stroke::new(1.0, p.jb_accent),
             );
-            ui.painter().line_segment(
-                [tip, Pos2::new(tip.x + 3.5, tip.y + 3.5)],
+            painter.line_segment(
+                [tip, Pos2::new(tip.x + 4.5, b.top())],
                 Stroke::new(1.0, p.jb_accent),
             );
         }
@@ -1775,7 +2049,7 @@ fn draw_diff(
         Pos2::new(titlebar.left() + 8.0, titlebar.center().y),
         Align2::LEFT_CENTER,
         &hash_text,
-        FontId::monospace(11.0),
+        FontId::monospace(12.0),
         p.text3,
     );
     text_clipped(
@@ -1785,7 +2059,7 @@ fn draw_diff(
             Pos2::new(titlebar.right() - 60.0, titlebar.bottom()),
         ),
         &path,
-        FontId::monospace(12.0),
+        FontId::monospace(12.5),
         p.text_bright,
         Align2::LEFT_CENTER,
     );
@@ -1873,6 +2147,17 @@ fn draw_diff(
     }
 
     if let Some(target) = nav_target.clone() {
+        if let Some(project) = model.projects.get_mut(index) {
+            if let Some(session) = project.compare_session.as_mut() {
+                session.selected = Some(target.clone());
+                let parts: Vec<&str> = target.split('/').collect();
+                for i in 1..parts.len() {
+                    let parent = parts[..i].join("/");
+                    session.collapsed.remove(&parent);
+                }
+                session.root_expanded = true;
+            }
+        }
         let cmd = match &diff_source {
             DiffSource::CompareCommits { from, to, .. } => Some(Command::OpenCompareCommitsDiff {
                 from: from.clone(),
@@ -1883,6 +2168,7 @@ fn draw_diff(
                 commit: commit.clone(),
                 path: target,
             }),
+            DiffSource::Worktree { .. } => Some(Command::OpenDiff(target)),
             _ => None,
         };
         if let Some(cmd) = cmd {
@@ -1980,12 +2266,12 @@ fn draw_diff(
             (
                 0usize,
                 DiffViewMode::Unified,
-                crate::tr!(model, "Unified view", "统一视图 (Unified)"),
+                crate::tr!(model, "Unified view", "统一视图"),
             ),
             (
                 1,
                 DiffViewMode::SideBySide,
-                crate::tr!(model, "Side by Side", "并排对比 (Side by Side)"),
+                crate::tr!(model, "Side by Side", "并排对比"),
             ),
         ] {
             let row_rect = Rect::from_min_size(
@@ -2059,13 +2345,29 @@ fn draw_diff(
         groups,
         current_group: current_group.min(groups.saturating_sub(1)),
         scroll_to_group: rt.diff_scroll,
+        can_rollback: worktree_mode,
     };
-    match view_mode {
-        DiffViewMode::Unified => {
-            crate::diff_view::draw_unified(ui, theme, body, ctx);
-        }
-        DiffViewMode::SideBySide => {
-            crate::diff_view::draw_split(ui, theme, body, ctx);
+    let rollback_group = match view_mode {
+        DiffViewMode::Unified => crate::diff_view::draw_unified(ui, theme, body, ctx),
+        DiffViewMode::SideBySide => crate::diff_view::draw_split(ui, theme, body, ctx),
+    };
+    if let Some(gi) = rollback_group {
+        if let Some(hunks) = &hunks {
+            if let Some(hi) = crate::diff_view::hunk_of_group(hunks, gi) {
+                let patch = lazecode_text::unified_patch(
+                    &path,
+                    &lazecode_text::TextDiff {
+                        hunks: vec![hunks[hi].clone()],
+                        ..Default::default()
+                    },
+                );
+                model.queue(Command::ApplyPatch {
+                    patch,
+                    cached: false,
+                    reverse: true,
+                    root: model.projects[index].root.clone(),
+                });
+            }
         }
     }
     // 滚动请求为单帧语义。
@@ -2373,8 +2675,8 @@ fn draw_welcome(
         Pos2::new(left, y),
         Align2::LEFT_CENTER,
         subtitle,
-        FontId::proportional(12.0),
-        p.text3,
+        FontId::proportional(13.5),
+        p.text2,
     );
     y += 30.0;
 
@@ -2452,13 +2754,6 @@ fn draw_welcome(
     let recent_rect = Rect::from_min_size(Pos2::new(left, y), Vec2::new(column_w, 168.0));
     ui.painter()
         .rect_filled(recent_rect, egui::CornerRadius::same(8), p.panel);
-    ui.painter().text(
-        Pos2::new(recent_rect.left() + 14.0, recent_rect.top() + 18.0),
-        Align2::LEFT_CENTER,
-        crate::tr!(model, "Open files", "打开的文件"),
-        FontId::proportional(10.0),
-        p.text3,
-    );
     let items: Vec<(PathBuf, bool)> = if let Some(index) = index {
         model.projects[index]
             .tabs
@@ -2486,8 +2781,8 @@ fn draw_welcome(
         } else {
             crate::tr!(model, "Recent projects", "最近项目")
         },
-        FontId::proportional(10.0),
-        p.text3,
+        FontId::proportional(13.0),
+        p.text,
     );
     if items.is_empty() {
         ui.painter().text(
@@ -2502,7 +2797,7 @@ fn draw_welcome(
             } else {
                 crate::tr!(model, "No recent projects", "暂无最近项目")
             },
-            FontId::proportional(11.0),
+            FontId::proportional(12.5),
             p.text3,
         );
     }
@@ -2546,8 +2841,8 @@ fn draw_welcome(
                 Pos2::new(row.right() - 8.0, row.bottom()),
             ),
             &name,
-            FontId::proportional(11.0),
-            p.text2,
+            FontId::proportional(13.0),
+            p.text,
             Align2::LEFT_CENTER,
         );
         if response.clicked() {
@@ -2573,8 +2868,8 @@ fn draw_welcome(
         Pos2::new(shortcuts.left() + 14.0, shortcuts.top() + 18.0),
         Align2::LEFT_CENTER,
         crate::tr!(model, "Keyboard", "快捷键"),
-        FontId::proportional(10.0),
-        p.text3,
+        FontId::proportional(13.0),
+        p.text,
     );
     let entries = [
         (crate::tr!(model, "Command palette", "命令面板"), "⌘K"),
@@ -2589,12 +2884,12 @@ fn draw_welcome(
             Pos2::new(shortcuts.left() + 14.0, row_y),
             Align2::LEFT_CENTER,
             label,
-            FontId::proportional(10.5),
-            p.text3,
+            FontId::proportional(12.5),
+            p.text2,
         );
         let kbd_rect = Rect::from_center_size(
             Pos2::new(shortcuts.right() - 26.0, row_y),
-            Vec2::new(key.chars().count() as f32 * 9.0 + 8.0, 17.0),
+            Vec2::new(key.chars().count() as f32 * 9.0 + 10.0, 19.0),
         );
         crate::widgets::kbd(ui.painter(), kbd_rect, key, theme);
         row_y += 24.0;
@@ -2617,7 +2912,7 @@ fn draw_welcome(
                 model.projects.len()
             )
         },
-        FontId::proportional(10.0),
+        FontId::proportional(12.0),
         p.text3,
     );
     if let Some(index) = index {

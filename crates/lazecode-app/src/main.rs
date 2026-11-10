@@ -55,6 +55,7 @@ struct LazeApp {
     last_workspace_save: std::time::Instant,
     last_autosave: std::time::Instant,
     repaint_after: std::time::Duration,
+    last_shift_press: Option<std::time::Instant>,
     #[cfg(target_os = "macos")]
     menu: Option<Menu>,
     #[cfg(target_os = "macos")]
@@ -74,6 +75,7 @@ impl LazeApp {
             last_workspace_save: std::time::Instant::now(),
             last_autosave: std::time::Instant::now(),
             repaint_after: std::time::Duration::MAX,
+            last_shift_press: None,
             #[cfg(target_os = "macos")]
             menu: None,
             #[cfg(target_os = "macos")]
@@ -191,6 +193,28 @@ impl LazeApp {
                     }
                 }
                 "new-console" => self.model.queue(lazecode_core::Command::NewTerminal),
+                "undo" => {
+                    if let Some(project) = self.model.active_project_mut() {
+                        if let Some(id) = project.active_tab {
+                            if let Some(tab) = project.tab_mut_by_id(id) {
+                                if let lazecode_core::TabKind::File(file_tab) = &mut tab.kind {
+                                    file_tab.doc.undo();
+                                }
+                            }
+                        }
+                    }
+                }
+                "redo" => {
+                    if let Some(project) = self.model.active_project_mut() {
+                        if let Some(id) = project.active_tab {
+                            if let Some(tab) = project.tab_mut_by_id(id) {
+                                if let lazecode_core::TabKind::File(file_tab) = &mut tab.kind {
+                                    file_tab.doc.redo();
+                                }
+                            }
+                        }
+                    }
+                }
                 "save-all" => self.model.queue(lazecode_core::Command::SaveAll),
                 "goto-line" => {
                     self.model.ui.goto_line_open = true;
@@ -490,6 +514,9 @@ impl LazeApp {
             .unwrap_or(std::time::Duration::MAX);
         gfx.egui_state
             .handle_platform_output(&window, output.platform_output.clone());
+        if output.platform_output.cursor_icon == egui::CursorIcon::Text {
+            window.set_cursor(winit::window::CursorIcon::Text);
+        }
         let pixels = output.pixels_per_point;
         let primitives = ctx.tessellate(output.shapes, pixels);
         let mut textures = output.textures_delta;
@@ -570,11 +597,36 @@ impl ApplicationHandler<AppEvent> for LazeApp {
                 self.modifiers = modifiers.state();
             }
             WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed
-                    && self.modifiers.super_key()
-                    && event.logical_key == winit::keyboard::Key::Character("q".into())
-                {
-                    self.request_quit(event_loop);
+                if event.state == ElementState::Pressed {
+                    if self.modifiers.super_key()
+                        && event.logical_key == winit::keyboard::Key::Character("q".into())
+                    {
+                        self.request_quit(event_loop);
+                    } else if event.logical_key
+                        == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Shift)
+                        && !event.repeat
+                        && !self.modifiers.super_key()
+                        && !self.modifiers.control_key()
+                        && !self.modifiers.alt_key()
+                    {
+                        let now = std::time::Instant::now();
+                        if let Some(last) = self.last_shift_press {
+                            if now.duration_since(last) < std::time::Duration::from_millis(450) {
+                                self.runtime.open_palette();
+                                self.model.ui.command_palette_open = true;
+                                self.last_shift_press = None;
+                                gfx.window.request_redraw();
+                            } else {
+                                self.last_shift_press = Some(now);
+                            }
+                        } else {
+                            self.last_shift_press = Some(now);
+                        }
+                    } else if event.logical_key
+                        != winit::keyboard::Key::Named(winit::keyboard::NamedKey::Shift)
+                    {
+                        self.last_shift_press = None;
+                    }
                 }
             }
             WindowEvent::DroppedFile(path) => {
@@ -778,8 +830,13 @@ fn build_menu(zh: bool) -> Option<Menu> {
         pick(zh, "Edit", "编辑"),
         true,
         &[
-            &PredefinedMenuItem::undo(Some(pick(zh, "Undo", "撤销"))),
-            &PredefinedMenuItem::redo(Some(pick(zh, "Redo", "重做"))),
+            &MenuItem::with_id("undo", pick(zh, "Undo", "撤销"), true, accel(Code::KeyZ)),
+            &MenuItem::with_id(
+                "redo",
+                pick(zh, "Redo", "重做"),
+                true,
+                accel_shift(Code::KeyZ),
+            ),
             &PredefinedMenuItem::separator(),
             &PredefinedMenuItem::cut(Some(pick(zh, "Cut", "剪切"))),
             &PredefinedMenuItem::copy(Some(pick(zh, "Copy", "复制"))),

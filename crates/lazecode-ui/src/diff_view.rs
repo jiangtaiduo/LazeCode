@@ -191,21 +191,27 @@ pub struct DiffBodyCtx<'a> {
     pub current_group: usize,
     /// (tab, group index) queued by toolbar navigation → reveal centered.
     pub scroll_to_group: Option<(u64, usize)>,
+    pub can_rollback: bool,
 }
 
 /// Unified (inline) body — Monaco inline diff: deletions directly above the
 /// paired additions inside the change group, two-column gutter, char-level
 /// highlights, current-group outline, overview ruler.
-pub fn draw_unified(ui: &mut egui::Ui, theme: &Theme, body: Rect, ctx: DiffBodyCtx<'_>) {
+pub fn draw_unified(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    body: Rect,
+    ctx: DiffBodyCtx<'_>,
+) -> Option<usize> {
     let p = theme.palette;
     let font = FontId::monospace(MONO_SIZE);
     let char_w = crate::widgets::mono_char_width(ui.ctx(), MONO_SIZE).max(7.0);
     let col_w = gutter_w(ctx.rows, char_w);
-    let gutter_x0 = body.left() + 6.0;
+    let icon_gutter = if ctx.can_rollback { 20.0 } else { 0.0 };
+    let gutter_x0 = body.left() + 6.0 + icon_gutter;
     let gutter_end = gutter_x0 + col_w * 2.0;
     let content_x = gutter_end + 6.0;
     let content_right = body.right() - RULER_W - 2.0;
-
     let pairs = unified_pairs(ctx.rows);
     let mut pair_of = vec![usize::MAX; ctx.rows.len()];
     for (pi, (d, a)) in pairs.iter().enumerate() {
@@ -242,10 +248,12 @@ pub fn draw_unified(ui: &mut egui::Ui, theme: &Theme, body: Rect, ctx: DiffBodyC
         scroll_area = scroll_area.vertical_scroll_offset(offset);
     }
     let scroll = scroll_area.show(&mut child, |ui| {
+        let mut rollback_clicked = None;
         let total_h = ctx.rows.len() as f32 * ROW_H;
         let (_, inner) = ui.allocate_exact_size(Vec2::new(body.width(), total_h), Sense::hover());
         let content_top = inner.rect.top();
-        let num_font = FontId::monospace(11.0);
+        let num_font = FontId::monospace(12.0);
+        let starts = group_starts(ctx.rows, ctx.groups);
         for (i, row) in ctx.rows.iter().enumerate() {
             let row_rect = Rect::from_min_size(
                 Pos2::new(body.left(), content_top + i as f32 * ROW_H),
@@ -259,6 +267,31 @@ pub fn draw_unified(ui: &mut egui::Ui, theme: &Theme, body: Rect, ctx: DiffBodyC
             };
             if let Some(bg) = line_bg {
                 ui.painter().rect_filled(row_rect, 0.0, bg);
+            }
+            if ctx.can_rollback
+                && row.group != u32::MAX
+                && starts.get(row.group as usize) == Some(&i)
+            {
+                let btn_rect =
+                    Rect::from_center_size(Pos2::new(body.left() + 10.0, y), Vec2::splat(18.0));
+                let resp = ui.interact(
+                    btn_rect,
+                    ui.scope_id().with(("rb-unified", ctx.tab_id, row.group)),
+                    Sense::click(),
+                );
+                let icon_color = if resp.hovered() {
+                    ui.painter()
+                        .rect_filled(btn_rect, egui::CornerRadius::same(3), p.hover);
+                    resp.show_tooltip_text("回滚此变更块 (Rollback this change)");
+                    p.rose
+                } else {
+                    p.text2
+                };
+                let icon_rect = Rect::from_center_size(btn_rect.center(), Vec2::splat(14.0));
+                crate::icons_svg::paint_svg(ui.painter(), icon_rect, "rollback", icon_color);
+                if resp.clicked() {
+                    rollback_clicked = Some(row.group as usize);
+                }
             }
             ui.painter().text(
                 Pos2::new(gutter_x0 + col_w - 8.0, y),
@@ -316,6 +349,7 @@ pub fn draw_unified(ui: &mut egui::Ui, theme: &Theme, body: Rect, ctx: DiffBodyC
             content_right + 2.0,
             content_top,
         );
+        rollback_clicked
     });
 
     // Overview ruler: del marks left half (rose), add marks right half
@@ -389,6 +423,7 @@ pub fn draw_unified(ui: &mut egui::Ui, theme: &Theme, body: Rect, ctx: DiffBodyC
             StrokeKind::Inside,
         );
     }
+    scroll.inner
 }
 
 /// Vertical band of the current group within a proportional `total` rows.
@@ -538,7 +573,12 @@ fn paint_line(
 
 /// Side-by-side body: left column shows context+del, right shows context+add,
 /// aligned per change group; filler rows where one side has none.
-pub fn draw_split(ui: &mut egui::Ui, theme: &Theme, body: Rect, ctx: DiffBodyCtx<'_>) {
+pub fn draw_split(
+    ui: &mut egui::Ui,
+    theme: &Theme,
+    body: Rect,
+    ctx: DiffBodyCtx<'_>,
+) -> Option<usize> {
     let p = theme.palette;
     let font = FontId::monospace(MONO_SIZE);
     let char_w = crate::widgets::mono_char_width(ui.ctx(), MONO_SIZE).max(7.0);
@@ -584,13 +624,56 @@ pub fn draw_split(ui: &mut egui::Ui, theme: &Theme, body: Rect, ctx: DiffBodyCtx
         scroll_area = scroll_area.vertical_scroll_offset(offset);
     }
     let scroll = scroll_area.show(&mut child, |ui| {
+        let mut rollback_clicked = None;
         let total_h = pairs.len() as f32 * ROW_H;
         let (_, inner) = ui.allocate_exact_size(Vec2::new(body.width(), total_h), Sense::hover());
         let content_top = inner.rect.top();
-        let num_font = FontId::monospace(11.0);
+        let num_font = FontId::monospace(12.0);
         for (i, (left, right)) in pairs.iter().enumerate() {
             let y_top = content_top + i as f32 * ROW_H;
             let y = y_top + ROW_H / 2.0;
+            if ctx.can_rollback {
+                let gi = left
+                    .map(|li| ctx.rows[li].group)
+                    .or_else(|| right.map(|ri| ctx.rows[ri].group))
+                    .unwrap_or(u32::MAX);
+                if gi != u32::MAX {
+                    let is_start = pairs.iter().position(|(l, r)| {
+                        l.map(|idx| ctx.rows[idx].group) == Some(gi)
+                            || r.map(|idx| ctx.rows[idx].group) == Some(gi)
+                    }) == Some(i);
+                    if is_start {
+                        let btn_rect = Rect::from_center_size(Pos2::new(mid, y), Vec2::splat(18.0));
+                        let resp = ui.interact(
+                            btn_rect,
+                            ui.scope_id().with(("rb-split", ctx.tab_id, gi)),
+                            Sense::click(),
+                        );
+                        let icon_color = if resp.hovered() {
+                            ui.painter().rect_filled(
+                                btn_rect,
+                                egui::CornerRadius::same(3),
+                                p.hover,
+                            );
+                            resp.show_tooltip_text("回滚此变更块 (Rollback this change)");
+                            p.rose
+                        } else {
+                            p.text2
+                        };
+                        let icon_rect =
+                            Rect::from_center_size(btn_rect.center(), Vec2::splat(14.0));
+                        crate::icons_svg::paint_svg(
+                            ui.painter(),
+                            icon_rect,
+                            "rollback",
+                            icon_color,
+                        );
+                        if resp.clicked() {
+                            rollback_clicked = Some(gi as usize);
+                        }
+                    }
+                }
+            }
             // Left pane.
             let l_rect = Rect::from_min_size(Pos2::new(body.left(), y_top), Vec2::new(half, ROW_H));
             if let Some(li) = left {
@@ -688,6 +771,7 @@ pub fn draw_split(ui: &mut egui::Ui, theme: &Theme, body: Rect, ctx: DiffBodyCtx
                 }
             }
         }
+        rollback_clicked
     });
     let _ = scroll;
 
@@ -740,6 +824,7 @@ pub fn draw_split(ui: &mut egui::Ui, theme: &Theme, body: Rect, ctx: DiffBodyCtx
             );
         }
     }
+    scroll.inner
 }
 
 /// Vertical pixel band of the current group in the split view.

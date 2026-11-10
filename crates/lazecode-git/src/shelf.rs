@@ -566,3 +566,27 @@ pub fn shelf_restore_partial(root: &Path, name: &str, paths: &[String]) -> Resul
     }
     Ok(())
 }
+
+/// Import an external `.patch` file into the shelf repository.
+pub fn shelf_import_patch(root: &Path, patch_path: &Path, name: Option<&str>) -> Result<String> {
+    if !patch_path.exists() {
+        anyhow::bail!("patch file does not exist");
+    }
+    let content =
+        std::fs::read_to_string(patch_path).map_err(|e| anyhow!("failed to read patch: {e}"))?;
+    if content.trim().is_empty() {
+        anyhow::bail!("patch file is empty");
+    }
+    let shelf_name = match name.filter(|n| !n.trim().is_empty()) {
+        Some(n) => n.trim().to_string(),
+        None => patch_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Imported Patch".to_string()),
+    };
+    let dir = shelves_dir(root);
+    std::fs::create_dir_all(&dir)?;
+    let target = dir.join(format!("{shelf_name}.patch"));
+    std::fs::write(&target, content)?;
+    Ok(shelf_name)
+}

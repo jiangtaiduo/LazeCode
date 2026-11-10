@@ -457,6 +457,21 @@ pub fn checkout_revision(root: &Path, revision: &str) -> Result<String> {
     Ok(format!("checked out revision {revision}"))
 }
 
+/// Checkout a single file from a given revision (`git checkout <revision> -- <path>`).
+pub fn checkout_revision_path(root: &Path, revision: &str, path: &str) -> Result<()> {
+    validated_hash(revision)?;
+    let output = builder(root, &["checkout", revision, "--", path])
+        .output()
+        .map_err(|e| anyhow!("git checkout file failed: {e}"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 /// Undo the HEAD commit (soft reset HEAD~1).
 pub fn undo_commit_head(root: &Path) -> Result<String> {
     require_clean(root)?;

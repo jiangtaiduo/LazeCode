@@ -31,16 +31,41 @@ fn log_options_from_query(
     } else {
         None
     };
+    let since = match query.date {
+        lazecode_core::DatePreset::All => (query.since > 0).then_some(query.since),
+        lazecode_core::DatePreset::Today => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            Some(now - (now % 86400))
+        }
+        lazecode_core::DatePreset::Week => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            Some(now.saturating_sub(7 * 86400))
+        }
+        lazecode_core::DatePreset::Month => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            Some(now.saturating_sub(30 * 86400))
+        }
+    };
+    let has_branch = !query.branch.trim().is_empty();
     LogOptions {
         limit: limit + offset,
         first_parent: query.first_parent,
         no_merges: query.no_merges,
         topo_order: query.topo_order,
         author: (!query.author.trim().is_empty()).then(|| query.author.clone()),
-        since: (query.since > 0).then_some(query.since),
+        since,
         path: (!query.path.trim().is_empty()).then(|| query.path.clone()),
-        all_refs: query.all_refs || !query.branch.trim().is_empty(),
-        branch: (!query.branch.trim().is_empty()).then(|| query.branch.clone()),
+        all_refs: query.all_refs && !has_branch,
+        branch: has_branch.then(|| query.branch.trim().to_string()),
         head_ancestors,
         range_walk: false,
     }
@@ -49,10 +74,11 @@ fn log_options_from_query(
 /// Stable key so unrelated filter edits don't clobber the in-flight dedup.
 fn log_query_fingerprint(query: &lazecode_core::LogQuery) -> String {
     format!(
-        "{}|{}|{}|{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}",
         query.branch,
         query.author,
         query.path,
+        query.date as u8,
         query.since,
         query.all_refs,
         query.first_parent,
@@ -462,8 +488,14 @@ impl JobQueue {
                 }
             }
             Command::ReloadTree => {
+                let ignored = model.settings.ignored_patterns.clone();
                 if let Some(project) = model.active_project_mut() {
-                    project.tree = lazecode_fs::tree::load_tree(&project.root);
+                    project.tree = lazecode_fs::tree::load_tree_with_expanded(
+                        &project.root,
+                        Some(&project.expanded),
+                        20_000,
+                        Some(&ignored),
+                    );
                 }
             }
             Command::Stage(paths) => {
@@ -678,7 +710,7 @@ impl JobQueue {
                                 Err(err) => err.to_string(),
                             },
                             ok: result.is_ok(),
-                            refresh: false,
+                            refresh: true,
                             reload_files: false,
                             clear_commit_message: false,
                         }
@@ -732,7 +764,7 @@ impl JobQueue {
                                 Err(err) => err.to_string(),
                             },
                             ok: result.is_ok(),
-                            refresh: rollback,
+                            refresh: true,
                             reload_files: rollback,
                             clear_commit_message: false,
                         }
@@ -762,7 +794,7 @@ impl JobQueue {
                                 format!("Moved {count} files to {list}")
                             },
                             ok: true,
-                            refresh: false,
+                            refresh: true,
                             reload_files: false,
                             clear_commit_message: false,
                         }
@@ -2338,6 +2370,15 @@ impl JobQueue {
             }
             Command::OpenCompareCommitsDiff { from, to, path } => {
                 if let Some(project) = model.active_project_mut() {
+                    if let Some(session) = project.compare_session.as_mut() {
+                        session.selected = Some(path.clone());
+                        let parts: Vec<&str> = path.split('/').collect();
+                        for i in 1..parts.len() {
+                            let parent = parts[..i].join("/");
+                            session.collapsed.remove(&parent);
+                        }
+                        session.root_expanded = true;
+                    }
                     let source = DiffSource::CompareCommits { from, to, path };
                     project.open_diff_source(source.clone());
                     let root = project.root.clone();
@@ -2531,23 +2572,45 @@ impl JobQueue {
                 let settings = model.settings.clone();
                 let notifier = model.notifier.clone();
                 if let Some(project) = model.active_project_mut() {
-                    if let Err(err) = project.open_terminal(
+                    match project.open_terminal(
                         None,
                         None,
                         lazecode_terminal::SessionKind::Shell,
                         &settings,
                         notifier,
                     ) {
-                        model.toast(err, ToastKind::Error);
+                        Ok(id) => {
+                            runtime.set_terminal_focus(id);
+                        }
+                        Err(err) => {
+                            model.toast(err, ToastKind::Error);
+                        }
                     }
-                    model.ui.panel_visible = true;
                     model.ui.terminal_visible = true;
+                    if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
+                        model.ui.panel_visible = false;
+                    }
+                    model.ui.panel_tab = lazecode_core::PanelTab::Console;
                 } else {
                     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
                     if let Ok(index) = model.open_project(home) {
                         model.active_project = Some(index);
-                        model.ui.panel_visible = true;
+                        if let Some(project) = model.active_project_mut() {
+                            if let Ok(id) = project.open_terminal(
+                                None,
+                                None,
+                                lazecode_terminal::SessionKind::Shell,
+                                &settings,
+                                notifier,
+                            ) {
+                                runtime.set_terminal_focus(id);
+                            }
+                        }
                         model.ui.terminal_visible = true;
+                        if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
+                            model.ui.panel_visible = false;
+                        }
+                        model.ui.panel_tab = lazecode_core::PanelTab::Console;
                     }
                 }
             }
@@ -2555,17 +2618,25 @@ impl JobQueue {
                 let settings = model.settings.clone();
                 let notifier = model.notifier.clone();
                 if let Some(project) = model.active_project_mut() {
-                    if let Err(err) = project.open_terminal(
+                    match project.open_terminal(
                         Some(command),
                         Some(title),
                         lazecode_terminal::SessionKind::Agent,
                         &settings,
                         notifier,
                     ) {
-                        model.toast(err, ToastKind::Error);
+                        Ok(id) => {
+                            runtime.set_terminal_focus(id);
+                        }
+                        Err(err) => {
+                            model.toast(err, ToastKind::Error);
+                        }
                     }
-                    model.ui.panel_visible = true;
                     model.ui.terminal_visible = true;
+                    if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
+                        model.ui.panel_visible = false;
+                    }
+                    model.ui.panel_tab = lazecode_core::PanelTab::Console;
                 }
             }
             Command::RestartTerminal(id) => {
@@ -2585,12 +2656,20 @@ impl JobQueue {
                 runtime.terminal_selections.remove(&id);
                 runtime.terminal_search.remove(&id);
             }
-            Command::CreateWorktree { name } => {
+            Command::CreateWorktree {
+                name,
+                branch,
+                location,
+            } => {
                 let Some(project) = model.active_project() else {
                     return;
                 };
                 let project_root = project.root.clone();
-                let destination = project_root.parent().unwrap_or(&project_root).join(&name);
+                let destination = if location.as_os_str().is_empty() {
+                    project_root.join(".worktree").join(&name)
+                } else {
+                    location
+                };
                 if destination.exists() {
                     model.toast(
                         if model.settings.language.is_zh() {
@@ -2602,12 +2681,49 @@ impl JobQueue {
                     );
                     return;
                 }
+                // 默认在当前项目的 .worktree 下，并且自动添加到 .gitignore
+                if destination.starts_with(&project_root) {
+                    let gitignore_path = project_root.join(".gitignore");
+                    let gitignore_entry = ".worktree/";
+                    let already_ignored = if gitignore_path.exists() {
+                        std::fs::read_to_string(&gitignore_path)
+                            .map(|c| {
+                                c.lines().any(|l| {
+                                    let t = l.trim();
+                                    t == ".worktree"
+                                        || t == ".worktree/"
+                                        || t == "/.worktree"
+                                        || t == "/.worktree/"
+                                })
+                            })
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    if !already_ignored {
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&gitignore_path)
+                        {
+                            let _ = writeln!(f, "\n# worktree\n{}", gitignore_entry);
+                        }
+                    }
+                }
                 let key = format!("worktree-add:{}", name);
                 let job_name = name.clone();
+                let branch_clone = branch.clone();
                 self.spawn("worktree-add", key, move || {
-                    let result =
+                    let result = if branch_clone.trim().is_empty() {
                         lazecode_git::add_worktree_detached_at_head(&project_root, &destination)
-                            .map_err(|err| err.to_string());
+                            .map_err(|err| err.to_string())
+                    } else {
+                        let b = branch_clone.trim();
+                        let _ = lazecode_git::create_branch(&project_root, b, false);
+                        lazecode_git::add_worktree(&project_root, &destination, b)
+                            .map_err(|err| err.to_string())
+                    };
                     JobResult::WorktreeAdded {
                         project_root,
                         name: job_name,
@@ -3271,6 +3387,7 @@ mod tests {
             should_quit: false,
             version: "test",
             favorite_branches: HashSet::new(),
+            git_cmd_log: Vec::new(),
         }
     }
 

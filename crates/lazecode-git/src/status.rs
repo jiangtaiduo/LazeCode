@@ -29,6 +29,7 @@ pub fn snapshot(root: &Path) -> Result<RepoSnapshot> {
         _ => (0, 0),
     };
     let changes = changes(&repo, &workdir)?;
+    let (ignored_files, ignored_dirs) = ignored_entries(&workdir).unwrap_or_default();
     Ok(RepoSnapshot {
         root: workdir,
         branch,
@@ -37,8 +38,48 @@ pub fn snapshot(root: &Path) -> Result<RepoSnapshot> {
         ahead,
         behind,
         changes,
+        ignored_files,
+        ignored_dirs,
         head: info,
     })
+}
+
+/// Query entries ignored by `.gitignore` rules (`git status --porcelain=v1 -z --ignored=matching`).
+/// Returns `(all_ignored, ignored_dirs)`.
+pub fn ignored_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
+    let output = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["status", "--porcelain=v1", "-z", "--ignored=matching"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("git status failed: {e}"))?;
+    if !output.status.success() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let mut ignored_all = Vec::new();
+    let mut ignored_dirs = Vec::new();
+    for entry in output.stdout.split(|&b| b == 0) {
+        if entry.starts_with(b"!! ") {
+            let path_bytes = &entry[3..];
+            let path_str = String::from_utf8_lossy(path_bytes).trim().to_string();
+            if !path_str.is_empty() {
+                let is_dir = path_str.ends_with('/');
+                let clean = path_str.trim_end_matches('/').to_string();
+                if is_dir {
+                    ignored_dirs.push(clean.clone());
+                }
+                ignored_all.push(clean);
+            }
+        }
+    }
+    ignored_all.sort();
+    ignored_dirs.sort();
+    Ok((ignored_all, ignored_dirs))
+}
+
+/// Query files ignored by `.gitignore` rules.
+pub fn ignored_files(root: &Path) -> Result<Vec<String>> {
+    let (all, _) = ignored_entries(root)?;
+    Ok(all)
 }
 
 fn head_info(repo: &gix::Repository, id: ObjectId) -> Result<HeadInfo> {

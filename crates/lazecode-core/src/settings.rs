@@ -87,6 +87,7 @@ pub struct Settings {
     /// 最近提交信息历史（本机级，最新在前，上限 10 条；对齐稳定版的
     /// useCommitMessageHistory：提交成功后入史、历史项可回填可清除）。
     pub commit_history: Vec<String>,
+    pub ignored_patterns: Vec<String>,
 }
 
 impl Default for Settings {
@@ -102,6 +103,15 @@ impl Default for Settings {
             compare_split: 40.0,
             compare_details_width: 36.0,
             commit_history: Vec::new(),
+            ignored_patterns: vec![
+                ".git".into(),
+                ".idea".into(),
+                ".DS_Store".into(),
+                "node_modules".into(),
+                ".venv".into(),
+                "__pycache__".into(),
+                "target".into(),
+            ],
         }
     }
 }
@@ -189,10 +199,14 @@ pub struct WorkspaceFile {
     pub commit_drawer_width: Option<f32>,
     pub panel_visible: Option<bool>,
     pub panel_height: Option<f32>,
+    pub terminal_placement: Option<String>,
+    pub terminal_width: Option<f32>,
     pub open_tabs: std::collections::BTreeMap<PathBuf, Vec<PathBuf>>,
     pub active_tabs: std::collections::BTreeMap<PathBuf, PathBuf>,
     /// Favorite branches, decorated in the Git log branch tree.
     pub favorite_branches: Vec<String>,
+    /// Uncommitted commit message draft per project root.
+    pub commit_drafts: std::collections::BTreeMap<PathBuf, String>,
 }
 
 impl WorkspaceFile {

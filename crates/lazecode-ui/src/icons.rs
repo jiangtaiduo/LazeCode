@@ -63,8 +63,14 @@ pub enum Icon {
     Compare,
     ShelveIn,
     ViewOptions,
+    Locate,
+    AutoLocate,
+    DockBottom,
+    DockRight,
+    Sort,
+    Graph,
+    UpdateArrow,
 }
-
 /// Map an icon to its stable-app SVG source ("icons_svg::SVGS").
 /// `bool` = multicolor (brand palette baked in, draw without tint).
 /// Icons without a stable counterpart fall back to the hand-drawn vectors.
@@ -80,7 +86,8 @@ fn svg_of(icon: Icon) -> Option<(&'static str, bool)> {
         Icon::ChevronDown => ("chevron_down", false),
         Icon::ChevronRight => ("chevron_right", false),
         Icon::ChevronUp => ("chevron_up", false),
-        Icon::Panel => ("dock_bottom", false),
+        Icon::Panel | Icon::DockBottom => ("dock_bottom", false),
+        Icon::DockRight => ("dock_right", false),
         Icon::Play => ("play", false),
         Icon::Refresh => ("refresh", false),
         Icon::Folder => ("folder", true),
@@ -113,6 +120,9 @@ fn svg_of(icon: Icon) -> Option<(&'static str, bool)> {
         Icon::Compare => ("compare", false),
         Icon::ShelveIn => ("shelve_in", false),
         Icon::ViewOptions => ("view_options", false),
+        Icon::Sort => ("sort_commits", false),
+        Icon::Graph => ("commit_graph", false),
+        Icon::UpdateArrow => ("update_arrow", false),
         _ => return None,
     })
 }
@@ -264,6 +274,38 @@ fn paint_vector(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             ]);
             line(&[(13.0, 6.0), (9.8, 2.8)]);
             line(&[(13.0, 6.0), (9.8, 9.2)]);
+        }
+        Icon::Locate => {
+            circle((8.0, 8.0), 4.4);
+            dot((8.0, 8.0), 1.3);
+            seg((8.0, 1.4), (8.0, 3.4));
+            seg((8.0, 12.6), (8.0, 14.6));
+            seg((1.4, 8.0), (3.4, 8.0));
+            seg((12.6, 8.0), (14.6, 8.0));
+        }
+        Icon::AutoLocate => {
+            circle((7.0, 7.0), 4.2);
+            dot((7.0, 7.0), 1.2);
+            seg((10.0, 10.2), (13.4, 13.6));
+            line(&[(11.4, 13.6), (13.6, 13.6), (13.6, 11.4)]);
+        }
+        Icon::DockBottom => {
+            rect_outline((2.0, 3.0), (14.0, 13.0), 1.0);
+            seg((2.0, 9.6), (14.0, 9.6));
+            painter.rect_filled(
+                Rect::from_min_max(p(3.1, 10.7), p(12.9, 12.3)),
+                egui::CornerRadius::same(1),
+                color,
+            );
+        }
+        Icon::DockRight => {
+            rect_outline((2.0, 3.0), (14.0, 13.0), 1.0);
+            seg((9.6, 3.0), (9.6, 13.0));
+            painter.rect_filled(
+                Rect::from_min_max(p(10.7, 4.1), p(12.9, 11.9)),
+                egui::CornerRadius::same(1),
+                color,
+            );
         }
         _ => {}
     }

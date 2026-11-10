@@ -24,6 +24,7 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     let mut open_palette = false;
     let mut toggle_sidebar = false;
     let mut toggle_panel = false;
+    let mut toggle_terminal = false;
     let mut open_settings = false;
     let mut save = false;
     let mut new_terminal = false;
@@ -37,7 +38,10 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     let mut goto_line = false;
     let mut new_file = false;
     let mut toggle_tree_view = false;
-
+    let mut unshelve_silent = false;
+    let mut unshelve_dialog = false;
+    let mut undo = false;
+    let mut redo = false;
     ctx.input_mut(|input| {
         if input.consume_key(command_only(), Key::K) || input.consume_key(command_only(), Key::P) {
             open_palette = true;
@@ -52,11 +56,21 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         if input.consume_key(command_only(), Key::J) {
             toggle_panel = true;
         }
+        if input.consume_key(command_only(), Key::Backtick)
+            || input.consume_key(Modifiers::ALT, Key::F12)
+        {
+            toggle_terminal = true;
+        }
         if input.consume_key(command_only(), Key::Comma) {
             open_settings = true;
         }
         if input.consume_key(command_only(), Key::S) {
             save = true;
+        }
+        if input.consume_key(command_shift(), Key::Z) {
+            redo = true;
+        } else if input.consume_key(command_only(), Key::Z) {
+            undo = true;
         }
         if input.consume_key(command_only(), Key::W) {
             close_tab = true;
@@ -72,6 +86,18 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         }
         if input.consume_key(command_shift(), Key::F) {
             search = true;
+        }
+        let cmd_alt = Modifiers {
+            alt: true,
+            command: true,
+            mac_cmd: true,
+            ..Default::default()
+        };
+        if input.consume_key(cmd_alt, Key::U) {
+            unshelve_silent = true;
+        }
+        if input.consume_key(command_shift(), Key::U) {
+            unshelve_dialog = true;
         }
         if input.consume_key(command_only(), Key::F) {
             find = true;
@@ -156,12 +182,54 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         model.queue(Command::OpenProjectDialog);
     }
     if git_log {
-        model.ui.panel_visible = true;
-        model.ui.panel_tab = PanelTab::Git;
-        model.queue(Command::RefreshLog);
+        if model.ui.panel_visible && model.ui.panel_tab == PanelTab::Git {
+            model.ui.panel_visible = false;
+        } else {
+            model.ui.panel_visible = true;
+            model.ui.panel_tab = PanelTab::Git;
+            if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
+                model.ui.terminal_visible = false;
+            }
+            model.queue(Command::RefreshLog);
+        }
+    }
+    if toggle_terminal {
+        if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
+            if model.ui.terminal_visible {
+                model.ui.terminal_visible = false;
+            } else {
+                model.ui.terminal_visible = true;
+                model.ui.panel_visible = false;
+            }
+        } else {
+            model.ui.terminal_visible = !model.ui.terminal_visible;
+        }
+    }
+    if undo {
+        if let Some(project) = model.active_project_mut() {
+            if let Some(id) = project.active_tab {
+                if let Some(tab) = project.tab_mut_by_id(id) {
+                    if let lazecode_core::TabKind::File(file_tab) = &mut tab.kind {
+                        file_tab.doc.undo();
+                    }
+                }
+            }
+        }
+    }
+    if redo {
+        if let Some(project) = model.active_project_mut() {
+            if let Some(id) = project.active_tab {
+                if let Some(tab) = project.tab_mut_by_id(id) {
+                    if let lazecode_core::TabKind::File(file_tab) = &mut tab.kind {
+                        file_tab.doc.redo();
+                    }
+                }
+            }
+        }
     }
     if search {
         rt.search.open = true;
+        rt.search.opened_frame = rt.frame_count;
         rt.search.focus_requested = true;
         rt.search.searched = false;
         rt.settings_open = false;
@@ -170,6 +238,7 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     }
     if find && rt.terminal_focus.is_none() && model.active_project().is_some() {
         rt.find.open = true;
+        rt.find.opened_frame = rt.frame_count;
         rt.find.focus_requested = true;
     }
     if goto_line {
@@ -222,6 +291,53 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
             rt.menu = None;
         } else if palette_open {
             model.ui.command_palette_open = false;
+        }
+    }
+    if (unshelve_silent || unshelve_dialog) && rt.commit_tab == crate::runtime::CommitTab::Shelf {
+        if let Some(name) = rt.shelf_selected.clone() {
+            if unshelve_silent {
+                let paths = if rt.shelf_file_sel.is_empty() {
+                    None
+                } else {
+                    Some(rt.shelf_file_sel.clone())
+                };
+                let default_list = model
+                    .active_project()
+                    .and_then(|p| {
+                        lazecode_git::Changelists::open(&p.root)
+                            .lists()
+                            .first()
+                            .cloned()
+                    })
+                    .unwrap_or_else(|| "Default".to_string());
+                model.queue(Command::ShelfRestore {
+                    name,
+                    paths,
+                    target_list: Some(default_list),
+                    delete_after: false,
+                });
+            } else {
+                let root = model
+                    .active_project()
+                    .map(|p| p.root.clone())
+                    .unwrap_or_default();
+                let files = lazecode_git::shelf_files(&root, &name).unwrap_or_default();
+                let entries: Vec<(String, bool)> = files
+                    .into_iter()
+                    .map(|f| {
+                        let selected =
+                            rt.shelf_file_sel.is_empty() || rt.shelf_file_sel.contains(&f);
+                        (f, selected)
+                    })
+                    .collect();
+                rt.dialog = crate::runtime::DialogState::Unshelve {
+                    name,
+                    files: entries,
+                    target: None,
+                    new_name: String::new(),
+                    error: None,
+                };
+            }
         }
     }
 }

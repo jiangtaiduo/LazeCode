@@ -38,6 +38,7 @@ fn main() -> anyhow::Result<()> {
         should_quit: false,
         version: env!("CARGO_PKG_VERSION"),
         favorite_branches: HashSet::new(),
+        git_cmd_log: Vec::new(),
     };
     if mode != "welcome" {
         let mut project = ProjectState::open(project_root.clone(), &settings, None)

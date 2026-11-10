@@ -89,6 +89,8 @@ pub struct RepoSnapshot {
     pub ahead: usize,
     pub behind: usize,
     pub changes: Vec<Change>,
+    pub ignored_files: Vec<String>,
+    pub ignored_dirs: Vec<String>,
     pub head: Option<HeadInfo>,
 }
 

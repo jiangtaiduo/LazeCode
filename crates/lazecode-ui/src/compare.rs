@@ -264,7 +264,7 @@ const TOOLBAR_H: f32 = 30.0;
 const ROW_H: f32 = 26.0;
 const DETAILS_HEAD_H: f32 = 26.0;
 const ROOT_ROW_H: f32 = 24.0;
-const FILE_ROW_H: f32 = 21.0;
+const FILE_ROW_H: f32 = 24.0;
 const AUTHOR_W: f32 = 80.0;
 const DATE_W: f32 = 108.0;
 const RULER_GAP: f32 = 10.0;
@@ -547,7 +547,7 @@ fn cb_filter_btn(
         rect.center(),
         Align2::CENTER_CENTER,
         label,
-        FontId::proportional(11.0),
+        FontId::proportional(12.5),
         if active { p.blue } else { p.text2 },
     );
     response.clicked()
@@ -608,7 +608,7 @@ fn draw_pane(
             Pos2::new(text_right, banner.bottom()),
         ),
         &banner_text,
-        FontId::proportional(12.0),
+        FontId::proportional(13.0),
         p.amber,
         Align2::LEFT_CENTER,
     );
@@ -639,7 +639,7 @@ fn draw_pane(
             swap.center(),
             Align2::CENTER_CENTER,
             label,
-            FontId::proportional(11.0),
+            FontId::proportional(12.5),
             if resp.hovered() {
                 p.text_bright
             } else {
@@ -784,30 +784,30 @@ fn draw_pane(
     let paths_label = crate::tr!(model, "Paths", "路径");
     let user_label = crate::tr!(model, "User", "用户");
     let date_label = crate::tr!(model, "Date", "日期");
-    let btn_w = |label: &str| label.chars().count() as f32 * 6.2 + 14.0;
+    let btn_w = |label: &str| label.chars().count() as f32 * 7.2 + 18.0;
     let paths_w = btn_w(paths_label);
     let user_w = btn_w(user_label);
     let date_w = btn_w(date_label);
-    let ref_w = 24.0;
+    let ref_w = 26.0;
     let mut fx = rx - clear_w - 2.0;
     let paths_rect = Rect::from_min_size(
-        Pos2::new(fx - paths_w, toolbar.top() + 4.0),
-        Vec2::new(paths_w, 22.0),
+        Pos2::new(fx - paths_w, toolbar.top() + 3.0),
+        Vec2::new(paths_w, 24.0),
     );
     fx -= paths_w + 3.0;
     let date_rect = Rect::from_min_size(
-        Pos2::new(fx - date_w, toolbar.top() + 4.0),
-        Vec2::new(date_w, 22.0),
+        Pos2::new(fx - date_w, toolbar.top() + 3.0),
+        Vec2::new(date_w, 24.0),
     );
     fx -= date_w + 3.0;
     let user_rect = Rect::from_min_size(
-        Pos2::new(fx - user_w, toolbar.top() + 4.0),
-        Vec2::new(user_w, 22.0),
+        Pos2::new(fx - user_w, toolbar.top() + 3.0),
+        Vec2::new(user_w, 24.0),
     );
     fx -= user_w + 3.0;
     let ref_rect = Rect::from_min_size(
-        Pos2::new(fx - ref_w, toolbar.top() + 4.0),
-        Vec2::new(ref_w, 22.0),
+        Pos2::new(fx - ref_w, toolbar.top() + 3.0),
+        Vec2::new(ref_w, 24.0),
     );
     let search_right = ref_rect.left() - 3.0;
 
@@ -906,7 +906,7 @@ fn draw_pane(
             TextEdit::singleline(&mut query)
                 .frame(egui::Frame::NONE)
                 .hint_text(crate::tr!(model, "Text or hash", "搜索提交、哈希或作者"))
-                .font(FontId::proportional(11.0)),
+                .font(FontId::proportional(12.5)),
         );
         if resp.changed() {
             let view = if side_index == 0 {
@@ -954,121 +954,6 @@ fn draw_pane(
                 &mut model.ui.compare_branches.right_view
             };
             view.match_case = !view.match_case;
-        }
-    }
-
-    // 路径过滤浮层（cb-path-form：250px 菜单壳 + 输入 + Apply/Clear）。
-    let path_open = {
-        let view = if side_index == 0 {
-            &model.ui.compare_branches.left_view
-        } else {
-            &model.ui.compare_branches.right_view
-        };
-        view.path_edit_open
-    };
-    if path_open {
-        let form_w = 250.0;
-        let form = Rect::from_min_size(
-            Pos2::new(
-                paths_rect.left().min(toolbar.right() - form_w - 4.0),
-                toolbar.bottom() + 2.0,
-            ),
-            Vec2::new(form_w, 78.0),
-        );
-        crate::overlays::menu_frame(ui, form, theme);
-        let input = Rect::from_min_size(
-            Pos2::new(form.left() + 8.0, form.top() + 8.0),
-            Vec2::new(form_w - 16.0, 22.0),
-        );
-        ui.painter()
-            .rect_filled(input, egui::CornerRadius::same(4), p.scrim_subtle);
-        ui.painter().rect_stroke(
-            input,
-            egui::CornerRadius::same(4),
-            Stroke::new(1.0, p.border_soft),
-            StrokeKind::Inside,
-        );
-        let mut edit = {
-            let view = if side_index == 0 {
-                &model.ui.compare_branches.left_view
-            } else {
-                &model.ui.compare_branches.right_view
-            };
-            view.path_edit.clone()
-        };
-        let resp = ui.put(
-            input.shrink2(Vec2::new(6.0, 2.0)),
-            TextEdit::singleline(&mut edit)
-                .frame(egui::Frame::NONE)
-                .hint_text(crate::tr!(model, "path", "路径"))
-                .font(FontId::proportional(11.0)),
-        );
-        if resp.changed() {
-            let view = if side_index == 0 {
-                &mut model.ui.compare_branches.left_view
-            } else {
-                &mut model.ui.compare_branches.right_view
-            };
-            view.path_edit = edit.clone();
-        }
-        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            let view = if side_index == 0 {
-                &mut model.ui.compare_branches.left_view
-            } else {
-                &mut model.ui.compare_branches.right_view
-            };
-            view.path = view.path_edit.trim().to_string();
-            view.path_edit_open = false;
-            state_reload(model);
-            return;
-        }
-        let apply = Rect::from_min_size(
-            Pos2::new(form.right() - 118.0, form.bottom() - 30.0),
-            Vec2::new(52.0, 20.0),
-        );
-        let clear = Rect::from_min_size(
-            Pos2::new(form.right() - 60.0, form.bottom() - 30.0),
-            Vec2::new(52.0, 20.0),
-        );
-        if secondary_button(ui, apply, crate::tr!(model, "Apply", "应用"), None, theme).clicked()
-        {
-            let view = if side_index == 0 {
-                &mut model.ui.compare_branches.left_view
-            } else {
-                &mut model.ui.compare_branches.right_view
-            };
-            view.path = view.path_edit.trim().to_string();
-            view.path_edit_open = false;
-            state_reload(model);
-            return;
-        }
-        if secondary_button(ui, clear, crate::tr!(model, "Clear", "清除"), None, theme).clicked()
-        {
-            let view = if side_index == 0 {
-                &mut model.ui.compare_branches.left_view
-            } else {
-                &mut model.ui.compare_branches.right_view
-            };
-            view.path_edit.clear();
-            view.path.clear();
-            view.path_edit_open = false;
-            state_reload(model);
-            return;
-        }
-        if ui
-            .interact(
-                rect.expand(80.0),
-                ui.scope_id().with(("cb-path-dismiss", side_index)),
-                Sense::click(),
-            )
-            .clicked()
-        {
-            let view = if side_index == 0 {
-                &mut model.ui.compare_branches.left_view
-            } else {
-                &mut model.ui.compare_branches.right_view
-            };
-            view.path_edit_open = false;
         }
     }
 
@@ -1311,7 +1196,7 @@ fn draw_pane(
                             Pos2::new(msg_right.max(msg_x + 60.0), row.bottom()),
                         ),
                         &commit.message,
-                        FontId::proportional(12.0),
+                        FontId::proportional(13.0),
                         p.text,
                         Align2::LEFT_CENTER,
                     );
@@ -1343,7 +1228,7 @@ fn draw_pane(
                             Pos2::new(text_x, row.center().y),
                             Align2::LEFT_CENTER,
                             &label.label,
-                            FontId::proportional(11.0),
+                            FontId::proportional(11.5),
                             color,
                         );
                         badge_x = text_x + text_w + 8.0;
@@ -1357,7 +1242,7 @@ fn draw_pane(
                         ui.painter(),
                         author_rect,
                         &commit.author,
-                        FontId::proportional(11.0),
+                        FontId::proportional(12.0),
                         p.text2,
                         Align2::RIGHT_CENTER,
                     );
@@ -1366,7 +1251,7 @@ fn draw_pane(
                         Pos2::new(row.right() - 10.0, row.center().y),
                         Align2::RIGHT_CENTER,
                         date_str,
-                        FontId::proportional(11.0),
+                        FontId::proportional(12.0),
                         p.text3,
                     );
 
@@ -1555,6 +1440,120 @@ fn draw_pane(
     } else if rt.compare_details_drag {
         rt.compare_details_drag = false;
         model.save_settings();
+    }
+
+    // 路径过滤浮层（cb-path-form：置于 draw_pane 终点绘制，确保层级绝对置顶，绝不被提交列表与文件列表遮盖穿透）。
+    let path_open = {
+        let view = if side_index == 0 {
+            &model.ui.compare_branches.left_view
+        } else {
+            &model.ui.compare_branches.right_view
+        };
+        view.path_edit_open
+    };
+    if path_open {
+        let form_w = 260.0;
+        let form = Rect::from_min_size(
+            Pos2::new(
+                paths_rect.left().min(toolbar.right() - form_w - 4.0),
+                toolbar.bottom() + 2.0,
+            ),
+            Vec2::new(form_w, 82.0),
+        );
+        crate::overlays::menu_frame(ui, form, theme);
+        let input = Rect::from_min_size(
+            Pos2::new(form.left() + 8.0, form.top() + 8.0),
+            Vec2::new(form_w - 16.0, 26.0),
+        );
+        ui.painter()
+            .rect_filled(input, egui::CornerRadius::same(4), p.scrim_subtle);
+        ui.painter().rect_stroke(
+            input,
+            egui::CornerRadius::same(4),
+            Stroke::new(1.0, p.border_soft),
+            StrokeKind::Inside,
+        );
+        let mut edit = {
+            let view = if side_index == 0 {
+                &model.ui.compare_branches.left_view
+            } else {
+                &model.ui.compare_branches.right_view
+            };
+            view.path_edit.clone()
+        };
+        let resp = ui.put(
+            input.shrink2(Vec2::new(6.0, 2.0)),
+            TextEdit::singleline(&mut edit)
+                .frame(egui::Frame::NONE)
+                .hint_text(crate::tr!(model, "path", "路径"))
+                .font(FontId::proportional(12.5)),
+        );
+        if resp.changed() {
+            let view = if side_index == 0 {
+                &mut model.ui.compare_branches.left_view
+            } else {
+                &mut model.ui.compare_branches.right_view
+            };
+            view.path_edit = edit.clone();
+        }
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let view = if side_index == 0 {
+                &mut model.ui.compare_branches.left_view
+            } else {
+                &mut model.ui.compare_branches.right_view
+            };
+            view.path = view.path_edit.trim().to_string();
+            view.path_edit_open = false;
+            state_reload(model);
+            return;
+        }
+        let apply = Rect::from_min_size(
+            Pos2::new(form.right() - 128.0, form.bottom() - 32.0),
+            Vec2::new(56.0, 24.0),
+        );
+        let clear = Rect::from_min_size(
+            Pos2::new(form.right() - 64.0, form.bottom() - 32.0),
+            Vec2::new(56.0, 24.0),
+        );
+        if secondary_button(ui, apply, crate::tr!(model, "Apply", "应用"), None, theme).clicked()
+        {
+            let view = if side_index == 0 {
+                &mut model.ui.compare_branches.left_view
+            } else {
+                &mut model.ui.compare_branches.right_view
+            };
+            view.path = view.path_edit.trim().to_string();
+            view.path_edit_open = false;
+            state_reload(model);
+            return;
+        }
+        if secondary_button(ui, clear, crate::tr!(model, "Clear", "清除"), None, theme).clicked()
+        {
+            let view = if side_index == 0 {
+                &mut model.ui.compare_branches.left_view
+            } else {
+                &mut model.ui.compare_branches.right_view
+            };
+            view.path_edit.clear();
+            view.path.clear();
+            view.path_edit_open = false;
+            state_reload(model);
+            return;
+        }
+        let clicked_outside = ui.input(|i| {
+            i.pointer.any_click()
+                && i.pointer
+                    .interact_pos()
+                    .is_some_and(|pos| !form.contains(pos) && !paths_rect.contains(pos))
+        });
+        if clicked_outside || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            let view = if side_index == 0 {
+                &mut model.ui.compare_branches.left_view
+            } else {
+                &mut model.ui.compare_branches.right_view
+            };
+            view.path_edit_open = false;
+        }
     }
 }
 
@@ -1848,7 +1847,7 @@ fn draw_details(
                                 Pos2::new(row.left() + 36.0, row.center().y),
                                 Align2::LEFT_CENTER,
                                 repo_name,
-                                FontId::proportional(11.0),
+                                FontId::proportional(13.0),
                                 p.text_bright,
                             );
                             let count = if zh {
@@ -1862,7 +1861,7 @@ fn draw_details(
                                 Pos2::new(row.right() - 8.0, row.center().y),
                                 Align2::RIGHT_CENTER,
                                 count,
-                                FontId::proportional(10.0),
+                                FontId::proportional(11.5),
                                 p.text3,
                             );
                             if response.clicked() {
@@ -1912,7 +1911,7 @@ fn draw_details(
                                 Pos2::new(row.left() + indent + 30.0, row.center().y),
                                 Align2::LEFT_CENTER,
                                 &file_row.label,
-                                FontId::proportional(11.0),
+                                FontId::proportional(13.0),
                                 p.text,
                             );
                             let count = if zh {
@@ -1926,7 +1925,7 @@ fn draw_details(
                                 Pos2::new(row.right() - 8.0, row.center().y),
                                 Align2::RIGHT_CENTER,
                                 count,
-                                FontId::proportional(10.0),
+                                FontId::proportional(11.5),
                                 p.text3,
                             );
                             if response.clicked() {
@@ -1957,7 +1956,7 @@ fn draw_details(
                                 Pos2::new(row.left() + indent + 19.0, row.center().y),
                                 Align2::LEFT_CENTER,
                                 &file_row.label,
-                                FontId::proportional(11.0),
+                                FontId::proportional(13.0),
                                 name_color,
                             );
                             // numstat（mono 10px，+绿 / -红，仅 >0）。
@@ -1969,7 +1968,7 @@ fn draw_details(
                                     Pos2::new(nx, row.center().y),
                                     Align2::LEFT_CENTER,
                                     label,
-                                    FontId::monospace(10.0),
+                                    FontId::monospace(11.5),
                                     if is_selected {
                                         Color32::from_rgba_unmultiplied(255, 255, 255, 219)
                                     } else {
@@ -1985,7 +1984,7 @@ fn draw_details(
                                     Pos2::new(nx, row.center().y),
                                     Align2::LEFT_CENTER,
                                     label,
-                                    FontId::monospace(10.0),
+                                    FontId::monospace(11.5),
                                     if is_selected {
                                         Color32::from_rgba_unmultiplied(255, 255, 255, 219)
                                     } else {
@@ -2047,7 +2046,7 @@ fn draw_details(
                 Pos2::new(meta_rect.right() - 10.0, y + 17.0),
             ),
             &message,
-            FontId::proportional(12.0),
+            FontId::proportional(13.0),
             p.text_bright,
             Align2::LEFT_TOP,
         );
@@ -2057,15 +2056,15 @@ fn draw_details(
                 Pos2::new(meta_rect.left() + 10.0, y + 7.0),
                 Align2::LEFT_CENTER,
                 &hash,
-                FontId::monospace(10.0),
+                FontId::monospace(12.0),
                 p.accent,
             );
-            let hash_w = hash.chars().count() as f32 * 6.0 + 10.0;
+            let hash_w = hash.chars().count() as f32 * 7.2 + 10.0;
             ui.painter().text(
                 Pos2::new(meta_rect.left() + 10.0 + hash_w, y + 7.0),
                 Align2::LEFT_CENTER,
                 &email,
-                FontId::proportional(10.0),
+                FontId::proportional(12.0),
                 p.text2,
             );
             y += 16.0;
@@ -2075,7 +2074,7 @@ fn draw_details(
                 Pos2::new(meta_rect.left() + 10.0, y + 7.0),
                 Align2::LEFT_CENTER,
                 &date_line,
-                FontId::proportional(10.0),
+                FontId::proportional(12.0),
                 p.text3,
             );
             y += 16.0;
@@ -2090,7 +2089,7 @@ fn draw_details(
                 Pos2::new(meta_rect.left() + 10.0, y + 12.0),
                 Align2::LEFT_CENTER,
                 &branches_line,
-                FontId::proportional(10.0),
+                FontId::proportional(12.0),
                 p.text3,
             );
         }

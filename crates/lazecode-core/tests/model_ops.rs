@@ -16,6 +16,7 @@ fn model() -> AppModel {
         should_quit: false,
         version: "test",
         favorite_branches: HashSet::new(),
+        git_cmd_log: Vec::new(),
     }
 }
 
@@ -254,4 +255,132 @@ fn diff_tabs_reuse_one_window_like_stable() {
         }
         _ => panic!("expected diff tab"),
     }
+}
+
+#[test]
+fn locate_active_file_expands_ancestors_and_sets_reveal() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("crates/lazecode-core/src")).unwrap();
+    let file_path = dir.path().join("crates/lazecode-core/src/commands.rs");
+    std::fs::write(&file_path, "// test\n").unwrap();
+
+    let mut model = model();
+    let mut project = ProjectState::open(dir.path().to_path_buf(), &model.settings, None).unwrap();
+    project.expanded.clear();
+    let tab_id = project
+        .open_file(file_path.clone(), &model.settings)
+        .unwrap();
+    project.active_tab = Some(tab_id);
+    project.expanded.clear(); // Clear to test locate_active_file re-expansion
+
+    let idx = model.add_loaded_project(project);
+    model.active_project = Some(idx);
+
+    // Run manual locate
+    model.locate_active_file(false);
+
+    let project = &model.projects[idx];
+    assert!(project.expanded.contains(&PathBuf::from("crates")));
+    assert!(project
+        .expanded
+        .contains(&PathBuf::from("crates/lazecode-core")));
+    assert!(project
+        .expanded
+        .contains(&PathBuf::from("crates/lazecode-core/src")));
+
+    let expected_rel = PathBuf::from("crates/lazecode-core/src/commands.rs");
+    assert_eq!(model.ui.tree_selected, Some(expected_rel.clone()));
+    assert_eq!(model.ui.tree_reveal, Some((expected_rel.clone(), false)));
+    assert!(model.ui.locate_flash.is_some());
+}
+
+#[test]
+fn compare_session_cross_file_syncs_selected_and_uncollapses_parents() {
+    let mut session = lazecode_core::CompareSession {
+        from: "897cd53c".into(),
+        to: "bf548fd0".into(),
+        group_by_dir: true,
+        root_expanded: true,
+        ..Default::default()
+    };
+    session.collapsed.insert("crates".into());
+    session.collapsed.insert("crates/lazecode-core".into());
+    session.collapsed.insert("crates/lazecode-core/src".into());
+    session.selected = Some("crates/lazecode-app/src/jobs.rs".into());
+
+    // Simulate navigating to "crates/lazecode-core/src/commands.rs"
+    let target = "crates/lazecode-core/src/commands.rs";
+    session.selected = Some(target.into());
+    let parts: Vec<&str> = target.split('/').collect();
+    for i in 1..parts.len() {
+        let parent = parts[..i].join("/");
+        session.collapsed.remove(&parent);
+    }
+
+    assert_eq!(session.selected, Some(target.into()));
+    assert!(!session.collapsed.contains("crates"));
+    assert!(!session.collapsed.contains("crates/lazecode-core"));
+    assert!(!session.collapsed.contains("crates/lazecode-core/src"));
+}
+#[test]
+fn git_ignore_distinction_and_lookup() {
+    use lazecode_core::is_snapshot_ignored;
+    use std::path::Path;
+
+    let snapshot = lazecode_git::RepoSnapshot {
+        root: PathBuf::from("/test"),
+        branch: Some("main".into()),
+        detached: false,
+        unborn: false,
+        ahead: 0,
+        behind: 0,
+        changes: Vec::new(),
+        ignored_files: vec![
+            ".audit".into(),
+            ".zcode".into(),
+            "debug.log".into(),
+            "dist".into(),
+            "target".into(),
+        ],
+        ignored_dirs: vec![
+            ".audit".into(),
+            ".zcode".into(),
+            "dist".into(),
+            "target".into(),
+        ],
+        head: None,
+    };
+
+    // Root is not ignored
+    assert!(!is_snapshot_ignored(&snapshot, Path::new("")));
+
+    // Direct files ignored by git
+    assert!(is_snapshot_ignored(&snapshot, Path::new("debug.log")));
+
+    // Direct folders ignored by git
+    assert!(is_snapshot_ignored(&snapshot, Path::new("target")));
+    assert!(is_snapshot_ignored(&snapshot, Path::new("dist")));
+    assert!(is_snapshot_ignored(&snapshot, Path::new(".audit")));
+    assert!(is_snapshot_ignored(&snapshot, Path::new(".zcode")));
+
+    // Descendants inside ignored folders are also ignored
+    assert!(is_snapshot_ignored(&snapshot, Path::new("target/debug")));
+    assert!(is_snapshot_ignored(
+        &snapshot,
+        Path::new("target/debug/app")
+    ));
+    assert!(is_snapshot_ignored(&snapshot, Path::new("dist/bundle.js")));
+    assert!(is_snapshot_ignored(
+        &snapshot,
+        Path::new(".audit/report.json")
+    ));
+
+    // Normal files and folders are NOT git ignored
+    assert!(!is_snapshot_ignored(&snapshot, Path::new("Cargo.toml")));
+    assert!(!is_snapshot_ignored(&snapshot, Path::new("src")));
+    assert!(!is_snapshot_ignored(&snapshot, Path::new("src/main.rs")));
+    assert!(!is_snapshot_ignored(
+        &snapshot,
+        Path::new("crates/lazecode-ui")
+    ));
 }

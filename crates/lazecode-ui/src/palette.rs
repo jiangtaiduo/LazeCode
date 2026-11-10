@@ -185,15 +185,16 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             execute(action, model, rt);
         }
     }
-    if ui.input(|input| input.key_pressed(Key::Escape))
-        || ui.input(|input| {
+    let is_escape = ui.input(|input| input.key_pressed(Key::Escape));
+    let outside_click = rt.palette.opened_frame != rt.frame_count
+        && ui.input(|input| {
             input.pointer.any_click()
                 && input
                     .pointer
                     .interact_pos()
                     .is_some_and(|pos| !panel.contains(pos))
-        })
-    {
+        });
+    if is_escape || outside_click {
         model.ui.command_palette_open = false;
     }
     ui.painter().text(
@@ -316,7 +317,7 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
     );
     action(
         Icon::GitLog,
-        crate::tr!(model, "Stashes (Manage stashes)…", "贮藏管理 (Stashes)…"),
+        crate::tr!(model, "Stashes…", "贮藏管理…"),
         crate::tr!(
             model,
             "List, apply, pop or drop stashes",
@@ -327,7 +328,7 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
     );
     action(
         Icon::GitLog,
-        crate::tr!(model, "Shelves (Manage shelves)…", "架藏管理 (Shelves)…"),
+        crate::tr!(model, "Shelves…", "架藏管理…"),
         crate::tr!(
             model,
             "List, restore or delete shelves",
@@ -338,11 +339,7 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
     );
     action(
         Icon::GitLog,
-        crate::tr!(
-            model,
-            "Git tools (Submodules / LFS)…",
-            "Git 工具 (子模块 / LFS)…"
-        ),
+        crate::tr!(model, "Git tools…", "Git 工具…"),
         crate::tr!(
             model,
             "Submodules and Git LFS status",

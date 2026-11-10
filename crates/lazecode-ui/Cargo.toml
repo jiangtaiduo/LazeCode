@@ -21,3 +21,7 @@ lazecode-terminal.workspace = true
 libc.workspace = true
 dirs.workspace = true
 resvg = "0.45"
+rfd = "0.16"
+egui_commonmark = "0.26.0"
+egui_extras = { version = "0.37.0", features = ["all_loaders"] }
+image = "0.25"

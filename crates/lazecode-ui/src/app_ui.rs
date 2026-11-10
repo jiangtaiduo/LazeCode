@@ -42,10 +42,17 @@ fn drawer_width(model: &AppModel) -> f32 {
 
 pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
     let titlebar = Rect::from_min_max(full.min, pos2(full.right(), full.top() + TITLEBAR_H));
-    let workspace = Rect::from_min_max(pos2(full.left(), titlebar.bottom()), full.max);
+    let status = Rect::from_min_max(
+        pos2(full.left() + STRIP_W, full.bottom() - STATUS_H),
+        full.max,
+    );
+    let workspace = Rect::from_min_max(
+        pos2(full.left(), titlebar.bottom()),
+        pos2(full.right(), status.top()),
+    );
     let strip = Rect::from_min_max(
-        workspace.min,
-        pos2(workspace.left() + STRIP_W, workspace.bottom()),
+        pos2(full.left(), titlebar.bottom()),
+        pos2(full.left() + STRIP_W, status.top()),
     );
     let mut stage_left = strip.right();
     let has_project = !model.projects.is_empty();
@@ -62,23 +69,26 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
         None
     };
     let stage = Rect::from_min_max(pos2(stage_left, workspace.top()), workspace.max);
-    // The statusbar lives inside the center workspace (right of the
-    // drawer), like the stable grid's `status` row.
-    let status = Rect::from_min_max(
-        pos2(stage.left(), full.bottom() - STATUS_H),
-        pos2(stage.right(), full.bottom()),
-    );
-    let panel_height = if model.ui.panel_visible {
-        let max_height = (stage.height() - TABBAR_H - 120.0).max(120.0);
+    let is_right = model.ui.terminal_placement == lazecode_core::TerminalPlacement::Right;
+    let (show_panel, show_terminal_bottom) = if is_right {
+        (model.ui.panel_visible, false)
+    } else if model.ui.terminal_visible {
+        (false, true)
+    } else {
+        (model.ui.panel_visible, false)
+    };
+
+    let panel_height = if show_panel {
         if model.ui.panel_maximised {
-            max_height
+            stage.height()
         } else {
+            let max_height = (stage.height() - TABBAR_H - 120.0).max(120.0);
             model.ui.panel_height.clamp(120.0, max_height)
         }
     } else {
         0.0
     };
-    let panel = if model.ui.panel_visible && has_project {
+    let panel = if show_panel && has_project {
         Some(Rect::from_min_max(
             pos2(stage.left(), status.top() - panel_height),
             pos2(stage.right(), status.top()),
@@ -86,28 +96,60 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
     } else {
         None
     };
-    // 稳定版 grid：终端 dock 在 git 面板之上（main / dock / bottom / status）。
-    let upper_limit = panel
-        .as_ref()
-        .map(|panel| panel.top() - SPLITTER)
-        .unwrap_or_else(|| status.top());
-    let terminal_height = if model.ui.terminal_visible {
-        let max_height = (stage.height() - TABBAR_H - 120.0).max(120.0);
-        model.ui.terminal_height.clamp(120.0, max_height)
-    } else {
-        0.0
-    };
-    let terminal_dock = if model.ui.terminal_visible && has_project {
-        Some(Rect::from_min_max(
-            pos2(stage.left(), upper_limit - terminal_height),
-            pos2(stage.right(), upper_limit),
-        ))
+
+    let terminal_dock = if has_project {
+        if is_right && model.ui.terminal_visible {
+            if model.ui.terminal_maximised {
+                Some(Rect::from_min_max(
+                    stage.min,
+                    pos2(stage.right(), status.top()),
+                ))
+            } else {
+                let max_width = (stage.width() - 320.0).max(240.0);
+                let dock_width = model.ui.terminal_width.clamp(240.0, max_width);
+                let upper_limit = panel
+                    .as_ref()
+                    .map(|p| p.top() - SPLITTER)
+                    .unwrap_or_else(|| status.top());
+                Some(Rect::from_min_max(
+                    pos2(stage.right() - dock_width, stage.top()),
+                    pos2(stage.right(), upper_limit),
+                ))
+            }
+        } else if show_terminal_bottom {
+            let dock_height = if model.ui.terminal_maximised {
+                stage.height()
+            } else {
+                let max_height = (stage.height() - TABBAR_H - 120.0).max(120.0);
+                model.ui.terminal_height.clamp(120.0, max_height)
+            };
+            Some(Rect::from_min_max(
+                pos2(stage.left(), status.top() - dock_height),
+                pos2(stage.right(), status.top()),
+            ))
+        } else {
+            None
+        }
     } else {
         None
     };
-    let editor = if let Some(dock) = terminal_dock {
+    let editor = if (show_panel && model.ui.panel_maximised)
+        || (model.ui.terminal_visible && model.ui.terminal_maximised)
+    {
+        Rect::from_min_max(stage.min, stage.min)
+    } else if is_right {
+        let right_bound = terminal_dock
+            .as_ref()
+            .map(|dock| dock.left() - SPLITTER)
+            .unwrap_or_else(|| stage.right());
+        if let Some(panel) = &panel {
+            Rect::from_min_max(stage.min, pos2(right_bound, panel.top() - SPLITTER))
+        } else {
+            Rect::from_min_max(stage.min, pos2(right_bound, status.top()))
+        }
+    } else if let Some(dock) = &terminal_dock {
         Rect::from_min_max(stage.min, pos2(stage.right(), dock.top() - SPLITTER))
-    } else if let Some(panel) = panel {
+    } else if let Some(panel) = &panel {
         Rect::from_min_max(stage.min, pos2(stage.right(), panel.top() - SPLITTER))
     } else {
         Rect::from_min_max(stage.min, pos2(stage.right(), status.top()))
@@ -128,6 +170,7 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
 
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     rt.frame_count = rt.frame_count.wrapping_add(1);
+    egui_extras::install_image_loaders(ui.ctx());
     let theme = Theme::for_mode(model.settings.theme);
     if rt.applied_theme != Some(model.settings.theme) {
         theme.apply(ui.ctx());
@@ -178,7 +221,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     painter.vline(
         layout.strip.right() - 0.5,
         layout.strip.y_range(),
-        Stroke::new(1.0, p.border_soft),
+        Stroke::new(1.0, p.border),
     );
     if let Some(sidebar) = layout.sidebar {
         painter.rect_filled(sidebar, 0.0, p.sidebar);
@@ -210,29 +253,54 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         crate::sidebar::draw(ui, model, rt, &theme, sidebar);
         splitter_vertical(ui, model, rt, &theme, sidebar.y_range(), sidebar.right());
     }
-    crate::editor::draw(ui, model, rt, &theme, layout.editor);
+    if layout.editor.height() >= 35.0 && layout.editor.width() >= 10.0 {
+        crate::editor::draw(ui, model, rt, &theme, layout.editor);
+    }
     if let Some(dock) = layout.terminal_dock {
         painter.rect_filled(dock, 0.0, p.panel);
-        painter.hline(dock.x_range(), dock.top() + 0.5, Stroke::new(1.0, p.border));
-        splitter_terminal(
-            ui,
-            model,
-            rt,
-            &theme,
-            dock.x_range(),
-            dock.top() - SPLITTER * 0.5,
-        );
+        let is_right = model.ui.terminal_placement == lazecode_core::TerminalPlacement::Right;
+        if is_right {
+            painter.vline(
+                dock.left() - 0.5,
+                dock.y_range(),
+                Stroke::new(1.0, p.border),
+            );
+            if !model.ui.terminal_maximised {
+                splitter_terminal_vertical(
+                    ui,
+                    model,
+                    rt,
+                    &theme,
+                    dock.y_range(),
+                    dock.left() - SPLITTER * 0.5,
+                );
+            }
+        } else {
+            painter.hline(dock.x_range(), dock.top() + 0.5, Stroke::new(1.0, p.border));
+            if !model.ui.terminal_maximised {
+                splitter_terminal(
+                    ui,
+                    model,
+                    rt,
+                    &theme,
+                    dock.x_range(),
+                    dock.top() - SPLITTER * 0.5,
+                );
+            }
+        }
         crate::panel::draw_terminal_dock(ui, model, rt, &theme, dock);
     }
     if let Some(panel) = layout.panel {
-        splitter_horizontal(
-            ui,
-            model,
-            rt,
-            &theme,
-            panel.x_range(),
-            panel.top() - SPLITTER * 0.5,
-        );
+        if !model.ui.panel_maximised {
+            splitter_horizontal(
+                ui,
+                model,
+                rt,
+                &theme,
+                panel.x_range(),
+                panel.top() - SPLITTER * 0.5,
+            );
+        }
         crate::panel::draw(ui, model, rt, &theme, panel);
     }
     crate::statusbar::draw(ui, model, rt, &theme, layout.status);
@@ -329,6 +397,42 @@ fn splitter_terminal(
         // 与面板共用拖拽标志；面板自身不在拖拽时才落盘终端高度。
         rt.panel_drag = false;
         model.save_settings();
+    }
+}
+
+fn splitter_terminal_vertical(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    y_range: egui::Rangef,
+    x: f32,
+) {
+    let rect = Rect::from_min_max(
+        pos2(x - 2.0, y_range.min),
+        pos2(x + SPLITTER + 2.0, y_range.max),
+    );
+    let response = ui.interact(
+        rect,
+        ui.scope_id().with("terminal-splitter-vert"),
+        egui::Sense::drag(),
+    );
+    let active = response.hovered() || response.dragged();
+    if active {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        ui.painter().rect_filled(
+            Rect::from_min_max(pos2(x + 1.0, y_range.min), pos2(x + 3.0, y_range.max)),
+            egui::CornerRadius::same(1),
+            theme.palette.accent,
+        );
+    }
+    if response.dragged() {
+        model.ui.terminal_width =
+            (model.ui.terminal_width - response.drag_delta().x).clamp(240.0, 1200.0);
+        rt.panel_drag = true;
+    } else if rt.panel_drag {
+        rt.panel_drag = false;
+        model.save_workspace();
     }
 }
 

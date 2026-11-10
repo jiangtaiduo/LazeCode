@@ -19,7 +19,7 @@ pub fn text_clipped(
     }
     let galley = painter.layout_no_wrap(text.to_owned(), font.clone(), color);
     if galley.size().x <= rect.width() {
-        painter.galley_with_override_text_color(
+        painter.galley(
             align.align_size_within_rect(galley.size(), rect).min,
             galley,
             color,
@@ -40,7 +40,7 @@ pub fn text_clipped(
     }
     fitted.push('…');
     let galley = painter.layout_no_wrap(fitted, font, color);
-    painter.galley_with_override_text_color(
+    painter.galley(
         align.align_size_within_rect(galley.size(), rect).min,
         galley,
         color,
@@ -97,8 +97,8 @@ pub fn kbd(painter: &Painter, rect: Rect, label: &str, theme: &Theme) {
         painter,
         rect.shrink2(Vec2::new(3.0, 0.0)),
         label,
-        FontId::monospace(9.5),
-        p.text3,
+        FontId::monospace(11.0),
+        p.text2,
         Align2::CENTER_CENTER,
     );
 }
@@ -416,7 +416,9 @@ pub fn icon_button(ui: &mut Ui, rect: Rect, icon: Icon, active: bool, theme: &Th
         );
     }
     let color = if active { p.text } else { p.text2 };
-    paint_icon(ui.painter(), rect.shrink(5.0), icon, color);
+    let icon_rect =
+        Rect::from_center_size(rect.center(), Vec2::splat(14.0_f32.min(rect.width() - 4.0)));
+    paint_icon(ui.painter(), icon_rect, icon, color);
     response
 }
 

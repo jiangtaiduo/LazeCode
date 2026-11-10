@@ -11,7 +11,9 @@ pub mod watch;
 
 pub use file::{move_to_trash, Eol, TextFile, MAX_FILE_BYTES, MAX_FORCE_FILE_BYTES};
 pub use search::{compile_regex, replace_in_files, search_in_files, SearchHit, SearchOptions};
-pub use tree::{FileTree, NodeKind, TreeNode};
+pub use tree::{
+    load_tree, load_tree_filtered, load_tree_with_expanded, FileTree, NodeKind, TreeNode,
+};
 pub use watch::{watch_project, ProjectWatcher, WatchBatch};
 
 /// Errors produced by filesystem operations.
@@ -50,25 +52,51 @@ pub enum FsError {
 
 pub type Result<T, E = FsError> = std::result::Result<T, E>;
 
-/// Directories that are never interesting in a project tree or a status list.
-/// Git's own ignore rules are still applied; this list only removes build and
-/// dependency output that would otherwise flood the UI.
-pub fn is_default_ignored(name: &std::ffi::OsStr) -> bool {
-    matches!(
-        name.to_str(),
-        Some(".git")
-            | Some(".DS_Store")
-            | Some("target")
-            | Some("node_modules")
-            | Some("dist")
-            | Some(".next")
-            | Some(".nuxt")
-            | Some(".venv")
-            | Some("__pycache__")
-            | Some(".gradle")
-    )
+/// Match an entry against ignored patterns (e.g. from settings).
+pub fn is_ignored_pattern(name: &str, is_dir: bool, custom_ignored: Option<&[String]>) -> bool {
+    const DEFAULT_IGNORED: &[&str] = &[
+        ".git",
+        ".idea",
+        ".DS_Store",
+        "node_modules",
+        ".venv",
+        "__pycache__",
+    ];
+
+    let patterns: Vec<&str> = match custom_ignored {
+        Some(list) if !list.is_empty() => list
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => DEFAULT_IGNORED.to_vec(),
+    };
+
+    for pat in patterns {
+        if let Some(suffix) = pat.strip_prefix('*') {
+            if name.ends_with(suffix) {
+                return true;
+            }
+        } else if let Some(prefix) = pat.strip_suffix('*') {
+            if name.starts_with(prefix) {
+                return true;
+            }
+        } else if pat.ends_with('/') {
+            let dir_pat = pat.trim_end_matches('/');
+            if is_dir && name == dir_pat {
+                return true;
+            }
+        } else if name == pat {
+            return true;
+        }
+    }
+
+    false
 }
 
+pub fn is_default_ignored(name: &std::ffi::OsStr) -> bool {
+    is_ignored_pattern(name.to_str().unwrap_or_default(), true, None)
+}
 /// Normalise a path for display: replace the home directory with `~`.
 pub fn display_path(path: &std::path::Path) -> String {
     if let Some(home) = dirs_home() {

@@ -25,11 +25,12 @@ pub use diff::{
     commit_details, commit_file_diff, diff_commits, diff_ref_worktree, diff_two_files, file_diff,
 };
 pub use history::{
-    amend_commit_message, checkout_revision, cherry_pick, cherry_pick_abort, cherry_pick_continue,
-    commit_patch, conflict_list, drop_commit, mark_conflict_resolved, merge, merge_abort,
-    merge_continue, merge_file_content, rebase, rebase_abort, rebase_continue, rebase_interactive,
-    rebase_skip, require_clean, reset, resolve_take, revert, sequencer_state, squash_commits,
-    undo_commit_head, ConflictEntry, MergeFile3Way, RebaseStep, ResetMode, SequencerState,
+    amend_commit_message, checkout_revision, checkout_revision_path, cherry_pick,
+    cherry_pick_abort, cherry_pick_continue, commit_patch, conflict_list, drop_commit,
+    mark_conflict_resolved, merge, merge_abort, merge_continue, merge_file_content, rebase,
+    rebase_abort, rebase_continue, rebase_interactive, rebase_skip, require_clean, reset,
+    resolve_take, revert, sequencer_state, squash_commits, undo_commit_head, ConflictEntry,
+    MergeFile3Way, RebaseStep, ResetMode, SequencerState,
 };
 pub use introspect::{
     blame, commit_files, compare_branches, compare_commits, file_history, lfs_pull, lfs_status,
@@ -43,12 +44,12 @@ pub use ops::{
     delete_tag, discard_file_changes, git_init, rename_branch, stage, unstage,
 };
 pub use shelf::{
-    diff_patch_paths, shelf_delete, shelf_files, shelf_list, shelf_list_deleted, shelf_patch,
-    shelf_purge_deleted, shelf_rename, shelf_restore, shelf_restore_deleted, shelf_restore_partial,
-    shelf_save, shelf_save_paths, stash_apply, stash_drop, stash_files, stash_list, stash_pop,
-    stash_push, ShelfEntry, StashEntry,
+    diff_patch_paths, shelf_delete, shelf_files, shelf_import_patch, shelf_list,
+    shelf_list_deleted, shelf_patch, shelf_purge_deleted, shelf_rename, shelf_restore,
+    shelf_restore_deleted, shelf_restore_partial, shelf_save, shelf_save_paths, stash_apply,
+    stash_drop, stash_files, stash_list, stash_pop, stash_push, ShelfEntry, StashEntry,
 };
-pub use status::snapshot;
+pub use status::{ignored_entries, ignored_files, snapshot};
 pub use sync::{
     clone, fetch_all, pending_count, pull, push, remote_add, remote_list, remote_remove,
     remote_rename, remote_set_url, PullMode, RemoteInfo,

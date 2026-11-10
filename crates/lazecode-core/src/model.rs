@@ -31,6 +31,20 @@ pub enum PanelTab {
     Git,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub enum TerminalPlacement {
+    #[default]
+    Bottom,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GitSubtab {
+    #[default]
+    Log,
+    Console,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToastKind {
     Info,
@@ -61,7 +75,11 @@ pub struct UiState {
     pub panel_height: f32,
     /// 终端 dock 高度（稳定版默认 340）。
     pub terminal_height: f32,
+    pub terminal_placement: TerminalPlacement,
+    pub terminal_width: f32,
+    pub git_subtab: GitSubtab,
     pub panel_maximised: bool,
+    pub terminal_maximised: bool,
     pub settings_open: bool,
     pub settings_section: usize,
     pub command_palette_open: bool,
@@ -82,13 +100,25 @@ pub struct UiState {
     pub git_branches_width: f32,
     pub git_details_width: f32,
     pub git_details_visible: bool,
+    pub git_details_card_height: f32,
     pub git_jump_to_commit: Option<String>,
     pub git_log_compact: bool,
+    pub git_log_show_graph: bool,
     pub goto_line_open: bool,
     pub goto_line_input: String,
     /// One-shot: 「Commit and Push」的提交已成功，shell 下一次绘制时打开
     /// Push 对话框并复位（JobResult 消费点置位，UI 消费）。
     pub open_push_dialog: bool,
+    /// 自动定位树中打开的文件（对齐稳定版 Always Select Opened File，默认 true）。
+    pub auto_locate: bool,
+    /// 树中选中的文件路径（用于高亮和 reveal）。
+    pub tree_selected: Option<std::path::PathBuf>,
+    /// 树中多选的文件集合（支持 Cmd/Ctrl、Shift 多选）。
+    pub tree_selection: std::collections::HashSet<std::path::PathBuf>,
+    /// 滚动定位请求（路径 + 模式：quiet 模式为 nearest，非 quiet 为 center）。
+    pub tree_reveal: Option<(std::path::PathBuf, bool)>,
+    /// 树定位闪烁的目标路径及触发时间（单次定位时高亮/闪烁）。
+    pub locate_flash: Option<(std::path::PathBuf, std::time::Instant)>,
     /// 分支比较会话（数据缓存 + 双侧 UI 状态）。稳定版的比较页是常驻
     /// 标签（换 ref 不丢状态），对话框方案下挂在 UiState 以便后台任务
     /// 回填，重开对话框保留上次比较。
@@ -173,7 +203,11 @@ impl Default for UiState {
             panel_tab: PanelTab::Console,
             panel_height: 248.0,
             terminal_height: 340.0,
+            terminal_placement: TerminalPlacement::Bottom,
+            terminal_width: 480.0,
+            git_subtab: GitSubtab::Log,
             panel_maximised: false,
+            terminal_maximised: false,
             settings_open: false,
             settings_section: 0,
             command_palette_open: false,
@@ -190,11 +224,18 @@ impl Default for UiState {
             git_branches_width: 210.0,
             git_details_width: 340.0,
             git_details_visible: true,
+            git_details_card_height: 90.0,
             git_jump_to_commit: None,
             git_log_compact: false,
+            git_log_show_graph: true,
             goto_line_open: false,
             goto_line_input: String::new(),
             open_push_dialog: false,
+            auto_locate: true,
+            tree_selected: None,
+            tree_selection: std::collections::HashSet::new(),
+            tree_reveal: None,
+            locate_flash: None,
             compare_branches: CompareBranchesState::default(),
         }
     }
@@ -270,6 +311,23 @@ pub enum TabKind {
     Diff(DiffTab),
     /// 分支比较页（稳定版 compare-branches 中央标签页；单实例）。
     Compare(CompareTab),
+    Image(ImageTab),
+}
+
+#[derive(Clone, Debug)]
+pub struct ImageTab {
+    pub path: PathBuf,
+    pub external: bool,
+}
+
+pub fn is_image_path(path: &std::path::Path) -> bool {
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "bmp" | "svg" | "icns"
+    )
 }
 
 /// 分支比较标签页：只保存方向身份，数据在 `UiState::compare_branches`。
@@ -348,40 +406,41 @@ impl Tab {
         match &self.kind {
             TabKind::File(file) => file.doc.title(),
             TabKind::Compare(compare) => compare.title.clone(),
-            TabKind::Diff(diff) => {
-                // 稳定版 diff 标签标题（EditorTabBar）：路径不在标题里，
-                // 文件名由 diff 视图内部标题栏展示；两种语言同文案。
-                match &diff.source {
-                    DiffSource::Worktree { .. } => "Working Tree Diff".to_string(),
-                    DiffSource::Commit { commit, .. } => {
-                        format!("Diff ({})", &commit[..commit.len().min(7)])
-                    }
-                    DiffSource::CompareWithLocal { commit, .. } => {
-                        format!("Diff (Local ↔ {})", &commit[..commit.len().min(7)])
-                    }
-                    DiffSource::CompareCommits { from, to, .. } => format!(
-                        "Diff ({} ↔ {})",
-                        &from[..from.len().min(7)],
-                        &to[..to.len().min(7)]
-                    ),
-                    DiffSource::Files { .. } => diff
-                        .path
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&diff.path)
-                        .to_string(),
+            TabKind::Image(img) => img
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Image".to_string()),
+            TabKind::Diff(diff) => match &diff.source {
+                DiffSource::Worktree { .. } => "Working Tree Diff".to_string(),
+                DiffSource::Commit { commit, .. } => {
+                    format!("Diff ({})", &commit[..commit.len().min(7)])
                 }
-            }
+                DiffSource::CompareWithLocal { commit, .. } => {
+                    format!("Diff (Local ↔ {})", &commit[..commit.len().min(7)])
+                }
+                DiffSource::CompareCommits { from, to, .. } => format!(
+                    "Diff ({} ↔ {})",
+                    &from[..from.len().min(7)],
+                    &to[..to.len().min(7)]
+                ),
+                DiffSource::Files { .. } => diff
+                    .path
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&diff.path)
+                    .to_string(),
+            },
         }
     }
     pub fn path(&self) -> Option<&str> {
         match &self.kind {
             TabKind::File(file) => file.doc.path.to_str(),
             TabKind::Diff(diff) => Some(diff.path.as_str()),
+            TabKind::Image(img) => img.path.to_str(),
             TabKind::Compare(_) => None,
         }
     }
-
     pub fn is_dirty(&self) -> bool {
         matches!(&self.kind, TabKind::File(file) if file.doc.dirty)
     }
@@ -429,6 +488,11 @@ impl WorktreeState {
                 }
             })
     }
+    pub fn is_git_ignored(&self, rel_path: &std::path::Path) -> bool {
+        self.git
+            .as_ref()
+            .is_some_and(|git| is_snapshot_ignored(git, rel_path))
+    }
 
     /// Load the tree/git/watcher state of one checkout without spawning a
     /// console. Callers attach consoles afterwards via `open_terminal_in`.
@@ -464,7 +528,7 @@ impl WorktreeState {
 }
 
 /// Filter state of the Git log view (persisted per project until changed).
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LogQuery {
     /// Substring/`.*/Cc` commit search (client-side).
     pub text: String,
@@ -487,6 +551,25 @@ pub struct LogQuery {
     /// Case sensitivity of `text`; and regex flag.
     pub use_regex: bool,
     pub case_sensitive: bool,
+}
+
+impl Default for LogQuery {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            branch: String::new(),
+            author: String::new(),
+            path: String::new(),
+            since: 0,
+            date: DatePreset::All,
+            all_refs: true,
+            first_parent: false,
+            no_merges: false,
+            topo_order: false,
+            use_regex: false,
+            case_sensitive: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -542,6 +625,7 @@ pub struct ProjectState {
     pub initials: String,
     pub tone: (u8, u8, u8),
     pub tree: FileTree,
+    pub root_expanded: bool,
     pub expanded: HashSet<PathBuf>,
     pub git: Option<RepoSnapshot>,
     pub git_error: Option<String>,
@@ -558,6 +642,7 @@ pub struct ProjectState {
     pub ref_selection: Vec<String>,
     pub favorites: std::collections::HashSet<String>,
     pub commit_file_dirs_expanded: std::collections::HashSet<String>,
+    pub commit_files_root_collapsed: bool,
     pub tags: Vec<String>,
     /// HEAD anchor of each tag (short hash), for the tags rows.
     pub tag_targets: Vec<(String, String)>,
@@ -636,7 +721,8 @@ impl ProjectState {
             .unwrap_or_else(|| root.display().to_string());
         let initials = initials_of(&name);
         let tone = tone_for(&root);
-        let tree = load_tree(&root);
+        let tree =
+            lazecode_fs::tree::load_tree_filtered(&root, 20_000, Some(&settings.ignored_patterns));
         let watcher = lazecode_fs::watch_project(&root).ok();
         let (git, git_error) = match lazecode_git::snapshot(&root) {
             Ok(snapshot) => (Some(snapshot), None),
@@ -651,7 +737,13 @@ impl ProjectState {
         };
         let (log, branches, log_error) = if git.is_some() {
             match (
-                lazecode_git::log(&root, LogOptions::default()),
+                lazecode_git::log(
+                    &root,
+                    LogOptions {
+                        all_refs: true,
+                        ..LogOptions::default()
+                    },
+                ),
                 lazecode_git::branches(&root),
             ) {
                 (Ok(mut log), Ok(branches)) => {
@@ -674,6 +766,7 @@ impl ProjectState {
             initials,
             tone,
             tree,
+            root_expanded: true,
             expanded: HashSet::new(),
             git,
             git_error,
@@ -686,6 +779,7 @@ impl ProjectState {
             ref_selection: Vec::new(),
             favorites: std::collections::HashSet::new(),
             commit_file_dirs_expanded: std::collections::HashSet::new(),
+            commit_files_root_collapsed: false,
             tags: Vec::new(),
             tag_targets: Vec::new(),
             remotes: Vec::new(),
@@ -742,6 +836,14 @@ impl ProjectState {
         }
         Ok(project)
     }
+    pub fn reload_tree(&mut self, settings: &Settings) {
+        self.tree = lazecode_fs::tree::load_tree_with_expanded(
+            &self.root,
+            Some(&self.expanded),
+            20_000,
+            Some(&settings.ignored_patterns),
+        );
+    }
 
     pub fn branch(&self) -> String {
         self.git
@@ -761,6 +863,26 @@ impl ProjectState {
             .as_ref()
             .map(|git| git.changes.as_slice())
             .unwrap_or(&[])
+    }
+
+    pub fn ignored_files(&self) -> &[String] {
+        self.git
+            .as_ref()
+            .map(|git| git.ignored_files.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn ignored_dirs(&self) -> &[String] {
+        self.git
+            .as_ref()
+            .map(|git| git.ignored_dirs.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn is_git_ignored(&self, rel_path: &std::path::Path) -> bool {
+        self.git
+            .as_ref()
+            .is_some_and(|git| is_snapshot_ignored(git, rel_path))
     }
 
     pub fn checked_changes(&self) -> Vec<String> {
@@ -1001,24 +1123,46 @@ impl ProjectState {
         // macOS temp paths (/var) are symlinked to /private/var; compare the
         // canonical form so the same file never opens twice.
         let path = path.canonicalize().unwrap_or(path);
-        if let Some(tab) = self
-            .tabs
-            .iter()
-            .find(|tab| matches!(&tab.kind, TabKind::File(file) if file.doc.path == path))
-        {
+        if let Some(tab) = self.tabs.iter().find(|tab| match &tab.kind {
+            TabKind::File(file) => file.doc.path == path,
+            TabKind::Image(img) => img.path == path,
+            _ => false,
+        }) {
             self.active_tab = Some(tab.id);
             return Ok(tab.id);
         }
-        let doc = Document::open(&path, settings.editor.tab_width, settings.editor.use_spaces)
-            .map_err(|err| err.to_string())?;
         let id = NEXT_TAB.fetch_add(1, Ordering::Relaxed);
         let external = !path.starts_with(&self.root);
+        if is_image_path(&path) {
+            self.tabs.push(Tab {
+                id,
+                kind: TabKind::Image(ImageTab {
+                    path: path.clone(),
+                    external,
+                }),
+            });
+            self.active_tab = Some(id);
+            self.expand_parents(&path);
+            return Ok(id);
+        }
+        let doc = Document::open(&path, settings.editor.tab_width, settings.editor.use_spaces)
+            .map_err(|err| err.to_string())?;
+        let is_md = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown")
+            });
         self.tabs.push(Tab {
             id,
             kind: TabKind::File(FileTab {
                 doc,
                 external,
-                md_mode: MarkdownViewMode::Code,
+                md_mode: if is_md {
+                    MarkdownViewMode::Preview
+                } else {
+                    MarkdownViewMode::Code
+                },
                 annotate: false,
                 blame: None,
             }),
@@ -1029,6 +1173,25 @@ impl ProjectState {
     }
 
     pub fn open_diff_source(&mut self, source: DiffSource) -> u64 {
+        let is_img = match &source {
+            DiffSource::Worktree { path }
+            | DiffSource::Commit { path, .. }
+            | DiffSource::CompareWithLocal { path, .. }
+            | DiffSource::CompareCommits { path, .. } => is_image_path(std::path::Path::new(path)),
+            DiffSource::Files { new_path, .. } => is_image_path(new_path),
+        };
+        if is_img {
+            let path_buf = match &source {
+                DiffSource::Worktree { path }
+                | DiffSource::Commit { path, .. }
+                | DiffSource::CompareWithLocal { path, .. }
+                | DiffSource::CompareCommits { path, .. } => self.root.join(path),
+                DiffSource::Files { new_path, .. } => new_path.clone(),
+            };
+            if let Ok(id) = self.open_file(path_buf, &Settings::default()) {
+                return id;
+            }
+        }
         // 完全同源（同提交同文件）：只激活不重置，避免重复加载与后台任务
         // 去重（同 key 会被丢弃）竞争导致永远转圈。
         if let Some(tab) = self.tabs.iter().find(|tab| match &tab.kind {
@@ -1405,6 +1568,7 @@ pub struct AppModel {
     pub version: &'static str,
     /// Favorite local branches the branch tree decorates/pins.
     pub favorite_branches: HashSet<String>,
+    pub git_cmd_log: Vec<String>,
 }
 
 impl AppModel {
@@ -1423,6 +1587,12 @@ impl AppModel {
                     Some("consoles") => SidebarView::Consoles,
                     _ => SidebarView::Files,
                 },
+                terminal_placement: match workspace.terminal_placement.as_deref() {
+                    Some("right") => TerminalPlacement::Right,
+                    _ => TerminalPlacement::Bottom,
+                },
+                terminal_width: workspace.terminal_width.unwrap_or(480.0),
+                git_subtab: GitSubtab::Log,
                 ..Default::default()
             },
             settings,
@@ -1435,6 +1605,7 @@ impl AppModel {
             should_quit: false,
             version: env!("CARGO_PKG_VERSION"),
             favorite_branches: workspace.favorite_branches.iter().cloned().collect(),
+            git_cmd_log: Vec::new(),
         };
         model.restore_workspace(workspace);
         if model.projects.is_empty() {
@@ -1474,6 +1645,9 @@ impl AppModel {
                     self.projects[*index].active_worktree = worktree_index;
                 }
             }
+            if let Some(draft) = workspace.commit_drafts.get(path) {
+                self.projects[*index].commit_message = draft.clone();
+            }
         }
         if self.active_project.is_none() {
             self.active_project = if self.projects.is_empty() {
@@ -1492,6 +1666,20 @@ impl AppModel {
     pub fn active_project_mut(&mut self) -> Option<&mut ProjectState> {
         self.active_project
             .and_then(|index| self.projects.get_mut(index))
+    }
+    pub fn reload_active_tree(&mut self) {
+        let Some(active) = self.active_project else {
+            return;
+        };
+        let ignored = self.settings.ignored_patterns.clone();
+        if let Some(project) = self.projects.get_mut(active) {
+            project.tree = lazecode_fs::tree::load_tree_with_expanded(
+                &project.root,
+                Some(&project.expanded),
+                20_000,
+                Some(&ignored),
+            );
+        }
     }
 
     pub fn project_at(&self, index: usize) -> Option<&ProjectState> {
@@ -1621,6 +1809,38 @@ impl AppModel {
             .map(|project| project.changes().len())
             .sum()
     }
+    /// 定位当前活动编辑器标签在文件树中的位置（对齐稳定版 locateActiveInTree 逻辑）。
+    /// quiet = true：切换标签时自动跟随（不产生刺眼闪烁，滚动到可见区域）；
+    /// quiet = false：手动点击定位按钮触发（中心对齐并带高亮闪烁动画）。
+    pub fn locate_active_file(&mut self, quiet: bool) {
+        let Some(active_index) = self.active_project else {
+            return;
+        };
+        let project = &mut self.projects[active_index];
+        let Some(active_tab_id) = project.active_tab else {
+            return;
+        };
+        let Some(tab) = project.tab_by_id(active_tab_id) else {
+            return;
+        };
+        let Some(file_path_str) = tab.path() else {
+            return;
+        };
+        let file_path = std::path::PathBuf::from(file_path_str);
+        project.root_expanded = true;
+        project.expand_parents(&file_path);
+        project.reload_tree(&self.settings);
+
+        let rel = file_path
+            .strip_prefix(&project.root)
+            .unwrap_or(&file_path)
+            .to_path_buf();
+        self.ui.tree_selected = Some(rel.clone());
+        self.ui.tree_reveal = Some((rel.clone(), quiet));
+        if !quiet {
+            self.ui.locate_flash = Some((rel, std::time::Instant::now()));
+        }
+    }
 
     pub fn toggle_theme(&mut self) {
         self.settings.theme = match self.settings.theme {
@@ -1666,26 +1886,47 @@ impl AppModel {
             commit_drawer_width: Some(self.ui.commit_width),
             panel_visible: Some(self.ui.panel_visible),
             panel_height: Some(self.ui.panel_height),
+            terminal_placement: Some(
+                match self.ui.terminal_placement {
+                    TerminalPlacement::Right => "right",
+                    TerminalPlacement::Bottom => "bottom",
+                }
+                .to_string(),
+            ),
+            terminal_width: Some(self.ui.terminal_width),
             open_tabs: BTreeMap::new(),
             active_tabs: BTreeMap::new(),
             active_worktrees: BTreeMap::new(),
             favorite_branches: self.favorite_branches.iter().cloned().collect(),
+            commit_drafts: BTreeMap::new(),
         };
         for project in &self.projects {
+            if !project.commit_message.trim().is_empty() {
+                file.commit_drafts
+                    .insert(project.root.clone(), project.commit_message.clone());
+            }
             let files: Vec<PathBuf> = project
                 .tabs
                 .iter()
                 .filter_map(|tab| match &tab.kind {
                     TabKind::File(file) => Some(file.doc.path.clone()),
+                    TabKind::Image(img) => Some(img.path.clone()),
                     TabKind::Diff(_) | TabKind::Compare(_) => None,
                 })
                 .collect();
             file.open_tabs.insert(project.root.clone(), files);
             if let Some(active) = project.active_tab {
                 if let Some(tab) = project.tab_by_id(active) {
-                    if let TabKind::File(file_tab) = &tab.kind {
-                        file.active_tabs
-                            .insert(project.root.clone(), file_tab.doc.path.clone());
+                    match &tab.kind {
+                        TabKind::File(file_tab) => {
+                            file.active_tabs
+                                .insert(project.root.clone(), file_tab.doc.path.clone());
+                        }
+                        TabKind::Image(img) => {
+                            file.active_tabs
+                                .insert(project.root.clone(), img.path.clone());
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1703,6 +1944,23 @@ impl AppModel {
             .map(|project| project.name.clone())
             .unwrap_or_else(|| "LazeCode".to_string());
         name
+    }
+
+    pub fn log_git_cmd(&mut self, cmd: impl Into<String>) {
+        let time_str = unsafe {
+            let now = libc::time(std::ptr::null_mut());
+            let mut tm: libc::tm = std::mem::zeroed();
+            if !libc::localtime_r(&now, &mut tm).is_null() {
+                format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+            } else {
+                "--:--:--".to_string()
+            }
+        };
+        self.git_cmd_log
+            .push(format!("{time_str}: [lazecode] git {}", cmd.into()));
+        if self.git_cmd_log.len() > 1000 {
+            self.git_cmd_log.drain(0..100);
+        }
     }
 }
 
@@ -1734,4 +1992,24 @@ fn tone_for(path: &Path) -> (u8, u8, u8) {
         hash = hash.wrapping_mul(1099511628211);
     }
     TONES[(hash % TONES.len() as u64) as usize]
+}
+/// Helper to determine if a relative path (or any of its ancestors) is ignored by Git.
+pub fn is_snapshot_ignored(git: &lazecode_git::RepoSnapshot, rel_path: &std::path::Path) -> bool {
+    if rel_path.as_os_str().is_empty() {
+        return false;
+    }
+    let rel_str = rel_path.to_string_lossy().replace('\\', "/");
+    if git.ignored_files.binary_search(&rel_str).is_ok() {
+        return true;
+    }
+    for ancestor in rel_path.ancestors() {
+        if ancestor == rel_path || ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        let anc_str = ancestor.to_string_lossy().replace('\\', "/");
+        if git.ignored_dirs.binary_search(&anc_str).is_ok() {
+            return true;
+        }
+    }
+    false
 }

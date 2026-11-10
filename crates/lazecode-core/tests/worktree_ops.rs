@@ -55,6 +55,7 @@ fn model(project: ProjectState) -> (AppModel, usize) {
         should_quit: false,
         version: "test",
         favorite_branches: HashSet::new(),
+        git_cmd_log: Vec::new(),
     };
     let index = model.add_loaded_project(project);
     (model, index)

@@ -271,6 +271,41 @@ static SVGS: &[(&str, &str, bool)] = &[
         mono!("1.4", "<rect x=\"2\" y=\"3\" width=\"12\" height=\"10\" rx=\"1.2\"/><path d=\"M2 9.6h12\"/><rect x=\"3.1\" y=\"10.7\" width=\"9.8\" height=\"1.6\" rx=\"0.5\" fill=\"#fff\" stroke=\"none\"/>"),
         false,
     ),
+    (
+        "dock_right",
+        mono!("1.4", "<rect x=\"2\" y=\"3\" width=\"12\" height=\"10\" rx=\"1.2\"/><path d=\"M9.6 3v10\"/><rect x=\"10.7\" y=\"4.1\" width=\"2.2\" height=\"7.8\" rx=\"0.6\" fill=\"#fff\" stroke=\"none\"/>"),
+        false,
+    ),
+    (
+        "sort_commits",
+        mono!("1.3", "<path d=\"M3.5 2.5v9M1.8 9l1.7 2.5L5.2 9\"/><path d=\"M7.5 4h6M7.5 7.5h4.5M7.5 11h3\"/>"),
+        false,
+    ),
+    (
+        "commit_graph",
+        mono!("1.2", "<path d=\"M4.5 2v12\"/><circle cx=\"4.5\" cy=\"4\" r=\"1.8\" fill=\"#fff\" stroke=\"none\"/><circle cx=\"4.5\" cy=\"12\" r=\"1.8\" fill=\"#fff\" stroke=\"none\"/><path d=\"M4.5 5.5c3 0 7 1.5 7 3.5v5\"/><circle cx=\"11.5\" cy=\"9\" r=\"1.8\" fill=\"#fff\" stroke=\"none\"/>"),
+        false,
+    ),
+    (
+        "update_arrow",
+        mono!("1.4", "<path d=\"M12.5 3.5L4.2 11.8\"/><path d=\"M4.2 6.8V11.8H9.2\"/>"),
+        false,
+    ),
+    (
+        "file_ignore",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\"><circle cx=\"8\" cy=\"8\" r=\"5.5\" stroke=\"#8c8f96\" stroke-width=\"1.3\" fill=\"none\"/><line x1=\"4.1\" y1=\"4.1\" x2=\"11.9\" y2=\"11.9\" stroke=\"#8c8f96\" stroke-width=\"1.3\" stroke-linecap=\"round\"/></svg>",
+        true,
+    ),
+    (
+        "file_toml",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\"><rect x=\"2\" y=\"2\" width=\"12\" height=\"12\" rx=\"2\" fill=\"#9c4221\"/><path d=\"M3.5 5.5h2.2M4.6 5.5v5M7.2 5.5h2c.8 0 1.2.5 1.2 1.3v2.4c0 .8-.4 1.3-1.2 1.3h-2V5.5zm1 1v3h1c.3 0 .4-.2.4-.4V6.9c0-.2-.1-.4-.4-.4h-1zM11.2 5.5h1.2l.9 2.5.9-2.5h1.2v5h-1V7.3l-.9 2.2h-.4l-.9-2.2v3.2h-1V5.5z\" stroke=\"#fff\" stroke-width=\"0.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/></svg>",
+        true,
+    ),
+    (
+        "file_md",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 16 16\" fill=\"none\"><path d=\"M2.5 11V5.5l2.2 2.5 2.2-2.5V11\" stroke=\"#58a6ff\" stroke-width=\"1.3\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/><path d=\"M11.5 5.5v5.5M9.5 9l2 2 2-2\" stroke=\"#58a6ff\" stroke-width=\"1.3\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>",
+        true,
+    ),
 ];
 
 fn find(name: &str) -> Option<(&'static str, bool)> {

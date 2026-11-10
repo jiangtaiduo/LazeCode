@@ -38,93 +38,122 @@ const DEFAULT_MAX_ENTRIES: usize = 20_000;
 /// If the scan exceeds `max_entries` the result is marked `truncated`; the UI
 /// surfaces that instead of silently pretending the project is complete.
 pub fn load_tree(root: &Path) -> FileTree {
-    load_tree_with_limit(root, DEFAULT_MAX_ENTRIES)
+    load_tree_filtered(root, DEFAULT_MAX_ENTRIES, None)
 }
 
 pub fn load_tree_with_limit(root: &Path, max_entries: usize) -> FileTree {
-    use ignore::WalkBuilder;
+    load_tree_filtered(root, max_entries, None)
+}
 
+pub fn load_tree_filtered(
+    root: &Path,
+    max_entries: usize,
+    custom_ignored: Option<&[String]>,
+) -> FileTree {
+    load_tree_with_expanded(root, None, max_entries, custom_ignored)
+}
+
+pub fn load_tree_with_expanded(
+    root: &Path,
+    expanded: Option<&HashSet<PathBuf>>,
+    max_entries: usize,
+    custom_ignored: Option<&[String]>,
+) -> FileTree {
     let mut tree = FileTree::default();
     if !root.is_dir() {
         return tree;
     }
 
-    // Used both for building and for sorting: folders before files, then
-    // case-insensitive by name.
-    fn insert(nodes: &mut Vec<TreeNode>, components: &[PathBuf], rel: &Path, is_dir: bool) {
-        let Some((first, rest)) = components.split_first() else {
-            return;
+    fn scan_dir_recursive(
+        root: &Path,
+        rel: &Path,
+        expanded: Option<&HashSet<PathBuf>>,
+        custom_ignored: Option<&[String]>,
+        budget: &mut usize,
+        max_entries: usize,
+    ) -> Vec<TreeNode> {
+        let full_dir = if rel.as_os_str().is_empty() {
+            root.to_path_buf()
+        } else {
+            root.join(rel)
         };
-        let name = first
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let folder = !rest.is_empty() || is_dir;
-        let pos = nodes
-            .binary_search_by(|node| {
-                let node_folder = node.kind == NodeKind::Folder;
-                node_folder
-                    .cmp(&folder)
-                    .reverse()
-                    .then_with(|| node.name.to_lowercase().cmp(&name.to_lowercase()))
-                    .then_with(|| node.name.cmp(&name))
-            })
-            .unwrap_or_else(|pos| {
-                nodes.insert(
-                    pos,
-                    TreeNode {
-                        name,
-                        path: rel.to_path_buf(),
-                        kind: if folder {
-                            NodeKind::Folder
-                        } else {
-                            NodeKind::File
-                        },
-                        children: Vec::new(),
-                    },
-                );
-                pos
-            });
-        if !rest.is_empty() {
-            insert(&mut nodes[pos].children, rest, rel, is_dir);
+        let Ok(read_dir) = std::fs::read_dir(&full_dir) else {
+            return Vec::new();
+        };
+
+        let mut children = Vec::new();
+        for entry in read_dir.flatten() {
+            if *budget >= max_entries {
+                break;
+            }
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if crate::is_ignored_pattern(&name, is_dir, custom_ignored) {
+                continue;
+            }
+            *budget += 1;
+            let entry_rel = if rel.as_os_str().is_empty() {
+                PathBuf::from(&*name)
+            } else {
+                rel.join(&*name)
+            };
+            if is_dir {
+                let should_descend = match expanded {
+                    Some(exp) => exp.contains(&entry_rel),
+                    None => name != "target" && name != "dist" && rel.components().count() < 16,
+                };
+                let sub_children = if should_descend {
+                    scan_dir_recursive(
+                        root,
+                        &entry_rel,
+                        expanded,
+                        custom_ignored,
+                        budget,
+                        max_entries,
+                    )
+                } else {
+                    Vec::new()
+                };
+                children.push(TreeNode {
+                    name: name.into_owned(),
+                    path: entry_rel,
+                    kind: NodeKind::Folder,
+                    children: sub_children,
+                });
+            } else {
+                children.push(TreeNode {
+                    name: name.into_owned(),
+                    path: entry_rel,
+                    kind: NodeKind::File,
+                    children: Vec::new(),
+                });
+            }
         }
+
+        children.sort_by(|a, b| {
+            let a_folder = a.kind == NodeKind::Folder;
+            let b_folder = b.kind == NodeKind::Folder;
+            b_folder
+                .cmp(&a_folder)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        children
     }
 
-    let mut count = 0usize;
-    let walker = WalkBuilder::new(root)
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .parents(false)
-        .follow_links(false)
-        .max_depth(Some(64))
-        .filter_entry(|entry| !crate::is_default_ignored(entry.file_name()))
-        .build();
-
-    for entry in walker {
-        let Ok(entry) = entry else { continue };
-        let path = entry.path();
-        if path == root {
-            continue;
-        }
-        let Ok(rel) = path.strip_prefix(root) else {
-            continue;
-        };
-        if rel.components().count() > 64 {
-            continue;
-        }
-        count += 1;
-        if count > max_entries {
-            tree.truncated = true;
-            break;
-        }
-        let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
-        let components: Vec<PathBuf> = rel
-            .components()
-            .map(|component| PathBuf::from(component.as_os_str()))
-            .collect();
-        insert(&mut tree.nodes, &components, rel, is_dir);
+    let mut budget = 0usize;
+    tree.nodes = scan_dir_recursive(
+        root,
+        Path::new(""),
+        expanded,
+        custom_ignored,
+        &mut budget,
+        max_entries,
+    );
+    if budget >= max_entries {
+        tree.truncated = true;
     }
     tree.file_count = crate::file_count(&tree);
     tree
@@ -215,5 +244,17 @@ mod tests {
         let rows = visible_rows(&tree, &expanded);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].depth, 1);
+    }
+    #[test]
+    fn loads_all_root_entries_without_target_truncation() {
+        let repo = Path::new("/Users/qinxl/work/jiangtaiduo/LazeCode");
+        let tree = load_tree_with_expanded(repo, Some(&HashSet::new()), 20_000, None);
+        assert!(!tree.truncated);
+        let names: Vec<&str> = tree.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert!(names.contains(&".gitignore"));
+        assert!(names.contains(&"Cargo.lock"));
+        assert!(names.contains(&"README.md"));
+        assert!(names.contains(&"target"));
+        assert!(names.contains(&".github"));
     }
 }

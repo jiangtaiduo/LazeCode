@@ -264,7 +264,8 @@ pub fn draw_terminal_dock(
     );
     let bar = ui.interact(head, ui.scope_id().with("term-head-bar"), Sense::click());
     if bar.double_clicked() {
-        model.ui.panel_maximised = !model.ui.panel_maximised;
+        model.ui.terminal_maximised = !model.ui.terminal_maximised;
+        model.save_workspace();
     }
     let Some(index) = model.active_project else {
         draw_empty(ui, theme, rect, "No project open");
@@ -407,40 +408,56 @@ pub fn draw_terminal_dock(
     let mut rx = head.right() - 6.0;
     let close_rect =
         Rect::from_center_size(Pos2::new(rx - 10.0, head.center().y), Vec2::splat(20.0));
-    if icon_button(ui, close_rect, Icon::X, false, theme).clicked() {
+    let close_tooltip = crate::tr!(model, "Close", "关闭");
+    if icon_button(ui, close_rect, Icon::X, false, theme)
+        .on_hover_text(close_tooltip)
+        .clicked()
+    {
         model.ui.terminal_visible = false;
     }
     rx -= 24.0;
-    let max_icon = if model.ui.panel_maximised {
+    let max_icon = if model.ui.terminal_maximised {
         Icon::Minimize
     } else {
         Icon::Maximize
     };
+    let max_tooltip = if model.ui.terminal_maximised {
+        crate::tr!(model, "Restore height", "还原高度")
+    } else {
+        crate::tr!(model, "Maximize height", "最大化")
+    };
     let max_rect = Rect::from_center_size(Pos2::new(rx - 10.0, head.center().y), Vec2::splat(20.0));
-    if icon_button(ui, max_rect, max_icon, model.ui.panel_maximised, theme).clicked() {
-        model.ui.panel_maximised = !model.ui.panel_maximised;
+    if icon_button(ui, max_rect, max_icon, model.ui.terminal_maximised, theme)
+        .on_hover_text(max_tooltip)
+        .clicked()
+    {
+        model.ui.terminal_maximised = !model.ui.terminal_maximised;
+        model.save_workspace();
     }
     rx -= 24.0;
-    // 停靠右侧/底部切换：分屏后端未接，先做稳定版图标占位。
+    // 停靠右侧/底部切换：右侧时显示 DockBottom，底部时显示 DockRight
+    let is_right = model.ui.terminal_placement == lazecode_core::TerminalPlacement::Right;
     let dock_rect =
         Rect::from_center_size(Pos2::new(rx - 10.0, head.center().y), Vec2::splat(20.0));
-    paint_icon(
-        ui.painter(),
-        dock_rect.shrink(4.0),
-        Icon::Panel,
-        p.text3.gamma_multiply(0.55),
-    );
-    ui.interact(
-        dock_rect,
-        ui.scope_id().with("term-dock-toggle"),
-        Sense::hover(),
-    )
-    .on_hover_text(crate::tr!(
-        model,
-        "Dock to the right (coming soon)",
-        "停靠到右侧（即将支持）"
-    ));
-
+    let dock_icon = if is_right {
+        Icon::DockBottom
+    } else {
+        Icon::DockRight
+    };
+    let dock_tooltip = if is_right {
+        crate::tr!(model, "Move to bottom", "停靠到底部")
+    } else {
+        crate::tr!(model, "Dock to right", "停靠到右侧")
+    };
+    let dock_resp = icon_button(ui, dock_rect, dock_icon, false, theme).on_hover_text(dock_tooltip);
+    if dock_resp.clicked() {
+        model.ui.terminal_placement = if is_right {
+            lazecode_core::TerminalPlacement::Bottom
+        } else {
+            lazecode_core::TerminalPlacement::Right
+        };
+        model.save_workspace();
+    }
     if let Some(id) = close_terminal {
         model.projects[index].close_terminal(id);
         rt.terminal_snapshots.remove(&id);
@@ -464,6 +481,9 @@ pub fn draw_terminal_dock(
         draw_empty(ui, theme, body, "No consoles open");
         return;
     };
+    if rt.terminal_focus.is_none() && rt.editor_focus.is_none() {
+        rt.set_terminal_focus(id);
+    }
     let Some(terminal) = project.term_by_id(id) else {
         draw_empty(ui, theme, body, "No consoles open");
         return;
@@ -537,60 +557,78 @@ fn draw_git_panel(
     );
 
     let mut tab_x = head.left() + 48.0;
-    // Log subtab (active)
-    let log_rect = Rect::from_min_size(Pos2::new(tab_x, head.top() + 5.0), Vec2::new(42.0, 22.0));
-    // 稳定版 subtab 激活态：填充盒（overlay-hover + border-subtle），非下划线。
-    ui.painter()
-        .rect_filled(log_rect, egui::CornerRadius::same(6), p.hover);
-    ui.painter().rect_stroke(
+    let is_log = model.ui.git_subtab == lazecode_core::GitSubtab::Log;
+
+    // 1. Log subtab
+    let log_rect = Rect::from_min_size(Pos2::new(tab_x, head.top() + 5.0), Vec2::new(44.0, 22.0));
+    let log_resp = ui.interact(
         log_rect,
-        egui::CornerRadius::same(6),
-        Stroke::new(1.0, p.border_soft),
-        StrokeKind::Inside,
+        ui.scope_id().with("git-subtab-log"),
+        Sense::click(),
     );
+    if is_log {
+        ui.painter()
+            .rect_filled(log_rect, egui::CornerRadius::same(6), p.hover);
+        ui.painter().rect_stroke(
+            log_rect,
+            egui::CornerRadius::same(6),
+            Stroke::new(1.0, p.border_soft),
+            StrokeKind::Inside,
+        );
+    } else if log_resp.hovered() {
+        ui.painter().rect_filled(
+            log_rect,
+            egui::CornerRadius::same(6),
+            p.hover.gamma_multiply(0.5),
+        );
+    }
     ui.painter().text(
         log_rect.center(),
         Align2::CENTER_CENTER,
         crate::tr!(model, "Log", "日志"),
         FontId::proportional(12.0),
-        p.text,
+        if is_log { p.text } else { p.text3 },
     );
-    tab_x += 46.0;
+    if log_resp.clicked() {
+        model.ui.git_subtab = lazecode_core::GitSubtab::Log;
+    }
+    tab_x += 48.0;
 
-    // （稳定版 git 头部还有 Console 子页签 = git 调用日志；本版无此
-    // 数据源，先不渲染，避免出现死页签。）
-    let _ = tab_x;
-    let scope = model
-        .active_project()
-        .and_then(|project| project.log_branch.clone())
-        .unwrap_or_else(|| crate::tr!(model, "All branches", "所有分支").to_string());
-    let scope_rect = Rect::from_min_size(
-        Pos2::new(tab_x, head.top() + 5.0),
-        Vec2::new((scope.chars().count() as f32 * 6.2 + 38.0).min(240.0), 23.0),
+    // 2. Console subtab (Git commands log)
+    let console_rect =
+        Rect::from_min_size(Pos2::new(tab_x, head.top() + 5.0), Vec2::new(66.0, 22.0));
+    let console_resp = ui.interact(
+        console_rect,
+        ui.scope_id().with("git-subtab-console"),
+        Sense::click(),
     );
-    ui.painter()
-        .rect_filled(scope_rect, egui::CornerRadius::same(5), p.panel2);
-    paint_icon(
-        ui.painter(),
-        Rect::from_center_size(
-            Pos2::new(scope_rect.left() + 11.0, scope_rect.center().y),
-            Vec2::splat(11.0),
-        ),
-        Icon::Worktree,
-        p.text3,
+    let is_console = model.ui.git_subtab == lazecode_core::GitSubtab::Console;
+    if is_console {
+        ui.painter()
+            .rect_filled(console_rect, egui::CornerRadius::same(6), p.hover);
+        ui.painter().rect_stroke(
+            console_rect,
+            egui::CornerRadius::same(6),
+            Stroke::new(1.0, p.border_soft),
+            StrokeKind::Inside,
+        );
+    } else if console_resp.hovered() {
+        ui.painter().rect_filled(
+            console_rect,
+            egui::CornerRadius::same(6),
+            p.hover.gamma_multiply(0.5),
+        );
+    }
+    ui.painter().text(
+        console_rect.center(),
+        Align2::CENTER_CENTER,
+        "Console",
+        FontId::proportional(12.0),
+        if is_console { p.text } else { p.text3 },
     );
-    text_clipped(
-        ui.painter(),
-        Rect::from_min_max(
-            Pos2::new(scope_rect.left() + 20.0, scope_rect.top()),
-            Pos2::new(scope_rect.right() - 6.0, scope_rect.bottom()),
-        ),
-        &scope,
-        FontId::proportional(10.0),
-        p.text3,
-        Align2::LEFT_CENTER,
-    );
-
+    if console_resp.clicked() {
+        model.ui.git_subtab = lazecode_core::GitSubtab::Console;
+    }
     let mut rx = head.right() - 6.0;
     let close_rect = Rect::from_min_size(Pos2::new(rx - 24.0, head.top() + 4.0), Vec2::splat(24.0));
     if icon_button(ui, close_rect, Icon::X, false, theme).clicked() {
@@ -617,7 +655,52 @@ fn draw_git_panel(
         draw_empty(ui, theme, body, "No project open");
         return;
     };
-    draw_git_log(ui, model, rt, theme, body, index);
+    if is_console {
+        draw_git_console(ui, model, theme, body);
+    } else {
+        draw_git_log(ui, model, rt, theme, body, index);
+    }
+}
+
+fn draw_git_console(ui: &mut Ui, model: &AppModel, theme: &Theme, body: Rect) {
+    let p = theme.palette;
+    ui.painter().rect_filled(body, 0.0, p.terminal_bg);
+    super::app_ui::region(ui, body.shrink(10.0), "git-console-region", |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("git-console-scroll")
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                if model.git_cmd_log.is_empty() {
+                    let (row, _) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::hover());
+                    ui.painter().text(
+                        row.left_top(),
+                        Align2::LEFT_TOP,
+                        crate::tr!(
+                            model,
+                            "No Git commands recorded in this session yet.",
+                            "暂无 Git 调用记录"
+                        ),
+                        FontId::monospace(11.5),
+                        p.text3,
+                    );
+                } else {
+                    for line in &model.git_cmd_log {
+                        let (row, _) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 18.0),
+                            Sense::hover(),
+                        );
+                        ui.painter().text(
+                            row.left_top(),
+                            Align2::LEFT_TOP,
+                            line,
+                            FontId::monospace(11.0),
+                            p.text,
+                        );
+                    }
+                }
+            });
+    });
 }
 
 fn draw_git_log(
@@ -816,39 +899,86 @@ fn draw_git_log(
         }
     }
 
-    // Filter bar.
-    let filter_offset = if banner_visible { 24.0 } else { 0.0 };
-    let filter = Rect::from_min_size(
-        Pos2::new(rect.left(), rect.top() + filter_offset),
-        Vec2::new(rect.width(), 30.0),
+    let body_offset = if banner_visible { 24.0 } else { 0.0 };
+    let body = Rect::from_min_max(Pos2::new(rect.left(), rect.top() + body_offset), rect.max);
+
+    // 1. Column 1: Vertical tool strip on the far left (30.0px wide, exactly matching stable branch-vertical-toolbar)
+    let toolbar_w = 30.0;
+    let toolbar_rect = Rect::from_min_size(body.min, Vec2::new(toolbar_w, body.height()));
+
+    // 2. Column 2: Branch tree column
+    let show_branches = model.ui.git_branches_visible && body.width() > 500.0;
+    let branch_w = if show_branches {
+        model.ui.git_branches_width.clamp(140.0, 360.0)
+    } else {
+        0.0
+    };
+    let branch_rect = Rect::from_min_size(
+        Pos2::new(toolbar_rect.right(), body.top()),
+        Vec2::new(branch_w, body.height()),
     );
+
+    // 3. Column 4: Commit details & changed files column
+    let show_detail = model.ui.git_details_visible && details.is_some() && body.width() > 700.0;
+    let detail_w = if show_detail {
+        model.ui.git_details_width.clamp(220.0, 500.0)
+    } else {
+        0.0
+    };
+    let detail_rect = Rect::from_min_max(Pos2::new(body.right() - detail_w, body.top()), body.max);
+
+    // 4. Column 3: Center commits column (contains filter bar at top, and commit log table below)
+    let commits_left = if show_branches {
+        branch_rect.right()
+    } else {
+        toolbar_rect.right()
+    };
+    let commits_right = if show_detail {
+        detail_rect.left()
+    } else {
+        body.right()
+    };
+    let commits_col = Rect::from_min_max(
+        Pos2::new(commits_left, body.top()),
+        Pos2::new(commits_right, body.bottom()),
+    );
+
+    // Filter bar lives strictly at the top of Column 3 (Commits column), exactly matching stable git-filter-bar!
+    let filter = Rect::from_min_size(commits_col.min, Vec2::new(commits_col.width(), 30.0));
+    let list_rect = Rect::from_min_max(
+        Pos2::new(commits_col.left(), filter.bottom()),
+        commits_col.max,
+    );
+
     ui.painter().rect_filled(filter, 0.0, p.panel);
     ui.painter().hline(
         filter.x_range(),
         filter.bottom() - 0.5,
         Stroke::new(1.0, p.border_soft),
     );
+    let search_w = (filter.width() * 0.30).clamp(150.0, 210.0);
     let search_rect = Rect::from_min_size(
-        Pos2::new(filter.left() + 12.0, filter.top() + 4.0),
-        Vec2::new((filter.width() * 0.34).clamp(140.0, 320.0), 22.0),
+        Pos2::new(filter.left() + 8.0, filter.top() + 4.0),
+        Vec2::new(search_w, 22.0),
     );
     ui.painter()
         .rect_filled(search_rect, egui::CornerRadius::same(5), p.panel2);
     paint_icon(
         ui.painter(),
         Rect::from_center_size(
-            Pos2::new(search_rect.left() + 12.0, search_rect.center().y),
+            Pos2::new(search_rect.left() + 11.0, search_rect.center().y),
             Vec2::splat(11.0),
         ),
         Icon::Search,
         p.text3,
     );
+    let field_rect = Rect::from_min_max(
+        Pos2::new(search_rect.left() + 22.0, search_rect.top() + 2.0),
+        Pos2::new(search_rect.right() - 42.0, search_rect.bottom() - 2.0),
+    );
     let mut query_value = query.text.clone();
     let response = ui.put(
-        Rect::from_min_max(
-            Pos2::new(search_rect.left() + 22.0, search_rect.top() + 2.0),
-            Pos2::new(search_rect.right() - 6.0, search_rect.bottom() - 2.0),
-        ),
+        field_rect,
         TextEdit::singleline(&mut query_value)
             .frame(egui::Frame::NONE)
             .hint_text(crate::tr!(
@@ -856,41 +986,38 @@ fn draw_git_log(
                 "Filter commits, authors, refs",
                 "过滤提交、作者、引用"
             ))
-            .font(FontId::proportional(12.5)),
+            .font(FontId::proportional(12.0)),
     );
     if response.changed() {
         model.projects[index].log_query.text = query_value;
     }
-    // Text filter option toggles: plugin anchors right of the search box.
-    let mut button_x = search_rect.right() + 8.0;
+
     let draw_toggle = |ui: &mut Ui, rect: Rect, text: &str, active: bool, tooltip: &str| -> bool {
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(4), p.panel2);
         if active {
-            ui.painter().rect_stroke(
-                rect,
-                egui::CornerRadius::same(4),
-                Stroke::new(1.0, p.accent),
-                egui::StrokeKind::Inside,
-            );
+            ui.painter()
+                .rect_filled(rect, egui::CornerRadius::same(3), p.active);
         }
         ui.painter().text(
             rect.center(),
             Align2::CENTER_CENTER,
             text,
-            FontId::monospace(11.0),
+            FontId::monospace(10.5),
             if active { p.accent } else { p.text3 },
         );
-        ui.interact(
+        let resp = ui.interact(
             rect,
             ui.scope_id().with(("logtoggle", tooltip)),
             Sense::click(),
-        )
-        .clicked()
+        );
+        if resp.hovered() {
+            resp.show_tooltip_text(tooltip);
+        }
+        resp.clicked()
     };
-    let regex_rect = Rect::from_min_size(
-        Pos2::new(button_x, filter.top() + 4.5),
-        Vec2::new(30.0, 21.0),
+
+    let regex_rect = Rect::from_center_size(
+        Pos2::new(search_rect.right() - 30.0, search_rect.center().y),
+        Vec2::splat(18.0),
     );
     if draw_toggle(
         ui,
@@ -905,10 +1032,9 @@ fn draw_git_log(
     ) {
         model.projects[index].log_query.use_regex = !query.use_regex;
     }
-    button_x += 34.0;
-    let case_rect = Rect::from_min_size(
-        Pos2::new(button_x, filter.top() + 4.5),
-        Vec2::new(30.0, 21.0),
+    let case_rect = Rect::from_center_size(
+        Pos2::new(search_rect.right() - 11.0, search_rect.center().y),
+        Vec2::splat(18.0),
     );
     if draw_toggle(
         ui,
@@ -923,12 +1049,76 @@ fn draw_git_log(
     ) {
         model.projects[index].log_query.case_sensitive = !query.case_sensitive;
     }
-    button_x += 38.0;
-    // Branch filter menu.
-    let branch_menu_rect = Rect::from_min_size(
-        Pos2::new(button_x, filter.top() + 4.5),
-        Vec2::new(96.0, 21.0),
+    let mut button_x = search_rect.right() + 6.0;
+    // Compute right action buttons first to establish right boundary for filter chips
+    let mut frx = filter.right() - 6.0;
+    let refresh_rect =
+        Rect::from_min_size(Pos2::new(frx - 20.0, filter.top() + 5.0), Vec2::splat(20.0));
+    let refresh_resp = icon_button(ui, refresh_rect, Icon::Refresh, false, theme);
+    if refresh_resp.hovered() {
+        refresh_resp.show_tooltip_text(crate::tr!(model, "Refresh Log", "刷新日志"));
+    }
+    if refresh_resp.clicked() {
+        model.queue(Command::RefreshLog);
+    }
+    frx -= 22.0;
+
+    let graph_rect =
+        Rect::from_min_size(Pos2::new(frx - 20.0, filter.top() + 5.0), Vec2::splat(20.0));
+    let graph_resp = icon_button(
+        ui,
+        graph_rect,
+        Icon::Graph,
+        model.ui.git_log_show_graph,
+        theme,
     );
+    if graph_resp.hovered() {
+        graph_resp.show_tooltip_text(crate::tr!(model, "Toggle Commit Graph", "显示/隐藏提交树"));
+    }
+    if graph_resp.clicked() {
+        model.ui.git_log_show_graph = !model.ui.git_log_show_graph;
+    }
+    frx -= 22.0;
+
+    let sort_rect =
+        Rect::from_min_size(Pos2::new(frx - 20.0, filter.top() + 5.0), Vec2::splat(20.0));
+    let sort_active = query.topo_order || query.first_parent || query.no_merges;
+    let sort_resp = icon_button(ui, sort_rect, Icon::Sort, sort_active, theme);
+    if sort_resp.hovered() {
+        sort_resp.show_tooltip_text(crate::tr!(model, "Sort and Log Options", "排序与日志选项"));
+    }
+    if sort_resp.clicked() {
+        rt.toggle_menu(
+            crate::runtime::MenuKind::LogSortOptions { project: index },
+            sort_rect,
+            None,
+        );
+    }
+    frx -= 26.0;
+
+    let count_text = if model.projects[index].log_paging {
+        if model.settings.language.is_zh() {
+            format!("{} 个提交...", log.len())
+        } else {
+            format!("{} commits...", log.len())
+        }
+    } else if model.settings.language.is_zh() {
+        format!("{} 个提交", log.len())
+    } else {
+        format!("{} commits", log.len())
+    };
+    let gal = ui
+        .painter()
+        .layout_no_wrap(count_text, FontId::monospace(10.0), p.text3);
+    let count_w = gal.size().x;
+    ui.painter().galley(
+        Pos2::new(frx - count_w, filter.center().y - gal.size().y * 0.5),
+        gal,
+        p.text3,
+    );
+    let max_chip_right = frx - count_w - 10.0;
+
+    // Branch filter menu
     let branch_label = if query.all_refs {
         if model.settings.language.is_zh() {
             "全部分支".to_string()
@@ -940,31 +1130,39 @@ fn draw_git_log(
     } else {
         format!("⎇ {}", query.branch)
     };
-    ui.painter()
-        .rect_filled(branch_menu_rect, egui::CornerRadius::same(4), p.panel2);
-    ui.painter().text(
-        branch_menu_rect.center(),
-        Align2::CENTER_CENTER,
-        &branch_label,
-        FontId::proportional(12.0),
-        p.text2,
-    );
-    let branch_menu_open = ui
-        .interact(
-            branch_menu_rect,
-            ui.scope_id().with("log-branch-menu"),
-            Sense::click(),
-        )
-        .clicked();
-    if branch_menu_open {
-        rt.toggle_menu(
-            crate::runtime::MenuKind::LogBranchFilter { project: index },
-            branch_menu_rect,
-            None,
+    let branch_w = (branch_label.chars().count() as f32 * 7.0 + 20.0).clamp(76.0, 140.0);
+    if button_x + branch_w <= max_chip_right {
+        let branch_menu_rect = Rect::from_min_size(
+            Pos2::new(button_x, filter.top() + 4.5),
+            Vec2::new(branch_w, 21.0),
         );
+        ui.painter()
+            .rect_filled(branch_menu_rect, egui::CornerRadius::same(4), p.panel2);
+        ui.painter().text(
+            branch_menu_rect.center(),
+            Align2::CENTER_CENTER,
+            &branch_label,
+            FontId::proportional(12.0),
+            p.text2,
+        );
+        let branch_menu_open = ui
+            .interact(
+                branch_menu_rect,
+                ui.scope_id().with("log-branch-menu"),
+                Sense::click(),
+            )
+            .clicked();
+        if branch_menu_open {
+            rt.toggle_menu(
+                crate::runtime::MenuKind::LogBranchFilter { project: index },
+                branch_menu_rect,
+                None,
+            );
+        }
+        button_x += branch_w + 6.0;
     }
-    // Author chip: opens the same menu kind; the overlay presents its payload
-    // rows as author names (payload format: newline-separated names).
+
+    // Author chip
     let authors: Vec<String> = {
         let mut set = std::collections::BTreeSet::new();
         for commit in log.iter() {
@@ -972,7 +1170,6 @@ fn draw_git_log(
         }
         set.into_iter().take(24).collect()
     };
-    button_x += branch_menu_rect.width() + 6.0;
     let author_label = if query.author.is_empty() {
         if model.settings.language.is_zh() {
             "👤 全部作者".to_string()
@@ -982,41 +1179,42 @@ fn draw_git_log(
     } else {
         format!("👤 {}", query.author)
     };
-    let author_rect = Rect::from_min_size(
-        Pos2::new(button_x, filter.top() + 4.5),
-        Vec2::new(
-            (author_label.chars().count() as f32 * 7.0 + 26.0).clamp(96.0, 190.0),
-            21.0,
-        ),
-    );
-    ui.painter()
-        .rect_filled(author_rect, egui::CornerRadius::same(4), p.panel2);
-    ui.painter().text(
-        author_rect.center(),
-        Align2::CENTER_CENTER,
-        &author_label,
-        FontId::proportional(12.0),
-        if query.author.is_empty() {
-            p.text2
-        } else {
-            p.accent
-        },
-    );
-    let author_open = ui
-        .interact(
-            author_rect,
-            ui.scope_id().with("log-author-chip"),
-            Sense::click(),
-        )
-        .clicked();
-    if author_open {
-        rt.toggle_menu(
-            crate::runtime::MenuKind::LogBranchFilter { project: index },
-            author_rect,
-            Some(authors.join("\n")),
+    let author_w = (author_label.chars().count() as f32 * 7.0 + 20.0).clamp(86.0, 160.0);
+    if button_x + author_w <= max_chip_right {
+        let author_rect = Rect::from_min_size(
+            Pos2::new(button_x, filter.top() + 4.5),
+            Vec2::new(author_w, 21.0),
         );
+        ui.painter()
+            .rect_filled(author_rect, egui::CornerRadius::same(4), p.panel2);
+        ui.painter().text(
+            author_rect.center(),
+            Align2::CENTER_CENTER,
+            &author_label,
+            FontId::proportional(12.0),
+            if query.author.is_empty() {
+                p.text2
+            } else {
+                p.accent
+            },
+        );
+        let author_open = ui
+            .interact(
+                author_rect,
+                ui.scope_id().with("log-author-chip"),
+                Sense::click(),
+            )
+            .clicked();
+        if author_open {
+            rt.toggle_menu(
+                crate::runtime::MenuKind::LogBranchFilter { project: index },
+                author_rect,
+                Some(authors.join("\n")),
+            );
+        }
+        button_x += author_w + 6.0;
     }
-    // Author pick consumed one frame after the menu closes.
+
     if model.ui.log_author_pick.is_some() {
         let (pick_project, picked) = model.ui.log_author_pick.take().expect("checked above");
         if pick_project == index {
@@ -1027,53 +1225,53 @@ fn draw_git_log(
             model.queue(Command::LogFilterChanged);
         }
     }
-    button_x += author_rect.width() + 6.0;
 
     // Date filter chip
     let date_label = match query.date {
         lazecode_core::DatePreset::All => crate::tr!(model, "Date ▾", "日期 ▾").to_string(),
         lazecode_core::DatePreset::Today => crate::tr!(model, "Today", "今天").to_string(),
-        lazecode_core::DatePreset::Week => crate::tr!(model, "This Week", "本周").to_string(),
-        lazecode_core::DatePreset::Month => crate::tr!(model, "This Month", "本月").to_string(),
+        lazecode_core::DatePreset::Week => {
+            crate::tr!(model, "Last 7 days", "最近 7 天").to_string()
+        }
+        lazecode_core::DatePreset::Month => {
+            crate::tr!(model, "Last 30 days", "最近 30 天").to_string()
+        }
     };
-    let date_rect = Rect::from_min_size(
-        Pos2::new(button_x, filter.top() + 4.5),
-        Vec2::new(
-            (date_label.chars().count() as f32 * 7.0 + 20.0).clamp(65.0, 110.0),
-            21.0,
-        ),
-    );
-    ui.painter()
-        .rect_filled(date_rect, egui::CornerRadius::same(4), p.panel2);
-    ui.painter().text(
-        date_rect.center(),
-        Align2::CENTER_CENTER,
-        &date_label,
-        FontId::proportional(12.0),
-        if query.date == lazecode_core::DatePreset::All {
-            p.text2
-        } else {
-            p.accent
-        },
-    );
-    if ui
-        .interact(
-            date_rect,
-            ui.scope_id().with("log-date-chip"),
-            Sense::click(),
-        )
-        .clicked()
-    {
-        let next_date = match query.date {
-            lazecode_core::DatePreset::All => lazecode_core::DatePreset::Today,
-            lazecode_core::DatePreset::Today => lazecode_core::DatePreset::Week,
-            lazecode_core::DatePreset::Week => lazecode_core::DatePreset::Month,
-            lazecode_core::DatePreset::Month => lazecode_core::DatePreset::All,
-        };
-        model.projects[index].log_query.date = next_date;
-        model.queue(Command::LogFilterChanged);
+    let date_w = (date_label.chars().count() as f32 * 7.5 + 20.0).clamp(62.0, 110.0);
+    if button_x + date_w <= max_chip_right {
+        let date_rect = Rect::from_min_size(
+            Pos2::new(button_x, filter.top() + 4.5),
+            Vec2::new(date_w, 21.0),
+        );
+        ui.painter()
+            .rect_filled(date_rect, egui::CornerRadius::same(4), p.panel2);
+        ui.painter().text(
+            date_rect.center(),
+            Align2::CENTER_CENTER,
+            &date_label,
+            FontId::proportional(12.0),
+            if query.date == lazecode_core::DatePreset::All {
+                p.text2
+            } else {
+                p.accent
+            },
+        );
+        if ui
+            .interact(
+                date_rect,
+                ui.scope_id().with("log-date-chip"),
+                Sense::click(),
+            )
+            .clicked()
+        {
+            rt.toggle_menu(
+                crate::runtime::MenuKind::LogDateFilter { project: index },
+                date_rect,
+                None,
+            );
+        }
+        button_x += date_w + 6.0;
     }
-    button_x += date_rect.width() + 6.0;
 
     // Paths filter chip
     let paths_label = if query.path.is_empty() {
@@ -1081,126 +1279,41 @@ fn draw_git_log(
     } else {
         format!("📁 {}", query.path)
     };
-    let paths_rect = Rect::from_min_size(
-        Pos2::new(button_x, filter.top() + 4.5),
-        Vec2::new(
-            (paths_label.chars().count() as f32 * 7.0 + 20.0).clamp(65.0, 130.0),
-            21.0,
-        ),
-    );
-    ui.painter()
-        .rect_filled(paths_rect, egui::CornerRadius::same(4), p.panel2);
-    ui.painter().text(
-        paths_rect.center(),
-        Align2::CENTER_CENTER,
-        &paths_label,
-        FontId::proportional(12.0),
-        if query.path.is_empty() {
-            p.text2
-        } else {
-            p.accent
-        },
-    );
-
-    // Right toolbar buttons in filter bar (Image #1):
-    // Refresh, Compact graph toggle, Sort toggle, and Commit count
-    let mut frx = filter.right() - 8.0;
-    let refresh_rect =
-        Rect::from_min_size(Pos2::new(frx - 20.0, filter.top() + 5.0), Vec2::splat(20.0));
-    let refresh_resp = icon_button(ui, refresh_rect, Icon::Refresh, false, theme);
-    if refresh_resp.hovered() {
-        refresh_resp.show_tooltip_text(crate::tr!(model, "Refresh Log", "刷新日志"));
-    }
-    if refresh_resp.clicked() {
-        model.queue(Command::RefreshLog);
-    }
-    frx -= 24.0;
-
-    let compact_rect =
-        Rect::from_min_size(Pos2::new(frx - 20.0, filter.top() + 5.0), Vec2::splat(20.0));
-    let compact_resp = icon_button(
-        ui,
-        compact_rect,
-        Icon::GitLog,
-        model.ui.git_log_compact,
-        theme,
-    );
-    if compact_resp.hovered() {
-        compact_resp.show_tooltip_text(crate::tr!(model, "Toggle Compact Graph", "切换紧凑图"));
-    }
-    if compact_resp.clicked() {
-        model.ui.git_log_compact = !model.ui.git_log_compact;
-    }
-    frx -= 24.0;
-
-    let sort_rect =
-        Rect::from_min_size(Pos2::new(frx - 20.0, filter.top() + 5.0), Vec2::splat(20.0));
-    let sort_resp = icon_button(ui, sort_rect, Icon::Commit, query.topo_order, theme);
-    if sort_resp.hovered() {
-        sort_resp.show_tooltip_text(if query.topo_order {
-            crate::tr!(model, "Topological Order (Active)", "拓扑排序（已激活）")
-        } else {
-            crate::tr!(model, "Date Order (Active)", "日期排序（已激活）")
-        });
-    }
-    if sort_resp.clicked() {
-        model.projects[index].log_query.topo_order = !query.topo_order;
-        model.queue(Command::LogFilterChanged);
-    }
-    frx -= 28.0;
-
-    ui.painter().text(
-        Pos2::new(frx, filter.center().y),
-        Align2::RIGHT_CENTER,
-        if model.projects[index].log_paging {
-            if model.settings.language.is_zh() {
-                format!("{} 个提交 (加载中...)", log.len())
+    let paths_w = (paths_label.chars().count() as f32 * 7.0 + 18.0).clamp(62.0, 120.0);
+    if button_x + paths_w <= max_chip_right {
+        let paths_rect = Rect::from_min_size(
+            Pos2::new(button_x, filter.top() + 4.5),
+            Vec2::new(paths_w, 21.0),
+        );
+        ui.painter()
+            .rect_filled(paths_rect, egui::CornerRadius::same(4), p.panel2);
+        ui.painter().text(
+            paths_rect.center(),
+            Align2::CENTER_CENTER,
+            &paths_label,
+            FontId::proportional(12.0),
+            if query.path.is_empty() {
+                p.text2
             } else {
-                format!("{} commits (loading...)", log.len())
-            }
-        } else if model.settings.language.is_zh() {
-            format!("{} 个提交", log.len())
-        } else {
-            format!("{} commits", log.len())
-        },
-        FontId::monospace(9.5),
-        p.text3,
-    );
-
-    let area = Rect::from_min_max(Pos2::new(rect.left(), filter.bottom()), rect.max);
-
-    // 1. Column 1: Vertical tool strip on the far left (26px wide)
-    let toolbar_w = 26.0;
-    let toolbar_rect = Rect::from_min_size(area.min, Vec2::new(toolbar_w, area.height()));
-
-    // 2. Column 2: Branch tree column
-    let show_branches = model.ui.git_branches_visible && area.width() > 500.0;
-    let branch_w = if show_branches {
-        model.ui.git_branches_width.clamp(140.0, 360.0)
-    } else {
-        0.0
-    };
-    let branch_rect = Rect::from_min_size(
-        Pos2::new(toolbar_rect.right(), area.top()),
-        Vec2::new(branch_w, area.height()),
-    );
-
-    // 3. Column 4: Commit details & changed files column
-    let show_detail = model.ui.git_details_visible && details.is_some() && area.width() > 700.0;
-    let detail_w = if show_detail {
-        model.ui.git_details_width.clamp(200.0, 500.0)
-    } else {
-        0.0
-    };
-    let detail_rect = Rect::from_min_max(Pos2::new(area.right() - detail_w, area.top()), area.max);
-
-    // 4. Column 3: Center commit log table
-    let list_rect = Rect::from_min_max(
-        Pos2::new(branch_rect.right(), area.top()),
-        Pos2::new(area.right() - detail_w, area.bottom()),
-    );
-
-    // Paint vertical toolbar (PyCharm style)
+                p.accent
+            },
+        );
+        if ui
+            .interact(
+                paths_rect,
+                ui.scope_id().with("log-path-chip"),
+                Sense::click(),
+            )
+            .clicked()
+        {
+            rt.toggle_menu(
+                crate::runtime::MenuKind::LogPathFilter { project: index },
+                paths_rect,
+                Some(query.path.clone()),
+            );
+        }
+    }
+    // Paint vertical toolbar (30px wide, PyCharm style)
     ui.painter().rect_filled(toolbar_rect, 0.0, p.panel);
     ui.painter().vline(
         toolbar_rect.right() - 0.5,
@@ -1208,34 +1321,58 @@ fn draw_git_log(
         Stroke::new(1.0, p.border_soft),
     );
     let mut tb_y = toolbar_rect.top() + 6.0;
+    // Header: "Git"
+    ui.painter().text(
+        Pos2::new(toolbar_rect.center().x, tb_y + 8.0),
+        Align2::CENTER_CENTER,
+        "Git",
+        FontId::proportional(12.0),
+        p.text,
+    );
+    tb_y += 20.0;
+    // Separator 0
+    ui.painter().hline(
+        (toolbar_rect.left() + 7.0)..=(toolbar_rect.right() - 7.0),
+        tb_y + 0.5,
+        Stroke::new(1.0, p.border_soft),
+    );
+    tb_y += 5.0;
 
-    // 1. Collapse / expand branches button
+    // 1. Collapse / expand branches button (« / »)
     let collapse_rect = Rect::from_min_size(
         Pos2::new(toolbar_rect.left() + 3.0, tb_y),
-        Vec2::splat(20.0),
+        Vec2::splat(24.0),
     );
     let collapse_icon = if model.ui.git_branches_visible {
         Icon::DoubleChevronLeft
     } else {
         Icon::DoubleChevronRight
     };
-    if icon_button(ui, collapse_rect, collapse_icon, false, theme).clicked() {
+    let collapse_resp = icon_button(ui, collapse_rect, collapse_icon, false, theme);
+    if collapse_resp.hovered() {
+        collapse_resp.show_tooltip_text(if model.ui.git_branches_visible {
+            crate::tr!(model, "Hide branches", "收起分支列表")
+        } else {
+            crate::tr!(model, "Show branches", "展开分支列表")
+        });
+    }
+    if collapse_resp.clicked() {
         model.ui.git_branches_visible = !model.ui.git_branches_visible;
     }
-    tb_y += 24.0;
+    tb_y += 25.0;
 
-    // Separator
+    // Separator 1
     ui.painter().hline(
-        (toolbar_rect.left() + 4.0)..=(toolbar_rect.right() - 4.0),
-        tb_y + 2.0,
+        (toolbar_rect.left() + 7.0)..=(toolbar_rect.right() - 7.0),
+        tb_y + 0.5,
         Stroke::new(1.0, p.border_soft),
     );
-    tb_y += 6.0;
+    tb_y += 5.0;
 
     // 2. New branch button (+)
     let new_branch_rect = Rect::from_min_size(
         Pos2::new(toolbar_rect.left() + 3.0, tb_y),
-        Vec2::splat(20.0),
+        Vec2::splat(24.0),
     );
     let new_branch_resp = icon_button(ui, new_branch_rect, Icon::Plus, false, theme);
     if new_branch_resp.hovered() {
@@ -1247,26 +1384,32 @@ fn draw_git_log(
             error: None,
         };
     }
-    tb_y += 24.0;
+    tb_y += 25.0;
 
-    // 3. Update / fetch button (↓)
-    let fetch_rect = Rect::from_min_size(
+    // 3. Update selected branch (↓)
+    let update_rect = Rect::from_min_size(
         Pos2::new(toolbar_rect.left() + 3.0, tb_y),
-        Vec2::splat(20.0),
+        Vec2::splat(24.0),
     );
-    let fetch_resp = icon_button(ui, fetch_rect, Icon::ArrowDown, false, theme);
-    if fetch_resp.hovered() {
-        fetch_resp.show_tooltip_text(crate::tr!(model, "Update / Fetch", "更新 / 拉取"));
+    let update_resp = icon_button(ui, update_rect, Icon::UpdateArrow, false, theme);
+    if update_resp.hovered() {
+        update_resp.show_tooltip_text(crate::tr!(
+            model,
+            "Update Selected Branch",
+            "更新选中的分支"
+        ));
     }
-    if fetch_resp.clicked() {
-        model.queue(Command::FetchAll);
+    if update_resp.clicked() {
+        model.queue(Command::Pull {
+            mode: lazecode_git::PullMode::Merge,
+        });
     }
-    tb_y += 24.0;
+    tb_y += 25.0;
 
     // 4. Delete branch button (trash)
     let del_rect = Rect::from_min_size(
         Pos2::new(toolbar_rect.left() + 3.0, tb_y),
-        Vec2::splat(20.0),
+        Vec2::splat(24.0),
     );
     let del_resp = icon_button(ui, del_rect, Icon::Trash, false, theme);
     if del_resp.hovered() {
@@ -1286,29 +1429,120 @@ fn draw_git_log(
             }
         }
     }
-    tb_y += 24.0;
+    tb_y += 25.0;
 
-    // 5. Compare Selected（原「Compare with Working Tree」死按钮：有
-    // tooltip 无 clicked。接上稳定版 GitBottomPanel 工具栏的「比较选中
-    // 分支」语义：恰好选中 2 个分支时打开比较）。
-    let diff_rect = Rect::from_min_size(
+    // 5. Checkout selected branch (⑂)
+    let checkout_rect = Rect::from_min_size(
         Pos2::new(toolbar_rect.left() + 3.0, tb_y),
-        Vec2::splat(20.0),
+        Vec2::splat(24.0),
+    );
+    let checkout_target = model.projects[index].ref_selection.first().cloned();
+    let checkout_enabled = checkout_target
+        .as_ref()
+        .is_some_and(|name| name != &current_branch);
+    let checkout_resp = icon_button(ui, checkout_rect, Icon::Branch, checkout_enabled, theme);
+    if checkout_resp.hovered() {
+        checkout_resp.show_tooltip_text(crate::tr!(model, "Checkout Branch", "检出分支"));
+    }
+    if checkout_resp.clicked() {
+        if let Some(name) = checkout_target {
+            model.queue(Command::CheckoutBranch(name));
+        }
+    }
+    tb_y += 25.0;
+
+    // Separator 2
+    ui.painter().hline(
+        (toolbar_rect.left() + 7.0)..=(toolbar_rect.right() - 7.0),
+        tb_y + 2.5,
+        Stroke::new(1.0, p.border_soft),
+    );
+    tb_y += 6.0;
+
+    // 6. Search branches 🔍
+    let bsearch_rect = Rect::from_min_size(
+        Pos2::new(toolbar_rect.left() + 3.0, tb_y),
+        Vec2::splat(24.0),
+    );
+    let bsearch_resp = icon_button(
+        ui,
+        bsearch_rect,
+        Icon::Search,
+        model.ui.branch_search_open,
+        theme,
+    );
+    if bsearch_resp.hovered() {
+        bsearch_resp.show_tooltip_text(crate::tr!(model, "Search branches", "搜索分支"));
+    }
+    if bsearch_resp.clicked() {
+        model.ui.branch_search_open = !model.ui.branch_search_open;
+        if !model.ui.branch_search_open {
+            model.projects[index].branch_query.clear();
+        }
+    }
+    tb_y += 25.0;
+
+    // 7. Fetch all remotes
+    let fetch_rect = Rect::from_min_size(
+        Pos2::new(toolbar_rect.left() + 3.0, tb_y),
+        Vec2::splat(24.0),
+    );
+    let fetch_resp = icon_button(ui, fetch_rect, Icon::Refresh, false, theme);
+    if fetch_resp.hovered() {
+        fetch_resp.show_tooltip_text(crate::tr!(model, "Fetch All Remotes", "从所有远程拉取"));
+    }
+    if fetch_resp.clicked() {
+        model.queue(Command::FetchAll);
+    }
+    tb_y += 25.0;
+
+    // 8. Star / Favorite button
+    let star_rect = Rect::from_min_size(
+        Pos2::new(toolbar_rect.left() + 3.0, tb_y),
+        Vec2::splat(24.0),
+    );
+    let star_target = model.projects[index].ref_selection.first().cloned();
+    let is_starred = star_target
+        .as_ref()
+        .is_some_and(|name| model.projects[index].favorites.contains(name));
+    let star_resp = icon_button(ui, star_rect, Icon::Star, is_starred, theme);
+    if star_resp.hovered() {
+        star_resp.show_tooltip_text(crate::tr!(
+            model,
+            "Favorite / Unfavorite",
+            "收藏 / 取消收藏"
+        ));
+    }
+    if star_resp.clicked() {
+        if let Some(target) = star_target {
+            if model.projects[index].favorites.contains(&target) {
+                model.projects[index].favorites.remove(&target);
+            } else {
+                model.projects[index].favorites.insert(target);
+            }
+        }
+    }
+    tb_y += 25.0;
+
+    // 9. Compare Selected Branches (⇄ / Compare)
+    let compare_rect = Rect::from_min_size(
+        Pos2::new(toolbar_rect.left() + 3.0, tb_y),
+        Vec2::splat(24.0),
     );
     let compare_enabled = model
         .projects
         .get(index)
         .map(|project| project.ref_selection.len() == 2)
         .unwrap_or(false);
-    let diff_resp = icon_button(ui, diff_rect, Icon::Diff, compare_enabled, theme);
-    if diff_resp.hovered() {
-        diff_resp.show_tooltip_text(crate::tr!(
+    let compare_resp = icon_button(ui, compare_rect, Icon::Compare, compare_enabled, theme);
+    if compare_resp.hovered() {
+        compare_resp.show_tooltip_text(crate::tr!(
             model,
             "Compare Selected Branches",
             "比较选中的分支"
         ));
     }
-    if diff_resp.clicked() {
+    if compare_resp.clicked() {
         if let Some(project) = model.projects.get(index) {
             let refs: Vec<String> = project.ref_selection.clone();
             if refs.len() == 2 {
@@ -1326,72 +1560,40 @@ fn draw_git_log(
             }
         }
     }
-    tb_y += 24.0;
+    tb_y += 25.0;
 
-    // 6. Star / Favorite button
-    let star_rect = Rect::from_min_size(
-        Pos2::new(toolbar_rect.left() + 3.0, tb_y),
-        Vec2::splat(20.0),
+    // Separator 3
+    ui.painter().hline(
+        (toolbar_rect.left() + 7.0)..=(toolbar_rect.right() - 7.0),
+        tb_y + 2.5,
+        Stroke::new(1.0, p.border_soft),
     );
-    let star_resp = icon_button(ui, star_rect, Icon::Star, false, theme);
-    if star_resp.hovered() {
-        star_resp.show_tooltip_text(crate::tr!(
-            model,
-            "Favorite / Unfavorite",
-            "收藏 / 取消收藏"
-        ));
-    }
-    if star_resp.clicked() {
-        if let Some(target) = model.projects[index].ref_selection.first().cloned() {
-            if model.projects[index].favorites.contains(&target) {
-                model.projects[index].favorites.remove(&target);
-            } else {
-                model.projects[index].favorites.insert(target);
-            }
-        }
-    }
-    tb_y += 24.0;
+    tb_y += 6.0;
 
-    // 7. Checkout selected branch（⑂；当前分支禁用，renderRefRow 语义）。
-    let checkout_rect = Rect::from_min_size(
+    // 10. Jump Folding Arrow toggle (≡→)
+    let jump_rect = Rect::from_min_size(
         Pos2::new(toolbar_rect.left() + 3.0, tb_y),
-        Vec2::splat(20.0),
+        Vec2::splat(24.0),
     );
-    let checkout_target = model.projects[index].ref_selection.first().cloned();
-    let checkout_enabled = checkout_target
-        .as_ref()
-        .is_some_and(|name| name != &current_branch);
-    let checkout_resp = icon_button(ui, checkout_rect, Icon::Branch, checkout_enabled, theme);
-    if checkout_resp.hovered() {
-        checkout_resp.show_tooltip_text(crate::tr!(model, "Checkout", "检出"));
+    let jump_resp = icon_button(ui, jump_rect, Icon::ShelveIn, true, theme);
+    if jump_resp.hovered() {
+        jump_resp.show_tooltip_text(crate::tr!(model, "Jump to Linked Commit", "跳转到关联提交"));
     }
-    if checkout_resp.clicked() {
-        if let Some(name) = checkout_target {
-            model.queue(Command::CheckoutBranch(name));
-        }
-    }
-    tb_y += 24.0;
+    tb_y += 25.0;
 
-    // 8. Search branches 🔍（branchSearchOpen 切换）。
-    let bsearch_rect = Rect::from_min_size(
+    // 11. View Options / Gear (👁)
+    let view_opt_rect = Rect::from_min_size(
         Pos2::new(toolbar_rect.left() + 3.0, tb_y),
-        Vec2::splat(20.0),
+        Vec2::splat(24.0),
     );
-    let bsearch_resp = icon_button(ui, bsearch_rect, Icon::Search, false, theme);
-    if bsearch_resp.hovered() {
-        bsearch_resp.show_tooltip_text(crate::tr!(model, "Search branches", "搜索分支"));
+    let view_opt_resp = icon_button(ui, view_opt_rect, Icon::ViewOptions, false, theme);
+    if view_opt_resp.hovered() {
+        view_opt_resp.show_tooltip_text(crate::tr!(model, "View Options", "视图选项"));
     }
-    if bsearch_resp.clicked() {
-        model.ui.branch_search_open = !model.ui.branch_search_open;
-        if !model.ui.branch_search_open {
-            model.projects[index].branch_query.clear();
-        }
-    }
-
     if show_branches {
         let splitter_rect = Rect::from_min_size(
-            Pos2::new(branch_rect.right() - 3.0, area.top()),
-            Vec2::new(6.0, area.height()),
+            Pos2::new(branch_rect.right() - 3.0, body.top()),
+            Vec2::new(6.0, body.height()),
         );
         let resp = ui.interact(
             splitter_rect,
@@ -1422,7 +1624,7 @@ fn draw_git_log(
         );
         ui.painter().vline(
             branch_rect.right() - 0.5,
-            area.y_range(),
+            body.y_range(),
             if is_active_split {
                 Stroke::new(2.0, p.accent)
             } else {
@@ -1433,8 +1635,8 @@ fn draw_git_log(
 
     if show_detail {
         let splitter_rect = Rect::from_min_size(
-            Pos2::new(detail_rect.left() - 3.0, area.top()),
-            Vec2::new(6.0, area.height()),
+            Pos2::new(detail_rect.left() - 3.0, body.top()),
+            Vec2::new(6.0, body.height()),
         );
         let resp = ui.interact(
             splitter_rect,
@@ -1447,7 +1649,7 @@ fn draw_git_log(
         }
         if resp.dragged() {
             model.ui.git_details_width =
-                (model.ui.git_details_width - resp.drag_delta().x).clamp(200.0, 500.0);
+                (model.ui.git_details_width - resp.drag_delta().x).clamp(220.0, 500.0);
         }
         if let Some(details) = details.as_ref() {
             draw_commit_detail(
@@ -1463,7 +1665,7 @@ fn draw_git_log(
         }
         ui.painter().vline(
             detail_rect.left() + 0.5,
-            area.y_range(),
+            body.y_range(),
             if is_active_split {
                 Stroke::new(2.0, p.accent)
             } else {
@@ -1472,9 +1674,44 @@ fn draw_git_log(
         );
     }
 
+    let date_since = match model.projects[index].log_query.date {
+        lazecode_core::DatePreset::All => (model.projects[index].log_query.since > 0)
+            .then_some(model.projects[index].log_query.since),
+        lazecode_core::DatePreset::Today => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            Some(now - (now % 86400))
+        }
+        lazecode_core::DatePreset::Week => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            Some(now.saturating_sub(7 * 86400))
+        }
+        lazecode_core::DatePreset::Month => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            Some(now.saturating_sub(30 * 86400))
+        }
+    };
+    let author_filter = model.projects[index].log_query.author.trim().to_string();
+
     let filtered: Vec<CommitInfo> = log
         .into_iter()
         .filter(|commit| {
+            if let Some(since) = date_since {
+                if commit.time < since {
+                    return false;
+                }
+            }
+            if !author_filter.is_empty() && !commit.author.eq_ignore_ascii_case(&author_filter) {
+                return false;
+            }
             let query = if model.projects[index].log_query.case_sensitive {
                 model.projects[index].log_query.text.clone()
             } else {
@@ -1518,8 +1755,17 @@ fn draw_git_log(
         return;
     }
 
-    let dag = lazecode_git::compute_dag(&filtered);
-    let dag_width = (10.0 + (dag.max_lane + 1) as f32 * LANE_W).max(40.0);
+    let show_graph = model.ui.git_log_show_graph;
+    let dag = if show_graph {
+        lazecode_git::compute_dag(&filtered)
+    } else {
+        lazecode_git::dag::DagLayout::default()
+    };
+    let dag_width = if show_graph {
+        (10.0 + (dag.max_lane + 1) as f32 * LANE_W).max(40.0)
+    } else {
+        4.0
+    };
     let row_h = GRAPH_H; // 26.0!
 
     let painter = ui.painter().with_clip_rect(list_rect);
@@ -1575,17 +1821,23 @@ fn draw_git_log(
                 let dim = out_of_head && !is_selected;
 
                 // 1. DAG cell (100% continuous vertical lines, zero inter-row gaps)
-                let cell_rect = Rect::from_min_size(row.min, Vec2::new(dag_width, row_h));
-                draw_dag_cell(
-                    ui.painter(),
-                    cell_rect,
-                    dag.rows.get(&commit.id),
-                    dag.breaks.get(&commit.id),
-                    commit,
-                );
+                if show_graph {
+                    let cell_rect = Rect::from_min_size(row.min, Vec2::new(dag_width, row_h));
+                    draw_dag_cell(
+                        ui.painter(),
+                        cell_rect,
+                        dag.rows.get(&commit.id),
+                        dag.breaks.get(&commit.id),
+                        commit,
+                    );
+                }
 
                 // 2. Commit subject + Merge icon + Ref badges
-                let mut msg_x = row.left() + dag_width + 6.0;
+                let mut msg_x = if show_graph {
+                    row.left() + dag_width + 6.0
+                } else {
+                    row.left() + 10.0
+                };
                 let is_merge = commit.parents.len() > 1;
                 if is_merge {
                     paint_icon(
@@ -1604,36 +1856,55 @@ fn draw_git_log(
                     msg_x += 16.0;
                 }
 
-                let author_w = 80.0;
-                let date_w = 108.0;
+                // Fixed right columns: date and author (aligning with stable .log-date and .log-author)
+                let date_w = 104.0;
+                let author_w = 76.0;
+                let right_reserved = date_w + author_w + 16.0;
+                let content_right = (row.right() - right_reserved).max(msg_x + 100.0);
+
+                // Refs badges total width
                 let refs_w = commit
                     .refs
                     .iter()
                     .take(3)
                     .map(|r| r.label.chars().count() as f32 * 6.0 + 16.0)
                     .sum::<f32>();
-                let msg_right = row.right() - author_w - date_w - refs_w - 12.0;
+
+                // Available space for subject
+                let avail_for_subject = (content_right - msg_x - refs_w).max(80.0);
+                let subject_font = FontId::proportional(13.0);
+                let subject_color = if dim {
+                    p.text3.gamma_multiply(0.65)
+                } else {
+                    p.text
+                };
+
+                // Measure subject text width
+                let subject_galley = ui.painter().layout_no_wrap(
+                    commit.message.clone(),
+                    subject_font.clone(),
+                    subject_color,
+                );
+                let actual_subject_w = subject_galley.size().x.min(avail_for_subject);
 
                 text_clipped(
                     ui.painter(),
                     Rect::from_min_max(
                         Pos2::new(msg_x, row.top()),
-                        Pos2::new(msg_right.max(msg_x + 60.0), row.bottom()),
+                        Pos2::new(msg_x + actual_subject_w, row.bottom()),
                     ),
                     &commit.message,
-                    FontId::proportional(12.0),
-                    if dim {
-                        p.text3.gamma_multiply(0.65)
-                    } else {
-                        p.text
-                    },
+                    subject_font,
+                    subject_color,
                     Align2::LEFT_CENTER,
                 );
 
-                // log-ref：无底色的彩色 图标+名字（head 绿加粗 / local 绿 /
-                // remote 紫 / tag 琥珀），chip 间 gap 8。
-                let mut badge_x = msg_right.max(msg_x + 60.0) + 4.0;
+                // log-ref: drawn immediately following the subject text (stable flex layout)
+                let mut badge_x = msg_x + actual_subject_w + 6.0;
                 for label in commit.refs.iter().take(3) {
+                    if badge_x >= content_right {
+                        break;
+                    }
                     let color = match label.kind {
                         RefKind::Head => Color32::from_rgb(0x3f, 0xb9, 0x50),
                         RefKind::LocalBranch => Color32::from_rgb(0x3f, 0xb9, 0x50),
@@ -1660,51 +1931,56 @@ fn draw_git_log(
                         Pos2::new(text_x, row.center().y),
                         Align2::LEFT_CENTER,
                         &label.label,
-                        FontId::proportional(11.0),
+                        FontId::proportional(11.5),
                         color,
                     );
                     badge_x = text_x + text_w + 8.0;
                 }
 
-                // 3. Author column
+                // 3. Author column (right-aligned before date)
                 let author_rect = Rect::from_min_max(
-                    Pos2::new(row.right() - author_w - date_w, row.top()),
-                    Pos2::new(row.right() - date_w, row.bottom()),
+                    Pos2::new(row.right() - date_w - author_w - 6.0, row.top()),
+                    Pos2::new(row.right() - date_w - 6.0, row.bottom()),
                 );
                 text_clipped(
                     ui.painter(),
                     author_rect,
                     &commit.author,
-                    FontId::proportional(11.0),
+                    FontId::proportional(12.0),
                     p.text2,
                     Align2::RIGHT_CENTER,
                 );
 
-                // 4. Date column: Today HH:MM / Yesterday / YYYY/M/D HH:MM
+                // 4. Date column
                 let date_str = format_commit_datetime(commit.time);
                 ui.painter().text(
                     Pos2::new(row.right() - 10.0, row.center().y),
                     Align2::RIGHT_CENTER,
                     date_str,
-                    FontId::proportional(11.0),
+                    FontId::proportional(12.0),
                     p.text3,
                 );
 
                 let mut arrow_hit: Option<&lazecode_git::dag::FoldArrowMark> = None;
-                if let Some(brk) = dag.breaks.get(&commit.id) {
-                    if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
-                        for arrow in brk.below.iter().chain(brk.above.iter()) {
-                            let is_down = matches!(arrow.dir, lazecode_git::dag::ArrowDir::Down);
-                            let hit = fold_arrow_hit(
-                                cell_rect.left(),
-                                row.top(),
-                                row_h,
-                                arrow.lane,
-                                is_down,
-                            );
-                            if hit.contains(pointer) {
-                                arrow_hit = Some(arrow);
-                                break;
+                if show_graph {
+                    if let Some(brk) = dag.breaks.get(&commit.id) {
+                        if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
+                            let cell_rect =
+                                Rect::from_min_size(row.min, Vec2::new(dag_width, row_h));
+                            for arrow in brk.below.iter().chain(brk.above.iter()) {
+                                let is_down =
+                                    matches!(arrow.dir, lazecode_git::dag::ArrowDir::Down);
+                                let hit = fold_arrow_hit(
+                                    cell_rect.left(),
+                                    row.top(),
+                                    row_h,
+                                    arrow.lane,
+                                    is_down,
+                                );
+                                if hit.contains(pointer) {
+                                    arrow_hit = Some(arrow);
+                                    break;
+                                }
                             }
                         }
                     }
@@ -1978,7 +2254,7 @@ fn draw_branch_list(
                     Pos2::new(container_rect.left() + 24.0, y + 8.0),
                     Align2::LEFT_CENTER,
                     "HEAD (Current Branch)",
-                    FontId::proportional(11.0),
+                    FontId::proportional(12.0),
                     p.text2,
                 );
                 y += 22.0;
@@ -1987,7 +2263,7 @@ fn draw_branch_list(
                     Pos2::new(container_rect.left() + 12.0, y + 8.0),
                     Align2::LEFT_CENTER,
                     crate::tr!(model, "Local", "本地"),
-                    FontId::proportional(11.5),
+                    FontId::proportional(12.5),
                     p.text3,
                 );
                 y += 24.0;
@@ -2056,7 +2332,7 @@ fn draw_branch_list(
                             Pos2::new(row.left() + indent + 18.0, row.center().y),
                             Align2::LEFT_CENTER,
                             &name_label,
-                            FontId::proportional(11.0),
+                            FontId::proportional(12.5),
                             if is_current { p.text_bright } else { p.text },
                         );
                         // b-up-arrow：↑n ↓n 绿色 10px，margin-left auto。
@@ -2072,7 +2348,7 @@ fn draw_branch_list(
                                 Pos2::new(row.right() - 6.0, row.center().y),
                                 Align2::RIGHT_CENTER,
                                 badge,
-                                FontId::proportional(10.0),
+                                FontId::proportional(11.0),
                                 green,
                             );
                         }
@@ -2144,7 +2420,7 @@ fn draw_branch_list(
                         Pos2::new(container_rect.left() + 12.0, y + 8.0),
                         Align2::LEFT_CENTER,
                         crate::tr!(model, "Remote", "远程"),
-                        FontId::proportional(9.5),
+                        FontId::proportional(12.5),
                         p.text3,
                     );
                     y += 24.0;
@@ -2197,7 +2473,7 @@ fn draw_branch_list(
                                 Pos2::new(row.left() + indent + 18.0, row.center().y),
                                 Align2::LEFT_CENTER,
                                 &row_ref.label,
-                                FontId::proportional(11.0),
+                                FontId::proportional(12.5),
                                 p.text,
                             );
                             if response.secondary_clicked() {
@@ -2243,7 +2519,7 @@ fn draw_branch_list(
                         Pos2::new(container_rect.left() + 12.0, y + 8.0),
                         Align2::LEFT_CENTER,
                         crate::tr!(model, "Tags", "标签"),
-                        FontId::proportional(11.0),
+                        FontId::proportional(12.5),
                         p.text2,
                     );
                     y += 24.0;
@@ -2282,7 +2558,7 @@ fn draw_branch_list(
                             Pos2::new(row.left() + 28.0, row.center().y),
                             Align2::LEFT_CENTER,
                             tag,
-                            FontId::proportional(11.0),
+                            FontId::proportional(12.5),
                             p.text,
                         );
                         y += row_h;
@@ -2327,7 +2603,7 @@ fn draw_commit_detail(
     theme: &Theme,
     rect: Rect,
     details: &lazecode_git::CommitDetails,
-    _rt: &mut UiRuntime,
+    rt: &mut UiRuntime,
     lang: lazecode_core::Language,
     index: usize,
 ) {
@@ -2339,7 +2615,7 @@ fn draw_commit_detail(
         Stroke::new(1.0, p.border_soft),
     );
 
-    // Top Header (30.0px)
+    // Top Header (30.0px) - exactly matching stable details-files-header
     let header_rect = Rect::from_min_size(rect.min, Vec2::new(rect.width(), 30.0));
     ui.painter().rect_filled(header_rect, 0.0, p.panel);
     ui.painter().hline(
@@ -2348,40 +2624,40 @@ fn draw_commit_detail(
         Stroke::new(1.0, p.border_soft),
     );
 
-    let count_text = if lang.is_zh() {
-        format!("{} 个文件变更", details.files.len())
+    paint_icon(
+        ui.painter(),
+        Rect::from_center_size(
+            Pos2::new(header_rect.left() + 14.0, header_rect.center().y),
+            Vec2::splat(13.0),
+        ),
+        Icon::File,
+        p.text3,
+    );
+    let count_text = if details.files.len() == 1 {
+        if lang.is_zh() {
+            "1 个文件变更".to_string()
+        } else {
+            "1 file changed".to_string()
+        }
     } else {
-        format!("{} files changed", details.files.len())
+        if lang.is_zh() {
+            format!("{} 个文件变更", details.files.len())
+        } else {
+            format!("{} files changed", details.files.len())
+        }
     };
     ui.painter().text(
-        Pos2::new(header_rect.left() + 12.0, header_rect.center().y),
+        Pos2::new(header_rect.left() + 26.0, header_rect.center().y),
         Align2::LEFT_CENTER,
         count_text,
-        FontId::proportional(11.5),
-        p.text2,
+        FontId::proportional(12.5),
+        p.text,
     );
 
-    // Top action buttons: Copy, CollapseAll, ExpandAll, Diff
+    // Top action buttons from right to left (stable order: CollapseAll, ExpandAll, ViewOptions, Diff, Undo):
     let mut rx = header_rect.right() - 6.0;
-    // Copy hash button
-    let copy_rect = Rect::from_min_size(
-        Pos2::new(rx - 20.0, header_rect.top() + 5.0),
-        Vec2::splat(20.0),
-    );
-    let copy_resp = icon_button(ui, copy_rect, Icon::Copy, false, theme);
-    if copy_resp.hovered() {
-        copy_resp.show_tooltip_text(crate::tr!(model, "Copy Hash", "复制提交哈希"));
-    }
-    if copy_resp.clicked() {
-        ui.ctx().copy_text(details.info.id.clone());
-        model.toast(
-            crate::tr!(model, "Copied hash to clipboard", "已复制提交哈希到剪贴板"),
-            lazecode_core::ToastKind::Info,
-        );
-    }
-    rx -= 22.0;
 
-    // Collapse all
+    // 5. Collapse all
     let col_rect = Rect::from_min_size(
         Pos2::new(rx - 20.0, header_rect.top() + 5.0),
         Vec2::splat(20.0),
@@ -2392,10 +2668,11 @@ fn draw_commit_detail(
     }
     if col_resp.clicked() {
         model.projects[index].commit_file_dirs_expanded.clear();
+        model.projects[index].commit_files_root_collapsed = true;
     }
     rx -= 22.0;
 
-    // Expand all
+    // 4. Expand all
     let exp_rect = Rect::from_min_size(
         Pos2::new(rx - 20.0, header_rect.top() + 5.0),
         Vec2::splat(20.0),
@@ -2405,6 +2682,7 @@ fn draw_commit_detail(
         exp_resp.show_tooltip_text(crate::tr!(model, "Expand All", "全部展开"));
     }
     if exp_resp.clicked() {
+        model.projects[index].commit_files_root_collapsed = false;
         let tree = lazecode_git::build_commit_file_tree(&details.files);
         for path in lazecode_git::all_commit_file_dir_paths(&tree) {
             model.projects[index].commit_file_dirs_expanded.insert(path);
@@ -2412,7 +2690,18 @@ fn draw_commit_detail(
     }
     rx -= 22.0;
 
-    // Full commit diff button
+    // 3. View options
+    let view_rect = Rect::from_min_size(
+        Pos2::new(rx - 20.0, header_rect.top() + 5.0),
+        Vec2::splat(20.0),
+    );
+    let view_resp = icon_button(ui, view_rect, Icon::ViewOptions, false, theme);
+    if view_resp.hovered() {
+        view_resp.show_tooltip_text(crate::tr!(model, "View Options", "视图选项"));
+    }
+    rx -= 22.0;
+
+    // 2. Full commit diff
     let diff_rect = Rect::from_min_size(
         Pos2::new(rx - 20.0, header_rect.top() + 5.0),
         Vec2::splat(20.0),
@@ -2427,9 +2716,46 @@ fn draw_commit_detail(
             path: String::new(),
         });
     }
+    rx -= 22.0;
 
-    // Bottom Summary Card (height = 96.0)
-    let card_h = 96.0;
+    // 1. Revert commit (Undo)
+    let revert_rect = Rect::from_min_size(
+        Pos2::new(rx - 20.0, header_rect.top() + 5.0),
+        Vec2::splat(20.0),
+    );
+    let revert_resp = icon_button(ui, revert_rect, Icon::Undo, false, theme);
+    if revert_resp.hovered() {
+        revert_resp.show_tooltip_text(crate::tr!(model, "Revert Commit", "回滚提交"));
+    }
+    if revert_resp.clicked() {
+        model.queue(Command::RevertCommit {
+            hash: details.info.id.clone(),
+        });
+    }
+
+    // Bottom Summary Card and Draggable Resizer (height clamped between 60.0 and panel height - 90.0)
+    let card_h = model
+        .ui
+        .git_details_card_height
+        .clamp(60.0, (rect.height() - 90.0).max(60.0));
+    let split_rect = Rect::from_min_size(
+        Pos2::new(rect.left(), rect.bottom() - card_h - 4.0),
+        Vec2::new(rect.width(), 6.0),
+    );
+    let split_resp = ui.interact(
+        split_rect,
+        ui.scope_id().with("details-split-resizer"),
+        Sense::drag(),
+    );
+    if split_resp.hovered() || split_resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+    if split_resp.dragged() {
+        model.ui.git_details_card_height = (model.ui.git_details_card_height
+            - split_resp.drag_delta().y)
+            .clamp(60.0, (rect.height() - 90.0).max(60.0));
+    }
+
     let card_rect = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - card_h), rect.max);
     ui.painter().rect_filled(card_rect, 0.0, p.panel2);
     ui.painter().hline(
@@ -2446,7 +2772,7 @@ fn draw_commit_detail(
             Pos2::new(card_rect.right() - 12.0, card_rect.top() + 26.0),
         ),
         &details.info.message,
-        FontId::proportional(12.5),
+        FontId::proportional(13.0),
         p.text,
         Align2::LEFT_CENTER,
     );
@@ -2458,7 +2784,7 @@ fn draw_commit_detail(
                 Pos2::new(card_rect.right() - 12.0, card_rect.top() + 44.0),
             ),
             details.info.body.lines().next().unwrap_or(""),
-            FontId::proportional(11.0),
+            FontId::proportional(12.0),
             p.text3,
             Align2::LEFT_CENTER,
         );
@@ -2484,7 +2810,7 @@ fn draw_commit_detail(
         hash_pill_rect.center(),
         Align2::CENTER_CENTER,
         &details.info.short,
-        FontId::monospace(10.5),
+        FontId::monospace(11.5),
         pill_color,
     );
     if hash_resp.hovered() {
@@ -2504,21 +2830,21 @@ fn draw_commit_detail(
         Pos2::new(hash_pill_rect.right() + 8.0, hash_pill_rect.center().y),
         Align2::LEFT_CENTER,
         format!("{} <{}>", details.info.author, details.info.email),
-        FontId::proportional(10.5),
+        FontId::proportional(12.0),
         p.text3,
     );
     ui.painter().text(
         Pos2::new(card_rect.left() + 12.0, card_rect.bottom() - 10.0),
         Align2::LEFT_CENTER,
         format_commit_datetime(details.info.time),
-        FontId::monospace(10.5),
+        FontId::monospace(12.0),
         p.text3,
     );
 
     // Changed Files Tree Area (middle area)
     let files_rect = Rect::from_min_max(
         Pos2::new(rect.left(), header_rect.bottom()),
-        Pos2::new(rect.right(), card_rect.top()),
+        Pos2::new(rect.right(), split_rect.top()),
     );
     let tree = lazecode_git::build_commit_file_tree(&details.files);
     let flat_files = lazecode_git::flatten_commit_file_tree(
@@ -2531,124 +2857,227 @@ fn draw_commit_detail(
         egui::ScrollArea::vertical()
             .id_salt("commit-files")
             .auto_shrink([false, false])
-            .show_rows(ui, 20.0, flat_files.len(), |ui, range| {
-                for i in range {
-                    let item = &flat_files[i];
-                    let (row, response) = ui
-                        .allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::click());
-                    if response.hovered() {
-                        ui.painter()
-                            .rect_filled(row, egui::CornerRadius::same(3), p.hover);
-                    }
-                    let indent = 12.0 + item.depth as f32 * 14.0;
-                    if item.is_dir {
-                        let is_expanded = !model.projects[index]
-                            .commit_file_dirs_expanded
-                            .contains(&item.path);
-                        paint_icon(
-                            ui.painter(),
-                            Rect::from_center_size(
-                                Pos2::new(row.left() + indent, row.center().y),
-                                Vec2::splat(10.0),
-                            ),
-                            if is_expanded {
-                                Icon::ChevronDown
-                            } else {
-                                Icon::ChevronRight
-                            },
-                            p.text3,
+            .show(ui, |ui| {
+                // Root Project Row (exactly matching stable details-tree-root)
+                let root_collapsed = model.projects[index].commit_files_root_collapsed;
+                let (root_row, root_resp) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::click());
+                if root_resp.hovered() {
+                    ui.painter()
+                        .rect_filled(root_row, egui::CornerRadius::same(3), p.hover);
+                }
+                paint_icon(
+                    ui.painter(),
+                    Rect::from_center_size(
+                        Pos2::new(root_row.left() + 10.0, root_row.center().y),
+                        Vec2::splat(10.0),
+                    ),
+                    if root_collapsed {
+                        Icon::ChevronRight
+                    } else {
+                        Icon::ChevronDown
+                    },
+                    p.text3,
+                );
+                paint_icon(
+                    ui.painter(),
+                    Rect::from_center_size(
+                        Pos2::new(root_row.left() + 24.0, root_row.center().y),
+                        Vec2::splat(13.0),
+                    ),
+                    if root_collapsed {
+                        Icon::Folder
+                    } else {
+                        Icon::FolderOpen
+                    },
+                    Color32::from_rgb(0xdc, 0xd7, 0xaa),
+                );
+                let root_name = model.projects[index].name.clone();
+                text_clipped(
+                    ui.painter(),
+                    Rect::from_min_max(
+                        Pos2::new(root_row.left() + 36.0, root_row.top()),
+                        Pos2::new(root_row.right() - 50.0, root_row.bottom()),
+                    ),
+                    &root_name,
+                    FontId::proportional(12.5),
+                    p.text,
+                    Align2::LEFT_CENTER,
+                );
+                ui.painter().text(
+                    Pos2::new(root_row.right() - 8.0, root_row.center().y),
+                    Align2::RIGHT_CENTER,
+                    format!(
+                        "{} {}",
+                        details.files.len(),
+                        if details.files.len() == 1 {
+                            "file"
+                        } else {
+                            "files"
+                        }
+                    ),
+                    FontId::proportional(11.0),
+                    p.text3,
+                );
+                if root_resp.clicked() {
+                    model.projects[index].commit_files_root_collapsed = !root_collapsed;
+                }
+
+                if !root_collapsed {
+                    for item in &flat_files {
+                        let (row, response) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 20.0),
+                            Sense::click(),
                         );
-                        paint_icon(
-                            ui.painter(),
-                            Rect::from_center_size(
-                                Pos2::new(row.left() + indent + 12.0, row.center().y),
-                                Vec2::splat(12.0),
-                            ),
-                            if is_expanded {
-                                Icon::FolderOpen
-                            } else {
-                                Icon::Folder
-                            },
-                            p.accent,
-                        );
-                        ui.painter().text(
-                            Pos2::new(row.left() + indent + 24.0, row.center().y),
-                            Align2::LEFT_CENTER,
-                            &item.name,
-                            FontId::proportional(12.0),
-                            p.text,
-                        );
-                        ui.painter().text(
-                            Pos2::new(row.right() - 8.0, row.center().y),
-                            Align2::RIGHT_CENTER,
-                            format!("{} files", item.total_files),
-                            FontId::monospace(9.5),
-                            p.text3,
-                        );
-                        if response.clicked() {
-                            if is_expanded {
-                                model.projects[index]
-                                    .commit_file_dirs_expanded
-                                    .insert(item.path.clone());
-                            } else {
-                                model.projects[index]
-                                    .commit_file_dirs_expanded
-                                    .remove(&item.path);
+                        if response.hovered() {
+                            ui.painter()
+                                .rect_filled(row, egui::CornerRadius::same(3), p.hover);
+                        }
+                        let indent = 8.0 + (item.depth + 1) as f32 * 12.0;
+                        if item.is_dir {
+                            let is_expanded = !model.projects[index]
+                                .commit_file_dirs_expanded
+                                .contains(&item.path);
+                            paint_icon(
+                                ui.painter(),
+                                Rect::from_center_size(
+                                    Pos2::new(row.left() + indent, row.center().y),
+                                    Vec2::splat(10.0),
+                                ),
+                                if is_expanded {
+                                    Icon::ChevronDown
+                                } else {
+                                    Icon::ChevronRight
+                                },
+                                p.text3,
+                            );
+                            paint_icon(
+                                ui.painter(),
+                                Rect::from_center_size(
+                                    Pos2::new(row.left() + indent + 12.0, row.center().y),
+                                    Vec2::splat(12.0),
+                                ),
+                                if is_expanded {
+                                    Icon::FolderOpen
+                                } else {
+                                    Icon::Folder
+                                },
+                                Color32::from_rgb(0xdc, 0xd7, 0xaa),
+                            );
+                            ui.painter().text(
+                                Pos2::new(row.left() + indent + 24.0, row.center().y),
+                                Align2::LEFT_CENTER,
+                                &item.name,
+                                FontId::proportional(12.5),
+                                p.text,
+                            );
+                            ui.painter().text(
+                                Pos2::new(row.right() - 8.0, row.center().y),
+                                Align2::RIGHT_CENTER,
+                                format!(
+                                    "{} {}",
+                                    item.total_files,
+                                    if item.total_files == 1 {
+                                        "file"
+                                    } else {
+                                        "files"
+                                    }
+                                ),
+                                FontId::proportional(10.5),
+                                p.text3,
+                            );
+                            if response.clicked() {
+                                if is_expanded {
+                                    model.projects[index]
+                                        .commit_file_dirs_expanded
+                                        .insert(item.path.clone());
+                                } else {
+                                    model.projects[index]
+                                        .commit_file_dirs_expanded
+                                        .remove(&item.path);
+                                }
                             }
-                        }
-                    } else if let Some(file) = &item.file {
-                        paint_icon(
-                            ui.painter(),
-                            Rect::from_center_size(
-                                Pos2::new(row.left() + indent + 10.0, row.center().y),
-                                Vec2::splat(12.0),
-                            ),
-                            Icon::File,
-                            p.text3,
-                        );
-                        text_clipped(
-                            ui.painter(),
-                            Rect::from_min_max(
-                                Pos2::new(row.left() + indent + 22.0, row.top()),
-                                Pos2::new(row.right() - 65.0, row.bottom()),
-                            ),
-                            &item.name,
-                            FontId::proportional(12.0),
-                            if response.hovered() { p.text } else { p.text2 },
-                            Align2::LEFT_CENTER,
-                        );
-                        let stat_str = if file.additions > 0 && file.deletions > 0 {
-                            format!("+{} -{}", file.additions, file.deletions)
-                        } else if file.additions > 0 {
-                            format!("+{}", file.additions)
-                        } else {
-                            format!("-{}", file.deletions)
-                        };
-                        let stat_color = if file.additions > 0 && file.deletions == 0 {
-                            Color32::from_rgb(0x3f, 0xb9, 0x50)
-                        } else if file.deletions > 0 && file.additions == 0 {
-                            Color32::from_rgb(0xf8, 0x51, 0x49)
-                        } else {
-                            p.text3
-                        };
-                        ui.painter().text(
-                            Pos2::new(row.right() - 8.0, row.center().y),
-                            Align2::RIGHT_CENTER,
-                            stat_str,
-                            FontId::monospace(10.0),
-                            stat_color,
-                        );
-                        if response.clicked() {
-                            model.queue(Command::OpenCommitDiff {
-                                commit: details.info.id.clone(),
-                                path: file.path.clone(),
-                            });
-                        }
-                        if response.secondary_clicked() {
-                            model.queue(Command::OpenCompareWithLocalDiff {
-                                commit: details.info.id.clone(),
-                                path: file.path.clone(),
-                            });
+                        } else if let Some(file) = &item.file {
+                            paint_icon(
+                                ui.painter(),
+                                Rect::from_center_size(
+                                    Pos2::new(row.left() + indent + 10.0, row.center().y),
+                                    Vec2::splat(12.0),
+                                ),
+                                Icon::File,
+                                crate::sidebar::file_tone(&item.name, theme),
+                            );
+                            let name_color = match file.kind {
+                                lazecode_git::ChangeKind::Added => {
+                                    Color32::from_rgb(0x73, 0xc9, 0x91)
+                                }
+                                lazecode_git::ChangeKind::Deleted => {
+                                    Color32::from_rgb(0xe0, 0x6c, 0x75)
+                                }
+                                _ => Color32::from_rgb(0x58, 0xa6, 0xff),
+                            };
+                            text_clipped(
+                                ui.painter(),
+                                Rect::from_min_max(
+                                    Pos2::new(row.left() + indent + 22.0, row.top()),
+                                    Pos2::new(row.right() - 72.0, row.bottom()),
+                                ),
+                                &item.name,
+                                FontId::proportional(12.5),
+                                if response.hovered() {
+                                    p.text
+                                } else {
+                                    name_color
+                                },
+                                Align2::LEFT_CENTER,
+                            );
+                            let mut sx = row.right() - 8.0;
+                            if file.deletions > 0 {
+                                let del_str = format!("-{}", file.deletions);
+                                let gal = ui.painter().layout_no_wrap(
+                                    del_str,
+                                    FontId::monospace(10.5),
+                                    Color32::from_rgb(0xe0, 0x6c, 0x75),
+                                );
+                                let del_w = gal.size().x;
+                                ui.painter().galley(
+                                    Pos2::new(sx - del_w, row.center().y - gal.size().y * 0.5),
+                                    gal,
+                                    Color32::from_rgb(0xe0, 0x6c, 0x75),
+                                );
+                                sx -= del_w + 4.0;
+                            }
+                            if file.additions > 0 {
+                                let add_str = format!("+{}", file.additions);
+                                let gal = ui.painter().layout_no_wrap(
+                                    add_str,
+                                    FontId::monospace(10.5),
+                                    Color32::from_rgb(0x73, 0xc9, 0x91),
+                                );
+                                ui.painter().galley(
+                                    Pos2::new(
+                                        sx - gal.size().x,
+                                        row.center().y - gal.size().y * 0.5,
+                                    ),
+                                    gal,
+                                    Color32::from_rgb(0x73, 0xc9, 0x91),
+                                );
+                            }
+                            if response.double_clicked() {
+                                model.queue(Command::OpenCommitDiff {
+                                    commit: details.info.id.clone(),
+                                    path: file.path.clone(),
+                                });
+                            }
+                            if response.secondary_clicked() {
+                                rt.open_menu(
+                                    crate::runtime::MenuKind::CommitDetailsFileContext {
+                                        project: index,
+                                    },
+                                    row,
+                                    Some(format!("{}\u{1}{}", details.info.id, file.path)),
+                                );
+                            }
                         }
                     }
                 }

@@ -174,14 +174,14 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     }
 
     // --- bottom group: Git Log / Terminal / Settings -------------------
-    let by = rect.bottom() - GAP - BTN;
+    let by = rect.bottom() - GAP - BTN * 0.5;
 
     let settings_active = rt.settings_open;
     let response = button(
         ui,
         theme,
         rect,
-        Pos2::new(cx, by + BTN * 0.5),
+        Pos2::new(cx, by),
         "strip-settings",
         Icon::Settings,
         settings_active,
@@ -198,7 +198,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         ui,
         theme,
         rect,
-        Pos2::new(cx, by - (BTN + GAP) + BTN * 0.5),
+        Pos2::new(cx, by - (BTN + GAP)),
         "strip-terminal",
         Icon::Terminal,
         terminal_active,
@@ -206,7 +206,16 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         crate::tr!(model, "Terminal", "终端").to_string(),
     );
     if response.clicked() {
-        model.ui.terminal_visible = !terminal_active;
+        if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
+            if terminal_active {
+                model.ui.terminal_visible = false;
+            } else {
+                model.ui.terminal_visible = true;
+                model.ui.panel_visible = false;
+            }
+        } else {
+            model.ui.terminal_visible = !terminal_active;
+        }
     }
 
     let log_active = model.ui.panel_visible && model.ui.panel_tab == PanelTab::Git;
@@ -214,7 +223,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         ui,
         theme,
         rect,
-        Pos2::new(cx, by - 2.0 * (BTN + GAP) + BTN * 0.5),
+        Pos2::new(cx, by - 2.0 * (BTN + GAP)),
         "strip-gitlog",
         Icon::GitLog,
         log_active,
@@ -227,6 +236,9 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         } else {
             model.ui.panel_visible = true;
             model.ui.panel_tab = PanelTab::Git;
+            if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
+                model.ui.terminal_visible = false;
+            }
             model.queue(Command::RefreshLog);
         }
     }

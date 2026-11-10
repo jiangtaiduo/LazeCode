@@ -4,7 +4,7 @@ use lazecode_core::{AppModel, Command, TabKind};
 use crate::icons::{paint as paint_icon, Icon};
 use crate::runtime::{SearchState, UiRuntime};
 use crate::theme::Theme;
-use crate::widgets::{secondary_button, text_clipped};
+use crate::widgets::secondary_button;
 
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme) {
     let p = theme.palette;
@@ -332,10 +332,19 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     );
     let close_response = ui.interact(close, ui.scope_id().with("search-close"), Sense::click());
     paint_icon(ui.painter(), close.shrink(3.0), Icon::X, p.text3);
-    if close_response.clicked() {
+    if close_response.clicked()
+        || ui.input(|input| input.key_pressed(egui::Key::Escape))
+        || (rt.search.opened_frame != rt.frame_count
+            && ui.input(|input| {
+                input.pointer.any_click()
+                    && input
+                        .pointer
+                        .interact_pos()
+                        .is_some_and(|pos| !panel.contains(pos))
+            }))
+    {
         rt.search.open = false;
     }
-    let _ = (secondary_button, text_clipped);
 }
 
 fn run(model: &mut AppModel, state: &mut SearchState) {

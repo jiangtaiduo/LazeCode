@@ -228,10 +228,11 @@ pub enum Command {
     },
     RestartTerminal(u64),
     CloseTerminal(u64),
-    /// Create a linked worktree from the current HEAD of the active project
-    /// at `parent/name`, then open it.
+    /// Create a linked worktree from the chosen branch at `location`.
     CreateWorktree {
         name: String,
+        branch: String,
+        location: std::path::PathBuf,
     },
     /// Switch the project pane to another registered worktree (by name).
     SwitchWorktree(String),

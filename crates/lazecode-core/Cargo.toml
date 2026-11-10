@@ -21,6 +21,7 @@ lazecode-fs.workspace = true
 lazecode-git.workspace = true
 lazecode-text.workspace = true
 lazecode-terminal.workspace = true
+libc.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

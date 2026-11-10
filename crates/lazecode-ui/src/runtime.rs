@@ -37,7 +37,12 @@ pub struct TermSearchState {
 pub enum MenuKind {
     /// 提交抽屉 ⋮ 扩展菜单（贮藏 / 架藏库入口）。
     CommitExtras,
-    /// 架藏（页签）右键：payload = name \u{1} deleted \u{1} paths…。
+    /// 提交抽屉 👁 视图选项（按目录分组 / 显示被忽略的文件）。
+    CommitViewOptions,
+    /// 比较抽屉 👁 视图选项（按目录分组）。
+    CompareViewOptions {
+        project: usize,
+    },
     ShelfContext {
         project: usize,
     },
@@ -45,6 +50,10 @@ pub enum MenuKind {
     Branch,
     Worktree,
     LogBranchFilter {
+        project: usize,
+    },
+    /// Git log date filter dropdown menu.
+    LogDateFilter {
         project: usize,
     },
     LogCommitMenu {
@@ -91,6 +100,22 @@ pub enum MenuKind {
     },
     /// Changelist file row context menu (payload: file relative path).
     ChangeFileContext {
+        project: usize,
+    },
+    /// Git log sort and options menu (by date/topo, first-parent, no-merges).
+    LogSortOptions {
+        project: usize,
+    },
+    /// Git log path filter input popover.
+    LogPathFilter {
+        project: usize,
+    },
+    /// Git commit details file row context menu (payload: commit_id \u{1} path).
+    CommitDetailsFileContext {
+        project: usize,
+    },
+    /// Code editor context menu (payload: file path).
+    EditorContext {
         project: usize,
     },
 }
@@ -159,6 +184,12 @@ pub enum DialogState {
         error: Option<String>,
     },
     NewWorktree {
+        name: String,
+        branch: String,
+        location: String,
+        error: Option<String>,
+    },
+    CheckoutRevision {
         value: String,
         error: Option<String>,
     },
@@ -322,6 +353,7 @@ pub struct FindState {
     pub matches: Vec<(Cursor, Cursor)>,
     pub index: usize,
     pub focus_requested: bool,
+    pub opened_frame: u64,
 }
 
 #[derive(Default)]
@@ -339,6 +371,7 @@ pub struct SearchState {
     pub searched: bool,
     pub focus_requested: bool,
     pub request_id: u64,
+    pub opened_frame: u64,
 }
 
 #[derive(Default)]
@@ -346,6 +379,7 @@ pub struct PaletteState {
     pub query: String,
     pub selected: usize,
     pub focus_requested: bool,
+    pub opened_frame: u64,
 }
 
 pub struct UiRuntime {
@@ -384,6 +418,8 @@ pub struct UiRuntime {
     pub about_open: bool,
     pub applied_theme: Option<lazecode_core::ThemeMode>,
     pub last_frame: Instant,
+    pub md_cache: egui_commonmark::CommonMarkCache,
+    pub image_zoom: HashMap<u64, f32>,
     pub cursor_epoch: f64,
     pub agent_menu: Option<egui::Rect>,
     pub agent_menu_frame: u64,
@@ -392,12 +428,15 @@ pub struct UiRuntime {
     pub pending_open: Option<(std::path::PathBuf, usize, usize)>,
     pub toast_created: f64,
     pub last_revealed_tab: Option<u64>,
+    pub last_revealed_cmp_file: Option<String>,
     pub ime_preedit: String,
     // --- 提交抽屉（稳定版 CommitDrawer）状态 ---
     /// Commit / Shelf 页签。
     pub commit_tab: CommitTab,
     /// 稳定版 ^P：Group by Directory（树视图）。
     pub commit_tree_view: bool,
+    /// 稳定版：是否展示被 .gitignore 忽略的文件。
+    pub commit_show_ignored: bool,
     /// 工具栏眼睛视图选项弹层开关。
     pub commit_view_menu_open: bool,
     /// Shelf 页签数据（页签激活时同步加载：读本地补丁文件，无子进程）。
@@ -410,6 +449,20 @@ pub struct UiRuntime {
     pub shelf_selected: Option<String>,
     /// 选中的架藏文件（仓库相对路径，单架藏内多选）。
     pub shelf_file_sel: Vec<String>,
+    pub commit_view_menu_frame: u64,
+    pub cmp_view_menu_frame: u64,
+    pub new_ignore_pattern: String,
+    pub tree_submenu: Option<(String, egui::Rect)>,
+    pub branch_submenu: Option<BranchSubmenuState>,
+    pub branch_sections_collapsed: std::collections::HashSet<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BranchSubmenuState {
+    pub branch_name: String,
+    pub is_current: bool,
+    pub is_remote: bool,
+    pub anchor: egui::Rect,
 }
 
 /// CommitDrawer 顶部页签（稳定版 tabCommit / tabShelf）。
@@ -434,6 +487,9 @@ impl Default for UiRuntime {
             terminal_drag: None,
             terminal_scroll_fraction: HashMap::new(),
             terminal_preedit: HashMap::new(),
+            new_ignore_pattern: String::new(),
+            commit_view_menu_frame: 0,
+            cmp_view_menu_frame: 0,
             editor_focus: None,
             editor_drag: false,
             sidebar_drag: false,
@@ -451,6 +507,8 @@ impl Default for UiRuntime {
             applied_theme: None,
             last_frame: Instant::now(),
             cursor_epoch: 0.0,
+            md_cache: egui_commonmark::CommonMarkCache::default(),
+            image_zoom: HashMap::new(),
             agent_menu: None,
             agent_menu_frame: 0,
             frame_count: 0,
@@ -458,9 +516,11 @@ impl Default for UiRuntime {
             pending_open: None,
             toast_created: 0.0,
             last_revealed_tab: None,
+            last_revealed_cmp_file: None,
             ime_preedit: String::new(),
             commit_tab: CommitTab::Commit,
             commit_tree_view: false,
+            commit_show_ignored: false,
             commit_view_menu_open: false,
             shelf_entries: Vec::new(),
             shelf_deleted: Vec::new(),
@@ -468,12 +528,16 @@ impl Default for UiRuntime {
             shelf_files_map: HashMap::new(),
             shelf_selected: None,
             shelf_file_sel: Vec::new(),
+            tree_submenu: None,
+            branch_submenu: None,
+            branch_sections_collapsed: std::collections::HashSet::new(),
         }
     }
 }
 
 impl UiRuntime {
     pub fn open_menu(&mut self, kind: MenuKind, anchor: egui::Rect, payload: Option<String>) {
+        self.tree_submenu = None;
         self.menu = Some(MenuState {
             kind,
             anchor,
@@ -482,6 +546,11 @@ impl UiRuntime {
         });
     }
 
+    pub fn close_menu(&mut self) {
+        self.menu = None;
+        self.tree_submenu = None;
+        self.branch_submenu = None;
+    }
     pub fn toggle_menu(&mut self, kind: MenuKind, anchor: egui::Rect, payload: Option<String>) {
         if matches!(&self.menu, Some(m) if m.kind == kind) {
             self.menu = None;
@@ -517,6 +586,7 @@ impl UiRuntime {
         self.palette.query.clear();
         self.palette.selected = 0;
         self.palette.focus_requested = true;
+        self.palette.opened_frame = self.frame_count;
         self.menu = None;
         self.agent_menu = None;
         self.settings_open = false;

@@ -81,6 +81,8 @@ pub struct Palette {
     pub tok_var: Color32,
     pub tok_prop: Color32,
     pub tok_attr: Color32,
+    /// PyCharm git ignored file/folder muted color (置灰效果).
+    pub git_ignored: Color32,
     /// Stable GitGraphCell GRAPH_PALETTE — identical in both themes.
     pub lane: [Color32; 8],
     /// Terminal ANSI-16. The stable terminal keeps a dark canvas in both
@@ -136,14 +138,14 @@ impl Palette {
             elev: Color32::from_rgb(0x2a, 0x2a, 0x2d), // --bg-tab-active
             hover: rgba(255, 255, 255, 20),            // --overlay-hover
             active: rgba(255, 255, 255, 36),           // --overlay-active
-            border: rgba(255, 255, 255, 26),           // --border-color 0.10
-            border_soft: rgba(255, 255, 255, 15),      // 0.06
-            border_strong: rgba(255, 255, 255, 56),    // 0.22
+            border: rgba(255, 255, 255, 48),           // --border-color 0.19 (清晰明显的窗口分割线)
+            border_soft: rgba(255, 255, 255, 30),      // 0.12
+            border_strong: rgba(255, 255, 255, 80),    // 0.31
             current_line: Color32::from_rgb(0x23, 0x25, 0x29), // monaco lineHighlight
             selection: rgba(10, 132, 255, 66),         // --bg-selected 0.26
             text: Color32::from_rgb(0xe8, 0xe8, 0xea), // --text-primary
-            text2: Color32::from_rgb(0xa1, 0xa1, 0xa6), // --text-secondary
-            text3: Color32::from_rgb(0x74, 0x74, 0x7a), // --text-muted
+            text2: Color32::from_rgb(0xaa, 0xaf, 0xb8), // PyCharm secondary text
+            text3: Color32::from_rgb(0x8c, 0x90, 0x99), // PyCharm muted text (high legibility)
             text_bright: Color32::from_rgb(0xff, 0xff, 0xff),
             accent: Color32::from_rgb(0x0a, 0x84, 0xff), // macOS dark blue
             accent_on_fill: Color32::from_rgb(0xff, 0xff, 0xff),
@@ -168,7 +170,7 @@ impl Palette {
             diff_char_add: Color32::from_rgb(0x38, 0x55, 0x42),
             diff_char_del: Color32::from_rgb(0x5e, 0x34, 0x36),
             jb_accent: Color32::from_rgb(0x35, 0x74, 0xf0),
-            balloon_bg: Color32::from_rgb(0x23, 0x27, 0x2e),
+            balloon_bg: Color32::from_rgb(0x2b, 0x2d, 0x30), // PyCharm solid tooltip bg
             balloon_text: Color32::from_rgb(0xdf, 0xe1, 0xe5),
             conflict_bg: Color32::from_rgb(0x54, 0x26, 0x28), // --git-conflict-bg
             tok_kw: Color32::from_rgb(0xcf, 0x8e, 0x6d),      // monaco ide-jetbrains-dark keyword
@@ -182,6 +184,7 @@ impl Palette {
             tok_var: Color32::from_rgb(0xbc, 0xbe, 0xc4),
             tok_prop: Color32::from_rgb(0xbc, 0xbe, 0xc4),
             tok_attr: Color32::from_rgb(0xcf, 0x8e, 0x6d),
+            git_ignored: Color32::from_rgb(0x72, 0x77, 0x82),
             lane: [
                 Color32::from_rgb(0x3f, 0xb9, 0x50),
                 Color32::from_rgb(0xa3, 0x71, 0xf7),
@@ -211,10 +214,10 @@ impl Palette {
                 Color32::from_rgb(0xea, 0xea, 0xea),
             ],
             hairline: rgba(255, 255, 255, 15),
-            scrollbar: rgba(255, 255, 255, 46),       // 0.18
-            scrollbar_hover: rgba(255, 255, 255, 77), // 0.30
-            menu_bg: rgba(30, 30, 32, 245),           // --menu-bg 0.96
-            menu_border: rgba(255, 255, 255, 26),
+            scrollbar: rgba(255, 255, 255, 46),           // 0.18
+            scrollbar_hover: rgba(255, 255, 255, 77),     // 0.30
+            menu_bg: Color32::from_rgb(0x1e, 0x1f, 0x22), // 100% opaque PyCharm menu bg
+            menu_border: Color32::from_rgb(0x43, 0x45, 0x4b),
             menu_item_hover: rgba(10, 132, 255, 230), // 0.90
             menu_item_text: Color32::from_rgb(0xff, 0xff, 0xff),
             scrim_subtle: rgba(0, 0, 0, 71),             // 0.28
@@ -251,9 +254,9 @@ impl Palette {
             elev: Color32::from_rgb(0xff, 0xff, 0xff),
             hover: rgba(0, 0, 0, 15),         // 0.06
             active: rgba(0, 0, 0, 31),        // 0.12
-            border: rgba(0, 0, 0, 31),        // 0.12
-            border_soft: rgba(0, 0, 0, 18),   // 0.07
-            border_strong: rgba(0, 0, 0, 66), // 0.26
+            border: rgba(0, 0, 0, 48),        // 0.19
+            border_soft: rgba(0, 0, 0, 30),   // 0.12
+            border_strong: rgba(0, 0, 0, 85), // 0.33
             current_line: Color32::from_rgb(0xee, 0xf1, 0xf6),
             selection: rgba(10, 132, 255, 36), // 0.14
             text: Color32::from_rgb(0x1d, 0x1d, 0x1f),
@@ -299,13 +302,14 @@ impl Palette {
             tok_var: Color32::from_rgb(0x1d, 0x1d, 0x1f),
             tok_prop: Color32::from_rgb(0x0b, 0x4f, 0x8a),
             tok_attr: Color32::from_rgb(0x9a, 0x34, 0xc4),
+            git_ignored: Color32::from_rgb(0x8e, 0x8e, 0x93),
             lane: Palette::dark().lane, // stable GRAPH_PALETTE is theme-independent
             ansi: Palette::dark().ansi, // terminal canvas stays dark in light theme
             hairline: rgba(0, 0, 0, 18),
             scrollbar: rgba(0, 0, 0, 56),       // 0.22
             scrollbar_hover: rgba(0, 0, 0, 89), // 0.35
-            menu_bg: rgba(250, 250, 252, 245),
-            menu_border: rgba(0, 0, 0, 31),
+            menu_bg: Color32::from_rgb(250, 250, 252),
+            menu_border: Color32::from_rgb(0xd1, 0xd3, 0xd8),
             menu_item_hover: Color32::from_rgb(0x00, 0x71, 0xe3),
             menu_item_text: Color32::from_rgb(0xff, 0xff, 0xff),
             scrim_subtle: rgba(255, 255, 255, 115), // 0.45
@@ -436,7 +440,7 @@ pub fn install_fonts(ctx: &egui::Context) {
     let has_ui = add("SF Pro", "/System/Library/Fonts/SFNS.ttf", 0);
     let has_mono = add("SF Mono", "/System/Library/Fonts/SFNSMono.ttf", 0);
     let has_menlo = add("Menlo", "/System/Library/Fonts/Menlo.ttc", 0);
-    let has_pingfang = add("PingFang SC", "/System/Library/Fonts/PingFang.ttc", 0);
+    let has_monaco = add("Monaco", "/System/Library/Fonts/Monaco.ttf", 0);
     let has_cjk = add(
         "Hiragino Sans GB",
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
@@ -458,14 +462,11 @@ pub fn install_fonts(ctx: &egui::Context) {
     if has_ui {
         proportional.push("SF Pro".to_owned());
     }
-    if has_pingfang {
-        proportional.push("PingFang SC".to_owned());
+    if has_cjk {
+        proportional.push("Hiragino Sans GB".to_owned());
     }
     if has_heiti {
         proportional.push("Heiti SC".to_owned());
-    }
-    if has_cjk {
-        proportional.push("Hiragino Sans GB".to_owned());
     }
     if has_cjk_serif {
         proportional.push("Songti SC".to_owned());
@@ -479,20 +480,20 @@ pub fn install_fonts(ctx: &egui::Context) {
         .insert(FontFamily::Proportional, proportional);
 
     let mut mono = Vec::new();
-    if has_mono {
-        mono.push("SF Mono".to_owned());
-    }
     if has_menlo {
         mono.push("Menlo".to_owned());
     }
-    if has_pingfang {
-        mono.push("PingFang SC".to_owned());
+    if has_mono {
+        mono.push("SF Mono".to_owned());
     }
-    if has_heiti {
-        mono.push("Heiti SC".to_owned());
+    if has_monaco {
+        mono.push("Monaco".to_owned());
     }
     if has_cjk {
         mono.push("Hiragino Sans GB".to_owned());
+    }
+    if has_heiti {
+        mono.push("Heiti SC".to_owned());
     }
     if has_emoji {
         mono.push("Apple Color Emoji".to_owned());
@@ -503,9 +504,9 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-pub const BODY: f32 = 13.0;
-pub const SMALL: f32 = 12.0;
-pub const TINY: f32 = 11.0;
+pub const BODY: f32 = 13.5;
+pub const SMALL: f32 = 12.5;
+pub const TINY: f32 = 11.5;
 pub const MONO: f32 = 13.0;
 
 pub fn body_font() -> FontId {

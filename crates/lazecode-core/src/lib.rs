@@ -6,6 +6,7 @@ pub mod gitref;
 pub mod lsp;
 pub mod model;
 pub mod settings;
+pub mod updater;
 
 pub use commands::Command;
 pub use gitref::{FlatRefRow, RefTreeEntry, RefTreeNode};

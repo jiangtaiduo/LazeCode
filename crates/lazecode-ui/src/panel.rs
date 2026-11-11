@@ -553,6 +553,7 @@ pub fn draw_terminal_dock(
         let search = rt_ref.terminal_search.entry(*pane_id).or_default();
         let preedit = rt_ref.terminal_preedit.entry(*pane_id).or_default();
         let wheel_accum = rt_ref.terminal_wheel.entry(*pane_id).or_insert(0.0);
+        let graphics = rt_ref.terminal_graphics.entry(*pane_id).or_default();
         let wake_counter = session.wake_counter();
         let last_wake = rt_ref.terminal_wake.entry(*pane_id).or_insert(u64::MAX);
         let refresh = *last_wake != wake_counter;
@@ -568,6 +569,7 @@ pub fn draw_terminal_dock(
             focus,
             preedit,
             wheel_accum,
+            graphics,
             refresh,
             theme,
             area,

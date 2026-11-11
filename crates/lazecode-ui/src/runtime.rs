@@ -6,6 +6,7 @@ use lazecode_terminal::Snapshot;
 use lazecode_text::Cursor;
 
 use crate::icons::Icon;
+use crate::overlays::UpdateState;
 
 #[derive(Clone, Copy, Debug)]
 pub struct TermSelection {
@@ -472,6 +473,8 @@ pub struct UiRuntime {
     pub terminal_wheel: HashMap<u64, f32>,
     /// Last snapshot wake counter per terminal; skips rebuilding unchanged grids.
     pub terminal_wake: HashMap<u64, u64>,
+    /// egui textures for each pane's kitty graphics images.
+    pub terminal_graphics: HashMap<u64, crate::terminal::GraphicsCache>,
     pub editor_focus: Option<u64>,
     pub editor_drag: bool,
     pub sidebar_drag: bool,
@@ -493,6 +496,10 @@ pub struct UiRuntime {
     pub compare_details_drag: bool,
     pub settings_open: bool,
     pub about_open: bool,
+    /// Software update window (settings → Updates / auto-check notice).
+    pub update_open: bool,
+    /// Update endpoint results, in-flight job and staging status.
+    pub update: UpdateState,
     pub applied_theme: Option<lazecode_core::ThemeMode>,
     pub last_frame: Instant,
     pub md_cache: egui_commonmark::CommonMarkCache,
@@ -567,6 +574,7 @@ impl Default for UiRuntime {
             terminal_preedit: HashMap::new(),
             terminal_wheel: HashMap::new(),
             terminal_wake: HashMap::new(),
+            terminal_graphics: HashMap::new(),
             new_ignore_pattern: String::new(),
             commit_view_menu_frame: 0,
             cmp_view_menu_frame: 0,
@@ -584,6 +592,8 @@ impl Default for UiRuntime {
             compare_details_drag: false,
             settings_open: false,
             about_open: false,
+            update_open: false,
+            update: UpdateState::default(),
             applied_theme: None,
             last_frame: Instant::now(),
             cursor_epoch: 0.0,
@@ -695,6 +705,7 @@ impl UiRuntime {
         self.terminal_search.clear();
         self.terminal_preedit.clear();
         self.terminal_wheel.clear();
+        self.terminal_graphics.clear();
         self.terminal_focus = None;
     }
 
@@ -706,6 +717,7 @@ impl UiRuntime {
         self.terminal_preedit.remove(&id);
         self.terminal_wheel.remove(&id);
         self.terminal_wake.remove(&id);
+        self.terminal_graphics.remove(&id);
         self.terminal_scroll_fraction.remove(&id);
         if self.terminal_focus == Some(id) {
             self.terminal_focus = None;

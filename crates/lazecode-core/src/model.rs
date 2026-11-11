@@ -1760,6 +1760,11 @@ fn spawn_pane(
         cols: 110,
         rows: 28,
         scrollback: settings.terminal.scrollback,
+        // Cold history extends the hot budget onto disk; both the spool and
+        // the kitty image cache stay bounded by these caps.
+        cold_lines: settings.terminal.scrollback.saturating_mul(8),
+        cold_bytes: 64 * 1024 * 1024,
+        graphics_bytes: 32 * 1024 * 1024,
         notifier,
         kind,
     })

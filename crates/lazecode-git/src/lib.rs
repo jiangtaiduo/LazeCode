@@ -53,8 +53,8 @@ pub use history::{
     cherry_pick_abort, cherry_pick_continue, commit_patch, conflict_list, drop_commit,
     mark_conflict_resolved, merge, merge_abort, merge_continue, merge_file_content, rebase,
     rebase_abort, rebase_continue, rebase_interactive, rebase_skip, require_clean, reset,
-    resolve_take, revert, sequencer_state, squash_commits, undo_commit_head, ConflictEntry,
-    MergeFile3Way, RebaseStep, ResetMode, SequencerState,
+    resolve_take, revert, revert_abort, revert_continue, sequencer_state, squash_commits,
+    undo_commit_head, ConflictEntry, MergeFile3Way, RebaseStep, ResetMode, SequencerState,
 };
 pub use introspect::{
     blame, commit_files, compare_branches, compare_commits, file_history, lfs_pull, lfs_status,

@@ -6,8 +6,15 @@ use crate::runtime::UiRuntime;
 use crate::theme::Theme;
 use crate::widgets::{checkbox, primary_button, secondary_button, text_clipped};
 
-const SECTIONS_EN: [&str; 5] = ["Appearance", "Editor", "Terminal", "Files", "About"];
-const SECTIONS_ZH: [&str; 5] = ["外观", "编辑器", "终端", "文件", "关于"];
+const SECTIONS_EN: [&str; 6] = [
+    "Appearance",
+    "Editor",
+    "Terminal",
+    "Files",
+    "Updates",
+    "About",
+];
+const SECTIONS_ZH: [&str; 6] = ["外观", "编辑器", "终端", "文件", "更新", "关于"];
 
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme) {
     let p = theme.palette;
@@ -48,7 +55,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         p.text,
     );
     let mut y = nav.top() + 66.0;
-    let sections: &[&str; 5] = if model.settings.language.is_zh() {
+    let sections: &[&str; 6] = if model.settings.language.is_zh() {
         &SECTIONS_ZH
     } else {
         &SECTIONS_EN
@@ -128,6 +135,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         1 => editor(ui, model, theme, content),
         2 => terminal(ui, model, theme, content),
         3 => files(ui, model, rt, theme, content),
+        4 => updates(ui, model, rt, theme, content),
         _ => about(ui, model, theme, content),
     }
 }
@@ -694,6 +702,163 @@ fn files(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, r
         model.settings.ignored_patterns.remove(idx);
         model.save_settings();
         model.queue(lazecode_core::Command::ReloadTree);
+    }
+}
+
+/// Single-line labelled settings input. Returns `true` when the user
+/// committed a change (focus lost or Enter).
+fn labelled_input(
+    ui: &mut Ui,
+    theme: &Theme,
+    rect: Rect,
+    y: f32,
+    label: &str,
+    hint: &str,
+    value: &mut String,
+) -> bool {
+    let p = theme.palette;
+    ui.painter().text(
+        Pos2::new(rect.left(), y),
+        Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(11.5),
+        p.text2,
+    );
+    let input = Rect::from_min_size(
+        Pos2::new(rect.left() + 160.0, y - 13.0),
+        Vec2::new((rect.width() - 170.0).max(160.0), 26.0),
+    );
+    ui.painter()
+        .rect_filled(input, egui::CornerRadius::same(5), p.panel2);
+    ui.painter().rect_stroke(
+        input,
+        egui::CornerRadius::same(5),
+        Stroke::new(1.0, p.border),
+        StrokeKind::Inside,
+    );
+    let response = ui.put(
+        input.shrink2(Vec2::new(7.0, 3.0)),
+        TextEdit::singleline(value)
+            .frame(egui::Frame::NONE)
+            .hint_text(hint)
+            .font(FontId::monospace(10.5)),
+    );
+    let entered = response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    response.lost_focus() || entered
+}
+
+fn updates(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, rect: Rect) {
+    let p = theme.palette;
+    heading(
+        ui,
+        theme,
+        rect,
+        crate::tr!(model, "Updates", "更新"),
+        crate::tr!(
+            model,
+            "Signed release manifest: HTTPS endpoint plus the pinned Ed25519 public key.",
+            "签名发布清单：更新地址与固定的 Ed25519 公钥。"
+        ),
+    );
+    let endpoint_label = crate::tr!(model, "Endpoint", "更新地址");
+    let key_label = crate::tr!(model, "Public key", "公钥");
+    let auto_label = crate::tr!(model, "Check at startup", "启动时检查");
+    let mut changed = false;
+    let mut y = rect.top() + 74.0;
+    changed |= labelled_input(
+        ui,
+        theme,
+        rect,
+        y,
+        endpoint_label,
+        "https://updates.example.com/manifest.json",
+        &mut model.settings.update_endpoint,
+    );
+    y += 42.0;
+    changed |= labelled_input(
+        ui,
+        theme,
+        rect,
+        y,
+        key_label,
+        "base64 or hex Ed25519 public key",
+        &mut model.settings.update_public_key,
+    );
+    y += 42.0;
+    ui.painter().text(
+        Pos2::new(rect.left(), y),
+        Align2::LEFT_CENTER,
+        auto_label,
+        FontId::proportional(11.5),
+        p.text2,
+    );
+    let check_rect =
+        Rect::from_min_size(Pos2::new(rect.left() + 160.0, y - 9.0), Vec2::splat(18.0));
+    if checkbox(ui, check_rect, model.settings.auto_check_updates, theme).clicked() {
+        model.settings.auto_check_updates = !model.settings.auto_check_updates;
+        changed = true;
+    }
+    ui.painter().text(
+        Pos2::new(rect.left() + 186.0, y),
+        Align2::LEFT_CENTER,
+        crate::tr!(
+            model,
+            "Fetch the manifest once shortly after launch (no download starts).",
+            "启动后自动获取一次清单（不会自动下载）。"
+        ),
+        FontId::proportional(10.5),
+        p.text3,
+    );
+
+    y += 44.0;
+    let open_rect = Rect::from_min_size(
+        Pos2::new(rect.left() + 160.0, y - 13.0),
+        Vec2::new(150.0, 26.0),
+    );
+    if secondary_button(
+        ui,
+        open_rect,
+        crate::tr!(model, "Open update dialog", "打开更新窗口"),
+        None,
+        theme,
+    )
+    .clicked()
+    {
+        rt.update_open = true;
+    }
+
+    y += 34.0;
+    if model.settings.updates_configured() {
+        ui.painter().text(
+            Pos2::new(rect.left(), y),
+            Align2::LEFT_CENTER,
+            format!(
+                "{} {}",
+                crate::tr!(model, "Signing key:", "签名公钥："),
+                match model.settings.update_public_key.len() {
+                    0 => crate::tr!(model, "not set", "未设置").to_string(),
+                    len => format!("{len} chars"),
+                }
+            ),
+            FontId::proportional(10.5),
+            p.text3,
+        );
+    } else {
+        ui.painter().text(
+            Pos2::new(rect.left(), y),
+            Align2::LEFT_CENTER,
+            crate::tr!(
+                model,
+                "Updates stay disabled until both fields are filled in. Only HTTPS, file:// URLs and local paths are accepted; artifacts are SHA-256 checked and Ed25519 verified.",
+                "两项都填写后才会启用更新。仅接受 HTTPS、file:// 或本地路径；下载后会校验 SHA-256 与 Ed25519 签名。"
+            ),
+            FontId::proportional(10.5),
+            p.amber,
+        );
+    }
+
+    if changed {
+        model.save_settings();
     }
 }
 

@@ -10,6 +10,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Native history sequencer: cherry-pick/revert with clean and conflict paths,
+  conflicted rebase stop/continue/abort/skip, native conflict list/content/
+  resolution helpers, and author-preserving replay. Interactive rebase and
+  merge abort/continue remain porcelain.
+- Terminal cold/disk scrollback with bounded spool, stable row ids,
+  rehydration, search and cleanup; kitty graphics transmission/placement/
+  deletion with bounded image cache; kitty keyboard/modifyOtherKeys with
+  release/repeat events; accesskit terminal text mirror.
+- Signed updater: manifest check, semver gate, bounded download, SHA-256 +
+  Ed25519 verification, atomic executable replacement with rollback, Settings
+  → Updates UI and auto-check.
+- File → New Window (Cmd+Shift+N) opens an independent LazeCode process.
+
 - Native Git clean/smudge pipeline on stage, partial commit, status and
   checkout: `.gitattributes` `text`/`eol`/`ident`/`filter`, `core.autocrlf`/
   `core.eol`, user `filter.<driver>.clean|smudge` commands, and LFS pointer

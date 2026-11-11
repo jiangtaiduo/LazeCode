@@ -1,10 +1,13 @@
+use std::collections::HashMap;
+
 use egui::{
     Align2, Color32, Event, FontId, ImeEvent, Key, Modifiers, Pos2, Rect, Sense, Stroke,
     StrokeKind, TextEdit, Ui, Vec2,
 };
 use lazecode_terminal::{
-    ColorSpec, Session, Snapshot, TerminalKey, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_INVERSE,
-    ATTR_LEADING_SPACER, ATTR_SPACER, ATTR_STRIKEOUT, ATTR_UNDERLINE, ATTR_WIDE,
+    ColorSpec, ImagePlacement, KeyEvent, Session, Snapshot, TerminalKey, ATTR_BOLD, ATTR_DIM,
+    ATTR_HIDDEN, ATTR_INVERSE, ATTR_LEADING_SPACER, ATTR_SPACER, ATTR_STRIKEOUT, ATTR_UNDERLINE,
+    ATTR_WIDE,
 };
 
 use crate::icons::{paint as paint_icon, Icon};
@@ -20,6 +23,146 @@ pub struct TerminalOutput {
     pub focus_requested: bool,
 }
 
+/// Per-pane cache of egui textures for kitty graphics images.
+///
+/// Pixels are uploaded once per generation and dropped when the terminal
+/// evicts or deletes an image, so the cache mirrors the terminal's own byte
+/// cap instead of growing on its own.
+#[derive(Default)]
+pub struct GraphicsCache {
+    images: HashMap<u32, CachedImage>,
+    /// A full re-upload was already requested for the current empty state.
+    resynced: bool,
+}
+
+struct CachedImage {
+    generation: u64,
+    texture: egui::TextureHandle,
+}
+
+impl GraphicsCache {
+    /// Upload decoded images and prune textures the terminal no longer holds.
+    pub fn sync(&mut self, ctx: &egui::Context, session: &Session, snapshot: &Snapshot) {
+        if self.images.is_empty() && !snapshot.graphics_images.is_empty() && !self.resynced {
+            // The frontend lost its textures (a fresh context, a cleared cache)
+            // while the terminal still holds pixels: ask for a full re-upload
+            // once, then accept the terminal's answer.
+            self.resynced = true;
+            session.resync_graphics();
+        }
+        let images = session.take_graphics_updates();
+        if !images.is_empty() {
+            self.resynced = false;
+        }
+        self.apply(ctx, images, &snapshot.graphics_images);
+    }
+
+    /// Upload `images` and drop every texture not in `live_ids`.
+    fn apply(
+        &mut self,
+        ctx: &egui::Context,
+        images: Vec<lazecode_terminal::KittyImage>,
+        live_ids: &[u32],
+    ) {
+        let max_side = ctx.input(|input| input.max_texture_side);
+        for image in images {
+            if image.width == 0
+                || image.height == 0
+                || image.width > max_side
+                || image.height > max_side
+            {
+                continue;
+            }
+            if self
+                .images
+                .get(&image.id)
+                .is_some_and(|cached| cached.generation == image.generation)
+            {
+                continue;
+            }
+            let pixels =
+                egui::ColorImage::from_rgba_unmultiplied([image.width, image.height], &image.rgba);
+            let texture = ctx.load_texture(
+                format!("kitty-image-{}", image.id),
+                pixels,
+                egui::TextureOptions::LINEAR,
+            );
+            self.images.insert(
+                image.id,
+                CachedImage {
+                    generation: image.generation,
+                    texture,
+                },
+            );
+        }
+        self.images.retain(|id, _| live_ids.contains(id));
+    }
+
+    /// Paint the placements that intersect the visible viewport.
+    fn paint(
+        &self,
+        painter: &egui::Painter,
+        snapshot: &Snapshot,
+        inner: Rect,
+        char_w: f32,
+        line_h: f32,
+        rows: usize,
+    ) {
+        if snapshot.graphics.is_empty() {
+            return;
+        }
+        for placement in &snapshot.graphics {
+            let Some(cached) = self.images.get(&placement.image_id) else {
+                continue;
+            };
+            let row = placement.row as f32 + snapshot.display_offset as f32;
+            if row + placement.rows as f32 <= 0.0 || row >= rows as f32 {
+                continue;
+            }
+            let rect = Rect::from_min_size(
+                Pos2::new(
+                    inner.left() + placement.col as f32 * char_w,
+                    inner.top() + row * line_h,
+                ),
+                Vec2::new(
+                    placement.columns as f32 * char_w,
+                    placement.rows as f32 * line_h,
+                ),
+            );
+            let size = cached.texture.size_vec2();
+            let uv = source_uv(placement, size);
+            painter.image(cached.texture.id(), rect, uv, Color32::WHITE);
+        }
+    }
+}
+
+/// Normalise a kitty source rectangle (`x`,`y`,`w`,`h`; 0 = to the edge) into
+/// the texture's UV space.
+fn source_uv(placement: &ImagePlacement, size: Vec2) -> Rect {
+    let (source_x, source_y, source_w, source_h) = placement.source;
+    let width = size.x.max(1.0);
+    let height = size.y.max(1.0);
+    let x = (source_x as f32).min(width);
+    let y = (source_y as f32).min(height);
+    let crop_w = if source_w > 0 {
+        (source_w as f32).min(width - x)
+    } else {
+        width - x
+    };
+    let crop_h = if source_h > 0 {
+        (source_h as f32).min(height - y)
+    } else {
+        height - y
+    };
+    if crop_w <= 0.0 || crop_h <= 0.0 {
+        return Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    }
+    Rect::from_min_max(
+        Pos2::new(x / width, y / height),
+        Pos2::new((x + crop_w) / width, (y + crop_h) / height),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn draw(
     ui: &mut Ui,
@@ -30,6 +173,7 @@ pub fn draw(
     focus: bool,
     preedit: &mut String,
     wheel_accum: &mut f32,
+    graphics: &mut GraphicsCache,
     refresh: bool,
     theme: &Theme,
     rect: Rect,
@@ -70,6 +214,8 @@ pub fn draw(
     }
     let cols = snapshot.cols.max(1);
     let rows = snapshot.rows.max(1);
+    // Kitty graphics needs the cell pixel size to size a placement.
+    session.set_cell_size(char_w, line_h);
 
     let mut focus_requested = false;
     let input_rect = Rect::from_min_max(
@@ -83,6 +229,23 @@ pub fn draw(
     );
     if response.clicked() || response.dragged() {
         focus_requested = true;
+    }
+    // Screen readers see the visible viewport text, cursor and selection. The
+    // mirror is bounded to the viewport, so no history is cloned per frame.
+    if ui.ctx().options(|options| options.screen_reader) {
+        let mirror = a11y_mirror(snapshot, selection.as_ref(), focus);
+        response.widget_info(|| egui::WidgetInfo {
+            role: egui::accesskit::Role::Terminal,
+            enabled: true,
+            label: Some(mirror.label.clone()),
+            current_text_value: Some(mirror.text.clone()),
+            ..egui::WidgetInfo::new(egui::accesskit::Role::Terminal)
+        });
+        if !mirror.selection.is_empty() {
+            ui.ctx().accesskit_node_builder(response.id, |node| {
+                node.set_description(mirror.selection.clone());
+            });
+        }
     }
 
     let modes = snapshot.modes;
@@ -389,6 +552,11 @@ pub fn draw(
         }
     }
 
+    // Kitty graphics overlays sit on top of the cell grid and below the
+    // cursor.
+    graphics.sync(ui.ctx(), session, snapshot);
+    graphics.paint(&painter, snapshot, inner, char_w, line_h, rows);
+
     // Cursor & IME activation.
     if focus {
         let (cx, cy) = if let Some(cursor) = snapshot.cursor {
@@ -629,11 +797,17 @@ fn handle_input(
             }
             Event::Key {
                 key,
-                pressed: true,
+                pressed,
+                repeat,
                 modifiers,
                 ..
             } => {
-                if let Some(stroke) = key_to_stroke(key, modifiers) {
+                if let Some(mut stroke) = key_to_stroke(key, modifiers) {
+                    stroke.event = match (pressed, repeat) {
+                        (true, true) => KeyEvent::Repeat,
+                        (true, false) => KeyEvent::Press,
+                        (false, _) => KeyEvent::Release,
+                    };
                     if let Some(encoded) = encode_stroke_for(stroke, snapshot) {
                         bytes.extend_from_slice(&encoded);
                     }
@@ -669,6 +843,7 @@ fn key_to_stroke(key: Key, modifiers: Modifiers) -> Option<lazecode_terminal::Ke
                 ctrl: modifiers.ctrl,
                 alt: modifiers.alt,
                 shift: modifiers.shift,
+                event: KeyEvent::Press,
             });
         }
     }
@@ -709,6 +884,7 @@ fn key_to_stroke(key: Key, modifiers: Modifiers) -> Option<lazecode_terminal::Ke
         ctrl: modifiers.ctrl,
         alt: modifiers.alt,
         shift: modifiers.shift,
+        event: KeyEvent::Press,
     })
 }
 
@@ -1002,9 +1178,217 @@ fn draw_search(
     }
 }
 
+/// Bounded accessibility mirror of the visible viewport.
+pub struct A11yMirror {
+    /// Accessible name: geometry, cursor and scroll/focus state.
+    pub label: String,
+    /// Visible grid text, one line per row, trailing blanks trimmed.
+    pub text: String,
+    /// Selected text (empty when there is no selection).
+    pub selection: String,
+}
+
+/// Build the screen-reader view of the terminal.
+///
+/// Only the visible viewport is walked: no scrollback is cloned, so the cost
+/// is the same order as one rendered frame.
+pub fn a11y_mirror(
+    snapshot: &Snapshot,
+    selection: Option<&TermSelection>,
+    focused: bool,
+) -> A11yMirror {
+    let text = a11y_text(snapshot);
+    let mut label = format!(
+        "Terminal, {} columns by {} rows",
+        snapshot.cols, snapshot.rows
+    );
+    if let Some(cursor) = snapshot.cursor {
+        label.push_str(&format!(
+            ", cursor line {} column {}",
+            cursor.row + 1,
+            cursor.col + 1
+        ));
+    }
+    if snapshot.display_offset > 0 {
+        label.push_str(&format!(
+            ", scrolled back {} of {} history lines",
+            snapshot.display_offset, snapshot.history_size
+        ));
+    }
+    label.push_str(if focused { ", focused" } else { ", unfocused" });
+
+    let selection = selection
+        .map(|selection| selection_text(snapshot, selection))
+        .unwrap_or_default();
+    A11yMirror {
+        label,
+        text,
+        selection,
+    }
+}
+
+/// Visible grid text with trailing blanks trimmed per row.
+pub fn a11y_text(snapshot: &Snapshot) -> String {
+    let mut out = String::with_capacity(snapshot.rows * (snapshot.cols + 1));
+    for row in 0..snapshot.rows {
+        for col in 0..snapshot.cols {
+            let cell = snapshot.cell(row, col);
+            if cell.attrs & (ATTR_SPACER | ATTR_LEADING_SPACER) != 0 {
+                continue;
+            }
+            match &cell.text {
+                Some(cluster) => out.push_str(cluster),
+                None if cell.ch != '\0' => out.push(cell.ch),
+                None => out.push(' '),
+            }
+        }
+        // Trim the blank tail so screen readers do not announce padding.
+        while out.ends_with(' ') {
+            out.pop();
+        }
+        if row + 1 < snapshot.rows {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    use lazecode_terminal::CellData;
+
     use super::*;
+
+    fn text_snapshot(rows: &[&str], cols: usize) -> Snapshot {
+        let mut snapshot = Snapshot {
+            cols,
+            rows: rows.len(),
+            ..Snapshot::default()
+        };
+        snapshot.cells = vec![CellData::default(); cols * rows.len()];
+        for (row, line) in rows.iter().enumerate() {
+            for (col, ch) in line.chars().enumerate().take(cols) {
+                snapshot.cells[row * cols + col].ch = ch;
+            }
+        }
+        snapshot
+    }
+
+    #[test]
+    fn a11y_text_mirrors_the_visible_viewport_only() {
+        let snapshot = text_snapshot(&["hello", "world"], 8);
+        assert_eq!(a11y_text(&snapshot), "hello\nworld");
+
+        // History size does not change the mirror size: only viewport cells
+        // are exposed, so a screen reader never receives the whole scrollback.
+        let mut scrolled = snapshot.clone();
+        scrolled.history_size = 5_000;
+        scrolled.display_offset = 120;
+        scrolled.hot_history_size = 400;
+        assert_eq!(a11y_text(&scrolled), "hello\nworld");
+        assert_eq!(scrolled.cells.len(), scrolled.cols * scrolled.rows);
+    }
+
+    #[test]
+    fn a11y_label_reports_cursor_scroll_and_focus() {
+        let mut snapshot = text_snapshot(&["$ ls"], 8);
+        snapshot.cursor = Some(lazecode_terminal::CursorView {
+            row: 0,
+            col: 2,
+            shape: lazecode_terminal::CursorShape::Block,
+            blinking: false,
+        });
+        snapshot.history_size = 40;
+        snapshot.display_offset = 7;
+        let mirror = a11y_mirror(&snapshot, None, true);
+        assert!(
+            mirror.label.contains("cursor line 1 column 3"),
+            "{}",
+            mirror.label
+        );
+        assert!(
+            mirror.label.contains("scrolled back 7 of 40"),
+            "{}",
+            mirror.label
+        );
+        assert!(mirror.label.contains("focused"), "{}", mirror.label);
+        assert!(mirror.selection.is_empty());
+
+        // Absolute selection lines: the viewport starts at line -7.
+        let selection = TermSelection {
+            start: (-7, 0),
+            end: (-7, 4),
+        };
+        let mirror = a11y_mirror(&snapshot, Some(&selection), false);
+        assert_eq!(mirror.selection, "$ ls");
+        assert!(mirror.label.contains("unfocused"));
+    }
+
+    #[test]
+    fn kitty_source_rect_maps_to_texture_uv() {
+        let placement = ImagePlacement {
+            image_id: 1,
+            col: 0,
+            row: 0,
+            columns: 1,
+            rows: 1,
+            source: (0, 0, 0, 0),
+            z_index: 0,
+        };
+        let uv = source_uv(&placement, Vec2::new(10.0, 20.0));
+        assert_eq!(uv, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)));
+
+        let cropped = ImagePlacement {
+            source: (5, 10, 5, 10),
+            ..placement
+        };
+        let uv = source_uv(&cropped, Vec2::new(10.0, 20.0));
+        assert_eq!(
+            uv,
+            Rect::from_min_max(Pos2::new(0.5, 0.5), Pos2::new(1.0, 1.0))
+        );
+
+        // A crop larger than the image clamps to the remaining pixels.
+        let clamped = ImagePlacement {
+            source: (5, 10, 500, 500),
+            ..placement
+        };
+        let uv = source_uv(&clamped, Vec2::new(10.0, 20.0));
+        assert_eq!(
+            uv,
+            Rect::from_min_max(Pos2::new(0.5, 0.5), Pos2::new(1.0, 1.0))
+        );
+    }
+
+    #[test]
+    fn graphics_cache_uploads_once_and_prunes_evicted_images() {
+        let ctx = egui::Context::default();
+        let mut cache = GraphicsCache::default();
+        let image = lazecode_terminal::KittyImage {
+            id: 7,
+            width: 2,
+            height: 2,
+            rgba: std::sync::Arc::from(vec![0u8; 16].into_boxed_slice()),
+            generation: 1,
+        };
+        cache.apply(&ctx, vec![image.clone()], &[7]);
+        assert_eq!(cache.images.len(), 1);
+        assert_eq!(cache.images[&7].generation, 1);
+
+        // A stale upload is ignored; a new generation replaces the texture.
+        cache.apply(&ctx, vec![image.clone()], &[7]);
+        assert_eq!(cache.images[&7].generation, 1);
+        let newer = lazecode_terminal::KittyImage {
+            generation: 2,
+            ..image
+        };
+        cache.apply(&ctx, vec![newer], &[7]);
+        assert_eq!(cache.images[&7].generation, 2);
+
+        // Eviction in the terminal drops the texture here too.
+        cache.apply(&ctx, Vec::new(), &[]);
+        assert!(cache.images.is_empty());
+    }
 
     #[test]
     fn ctrl_and_alt_character_keys_become_strokes() {

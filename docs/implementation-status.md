@@ -137,13 +137,12 @@ Write path:
 - Native clean rebase: replays first-parent commits with `merge_trees`,
   preserves author identity, then hard-resets the branch; conflicted rebases
   fall back to the porcelain sequencer without touching refs/worktree first.
-- History rewrite porcelain (still uses the `git` binary): conflicted rebase (+continue/abort/skip),
-  interactive rebase (UI-arranged todo executed through a
-  GIT_SEQUENCE_EDITOR shim; conflicts fall through to the sequencer bar),
-  cherry-pick (+continue/abort, editor neutralised, empty picks skipped),
-  revert, drop (HEAD via native reset, others via rebase --onto with a hash
-  whitelist), squash (merge-base --is-ancestor ordering; root gotcha
-  special-cased); sequencer
+- Native sequencer: cherry-pick/revert (clean + conflict, author preserved),
+  conflicted rebase stop/continue/abort/skip with `rebase-merge/` state,
+  native `conflict_list`/`resolve_take`/`merge_file_content`; merge abort/
+  continue and interactive rebase still use the `git` sequencer. Drop uses
+  native reset for HEAD and rebase --onto otherwise; squash keeps its
+  ancestry guards. Sequencer
   state introspection (MERGE_HEAD / rebase-merge|apply / CHERRY_PICK_HEAD /
   REVERT_HEAD) drives a conflict bar with continue/abort routed per kind.
 - Native stash: push (message, `-u` for untracked, `--keep-index`),
@@ -242,16 +241,32 @@ Not implemented (explicit):
   a login-shell allow-list and common credential environment variables are
   stripped before spawn.
 - Bottom-dock height and right-dock width/placement persist across launches.
+- Cold/disk scrollback (`lazecode-terminal/src/cold.rs`): evicted rows are
+  spooled to a bounded append-only file with stable absolute row ids,
+  rehydrated for scroll/search, compacted when dead bytes dominate, and
+  deleted on session close. Hot memory plateaus at the configured history.
+- Kitty graphics: rio-vt parses APC transmit/place/delete with chunking,
+  base64 payloads, ids, z/columns/rows/source rects; decoded RGBA images are
+  byte-capped and rendered as egui textures above the cell grid. PNG/JPEG
+  payloads need rio-vt's `graphics` feature and are currently rejected;
+  virtual placements/animations are not composited.
+- Kitty keyboard and modifyOtherKeys: protocol flag stack, key codes, event
+  types (release/repeat), associated text, and xterm `CSI 27;…~` are encoded
+  in `input.rs`; legacy bytes remain when disabled.
+- Accessibility mirror: `accesskit::Role::Terminal` node with
+  viewport-bounded text, geometry/cursor/scroll/focus label and selected
+  text description.
+- New Window (File menu / Cmd+Shift+N) spawns an independent LazeCode
+  process. Windows do not share in-memory state; the shared workspace file
+  is last-writer-wins.
 
 Not implemented (explicit):
 
-- cold/disk history and the 10M-logical-line / 10GB soak target;
-- kitty graphics, OSC 133 prompt marks, OSC 7/9;9 cwd tracking (rio exposes
-  the OSC 7 cwd on `Crosswords.current_directory`; not surfaced yet),
-  OSC 52;
-- kitty keyboard protocol/modifyOtherKeys, key-release events, and the
-  screen-reader text mirror;
+- kitty PNG/JPEG payload decoding, virtual placements and strip/frame
+  animations;
+- OSC 133 prompt marks, OSC 7/9;9 cwd tracking and OSC 52;
 - rio-vt's hyperlink/vi-mode surfaces;
+- same-process multi-window model sharing (New Window is process-isolated);
 - custom GPU offscreen terminal renderer with an integer-pixel grid (the
   current renderer paints cell runs through the egui painter and caches the
   cell geometry per visible row).
@@ -286,20 +301,36 @@ The lifecycle is covered by a mock-server test and an ignored end-to-end
 test against real `rust-analyzer`
 (`cargo test -p lazecode-core --test lsp_e2e -- --ignored`).
 
+### Updater
+
+`lazecode-core::updater` implements a signed update flow:
+
+- manifest JSON: version, artifact URL, SHA-256, Ed25519 signature, notes,
+  min OS/arch; signed canonical payload excludes the signature;
+- HTTP/file/local-path check with semver comparison;
+- bounded streaming download (512 MiB), SHA-256 and Ed25519 verification
+  against the pinned `update_public_key`;
+- atomic executable replacement with backup and rollback on failure;
+- settings: `update_endpoint`, `update_public_key`, `auto_check_updates`
+  (defaults empty/false); Settings → Updates and a progress dialog.
+- macOS limitation: only `Contents/MacOS/<binary>` is replaced; full `.app`
+  bundle/resource/signature swapping still needs an installer/notarised
+  archive.
+
 ### Packaging
 
 - `scripts/build-app.sh` builds `dist/LazeCode.app` (Info.plist, ad-hoc
-  signature). No notarization, auto-update or crash reporting yet.
+  signature). No notarization or crash reporting yet.
 
 ## 2. Crate map
 
 | crate | responsibility |
 |---|---|
-| `lazecode-core` | project/workspace model, tabs, settings, layout, commands, toasts, workspace persistence, LSP client/diagnostics |
+| `lazecode-core` | project/workspace model, tabs, settings, layout, commands, toasts, workspace persistence, LSP client/diagnostics, updater |
 | `lazecode-fs` | tree scan, encoding-aware file IO, search, watchers |
 | `lazecode-text` | rope documents, undo, incremental syntax cache, diff model |
 | `lazecode-git` | gix read/write porcelain limited to the list above |
-| `lazecode-terminal` | PTY lifecycle, VT grid, snapshot, key/mouse encoding, search |
+| `lazecode-terminal` | PTY lifecycle, VT grid, cold history, snapshot, key/mouse encoding, kitty graphics/keyboard, search |
 | `lazecode-ui` | theme tokens, icons, widgets, all views and overlays |
 | `lazecode-app` | winit/egui-wgpu shell, event routing, background Git jobs, app bundle |
 | `lazecode-app --bin snapshot` | headless offscreen renderer used for visual verification |
@@ -312,7 +343,7 @@ workspace under `crates/`.
 ## 3. Verification performed
 
 ```sh
-cargo test --workspace          # 141 tests, all passing
+cargo test --workspace          # 233 tests, all passing
 cargo clippy --workspace --all-targets   # clean
 cargo test -p lazecode-core --test lsp_e2e -- --ignored  # real rust-analyzer
 cargo build --release -p lazecode-app    # native binary

@@ -369,12 +369,14 @@ impl LazeApp {
             // worktrees carry their own.
             if let Some(watcher) = project.watcher.as_ref() {
                 if let Some(batch) = watcher.poll() {
+                    lazecode_git::invalidate_ignored_cache(&project.root);
                     changed.push((project.root.clone(), batch.changed));
                 }
             }
             for worktree in project.worktrees.iter().skip(1) {
                 if let Some(watcher) = worktree.watcher.as_ref() {
                     if let Some(batch) = watcher.poll() {
+                        lazecode_git::invalidate_ignored_cache(&worktree.path);
                         changed.push((worktree.path.clone(), batch.changed));
                     }
                 }

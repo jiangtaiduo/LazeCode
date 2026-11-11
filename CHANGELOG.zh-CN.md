@@ -37,6 +37,19 @@
   操作只构建一次 attributes 栈，不再逐文件重建。
 - Stash 与架藏保存改用轻量变更扫描（不再计算逐文件增删统计、忽略目录
   遍历与 ahead/behind），减少工作树 I/O。
+- stash apply 在两侧修改同一文件时执行文本三方合并并写入 Git 风格冲突
+  标记；无冲突时自动合并。大 LFS 文件从 `.git/lfs/objects` 流式写出，
+  不再整块读入内存。
+- 忽略文件状态按 worktree 缓存，并由 watcher 事件失效（2 秒兜底 TTL），
+  避免每次 snapshot 都遍历目录。
+- ahead/behind/待推送计数改用 gix revision walk（支持 commit-graph），
+  不再手写父提交遍历。
+- 原生远程 fetch、clone 与仅快进 pull，使用 gix blocking transport
+  （reqwest + rustls）。push 与 merge/rebase pull 仍走 porcelain，等待
+  gix 提供 send-pack 与 merge sequencer。
+- stash apply 文本三方合并并写入冲突标记；大 LFS 对象流式写出；忽略文件
+  状态按 worktree 缓存并由 watcher 失效；ahead/behind 与待推送计数改用
+  支持 commit-graph 的 gix revision walk。
 - 原生 Git stash：push（支持 message、`-u`、`--keep-index`）、list、files、
   apply、pop、drop。实现会写入与 Git 兼容的 stash/index/untracked 提交及
   `refs/stash` reflog，因此与 `git` CLI 双向互通。

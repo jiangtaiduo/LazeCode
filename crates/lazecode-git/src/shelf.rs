@@ -364,7 +364,100 @@ fn entry_worktree(
 
 enum StashAction {
     Write { mode: u32, data: Vec<u8> },
+    WriteLfs { mode: u32, pointer: Vec<u8> },
     Delete,
+}
+
+fn lfs_entry(
+    repo: &gix::Repository,
+    filters: &mut crate::filter::FilterContext<'_>,
+    path: &str,
+    entry: &TreeEntry,
+) -> Result<Option<(Vec<u8>, String, u64)>> {
+    if entry.mode == 0o120000 {
+        return Ok(None);
+    }
+    let data = blob_bytes(repo, entry.oid)?;
+    let Some((oid, size)) = filters.lfs_pointer_info(path, &data)? else {
+        return Ok(None);
+    };
+    if filters.lfs_object_path(&oid).is_file() {
+        Ok(Some((data, oid, size)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn file_matches_lfs(path: &Path, oid: &str, size: u64) -> bool {
+    use std::io::Read;
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.len() != size {
+        return false;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => hasher.update(&buffer[..read]),
+            Err(_) => return false,
+        }
+    }
+    let digest = hasher.finish();
+    let mut actual = String::with_capacity(64);
+    for byte in digest.as_ref() {
+        use std::fmt::Write as _;
+        let _ = write!(actual, "{byte:02x}");
+    }
+    actual == oid
+}
+
+fn current_matches_entry(
+    repo: &gix::Repository,
+    root: &Path,
+    workdir: &Path,
+    path: &str,
+    entry: Option<&TreeEntry>,
+    filters: &mut crate::filter::FilterContext<'_>,
+) -> Result<bool> {
+    let absolute = safe_worktree_join(workdir, path)?;
+    let Some(entry) = entry else {
+        return Ok(std::fs::symlink_metadata(&absolute).is_err());
+    };
+    if let Some((_, oid, size)) = lfs_entry(repo, filters, path, entry)? {
+        return Ok(file_matches_lfs(&absolute, &oid, size));
+    }
+    let expected = entry_worktree(repo, root, path, entry, filters)?;
+    Ok(read_worktree(&absolute)? == Some(expected))
+}
+
+fn merge_contents(ancestor: &[u8], current: &[u8], other: &[u8]) -> Option<(Vec<u8>, bool)> {
+    let binary = |data: &[u8]| data.iter().take(8000).any(|byte| *byte == 0);
+    if binary(ancestor) || binary(current) || binary(other) {
+        return None;
+    }
+    let mut input = imara_diff::InternedInput::new(&[][..], &[]);
+    let mut output = Vec::new();
+    let labels = gix::merge::blob::builtin_driver::text::Labels {
+        ancestor: Some(gix::bstr::BStr::new("base")),
+        current: Some(gix::bstr::BStr::new("Updated upstream")),
+        other: Some(gix::bstr::BStr::new("Stashed changes")),
+    };
+    let resolution = gix::merge::blob::builtin_driver::text(
+        &mut output,
+        &mut input,
+        labels,
+        current,
+        ancestor,
+        other,
+        gix::merge::blob::builtin_driver::text::Options::default(),
+    );
+    Some((output, resolution == gix::merge::blob::Resolution::Conflict))
 }
 
 pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
@@ -374,13 +467,40 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
     let (_, base, index, new) = stash_trees(&repo, stash_id)?;
     let mut filters = crate::filter::FilterContext::new(&repo)?;
     let mut actions: Vec<(String, StashAction)> = Vec::new();
+    let mut conflicts: Vec<String> = Vec::new();
     for path in new.keys().chain(base.keys()) {
         let old = base.get(path);
         let new_entry = new.get(path);
         if old == new_entry {
             continue;
         }
-        let current = read_worktree(&safe_worktree_join(&workdir, path)?)?;
+        let absolute = safe_worktree_join(&workdir, path)?;
+        if let Some((pointer, oid, size)) = new_entry
+            .map(|entry| lfs_entry(&repo, &mut filters, path, entry))
+            .transpose()?
+            .flatten()
+        {
+            if file_matches_lfs(&absolute, &oid, size) {
+                continue;
+            }
+            let old_matches =
+                current_matches_entry(&repo, root, &workdir, path, old, &mut filters)?;
+            let index_matches =
+                current_matches_entry(&repo, root, &workdir, path, index.get(path), &mut filters)?;
+            if old_matches || index_matches {
+                actions.push((
+                    path.clone(),
+                    StashAction::WriteLfs {
+                        mode: new_entry.expect("new entry").mode,
+                        pointer,
+                    },
+                ));
+            } else {
+                conflicts.push(path.clone());
+            }
+            continue;
+        }
+        let current = read_worktree(&absolute)?;
         let old_data = old
             .map(|entry| entry_worktree(&repo, root, path, entry, &mut filters))
             .transpose()?;
@@ -394,24 +514,59 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
         if current == new_data {
             continue;
         }
-        if current != old_data && current != index_data {
-            anyhow::bail!("stash apply conflict at '{path}'");
+        if current == old_data || current == index_data {
+            match new_entry {
+                Some(entry) => actions.push((
+                    path.clone(),
+                    StashAction::Write {
+                        mode: entry.mode,
+                        data: new_data
+                            .as_ref()
+                            .map(|(data, _)| data.clone())
+                            .unwrap_or_default(),
+                    },
+                )),
+                None => actions.push((path.clone(), StashAction::Delete)),
+            }
+            continue;
         }
-        match new_entry {
-            Some(entry) => actions.push((
-                path.clone(),
-                StashAction::Write {
-                    mode: entry.mode,
-                    data: new_data
-                        .as_ref()
-                        .map(|(data, _)| data.clone())
-                        .unwrap_or_default(),
-                },
-            )),
-            None => actions.push((path.clone(), StashAction::Delete)),
+
+        // Modified on both sides: perform a real three-way merge and write
+        // conflict markers when gix cannot resolve it automatically.
+        let merge_base = old_data
+            .as_ref()
+            .map(|(data, _)| data.as_slice())
+            .unwrap_or(&[]);
+        let current_data = current
+            .as_ref()
+            .map(|(data, _)| data.as_slice())
+            .unwrap_or(&[]);
+        if let Some((data, conflict)) = new_entry
+            .and_then(|entry| new_data.as_ref().map(|(data, _)| (entry, data)))
+            .and_then(|(entry, data)| {
+                merge_contents(merge_base, current_data, data).map(|(merged, conflict)| {
+                    (
+                        StashAction::Write {
+                            mode: entry.mode,
+                            data: merged,
+                        },
+                        conflict,
+                    )
+                })
+            })
+        {
+            actions.push((path.clone(), data));
+            if conflict {
+                conflicts.push(path.clone());
+            }
+            continue;
         }
+
+        // Delete/modify or binary add/add: keep the current side and report a
+        // conflict; Git leaves the index unmerged in this case.
+        conflicts.push(path.clone());
     }
-    if actions.is_empty() {
+    if actions.is_empty() && conflicts.is_empty() {
         return Ok("stash applied".to_string());
     }
     let backup = CheckoutBackup::capture(&repo, &workdir, actions.iter().map(|(path, _)| path))?;
@@ -422,6 +577,19 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
                 StashAction::Delete => {
                     std::fs::remove_file(&absolute)?;
                     remove_empty_parents(&workdir, Path::new(&path));
+                }
+                StashAction::WriteLfs { mode, pointer } => {
+                    if let Some(parent) = absolute.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    if !crate::filter::smudge_lfs_to_file_in(
+                        &repo, &workdir, &path, &pointer, &absolute,
+                    )? {
+                        lazecode_fs::file::write_atomic(&absolute, &pointer)?;
+                    }
+                    use std::os::unix::fs::PermissionsExt;
+                    let perms = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
+                    std::fs::set_permissions(&absolute, std::fs::Permissions::from_mode(perms))?;
                 }
                 StashAction::Write { mode, data } => {
                     if let Some(parent) = absolute.parent() {
@@ -454,6 +622,13 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
         return Err(error);
     }
     backup.discard();
+    if !conflicts.is_empty() {
+        conflicts.sort();
+        return Err(anyhow!(
+            "stash applied with conflicts: {}",
+            conflicts.join(", ")
+        ));
+    }
     Ok("stash applied".to_string())
 }
 

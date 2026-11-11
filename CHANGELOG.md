@@ -45,6 +45,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Stash and shelf save use a lightweight change scan (no per-file diff
   stats, ignored-directory walk or ahead/behind traversal), cutting worktree
   I/O for these actions.
+- Stash apply now performs a text three-way merge with Git-style conflict
+  markers when the worktree and the stash both changed the same file; clean
+  merges auto-resolve. Large LFS files stream from `.git/lfs/objects` instead
+  of being buffered.
+- Ignored-file status is cached per worktree and invalidated by watcher
+  events (with a 2s safety TTL), avoiding a directory walk on every snapshot.
+- Ahead/behind/pending counts use gix's revision walk (commit-graph aware)
+  instead of a hand-written parent traversal.
+- Native remote fetch, clone and fast-forward-only pull using gix's
+  blocking transport (reqwest + rustls). Push and merge/rebase pull remain
+  porcelain until gix exposes send-pack and merge sequencing.
+- Text three-way stash apply with conflict markers; large LFS objects stream
+  from the native object store; ignored status is cached per worktree and
+  invalidated by watcher events; ahead/behind and pending counts use the
+  commit-graph-aware gix revision walk.
 - Native Git stash: push (message, `-u`, `--keep-index`), list, files,
   apply, pop and drop. The implementation writes Git-compatible
   stash/index/untracked commits and `refs/stash` reflog entries, so stashes

@@ -1,11 +1,14 @@
-//! Remote sync over the `git` porcelain binary. gix 0.90 has no push/merge
-//! drivers; the plumbing stays the same, only the transport/outcome differs.
+//! Remote sync. Fetch, clone and fast-forward-only pull use gix's blocking
+//! transport; push and pull merge/rebase still use the `git` porcelain until
+//! gix grows a send-pack driver and a merge sequencer.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use anyhow::anyhow;
+use gix::remote::Direction;
 
-use crate::Result;
+use crate::{discover, Result};
 
 fn run(root: &Path, args: &[&str]) -> Result<String> {
     let output = crate::porcelain(root)
@@ -105,28 +108,46 @@ pub fn push(
     Ok(String::from_utf8_lossy(&output.stderr).trim().to_string())
 }
 
-/// Fetch all remotes and prune stale remote-tracking branches.
+/// Fetch all remotes. Native gix blocking transport; stale remote-tracking
+/// branches are left in place (prune is not part of the gix fetch API).
 pub fn fetch_all(root: &Path) -> Result<String> {
-    let output = crate::porcelain(root)
-        .args(["fetch", "--all", "--prune"])
-        .output()
-        .map_err(|err| anyhow!("git fetch spawn failed: {err}"))?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+    let repo = discover(root)?;
+    let names: Vec<String> = repo
+        .remote_names()
+        .into_iter()
+        .map(|name| name.to_string())
+        .collect();
+    for name in &names {
+        fetch_remote(&repo, name)?;
     }
-    Ok(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    Ok(names
+        .iter()
+        .map(|name| format!("{name}: fetched"))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+fn fetch_remote(repo: &gix::Repository, name: &str) -> Result<()> {
+    let remote = repo.find_remote(name)?;
+    let connection = remote.connect(Direction::Fetch)?;
+    let prepare = connection.prepare_fetch(
+        gix::progress::Discard,
+        gix::remote::ref_map::Options::default(),
+    )?;
+    let _outcome = prepare.receive(gix::progress::Discard, &AtomicBool::new(false))?;
+    Ok(())
 }
 
 /// Pull the current branch's upstream using the requested mode.
 pub fn pull(root: &Path, mode: PullMode) -> Result<String> {
+    if mode == PullMode::FastForwardOnly {
+        return pull_fast_forward(root);
+    }
     let mut args: Vec<String> = vec!["pull".into()];
     args.push(match mode {
         PullMode::Rebase => "--rebase".into(),
         PullMode::Merge => "--no-rebase".into(),
-        PullMode::FastForwardOnly => "--ff-only".into(),
+        PullMode::FastForwardOnly => unreachable!(),
     });
     let output = crate::porcelain(root)
         .args(&args)
@@ -139,6 +160,45 @@ pub fn pull(root: &Path, mode: PullMode) -> Result<String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stderr).trim().to_string())
+}
+
+fn pull_fast_forward(root: &Path) -> Result<String> {
+    let repo = discover(root)?;
+    let head = repo.head()?;
+    if head.is_unborn() || head.is_detached() {
+        anyhow::bail!("fast-forward pull requires a checked-out branch");
+    }
+    let branch = head
+        .referent_name()
+        .map(|name| name.shorten().to_string())
+        .unwrap_or_default();
+    let config = repo.config_snapshot();
+    let remote = config
+        .string(&format!("branch.{branch}.remote"))
+        .map(|value| value.to_string())
+        .ok_or_else(|| anyhow!("branch '{branch}' has no upstream remote"))?;
+    let merge = config
+        .string(&format!("branch.{branch}.merge"))
+        .map(|value| value.to_string())
+        .ok_or_else(|| anyhow!("branch '{branch}' has no upstream branch"))?;
+    let leaf = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+    fetch_remote(&repo, &remote)?;
+    let upstream_ref = format!("refs/remotes/{remote}/{leaf}");
+    let upstream = repo
+        .find_reference(upstream_ref.as_str())
+        .ok()
+        .and_then(|reference| reference.target().try_id().map(|id| id.to_owned()))
+        .ok_or_else(|| anyhow!("remote-tracking ref {upstream_ref} is missing"))?;
+    let head_id = repo.head_id()?.detach();
+    let base = repo
+        .merge_base(head_id, upstream)?
+        .ok_or_else(|| anyhow!("no common ancestor with upstream"))?
+        .detach();
+    if base != head_id {
+        anyhow::bail!("cannot fast-forward: local branch has diverged");
+    }
+    crate::history::reset(root, &upstream.to_string(), crate::history::ResetMode::Hard)?;
+    Ok("fast-forwarded".to_string())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,19 +218,10 @@ pub fn clone(url: &str, destination: &Path) -> Result<PathBuf> {
             anyhow::bail!("{} already exists and is not empty", destination.display());
         }
     }
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let output = crate::porcelain(&cwd)
-        .arg("clone")
-        .arg(url)
-        .arg(destination)
-        .output()
-        .map_err(|err| anyhow!("git clone spawn failed: {err}"))?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
+    let mut prepare = gix::prepare_clone(url, destination)?
+        .fetch_then_checkout(gix::progress::Discard, &AtomicBool::new(false))?
+        .0;
+    let _repo = prepare.main_worktree(gix::progress::Discard, &AtomicBool::new(false))?;
     Ok(destination.to_path_buf())
 }
 

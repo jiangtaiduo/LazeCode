@@ -31,6 +31,8 @@
 - Shelf/复制为 Patch 的差异改由原生 HEAD→工作树生成（覆盖已跟踪、
   未跟踪、删除、mode 变化与缺失末尾换行）；输出可被 `git apply --check`
   接受，架藏不再启动 `git diff`。
+- ahead/behind 与待推送提交数按 worktree + head + upstream 对象 ID 缓存
+  （有界），ref 未变化时不再重复遍历祖先。
 - Git clean/smudge/status/stage/stash/shelf 复用已打开的仓库，并且每次
   操作只构建一次 attributes 栈，不再逐文件重建。
 - Stash 与架藏保存改用轻量变更扫描（不再计算逐文件增删统计、忽略目录

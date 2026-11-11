@@ -1,5 +1,6 @@
-use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use gix::hash::ObjectId;
 use gix::index::entry::Stat;
@@ -406,6 +407,47 @@ pub(crate) fn compute_stats(old: &[u8], new: &[u8]) -> (u32, u32, bool) {
     (diff.additions, diff.deletions, false)
 }
 
+type CountKey = (PathBuf, ObjectId, ObjectId);
+
+static COUNT_CACHE: OnceLock<parking_lot::Mutex<HashMap<CountKey, (usize, usize)>>> =
+    OnceLock::new();
+
+fn cached_counts(key: &CountKey) -> Option<(usize, usize)> {
+    COUNT_CACHE
+        .get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+        .lock()
+        .get(key)
+        .copied()
+}
+
+fn store_counts(key: CountKey, counts: (usize, usize)) {
+    let cache = COUNT_CACHE.get_or_init(|| parking_lot::Mutex::new(HashMap::new()));
+    let mut cache = cache.lock();
+    if cache.len() >= 512 {
+        cache.clear();
+    }
+    cache.insert(key, counts);
+}
+
+fn counts_until(
+    repo: &gix::Repository,
+    workdir: &Path,
+    head: ObjectId,
+    upstream: ObjectId,
+    base: ObjectId,
+) -> Result<(usize, usize)> {
+    let key = (workdir.to_path_buf(), head, upstream);
+    if let Some(cached) = cached_counts(&key) {
+        return Ok(cached);
+    }
+    let counts = (
+        count_until(repo, head, base)?,
+        count_until(repo, upstream, base)?,
+    );
+    store_counts(key, counts);
+    Ok(counts)
+}
+
 fn upstream_ref(repo: &gix::Repository, branch: &str) -> Option<String> {
     let config = repo.config_snapshot();
     let remote = config
@@ -444,11 +486,8 @@ fn ahead_behind(repo: &gix::Repository, head: ObjectId, branch: &str) -> Result<
         let Some(base) = repo.merge_base(head, upstream_id)? else {
             continue;
         };
-        let base = base.detach();
-        return Ok((
-            count_until(repo, head, base).unwrap_or(0),
-            count_until(repo, upstream_id, base).unwrap_or(0),
-        ));
+        let workdir = workdir(repo)?;
+        return counts_until(repo, &workdir, head, upstream_id, base.detach());
     }
     Ok((0, 0))
 }
@@ -478,7 +517,9 @@ pub fn pending_count(root: &Path, branch: &str) -> Result<usize> {
         let Some(base) = repo.merge_base(branch_id, upstream_id)? else {
             continue;
         };
-        return count_until(&repo, branch_id, base.detach());
+        let workdir = workdir(&repo)?;
+        let counts = counts_until(&repo, &workdir, branch_id, upstream_id, base.detach())?;
+        return Ok(counts.0);
     }
     Ok(0)
 }

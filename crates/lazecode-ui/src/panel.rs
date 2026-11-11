@@ -2836,7 +2836,12 @@ fn draw_commit_detail(
         col_resp.show_tooltip_text(crate::tr!(model, "Collapse All", "全部折叠"));
     }
     if col_resp.clicked() {
-        model.projects[index].commit_file_dirs_expanded.clear();
+        let tree = lazecode_git::build_commit_file_tree(&details.files);
+        for path in lazecode_git::all_commit_file_dir_paths(&tree) {
+            model.projects[index]
+                .commit_file_dirs_collapsed
+                .insert(path);
+        }
         model.projects[index].commit_files_root_collapsed = true;
     }
     rx -= 22.0;
@@ -2852,10 +2857,8 @@ fn draw_commit_detail(
     }
     if exp_resp.clicked() {
         model.projects[index].commit_files_root_collapsed = false;
-        let tree = lazecode_git::build_commit_file_tree(&details.files);
-        for path in lazecode_git::all_commit_file_dir_paths(&tree) {
-            model.projects[index].commit_file_dirs_expanded.insert(path);
-        }
+        // The set stores collapsed directories; an empty set expands all.
+        model.projects[index].commit_file_dirs_collapsed.clear();
     }
     rx -= 22.0;
 
@@ -3018,7 +3021,7 @@ fn draw_commit_detail(
     let tree = lazecode_git::build_commit_file_tree(&details.files);
     let flat_files = lazecode_git::flatten_commit_file_tree(
         &tree,
-        &model.projects[index].commit_file_dirs_expanded,
+        &model.projects[index].commit_file_dirs_collapsed,
         0,
     );
 
@@ -3105,7 +3108,7 @@ fn draw_commit_detail(
                         let indent = 8.0 + (item.depth + 1) as f32 * 12.0;
                         if item.is_dir {
                             let is_expanded = !model.projects[index]
-                                .commit_file_dirs_expanded
+                                .commit_file_dirs_collapsed
                                 .contains(&item.path);
                             paint_icon(
                                 ui.painter(),
@@ -3158,11 +3161,11 @@ fn draw_commit_detail(
                             if response.clicked() {
                                 if is_expanded {
                                     model.projects[index]
-                                        .commit_file_dirs_expanded
+                                        .commit_file_dirs_collapsed
                                         .insert(item.path.clone());
                                 } else {
                                     model.projects[index]
-                                        .commit_file_dirs_expanded
+                                        .commit_file_dirs_collapsed
                                         .remove(&item.path);
                                 }
                             }

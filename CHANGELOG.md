@@ -10,6 +10,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Interface, editor and terminal font pickers in Settings, backed by the
+  installed-font catalog (`fontdb`, including macOS `AssetsV2` fonts).
+  Editor and terminal monospace families are independent; the terminal
+  follows the editor unless overridden.
 - Native history sequencer: cherry-pick/revert with clean and conflict paths,
   conflicted rebase stop/continue/abort/skip, native conflict list/content/
   resolution helpers, and author-preserving replay. Interactive rebase and
@@ -96,6 +100,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Mixed CJK/Latin UI typography: Chinese mode now leads with PingFang SC so
+  punctuation and mixed runs share one font's metrics, English falls back
+  from SF Pro to PingFang SC instead of Hiragino, and SF Pro uses the 17pt
+  Text optical size rather than the 28pt Display default.
+- Commit-details “Expand All” no longer collapses every directory: the tree
+  state is now a collapsed set (`empty = all expanded`), and “Collapse All”
+  fills it. Both buttons operate on every nesting level.
 - Worktree status and commit staging now compare canonical (filtered) bytes,
   so CRLF files, `$Id$` files and LFS pointers are not reported as modified
   just because the worktree representation differs from the blob.

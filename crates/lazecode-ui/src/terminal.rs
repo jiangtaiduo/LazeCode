@@ -13,7 +13,7 @@ use lazecode_terminal::{
 use crate::icons::{paint as paint_icon, Icon};
 use crate::runtime::{TermSearchState, TermSelection};
 use crate::theme::Theme;
-use crate::widgets::mono_char_width;
+use crate::widgets::char_width;
 
 const PAD_X: f32 = 8.0;
 const PAD_Y: f32 = 6.0;
@@ -198,7 +198,7 @@ pub fn draw(
             .request_repaint_after(std::time::Duration::from_millis(16));
     }
     let line_h = (font_size * 1.36).round().max(12.0);
-    let char_w = mono_char_width(ui.ctx(), font_size).max(5.0);
+    let char_w = char_width(ui.ctx(), crate::theme::terminal_font(font_size)).max(5.0);
     let inner = Rect::from_min_max(
         Pos2::new(rect.left() + PAD_X, rect.top() + PAD_Y),
         Pos2::new(rect.right() - SCROLLBAR, rect.bottom() - PAD_Y),
@@ -493,7 +493,7 @@ pub fn draw(
                     Pos2::new(inner.left() + col as f32 * char_w, y + line_h * 0.5),
                     Align2::LEFT_CENTER,
                     display,
-                    FontId::monospace(font_size),
+                    crate::theme::terminal_font(font_size),
                     fg,
                 );
                 if attrs & ATTR_UNDERLINE != 0 {
@@ -616,7 +616,7 @@ pub fn draw(
                                 Pos2::new(x + char_w * 0.5, y + line_h * 0.5),
                                 Align2::CENTER_CENTER,
                                 text,
-                                FontId::monospace(font_size),
+                                crate::theme::terminal_font(font_size),
                                 p.accent_on_fill,
                             );
                         }
@@ -633,7 +633,7 @@ pub fn draw(
                         Pos2::new(x, y + line_h * 0.5),
                         Align2::LEFT_CENTER,
                         preedit.as_str(),
-                        FontId::monospace(font_size),
+                        crate::theme::terminal_font(font_size),
                         p.text,
                     );
                     painter.line_segment(
@@ -701,7 +701,7 @@ fn flush_run(
         Pos2::new(inner.left() + start as f32 * char_w, y + line_h * 0.5),
         Align2::LEFT_CENTER,
         run_text.as_str(),
-        FontId::monospace(font_size),
+        crate::theme::terminal_font(font_size),
         color,
     );
     if attrs & ATTR_UNDERLINE != 0 {
@@ -1414,24 +1414,17 @@ mod tests {
     #[test]
     fn test_cjk_metrics() {
         let ctx = egui::Context::default();
-        crate::theme::install_fonts(&ctx);
+        crate::theme::install_fonts(&ctx, &lazecode_core::Settings::default());
         let mut out = ctx.run_ui(Default::default(), |_| {});
         out.textures_delta.clear();
         let size = 13.0;
-        let char_w = crate::widgets::mono_char_width(&ctx, size);
+        let terminal_font = crate::theme::terminal_font(size);
+        let char_w = crate::widgets::char_width(&ctx, terminal_font.clone());
         let ascii_galley = ctx.fonts_mut(|f| {
-            f.layout_no_wrap(
-                "M".to_string(),
-                egui::FontId::monospace(size),
-                egui::Color32::WHITE,
-            )
+            f.layout_no_wrap("M".to_string(), terminal_font.clone(), egui::Color32::WHITE)
         });
         let cjk_galley = ctx.fonts_mut(|f| {
-            f.layout_no_wrap(
-                "你好".to_string(),
-                egui::FontId::monospace(size),
-                egui::Color32::WHITE,
-            )
+            f.layout_no_wrap("你好".to_string(), terminal_font, egui::Color32::WHITE)
         });
         assert!(cjk_galley.size().x > char_w);
         assert!(ascii_galley.size().x > 0.0);

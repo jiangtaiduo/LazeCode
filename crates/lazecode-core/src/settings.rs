@@ -27,6 +27,8 @@ impl Language {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EditorSettings {
+    /// Editor font family. Empty means the built-in monospace stack.
+    pub font_family: String,
     pub font_size: f32,
     pub tab_width: usize,
     pub use_spaces: bool,
@@ -39,6 +41,7 @@ pub struct EditorSettings {
 impl Default for EditorSettings {
     fn default() -> Self {
         Self {
+            font_family: String::new(),
             font_size: 13.5,
             tab_width: 4,
             use_spaces: true,
@@ -53,6 +56,9 @@ impl Default for EditorSettings {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalSettings {
+    /// Terminal font family. Empty means "Match editor" when the editor
+    /// has a custom family, otherwise the built-in monospace stack.
+    pub font_family: String,
     pub font_size: f32,
     pub scrollback: usize,
     /// `None` means use `$SHELL` (or /bin/zsh).
@@ -62,6 +68,7 @@ pub struct TerminalSettings {
 impl Default for TerminalSettings {
     fn default() -> Self {
         Self {
+            font_family: String::new(),
             font_size: 13.0,
             scrollback: 10_000,
             shell: None,
@@ -74,6 +81,9 @@ impl Default for TerminalSettings {
 pub struct Settings {
     pub theme: ThemeMode,
     pub language: Language,
+    /// Application UI font family. Empty means the language-aware system
+    /// stack (SF Pro for English, PingFang SC first for Chinese).
+    pub ui_font: String,
     /// Optional language-server integration for the 11 supported languages.
     /// A missing or crashing server silently degrades to syntax highlighting.
     pub lsp_enabled: bool,
@@ -107,6 +117,7 @@ impl Default for Settings {
         Self {
             theme: ThemeMode::Dark,
             language: Language::English,
+            ui_font: String::new(),
             lsp_enabled: false,
             editor: EditorSettings::default(),
             terminal: TerminalSettings::default(),
@@ -194,6 +205,9 @@ impl Settings {
     }
 
     fn normalise(&mut self) {
+        self.ui_font = self.ui_font.trim().to_string();
+        self.editor.font_family = self.editor.font_family.trim().to_string();
+        self.terminal.font_family = self.terminal.font_family.trim().to_string();
         self.editor.font_size = self.editor.font_size.clamp(9.0, 24.0);
         self.editor.tab_width = self.editor.tab_width.clamp(1, 8);
         self.terminal.font_size = self.terminal.font_size.clamp(9.0, 24.0);
@@ -301,6 +315,9 @@ mod tests {
     #[test]
     fn missing_updater_fields_fall_back_to_defaults() {
         let back: Settings = toml::from_str("theme = \"light\"\n").unwrap();
+        assert!(back.ui_font.is_empty());
+        assert!(back.editor.font_family.is_empty());
+        assert!(back.terminal.font_family.is_empty());
         assert!(back.update_endpoint.is_empty());
         assert!(!back.auto_check_updates);
         assert!(!back.updates_configured());
@@ -310,10 +327,16 @@ mod tests {
     fn round_trips_settings() {
         let mut settings = Settings::default();
         settings.editor.font_size = 15.0;
+        settings.editor.font_family = "Menlo".into();
+        settings.terminal.font_family = "SF Mono".into();
+        settings.ui_font = "PingFang SC".into();
         settings.theme = ThemeMode::Light;
         let text = toml::to_string_pretty(&settings).unwrap();
         let back: Settings = toml::from_str(&text).unwrap();
         assert_eq!(back.editor.font_size, 15.0);
+        assert_eq!(back.editor.font_family, "Menlo");
+        assert_eq!(back.terminal.font_family, "SF Mono");
+        assert_eq!(back.ui_font, "PingFang SC");
         assert_eq!(back.theme, ThemeMode::Light);
     }
 }

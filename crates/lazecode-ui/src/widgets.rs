@@ -75,9 +75,14 @@ pub fn text_width(painter: &Painter, text: &str, font: FontId) -> f32 {
 }
 
 pub fn mono_char_width(ctx: &egui::Context, size: f32) -> f32 {
+    char_width(ctx, FontId::monospace(size))
+}
+
+/// Advance width of one cell for an arbitrary measured font.
+pub fn char_width(ctx: &egui::Context, font: FontId) -> f32 {
     ctx.fonts_mut(|fonts| {
         fonts
-            .layout_no_wrap("M".to_owned(), FontId::monospace(size), Color32::WHITE)
+            .layout_no_wrap("M".to_owned(), font, Color32::WHITE)
             .size()
             .x
     })

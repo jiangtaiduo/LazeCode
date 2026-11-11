@@ -11,7 +11,12 @@
 - `winit` + `egui-winit` + `egui-wgpu`/`wgpu` (Metal), no WebView, no eframe.
 - Custom macOS window: transparent titlebar, full-size content view, native
   traffic lights, dark/light palettes derived from the UI design tokens,
-  system SF Pro / SF Mono / Hiragino Sans GB fonts.
+  system SF Pro / PingFang SC / SF Mono / Menlo stack. Settings → Appearance,
+  Editor and Terminal choose installed families through `fontdb` (including
+  macOS `AssetsV2` fonts); Chinese UI puts PingFang SC first for uniform
+  mixed-script metrics, English keeps SF Pro first, and SF Pro uses the
+  17pt Text optical size instead of the 28pt Display default. Editor and
+  terminal families are independent (terminal "Match editor" by default).
 - Project rail, project tab strip in the titlebar, activity bar, resizable
   explorer/source-control/consoles sidebar, editor stage, resizable bottom
   panel, status bar, toasts.
@@ -343,7 +348,7 @@ workspace under `crates/`.
 ## 3. Verification performed
 
 ```sh
-cargo test --workspace          # 233 tests, all passing
+cargo test --workspace          # 237 tests, all passing
 cargo clippy --workspace --all-targets   # clean
 cargo test -p lazecode-core --test lsp_e2e -- --ignored  # real rust-analyzer
 cargo build --release -p lazecode-app    # native binary

@@ -103,7 +103,7 @@ impl LazeApp {
         window.set_visible(true);
 
         let egui_ctx = egui::Context::default();
-        lazecode_ui::install_fonts(&egui_ctx);
+        lazecode_ui::install_fonts(&egui_ctx, &self.model.settings);
         egui_ctx.style_mut_of(egui::Theme::Dark, |style| {
             style.animation_time = 0.08;
         });
@@ -518,6 +518,10 @@ impl LazeApp {
         let window = gfx.window.clone();
         let raw_input = gfx.egui_state.take_egui_input(&window);
         let ctx = gfx.egui_ctx.clone();
+        if self.runtime.fonts_dirty {
+            lazecode_ui::install_fonts(&ctx, &self.model.settings);
+            self.runtime.fonts_dirty = false;
+        }
         let output = ctx.run_ui(raw_input, |ui| {
             lazecode_ui::draw(ui, &mut self.model, &mut self.runtime);
         });

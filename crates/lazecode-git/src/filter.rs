@@ -340,14 +340,25 @@ fn lfs_smudge(repo: &gix::Repository, data: &[u8]) -> Result<Vec<u8>> {
 /// the caller can fall back to the normal smudge path.
 pub fn smudge_lfs_to_file(root: &Path, path: &str, data: &[u8], target: &Path) -> Result<bool> {
     let repo = discover(root)?;
-    let attributes = attributes(&repo, path)?;
+    smudge_lfs_to_file_in(&repo, root, path, data, target)
+}
+
+pub fn smudge_lfs_to_file_in(
+    repo: &gix::Repository,
+    root: &Path,
+    path: &str,
+    data: &[u8],
+    target: &Path,
+) -> Result<bool> {
+    let _ = root;
+    let attributes = attributes(repo, path)?;
     if attributes.filter.as_deref() != Some("lfs") {
         return Ok(false);
     }
     let Some((oid, expected)) = lfs_pointer(data) else {
         return Ok(false);
     };
-    let object = lfs_object_path(&repo, &oid);
+    let object = lfs_object_path(repo, &oid);
     let Ok(mut input) = std::fs::File::open(&object) else {
         log::warn!("LFS object {oid} is missing; leaving pointer text");
         return Ok(false);
@@ -383,29 +394,46 @@ pub fn smudge_lfs_to_file(root: &Path, path: &str, data: &[u8], target: &Path) -
 /// Canonical (repository) bytes for `data` staged from the worktree.
 pub fn clean(root: &Path, path: &str, data: Vec<u8>) -> Result<Vec<u8>> {
     let repo = discover(root)?;
-    let _ = workdir(&repo)?;
-    let attributes = attributes(&repo, path)?;
-    clean_with(&repo, root, path, &attributes, data)
+    clean_in(&repo, root, path, data)
+}
+
+pub fn clean_in(repo: &gix::Repository, root: &Path, path: &str, data: Vec<u8>) -> Result<Vec<u8>> {
+    let _ = workdir(repo)?;
+    let attributes = attributes(repo, path)?;
+    clean_with(repo, root, path, &attributes, data)
 }
 
 /// Return the configured filter driver for a path, without touching bytes.
 pub fn filter_driver(root: &Path, path: &str) -> Result<Option<String>> {
     let repo = discover(root)?;
-    let _ = workdir(&repo)?;
-    Ok(attributes(&repo, path)?.filter)
+    filter_driver_in(&repo, path)
+}
+
+pub fn filter_driver_in(repo: &gix::Repository, path: &str) -> Result<Option<String>> {
+    let _ = workdir(repo)?;
+    Ok(attributes(repo, path)?.filter)
 }
 
 /// Canonical bytes for a worktree file, streaming LFS objects instead of
 /// loading the whole file into memory.
 pub fn clean_file(root: &Path, path: &str, source: &Path) -> Result<Vec<u8>> {
     let repo = discover(root)?;
-    let _ = workdir(&repo)?;
-    let attributes = attributes(&repo, path)?;
+    clean_file_in(&repo, root, path, source)
+}
+
+pub fn clean_file_in(
+    repo: &gix::Repository,
+    root: &Path,
+    path: &str,
+    source: &Path,
+) -> Result<Vec<u8>> {
+    let _ = workdir(repo)?;
+    let attributes = attributes(repo, path)?;
     if attributes.filter.as_deref() == Some("lfs") {
-        return lfs_clean_file(&repo, source);
+        return lfs_clean_file(repo, source);
     }
     let data = std::fs::read(source)?;
-    clean_with(&repo, root, path, &attributes, data)
+    clean_with(repo, root, path, &attributes, data)
 }
 
 fn clean_with(
@@ -436,14 +464,23 @@ fn clean_with(
 /// Worktree bytes for `data` stored in the repository (checkout direction).
 pub fn smudge(root: &Path, path: &str, oid: &str, data: Vec<u8>) -> Result<Vec<u8>> {
     let repo = discover(root)?;
-    let _ = workdir(&repo)?;
-    let attributes = attributes(&repo, path)?;
+    smudge_in(&repo, root, path, oid, data)
+}
+
+pub fn smudge_in(
+    repo: &gix::Repository,
+    root: &Path,
+    path: &str,
+    oid: &str,
+    data: Vec<u8>,
+) -> Result<Vec<u8>> {
+    let _ = workdir(repo)?;
+    let attributes = attributes(repo, path)?;
     let mut data = data;
     if let Some(driver) = attributes.filter.as_deref() {
         if driver == "lfs" {
-            data = lfs_smudge(&repo, &data)?;
-        } else if let Some(filtered) =
-            run_driver_filter(&repo, root, driver, "smudge", path, &data)?
+            data = lfs_smudge(repo, &data)?;
+        } else if let Some(filtered) = run_driver_filter(repo, root, driver, "smudge", path, &data)?
         {
             data = filtered;
         }
@@ -451,7 +488,7 @@ pub fn smudge(root: &Path, path: &str, oid: &str, data: Vec<u8>) -> Result<Vec<u
     if attributes.ident == Some(true) {
         data = expand_ident(&data, oid);
     }
-    if is_text(&repo, &attributes, &data) && should_crlf(&repo, &attributes) {
+    if is_text(repo, &attributes, &data) && should_crlf(repo, &attributes) {
         data = to_crlf(&data);
     }
     Ok(data)

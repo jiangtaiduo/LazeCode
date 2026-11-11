@@ -103,7 +103,7 @@ fn worktree_entry(
             }))
         }
         Ok(metadata) if metadata.is_file() => {
-            let data = crate::filter::clean_file(root, path, absolute)?;
+            let data = crate::filter::clean_file_in(repo, root, path, absolute)?;
             Ok(Some(TreeEntry {
                 oid: repo.write_blob(&data)?.detach(),
                 mode: if metadata.permissions().mode() & 0o111 != 0 {
@@ -354,7 +354,7 @@ fn entry_worktree(
     if entry.mode == 0o120000 {
         Ok((data, entry.mode))
     } else {
-        let data = crate::filter::smudge(root, path, &entry.oid.to_string(), data)?;
+        let data = crate::filter::smudge_in(repo, root, path, &entry.oid.to_string(), data)?;
         Ok((data, entry.mode))
     }
 }

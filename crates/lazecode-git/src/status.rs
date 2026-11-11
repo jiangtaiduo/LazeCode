@@ -380,14 +380,14 @@ fn file_sides(
             if data == old {
                 data
             } else {
-                crate::filter::clean(workdir, path, data)?
+                crate::filter::clean_in(repo, workdir, path, data)?
             }
         }
         Ok(metadata)
             if metadata.is_file()
-                && crate::filter::filter_driver(workdir, path)?.as_deref() == Some("lfs") =>
+                && crate::filter::filter_driver_in(repo, path)?.as_deref() == Some("lfs") =>
         {
-            crate::filter::clean_file(workdir, path, &worktree)?
+            crate::filter::clean_file_in(repo, workdir, path, &worktree)?
         }
         _ => Vec::new(),
     };

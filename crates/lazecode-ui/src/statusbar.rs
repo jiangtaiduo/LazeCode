@@ -13,7 +13,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     let y = rect.center().y;
     let mut x = rect.left() + 10.0;
 
-    let (project_name, branch, ahead, behind, changes, active_file_info) = {
+    let (project_name, branch, ahead, behind, changes, active_file_info, diagnostic_counts) = {
         let project = model.active_project();
         let active_file_info = project.and_then(|project| {
             let id = project.active_tab?;
@@ -26,16 +26,20 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                         .unwrap_or("Plain Text")
                         .to_string(),
                     file.doc.eol.as_str().to_string(),
-                    if file.doc.encoding.is_some() {
-                        "Latin-1".to_string()
-                    } else if file.doc.had_bom {
-                        "UTF-8 BOM".to_string()
-                    } else {
-                        "UTF-8".to_string()
-                    },
+                    file.doc.encoding_label(),
                     file.doc.cursor.line + 1,
                     file.doc.cursor.col + 1,
                 )),
+                _ => None,
+            }
+        });
+        let diagnostic_counts = project.and_then(|project| {
+            let id = project.active_tab?;
+            let tab = project.tab_by_id(id)?;
+            match &tab.kind {
+                lazecode_core::TabKind::File(file) => {
+                    Some(model.lsp.diagnostic_counts(&file.doc.path))
+                }
                 _ => None,
             }
         });
@@ -54,6 +58,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 .unwrap_or(0),
             project.map(|project| project.changes().len()).unwrap_or(0),
             active_file_info,
+            diagnostic_counts,
         )
     };
     let running = model.total_running();
@@ -235,6 +240,14 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             font.clone(),
             p.orange,
         ));
+    }
+    if let Some((errors, warnings)) = diagnostic_counts {
+        if errors > 0 {
+            right_items.push((format!("✕ {errors}"), font.clone(), p.rose));
+        }
+        if warnings > 0 {
+            right_items.push((format!("⚠ {warnings}"), font.clone(), p.amber));
+        }
     }
     if let Some(info) = &active_file_info {
         right_items.push((

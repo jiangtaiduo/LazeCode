@@ -31,11 +31,20 @@ impl Changelists {
             Ok(repo) => repo.git_dir().to_path_buf(),
             Err(_) => root.join(".git"),
         };
-        let data: Stored = std::fs::read_to_string(git_dir.join(FILE_NAME))
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
-        let mut data = data;
+        let path = git_dir.join(FILE_NAME);
+        let mut data: Stored = match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(data) => data,
+                Err(_) => {
+                    // Keep the unreadable file for the user instead of
+                    // silently overwriting their changelist assignments.
+                    let backup = git_dir.join(format!("{FILE_NAME}.corrupt.bak"));
+                    let _ = std::fs::rename(&path, backup);
+                    Stored::default()
+                }
+            },
+            Err(_) => Stored::default(),
+        };
         if data.lists.is_empty() {
             data.lists.push(DEFAULT_LIST.to_string());
         }
@@ -46,17 +55,18 @@ impl Changelists {
         &self.data.lists
     }
 
-    pub fn assign(&mut self, path: &str, list: &str) {
+    pub fn assign(&mut self, path: &str, list: &str) -> anyhow::Result<()> {
         self.data.files.insert(path.to_string(), list.to_string());
-        self.flush();
+        self.flush()
     }
 
-    pub fn create_list(&mut self, name: &str) {
+    pub fn create_list(&mut self, name: &str) -> anyhow::Result<()> {
         let name = name.trim();
         if !name.is_empty() && !self.data.lists.iter().any(|existing| existing == name) {
             self.data.lists.push(name.to_string());
-            self.flush();
+            self.flush()?;
         }
+        Ok(())
     }
 
     /// `create_list` 的可判错版本：重名/空名返回 `Err`，供需要把失败
@@ -69,29 +79,28 @@ impl Changelists {
         if self.data.lists.iter().any(|existing| existing == name) {
             anyhow::bail!("changelist '{name}' already exists");
         }
-        self.create_list(name);
-        Ok(())
+        self.create_list(name)
     }
 
     /// Batch-assign many paths in one flush (unshelve-to-changelist path).
-    pub fn assign_many(&mut self, paths: &[String], list: &str) {
+    pub fn assign_many(&mut self, paths: &[String], list: &str) -> anyhow::Result<()> {
         if paths.is_empty() {
-            return;
+            return Ok(());
         }
         for path in paths {
             self.data.files.insert(path.clone(), list.to_string());
         }
-        self.flush();
+        self.flush()
     }
 
     /// Removes a custom list; the files that belonged to it fall back to
     /// `Default` (implicit membership). Returns the paths that were re-homed.
-    pub fn remove_list(&mut self, name: &str) -> Vec<String> {
+    pub fn remove_list(&mut self, name: &str) -> anyhow::Result<Vec<String>> {
         let orphans = self.files_of(name);
         if remove_list(&mut self.data, name) {
-            self.flush();
+            self.flush()?;
         }
-        orphans
+        Ok(orphans)
     }
 
     pub fn files_of(&self, list: &str) -> Vec<String> {
@@ -106,13 +115,11 @@ impl Changelists {
             .unwrap_or_else(|| DEFAULT_LIST.to_string())
     }
 
-    fn flush(&self) {
-        if std::fs::create_dir_all(&self.git_dir).is_err() {
-            return;
-        }
-        if let Ok(text) = serde_json::to_string_pretty(&self.data) {
-            let _ = lazecode_fs::file::write_atomic(&self.git_dir.join(FILE_NAME), text.as_bytes());
-        }
+    fn flush(&self) -> anyhow::Result<()> {
+        std::fs::create_dir_all(&self.git_dir)?;
+        let text = serde_json::to_string_pretty(&self.data)?;
+        lazecode_fs::file::write_atomic(&self.git_dir.join(FILE_NAME), text.as_bytes())?;
+        Ok(())
     }
 }
 

@@ -343,6 +343,14 @@ fn editor(ui: &mut Ui, model: &mut AppModel, theme: &Theme, rect: Rect) {
             crate::tr!(model, "Auto save", "自动保存"),
             model.settings.editor.auto_save,
         ),
+        (
+            crate::tr!(
+                model,
+                "Language servers (experimental)",
+                "语言服务器（实验性）"
+            ),
+            model.settings.lsp_enabled,
+        ),
     ];
     for (index, (label, current)) in toggles.into_iter().enumerate() {
         ui.painter().text(
@@ -358,8 +366,10 @@ fn editor(ui: &mut Ui, model: &mut AppModel, theme: &Theme, rect: Rect) {
                 0 => model.settings.editor.use_spaces = !current,
                 1 => model.settings.editor.show_line_numbers = !current,
                 2 => model.settings.editor.highlight_current_line = !current,
-                _ => model.settings.editor.auto_save = !current,
+                3 => model.settings.editor.auto_save = !current,
+                _ => model.settings.lsp_enabled = !current,
             }
+            model.lsp.set_enabled(model.settings.lsp_enabled);
             model.save_settings();
         }
         y += 34.0;

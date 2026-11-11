@@ -39,6 +39,8 @@ pub struct Change {
     pub staged: Option<ChangeKind>,
     pub unstaged: Option<ChangeKind>,
     pub untracked: bool,
+    /// Unmerged index entries (content or delete/modify conflicts).
+    pub conflicted: bool,
     pub additions: u32,
     pub deletions: u32,
     pub binary: bool,
@@ -55,6 +57,9 @@ impl Change {
 
     /// Single letter shown in the tree/source-control list.
     pub fn letter(&self) -> char {
+        if self.conflicted {
+            return 'C';
+        }
         if self.untracked {
             return 'U';
         }

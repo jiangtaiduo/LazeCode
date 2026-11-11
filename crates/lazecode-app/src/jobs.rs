@@ -731,7 +731,19 @@ impl JobQueue {
                         // rollback=true 逐文件回滚（对齐稳定版 deleteChangelist
                         // 的 Rollback 分支）；否则文件隐式回归默认列表。
                         let mut lists = lazecode_git::Changelists::open(&root);
-                        let orphans = lists.remove_list(&name);
+                        let orphans = match lists.remove_list(&name) {
+                            Ok(orphans) => orphans,
+                            Err(error) => {
+                                return JobResult::OpDone {
+                                    root: root.clone(),
+                                    message: error.to_string(),
+                                    ok: false,
+                                    refresh: false,
+                                    reload_files: false,
+                                    clear_commit_message: false,
+                                };
+                            }
+                        };
                         let result: anyhow::Result<Vec<String>> = if rollback {
                             let mut first_error: Option<anyhow::Error> = None;
                             for path in &orphans {
@@ -783,20 +795,28 @@ impl JobQueue {
                     "clist-assign",
                     format!("clist-a:{root:?}:{list}:{paths:?}"),
                     move || {
-                        // assign_many 只写 JSON，不会失败。
                         let mut lists = lazecode_git::Changelists::open(&root);
-                        lists.assign_many(&paths, &list);
-                        JobResult::OpDone {
-                            root,
-                            message: if zh {
-                                format!("已移动 {count} 个文件到 {list}")
-                            } else {
-                                format!("Moved {count} files to {list}")
+                        match lists.assign_many(&paths, &list) {
+                            Ok(()) => JobResult::OpDone {
+                                root,
+                                message: if zh {
+                                    format!("已移动 {count} 个文件到 {list}")
+                                } else {
+                                    format!("Moved {count} files to {list}")
+                                },
+                                ok: true,
+                                refresh: true,
+                                reload_files: false,
+                                clear_commit_message: false,
                             },
-                            ok: true,
-                            refresh: true,
-                            reload_files: false,
-                            clear_commit_message: false,
+                            Err(error) => JobResult::OpDone {
+                                root,
+                                message: error.to_string(),
+                                ok: false,
+                                refresh: false,
+                                reload_files: false,
+                                clear_commit_message: false,
+                            },
                         }
                     },
                 );
@@ -1042,16 +1062,16 @@ impl JobQueue {
                     }
                 });
             }
-            Command::CreateTag(name) => {
+            Command::CreateTag { name, commit } => {
                 let Some(project) = model.active_project() else {
                     return;
                 };
                 let root = project.root.clone();
                 let zh = model.settings.language.is_zh();
-                let key = format!("create-tag:{}:{name}", root.display());
+                let key = format!("create-tag:{}:{name}:{commit}", root.display());
                 let job_root = root.clone();
                 self.spawn("create-tag", key, move || {
-                    let result = lazecode_git::create_tag(&job_root, &name, "", None);
+                    let result = lazecode_git::create_tag(&job_root, &name, &commit, None);
                     match result {
                         Ok(()) => JobResult::OpDone {
                             root: job_root,
@@ -1894,6 +1914,116 @@ impl JobQueue {
                     }
                 }
             }
+            Command::OpenFileAt {
+                path,
+                line,
+                character,
+            } => {
+                let index = model
+                    .projects
+                    .iter()
+                    .position(|project| {
+                        project
+                            .worktrees
+                            .iter()
+                            .any(|worktree| path.starts_with(&worktree.path))
+                    })
+                    .or(model.active_project);
+                let Some(index) = index else {
+                    return;
+                };
+                let settings = model.settings.clone();
+                match model.projects[index].open_file(path.clone(), &settings) {
+                    Ok(tab_id) => {
+                        model.active_project = Some(index);
+                        if let Some(tab) = model.projects[index].tab_mut_by_id(tab_id) {
+                            if let lazecode_core::TabKind::File(file) = &mut tab.kind {
+                                let cursor = file.doc.lsp_cursor(line, character);
+                                file.doc.set_cursor(cursor, false);
+                                file.doc.scroll_line = cursor.line.saturating_sub(6) as f32;
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        let zh = model.settings.language.is_zh();
+                        let message = if zh {
+                            format!("无法打开 {}: {error}", path.display())
+                        } else {
+                            format!("Cannot open {}: {error}", path.display())
+                        };
+                        model.toast(message, ToastKind::Error);
+                    }
+                }
+            }
+            Command::ApplyWorkspaceEdit(edit) => {
+                let zh = model.settings.language.is_zh();
+                let mut changed = 0usize;
+                let mut failed: Vec<String> = Vec::new();
+                for (path, edits) in edit.files {
+                    if edits.is_empty() {
+                        continue;
+                    }
+                    let mut applied = false;
+                    for project in &mut model.projects {
+                        for tab in &mut project.tabs {
+                            if let lazecode_core::TabKind::File(file) = &mut tab.kind {
+                                if file.doc.path == path {
+                                    if file.doc.apply_text_edits(&edits) {
+                                        applied = true;
+                                        changed += 1;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        if applied {
+                            break;
+                        }
+                    }
+                    if applied {
+                        continue;
+                    }
+                    // Not open: apply to the file on disk, preserving its
+                    // encoding, EOL style and BOM.
+                    match lazecode_fs::file::read_text_file(&path) {
+                        Ok(file) => {
+                            match lazecode_text::lsp::apply_text_edits(&file.text, &edits) {
+                                Ok(text) if text != file.text => {
+                                    if let Err(error) = lazecode_fs::file::write_text_file(
+                                        &path,
+                                        &text,
+                                        file.encoding,
+                                        file.eol,
+                                        file.had_bom,
+                                    ) {
+                                        failed.push(format!("{}: {error}", path.display()));
+                                    } else {
+                                        changed += 1;
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(error) => failed.push(format!("{}: {error}", path.display())),
+                            }
+                        }
+                        Err(error) => failed.push(format!("{}: {error}", path.display())),
+                    }
+                }
+                if let Some(error) = failed.first() {
+                    let message = if zh {
+                        format!("重命名部分失败: {error}")
+                    } else {
+                        format!("Rename partially failed: {error}")
+                    };
+                    model.toast(message, ToastKind::Error);
+                } else if changed > 0 {
+                    let message = if zh {
+                        format!("已更新 {changed} 个文件")
+                    } else {
+                        format!("Updated {changed} file(s)")
+                    };
+                    model.toast(message, ToastKind::Success);
+                }
+            }
             Command::StashPush {
                 message,
                 include_untracked,
@@ -2652,9 +2782,7 @@ impl JobQueue {
                 if let Some(project) = model.active_project_mut() {
                     project.close_terminal(id);
                 }
-                runtime.terminal_snapshots.remove(&id);
-                runtime.terminal_selections.remove(&id);
-                runtime.terminal_search.remove(&id);
+                runtime.forget_terminal(id);
             }
             Command::CreateWorktree {
                 name,
@@ -2778,7 +2906,14 @@ impl JobQueue {
                     .worktrees
                     .iter()
                     .find(|worktree| worktree.name == name)
-                    .map(|worktree| worktree.terminals.iter().map(|t| t.id).collect())
+                    .map(|worktree| {
+                        worktree
+                            .terminals
+                            .iter()
+                            .flat_map(|tab| tab.panes.iter())
+                            .map(|pane| pane.id)
+                            .collect()
+                    })
                     .unwrap_or_default();
                 if let Some(project) = model.active_project_mut() {
                     for id in terminal_ids {
@@ -3349,13 +3484,13 @@ fn shelf_restore_scoped(
     if let Some(list) = target_list {
         let mut lists = lazecode_git::Changelists::open(root);
         if !lists.lists().iter().any(|existing| existing == list) {
-            lists.create_list(list);
+            lists.create_list(list)?;
         }
         let assigned = match paths {
             Some(selected) => selected.to_vec(),
             None => lazecode_git::shelf_files(root, name)?,
         };
-        lists.assign_many(&assigned, list);
+        lists.assign_many(&assigned, list)?;
     }
     if delete_after {
         lazecode_git::shelf_delete(root, name)?;
@@ -3384,6 +3519,7 @@ mod tests {
             recent: Vec::new(),
             commands: Vec::new(),
             notifier: None,
+            lsp: lazecode_core::LspManager::new(true, None),
             should_quit: false,
             version: "test",
             favorite_branches: HashSet::new(),

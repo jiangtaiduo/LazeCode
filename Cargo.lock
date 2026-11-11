@@ -3760,6 +3760,7 @@ dependencies = [
  "lazecode-text",
  "log",
  "parking_lot",
+ "ring",
  "serde",
  "serde_json",
  "similar",

@@ -8,16 +8,39 @@
 pub mod changelists;
 pub mod dag;
 pub mod diff;
+pub mod filter;
 pub mod history;
+pub mod hooks;
 pub mod introspect;
 pub mod log;
 pub mod model;
 pub mod ops;
+pub mod patch;
 pub mod shelf;
 pub mod status;
 pub mod sync;
 pub mod tree;
 pub mod worktree;
+
+/// A `git` process with the GUI-safety environment applied: no interactive
+/// credential/host-key prompt, no editor, and its own process group so a
+/// timeout/quit can terminate hooks and transports as a unit.
+pub(crate) fn porcelain(root: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command
+        .current_dir(root)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "never")
+        .env("GIT_EDITOR", "true")
+        .env("GIT_SEQUENCE_EDITOR", "true")
+        .env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes");
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+}
 
 pub use changelists::Changelists;
 pub use dag::*;

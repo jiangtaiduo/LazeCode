@@ -174,6 +174,19 @@ impl Document {
         len
     }
 
+    /// Human label for the status bar (UTF-8 / UTF-16LE / … plus BOM).
+    pub fn encoding_label(&self) -> String {
+        let name = self
+            .encoding
+            .map(|encoding| encoding.name().to_string())
+            .unwrap_or_else(|| "UTF-8".to_string());
+        if self.had_bom {
+            format!("{name} BOM")
+        } else {
+            name
+        }
+    }
+
     pub fn char_index(&self, cursor: Cursor) -> usize {
         let line = cursor.line.min(self.rope.len_lines().saturating_sub(1));
         let base = self.rope.line_to_char(line);
@@ -188,6 +201,87 @@ impl Document {
             line,
             col: (char_index - base).min(self.line_content_len(line)),
         }
+    }
+
+    /// LSP position for a cursor: zero-based line plus a UTF-16 code-unit
+    /// column. `Cursor::col` counts Unicode scalars, so astral characters
+    /// (emoji, some CJK extensions) occupy two LSP columns but one editor
+    /// column.
+    pub fn lsp_position(&self, cursor: Cursor) -> (u32, u32) {
+        let line = cursor.line.min(self.rope.len_lines().saturating_sub(1));
+        let content = self.line_content(line);
+        (
+            line as u32,
+            crate::lsp::utf16_col_for_char(&content, cursor.col),
+        )
+    }
+
+    /// Cursor for an LSP position. Out-of-range lines clamp to the last line
+    /// and UTF-16 columns clamp to the line's end.
+    pub fn lsp_cursor(&self, line: u32, character: u32) -> Cursor {
+        let line = (line as usize).min(self.rope.len_lines().saturating_sub(1));
+        let content = self.line_content(line);
+        Cursor {
+            line,
+            col: crate::lsp::char_col_for_utf16(&content, character),
+        }
+    }
+
+    /// Apply a batch of LSP edits as one undo group. Positions refer to the
+    /// document *before* any of the edits; they must not overlap. Returns
+    /// `false` (and leaves the document untouched) for an invalid batch.
+    pub fn apply_text_edits(&mut self, edits: &[crate::LspTextEdit]) -> bool {
+        if edits.is_empty() {
+            return false;
+        }
+        let mut specs: Vec<(usize, usize, &str)> = Vec::with_capacity(edits.len());
+        for edit in edits {
+            if (edit.start_line, edit.start_character) > (edit.end_line, edit.end_character) {
+                return false;
+            }
+            let lines = self.rope.len_lines();
+            if edit.start_line as usize >= lines || edit.end_line as usize >= lines {
+                return false;
+            }
+            let start = self.char_index(self.lsp_cursor(edit.start_line, edit.start_character));
+            let end = self.char_index(self.lsp_cursor(edit.end_line, edit.end_character));
+            if end < start {
+                return false;
+            }
+            specs.push((start, end, edit.new_text.as_str()));
+        }
+        specs.sort_by_key(|(start, _, _)| *start);
+        for pair in specs.windows(2) {
+            if pair[0].1 > pair[1].0 {
+                return false;
+            }
+        }
+
+        // Keep the caret near its pre-edit logical position. Applying edits
+        // back-to-front invalidates raw offsets, so map the old caret against
+        // the ascending list first.
+        let old_index = self.char_index(self.cursor);
+        let mut mapped = old_index as isize;
+        for (start, end, text) in &specs {
+            let removed = (end - start) as isize;
+            let inserted = text.chars().count() as isize;
+            if *end <= old_index {
+                mapped += inserted - removed;
+            } else if *start < old_index {
+                mapped = *start as isize + inserted;
+            }
+        }
+
+        let before = self.cursor;
+        let undo_len = self.undo.len();
+        for (start, end, text) in specs.iter().rev() {
+            self.apply_edit(*start, *end, text, MergeKind::None);
+        }
+        self.finish_multi_edit(undo_len, before);
+        let mapped = mapped.max(0) as usize;
+        self.cursor = self.cursor_at(mapped.min(self.rope.len_chars()));
+        self.selection = None;
+        true
     }
 
     pub fn selection_char_range(&self) -> Option<(usize, usize)> {
@@ -887,6 +981,41 @@ mod tests {
         let matches = doc.find_all("foo", MatchOptions::default());
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[1].0, Cursor { line: 0, col: 8 });
+    }
+
+    #[test]
+    fn lsp_positions_use_utf16_columns() {
+        let doc = doc("a😀b\nsecond");
+        assert_eq!(doc.lsp_position(Cursor { line: 0, col: 2 }), (0, 3));
+        assert_eq!(doc.lsp_cursor(0, 3), Cursor { line: 0, col: 2 });
+        assert_eq!(doc.lsp_cursor(0, 4), Cursor { line: 0, col: 3 });
+        // Clamps out-of-range lines/columns instead of panicking.
+        assert_eq!(doc.lsp_cursor(99, 99), Cursor { line: 1, col: 6 });
+    }
+
+    #[test]
+    fn applies_lsp_edits_as_one_undo_group() {
+        let mut doc = doc("one\ntwo\nthree\n");
+        let edits = [
+            crate::LspTextEdit::new(0, 0, 0, 3, "ONE"),
+            crate::LspTextEdit::new(2, 0, 2, 5, "THREE"),
+        ];
+        assert!(doc.apply_text_edits(&edits));
+        assert_eq!(doc.text(), "ONE\ntwo\nTHREE\n");
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "one\ntwo\nthree\n");
+    }
+
+    #[test]
+    fn rejects_overlapping_lsp_edits_without_mutating() {
+        let mut doc = doc("abcdef");
+        let edits = [
+            crate::LspTextEdit::new(0, 0, 0, 3, "x"),
+            crate::LspTextEdit::new(0, 2, 0, 5, "y"),
+        ];
+        assert!(!doc.apply_text_edits(&edits));
+        assert_eq!(doc.text(), "abcdef");
+        assert!(!doc.dirty);
     }
 
     #[test]

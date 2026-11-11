@@ -72,7 +72,8 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                         .worktrees
                         .iter()
                         .flat_map(|worktree| worktree.terminals.iter())
-                        .filter(|terminal| terminal.session.is_running())
+                        .flat_map(|tab| tab.panes.iter())
+                        .filter(|pane| pane.session.is_running())
                         .count(),
                     project.initials.clone(),
                     project.name.clone(),

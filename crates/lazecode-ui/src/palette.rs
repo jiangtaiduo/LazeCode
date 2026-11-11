@@ -382,6 +382,50 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
         PaletteAction::GoToLine,
     );
     action(
+        Icon::Save,
+        crate::tr!(model, "Format document", "格式化文档"),
+        crate::tr!(
+            model,
+            "Format the active file through the language server",
+            "通过语言服务器格式化当前文件"
+        ),
+        Some("⌥⌘L"),
+        PaletteAction::FormatDocument,
+    );
+    action(
+        Icon::Search,
+        crate::tr!(model, "Go to symbol…", "转到符号…"),
+        crate::tr!(
+            model,
+            "List symbols in the active file",
+            "列出当前文件中的符号"
+        ),
+        Some("⌘⇧O"),
+        PaletteAction::GoToSymbol,
+    );
+    action(
+        Icon::Search,
+        crate::tr!(model, "Rename symbol…", "重命名符号…"),
+        crate::tr!(
+            model,
+            "Rename a symbol and its references",
+            "重命名符号及其引用"
+        ),
+        Some("F2"),
+        PaletteAction::RenameSymbol,
+    );
+    action(
+        Icon::Search,
+        crate::tr!(model, "Go to definition", "跳转到定义"),
+        crate::tr!(
+            model,
+            "Jump to the symbol under the caret",
+            "跳转到光标下的符号定义"
+        ),
+        Some("F12"),
+        PaletteAction::GoToDefinition,
+    );
+    action(
         Icon::Search,
         crate::tr!(model, "Find in files", "在文件中查找"),
         crate::tr!(model, "Search file contents", "搜索文件内容"),
@@ -722,6 +766,61 @@ fn execute(action: PaletteAction, model: &mut AppModel, rt: &mut UiRuntime) {
                 value: String::new(),
                 error: None,
             };
+        }
+        PaletteAction::FormatDocument => {
+            if let Some(tab_id) = model
+                .active_project()
+                .and_then(|project| project.active_tab)
+            {
+                rt.lsp.format_request = Some(tab_id);
+            }
+        }
+        PaletteAction::GoToSymbol => {
+            if let Some(tab_id) = model
+                .active_project()
+                .and_then(|project| project.active_tab)
+            {
+                rt.lsp.symbols_request = Some(tab_id);
+            }
+        }
+        PaletteAction::RenameSymbol => {
+            let info = model.active_project().and_then(|project| {
+                let tab_id = project.active_tab?;
+                let tab = project.tab_by_id(tab_id)?;
+                match &tab.kind {
+                    TabKind::File(file) => Some((
+                        tab_id,
+                        file.doc.path.to_string_lossy().to_string(),
+                        file.doc.cursor.line,
+                        file.doc.cursor.col,
+                        crate::editor::word_at(&file.doc, file.doc.cursor),
+                    )),
+                    _ => None,
+                }
+            });
+            if let Some((tab_id, path, line, col, value)) = info {
+                rt.dialog = crate::runtime::DialogState::RenameSymbol {
+                    tab_id,
+                    path,
+                    line,
+                    col,
+                    value,
+                    error: None,
+                };
+            }
+        }
+        PaletteAction::GoToDefinition => {
+            let info = model.active_project().and_then(|project| {
+                let tab_id = project.active_tab?;
+                let tab = project.tab_by_id(tab_id)?;
+                match &tab.kind {
+                    TabKind::File(file) => Some((tab_id, file.doc.cursor)),
+                    _ => None,
+                }
+            });
+            if let Some((tab_id, cursor)) = info {
+                rt.lsp.goto_request = Some((tab_id, cursor));
+            }
         }
         PaletteAction::About => {
             rt.settings_open = true;

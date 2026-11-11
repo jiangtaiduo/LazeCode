@@ -44,32 +44,48 @@ pub fn snapshot(root: &Path) -> Result<RepoSnapshot> {
     })
 }
 
-/// Query entries ignored by `.gitignore` rules (`git status --porcelain=v1 -z --ignored=matching`).
+/// Query entries ignored by `.gitignore` rules.
+///
+/// Mirrors `git status --ignored=matching`: ignored directories are reported
+/// as directory entries (for example `target/`) while individual ignored files
+/// are reported by path. The walk is native (`gix-dir`), not a `git` process.
 /// Returns `(all_ignored, ignored_dirs)`.
 pub fn ignored_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
-    let output = std::process::Command::new("git")
-        .current_dir(root)
-        .args(["status", "--porcelain=v1", "-z", "--ignored=matching"])
-        .output()
-        .map_err(|e| anyhow::anyhow!("git status failed: {e}"))?;
-    if !output.status.success() {
-        return Ok((Vec::new(), Vec::new()));
-    }
+    let repo = discover(root)?;
+    let index = repo.index_or_empty()?;
+    let options = repo
+        .dirwalk_options()?
+        .emit_ignored(Some(gix::dir::walk::EmissionMode::CollapseDirectory))
+        .emit_tracked(false)
+        .emit_pruned(false)
+        .emit_empty_directories(false)
+        .emit_collapsed(Some(gix::dir::walk::CollapsedEntriesEmissionMode::All));
+    let mut collect = gix::dir::walk::delegate::Collect::default();
+    let interrupt = std::sync::atomic::AtomicBool::new(false);
+    repo.dirwalk(
+        &index,
+        std::iter::empty::<gix::bstr::BString>(),
+        &interrupt,
+        options,
+        &mut collect,
+    )?;
     let mut ignored_all = Vec::new();
     let mut ignored_dirs = Vec::new();
-    for entry in output.stdout.split(|&b| b == 0) {
-        if entry.starts_with(b"!! ") {
-            let path_bytes = &entry[3..];
-            let path_str = String::from_utf8_lossy(path_bytes).trim().to_string();
-            if !path_str.is_empty() {
-                let is_dir = path_str.ends_with('/');
-                let clean = path_str.trim_end_matches('/').to_string();
-                if is_dir {
-                    ignored_dirs.push(clean.clone());
-                }
-                ignored_all.push(clean);
-            }
+    for (entry, _) in collect.into_entries_by_path() {
+        if !matches!(entry.status, gix::dir::entry::Status::Ignored(_)) {
+            continue;
         }
+        let path = String::from_utf8_lossy(entry.rela_path.as_ref())
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_string();
+        if path.is_empty() {
+            continue;
+        }
+        if entry.disk_kind == Some(gix::dir::entry::Kind::Directory) {
+            ignored_dirs.push(path.clone());
+        }
+        ignored_all.push(path);
     }
     ignored_all.sort();
     ignored_dirs.sort();
@@ -110,8 +126,13 @@ pub(crate) fn changes(repo: &gix::Repository, workdir: &Path) -> Result<Vec<Chan
     let index = repo.index_or_empty()?;
     let index_entries = index.entries();
     let mut index_map: BTreeMap<String, (ObjectId, u32, Stat)> = BTreeMap::new();
+    let mut conflicted: HashSet<String> = HashSet::new();
     for entry in index_entries {
         if entry.stage() != gix::index::entry::Stage::Unconflicted {
+            // Unmerged stages are conflicts, not untracked files. Keep the
+            // path out of the unstaged walks so the UI can show the Merge
+            // Conflicts subgroup and offer Resolve.
+            conflicted.insert(entry.path(&index).to_string());
             continue;
         }
         // Submodules are not materialised by this crate; showing every gitlink
@@ -133,6 +154,7 @@ pub(crate) fn changes(repo: &gix::Repository, workdir: &Path) -> Result<Vec<Chan
             staged: None,
             unstaged: None,
             untracked: false,
+            conflicted: false,
             additions: 0,
             deletions: 0,
             binary: false,
@@ -167,6 +189,9 @@ pub(crate) fn changes(repo: &gix::Repository, workdir: &Path) -> Result<Vec<Chan
     }
 
     for path in head_map.keys() {
+        if conflicted.contains(path) {
+            continue;
+        }
         if !index_map.contains_key(path) {
             add(path.clone(), Some(ChangeKind::Deleted), None, false);
         }
@@ -196,15 +221,25 @@ pub(crate) fn changes(repo: &gix::Repository, workdir: &Path) -> Result<Vec<Chan
         // On Unix a backslash is a normal filename character; translating it
         // to a separator can turn a harmless filename into a path escape.
         let path = rel.to_string_lossy().into_owned();
-        if index_map.contains_key(&path) {
+        if index_map.contains_key(&path) || conflicted.contains(&path) {
             continue;
         }
         add(path, None, None, true);
     }
 
+    // Conflicted index entries are shown once, under Merge Conflicts.
+    for path in &conflicted {
+        add(path.clone(), None, None, false);
+    }
+    for path in &conflicted {
+        if let Some(change) = acc.get_mut(path) {
+            change.conflicted = true;
+        }
+    }
+
     let mut changes: Vec<Change> = acc.into_values().collect();
     for change in &mut changes {
-        let (old, new) = file_sides(repo, workdir, &change.path, &head_map);
+        let (old, new) = file_sides(repo, workdir, &change.path, &head_map)?;
         let (additions, deletions, binary) = compute_stats(&old, &new);
         change.additions = additions;
         change.deletions = deletions;
@@ -315,7 +350,7 @@ fn file_sides(
     workdir: &Path,
     path: &str,
     head_map: &TreeMap,
-) -> (Vec<u8>, Vec<u8>) {
+) -> Result<(Vec<u8>, Vec<u8>)> {
     let old = head_map
         .get(path)
         .and_then(|entry: &TreeEntry| blob_bytes_capped(repo, entry.oid))
@@ -327,11 +362,22 @@ fn file_sides(
             .map(|target| target.to_string_lossy().into_owned().into_bytes())
             .unwrap_or_default(),
         Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_STAT_BYTES as u64 => {
-            std::fs::read(&worktree).unwrap_or_default()
+            let data = std::fs::read(&worktree).unwrap_or_default();
+            if data == old {
+                data
+            } else {
+                crate::filter::clean(workdir, path, data)?
+            }
+        }
+        Ok(metadata)
+            if metadata.is_file()
+                && crate::filter::filter_driver(workdir, path)?.as_deref() == Some("lfs") =>
+        {
+            crate::filter::clean_file(workdir, path, &worktree)?
         }
         _ => Vec::new(),
     };
-    (old, new)
+    Ok((old, new))
 }
 
 pub(crate) fn compute_stats(old: &[u8], new: &[u8]) -> (u32, u32, bool) {
@@ -345,23 +391,81 @@ pub(crate) fn compute_stats(old: &[u8], new: &[u8]) -> (u32, u32, bool) {
     (diff.additions, diff.deletions, false)
 }
 
+fn upstream_ref(repo: &gix::Repository, branch: &str) -> Option<String> {
+    let config = repo.config_snapshot();
+    let remote = config
+        .string(&format!("branch.{branch}.remote"))?
+        .to_string();
+    let merge = config
+        .string(&format!("branch.{branch}.merge"))?
+        .to_string();
+    let leaf = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+    if remote == "." {
+        Some(format!("refs/heads/{leaf}"))
+    } else {
+        Some(format!("refs/remotes/{remote}/{leaf}"))
+    }
+}
+
 fn ahead_behind(repo: &gix::Repository, head: ObjectId, branch: &str) -> Result<(usize, usize)> {
-    let upstream = format!("refs/remotes/origin/{branch}");
-    let upstream_id = repo
-        .find_reference(upstream.as_str())
+    let mut candidates = Vec::new();
+    if let Some(upstream) = upstream_ref(repo, branch) {
+        candidates.push(upstream);
+    }
+    // Stable fallback: `origin/<branch>`. A configured upstream (upstream/*,
+    // non-origin remotes) is resolved above.
+    let origin = format!("refs/remotes/origin/{branch}");
+    if !candidates.contains(&origin) {
+        candidates.push(origin);
+    }
+    for upstream in candidates {
+        let upstream_id = repo
+            .find_reference(upstream.as_str())
+            .ok()
+            .and_then(|reference| reference.target().try_id().map(|id| id.to_owned()));
+        let Some(upstream_id) = upstream_id else {
+            continue;
+        };
+        let Some(base) = repo.merge_base(head, upstream_id)? else {
+            continue;
+        };
+        let base = base.detach();
+        return Ok((
+            count_until(repo, head, base).unwrap_or(0),
+            count_until(repo, upstream_id, base).unwrap_or(0),
+        ));
+    }
+    Ok((0, 0))
+}
+
+/// Count commits on `branch` that are not yet in its configured upstream
+/// (falling back to `origin/<branch>`), without invoking `git rev-list`.
+pub fn pending_count(root: &Path, branch: &str) -> Result<usize> {
+    let repo = discover(root)?;
+    let branch_id = repo
+        .rev_parse_single(gix::bstr::BStr::new(&format!("refs/heads/{branch}")))
         .ok()
-        .and_then(|reference| reference.target().try_id().map(|id| id.to_owned()));
-    let Some(upstream_id) = upstream_id else {
-        return Ok((0, 0));
+        .map(|id| id.detach());
+    let Some(branch_id) = branch_id else {
+        return Ok(0);
     };
-    let Some(base) = repo.merge_base(head, upstream_id)? else {
-        return Ok((0, 0));
-    };
-    let base = base.detach();
-    Ok((
-        count_until(repo, head, base).unwrap_or(0),
-        count_until(repo, upstream_id, base).unwrap_or(0),
-    ))
+    let candidates = upstream_ref(&repo, branch)
+        .into_iter()
+        .chain(std::iter::once(format!("refs/remotes/origin/{branch}")));
+    for upstream in candidates {
+        let Some(upstream_id) = repo
+            .find_reference(upstream.as_str())
+            .ok()
+            .and_then(|reference| reference.target().try_id().map(|id| id.to_owned()))
+        else {
+            continue;
+        };
+        let Some(base) = repo.merge_base(branch_id, upstream_id)? else {
+            continue;
+        };
+        return count_until(&repo, branch_id, base.detach());
+    }
+    Ok(0)
 }
 
 fn count_until(repo: &gix::Repository, from: ObjectId, stop: ObjectId) -> Result<usize> {

@@ -214,11 +214,21 @@ pub fn materialize_tree(repo: &gix::Repository, map: &TreeMap) -> Result<()> {
                 std::os::unix::fs::symlink(target_path, &target)?;
             }
             mode => {
-                let existing = match std::fs::symlink_metadata(&target) {
-                    Ok(metadata) if metadata.is_file() => std::fs::read(&target).ok(),
-                    _ => None,
+                let streamed = crate::filter::smudge_lfs_to_file(&workdir, path, &data, &target)?;
+                let data = if streamed {
+                    Vec::new()
+                } else {
+                    crate::filter::smudge(&workdir, path, &entry.oid.to_string(), data)?
                 };
-                if existing.as_deref() != Some(data.as_slice()) {
+                let existing = if streamed {
+                    None
+                } else {
+                    match std::fs::symlink_metadata(&target) {
+                        Ok(metadata) if metadata.is_file() => std::fs::read(&target).ok(),
+                        _ => None,
+                    }
+                };
+                if !streamed && existing.as_deref() != Some(data.as_slice()) {
                     lazecode_fs::file::write_atomic(&target, &data)?;
                 }
                 use std::os::unix::fs::PermissionsExt;

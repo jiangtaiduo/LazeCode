@@ -483,6 +483,7 @@ impl LazeApp {
         } else {
             self.model.save_workspace();
             self.model.save_settings();
+            self.model.shutdown_lsp();
             event_loop.exit();
         }
     }
@@ -653,6 +654,7 @@ impl ApplicationHandler<AppEvent> for LazeApp {
                 if self.model.should_quit {
                     self.model.save_workspace();
                     self.model.save_settings();
+                    self.model.shutdown_lsp();
                     event_loop.exit();
                 }
                 if had_commands || self.repaint_after.is_zero() {

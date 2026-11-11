@@ -271,27 +271,28 @@ pub fn draw_terminal_dock(
         draw_empty(ui, theme, rect, "No project open");
         return;
     };
-    let (tabs, _active) = {
+    // 一页一个标签：标题取活动分屏，激活态 = 拥有活动分屏的标签。
+    let tabs: Vec<(u64, String, u64, bool)> = {
         let worktree = model.projects[index].active_worktree();
-        let tabs: Vec<(u64, String, bool, bool)> = worktree
+        let active_tab = worktree.active_tab_id();
+        worktree
             .terminals
             .iter()
-            .map(|terminal| {
+            .map(|tab| {
                 (
-                    terminal.id,
-                    terminal.title.clone(),
-                    terminal.session.is_running(),
-                    worktree.active_terminal == Some(terminal.id),
+                    tab.id,
+                    tab.title().to_string(),
+                    tab.active_pane,
+                    Some(tab.id) == active_tab,
                 )
             })
-            .collect();
-        (tabs, worktree.active_terminal)
+            .collect()
     };
 
     // 页签：底对齐 26px；激活 = 终端底色 + 2px accent 顶边（稳定版 tab-item）。
-    let mut close_terminal = None;
+    let mut close_tab = None;
     let mut x = head.left() + 6.0;
-    for (id, title, _is_running, is_active) in &tabs {
+    for (id, title, active_pane, is_active) in &tabs {
         let width = (title.chars().count() as f32 * 6.2 + 46.0).clamp(84.0, 178.0);
         let tab = Rect::from_min_size(Pos2::new(x, head.bottom() - 26.0), Vec2::new(width, 26.0));
         let close_rect_inner = Rect::from_center_size(
@@ -373,16 +374,17 @@ pub fn draw_terminal_dock(
             );
         }
         if close_response.clicked() || response.middle_clicked() {
-            close_terminal = Some(*id);
+            close_tab = Some(*id);
         } else if response.clicked() {
-            model.projects[index].active_worktree_mut().active_terminal = Some(*id);
-            rt.set_terminal_focus(*id);
+            model.projects[index].active_worktree_mut().active_terminal = Some(*active_pane);
+            rt.set_terminal_focus(*active_pane);
             model.ui.terminal_visible = true;
         } else if response.secondary_clicked() {
             rt.open_menu(
                 crate::runtime::MenuKind::TerminalTabContext {
                     project: index,
-                    terminal_id: *id,
+                    tab_id: *id,
+                    terminal_id: *active_pane,
                 },
                 response.rect,
                 Some(title.clone()),
@@ -458,13 +460,19 @@ pub fn draw_terminal_dock(
         };
         model.save_workspace();
     }
-    if let Some(id) = close_terminal {
-        model.projects[index].close_terminal(id);
-        rt.terminal_snapshots.remove(&id);
-        rt.terminal_selections.remove(&id);
-        rt.terminal_search.remove(&id);
-        if rt.terminal_focus == Some(id) {
-            rt.terminal_focus = None;
+    if let Some(tab_id) = close_tab {
+        let panes: Vec<u64> = model.projects[index]
+            .active_worktree()
+            .tab_by_id(tab_id)
+            .map(|tab| tab.panes.iter().map(|pane| pane.id).collect())
+            .unwrap_or_default();
+        model.projects[index].close_terminal_tab(tab_id);
+        for id in panes {
+            rt.forget_terminal(id);
+        }
+        match model.projects[index].active_worktree().active_terminal {
+            Some(next) => rt.set_terminal_focus(next),
+            None => rt.terminal_focus = None,
         }
     }
 
@@ -476,19 +484,49 @@ pub fn draw_terminal_dock(
         Pos2::new(body.right() - 14.0, body.bottom() - 12.0),
     );
     let project = &mut model.projects[index];
-    let active = project.active_worktree().active_terminal;
-    let Some(id) = active else {
+    let Some(tab_id) = project.active_worktree().active_tab_id() else {
         draw_empty(ui, theme, body, "No consoles open");
         return;
     };
-    if rt.terminal_focus.is_none() && rt.editor_focus.is_none() {
-        rt.set_terminal_focus(id);
+    let Some((pane_ids, split, active_pane)) =
+        project.active_worktree().tab_by_id(tab_id).map(|tab| {
+            (
+                tab.panes.iter().map(|pane| pane.id).collect::<Vec<_>>(),
+                tab.split,
+                tab.active_pane,
+            )
+        })
+    else {
+        draw_empty(ui, theme, body, "No consoles open");
+        return;
+    };
+    if pane_ids.is_empty() {
+        draw_empty(ui, theme, body, "No consoles open");
+        return;
     }
-    let Some(terminal) = project.term_by_id(id) else {
-        draw_empty(ui, theme, body, "No consoles open");
-        return;
-    };
-    let session = &terminal.session;
+    if rt.terminal_focus.is_none() && rt.editor_focus.is_none() {
+        rt.set_terminal_focus(active_pane);
+    }
+    // 1 个分屏铺满；row = 左右均分，column = 上下均分（稳定版 flex 布局）。
+    let pane_rects = split_pane_rects(content, pane_ids.len(), split);
+    for area in pane_rects.iter().skip(1) {
+        match split {
+            lazecode_core::PaneSplit::Column => {
+                ui.painter().hline(
+                    content.x_range(),
+                    area.top() - 0.5,
+                    Stroke::new(1.0, p.border),
+                );
+            }
+            _ => {
+                ui.painter().vline(
+                    area.left() - 0.5,
+                    content.y_range(),
+                    Stroke::new(1.0, p.border),
+                );
+            }
+        }
+    }
     // Overlays own the keyboard; don't feed their keystrokes to the shell.
     let overlays_open = rt.settings_open
         || rt.about_open
@@ -497,27 +535,156 @@ pub fn draw_terminal_dock(
         || rt.menu.is_some()
         || rt.agent_menu.is_some()
         || !matches!(rt.dialog, crate::runtime::DialogState::None);
-    let focus = rt.terminal_focus == Some(id) && !overlays_open;
     let font_size = model.settings.terminal.font_size;
-    let rt_ref = &mut *rt;
-    let snapshot = rt_ref.terminal_snapshots.entry(id).or_default();
-    let selection = rt_ref.terminal_selections.entry(id).or_insert(None);
-    let search = rt_ref.terminal_search.entry(id).or_default();
-    let preedit = rt_ref.terminal_preedit.entry(id).or_default();
-    let output = crate::terminal::draw(
-        ui, session, snapshot, selection, search, focus, preedit, theme, content, id, font_size,
-    );
-    if output.focus_requested {
-        rt.set_terminal_focus(id);
-    }
-    // Keep tab titles in sync with OSC titles.
-    if let Some(title) = session.title() {
-        if let Some(terminal) = project.term_by_id_mut(id) {
-            if !title.is_empty() && terminal.title != title {
-                terminal.title = title;
+    let multi = pane_ids.len() > 1;
+    let mut activate: Option<u64> = None;
+    let mut close_pane: Option<u64> = None;
+    for (slot, pane_id) in pane_ids.iter().enumerate() {
+        let area = pane_rects[slot];
+        let is_active = *pane_id == active_pane;
+        let focus = is_active && rt.terminal_focus == Some(*pane_id) && !overlays_open;
+        let Some(terminal) = project.term_by_id(*pane_id) else {
+            continue;
+        };
+        let session = &terminal.session;
+        let rt_ref = &mut *rt;
+        let snapshot = rt_ref.terminal_snapshots.entry(*pane_id).or_default();
+        let selection = rt_ref.terminal_selections.entry(*pane_id).or_insert(None);
+        let search = rt_ref.terminal_search.entry(*pane_id).or_default();
+        let preedit = rt_ref.terminal_preedit.entry(*pane_id).or_default();
+        let wheel_accum = rt_ref.terminal_wheel.entry(*pane_id).or_insert(0.0);
+        let wake_counter = session.wake_counter();
+        let last_wake = rt_ref.terminal_wake.entry(*pane_id).or_insert(u64::MAX);
+        let refresh = *last_wake != wake_counter;
+        if refresh {
+            *last_wake = wake_counter;
+        }
+        let output = crate::terminal::draw(
+            ui,
+            session,
+            snapshot,
+            selection,
+            search,
+            focus,
+            preedit,
+            wheel_accum,
+            refresh,
+            theme,
+            area,
+            *pane_id,
+            font_size,
+        );
+        if output.focus_requested {
+            activate = Some(*pane_id);
+        }
+        if multi {
+            // 活动分屏焦点提示：只在分屏时出现（稳定版 `.terminal-pane.active::after`）。
+            if is_active {
+                ui.painter().rect_stroke(
+                    area,
+                    egui::CornerRadius::ZERO,
+                    Stroke::new(1.0, p.accent.gamma_multiply(0.55)),
+                    StrokeKind::Inside,
+                );
+            }
+            // 分屏关闭按钮：悬停分屏时出现，避免常驻遮挡终端内容。
+            let close_rect = Rect::from_min_size(
+                Pos2::new(area.right() - 22.0, area.top() + 4.0),
+                Vec2::splat(16.0),
+            );
+            let close_response = ui.interact(
+                close_rect,
+                ui.scope_id().with(("pane-close", *pane_id)),
+                Sense::click(),
+            );
+            if ui.rect_contains_pointer(area) || close_response.hovered() {
+                ui.painter()
+                    .rect_filled(close_rect, egui::CornerRadius::same(3), p.titlebar);
+                ui.painter().rect_stroke(
+                    close_rect,
+                    egui::CornerRadius::same(3),
+                    Stroke::new(
+                        1.0,
+                        if close_response.hovered() {
+                            p.accent
+                        } else {
+                            p.border
+                        },
+                    ),
+                    StrokeKind::Inside,
+                );
+                ui.painter().text(
+                    close_rect.center(),
+                    Align2::CENTER_CENTER,
+                    "×",
+                    FontId::proportional(10.0),
+                    if close_response.hovered() {
+                        p.text_bright
+                    } else {
+                        p.text3
+                    },
+                );
+            }
+            if close_response.clicked() {
+                close_pane = Some(*pane_id);
             }
         }
     }
+    if let Some(pane_id) = close_pane {
+        project.close_terminal(pane_id);
+        rt.forget_terminal(pane_id);
+        match project.active_worktree().active_terminal {
+            Some(next) => rt.set_terminal_focus(next),
+            None => rt.terminal_focus = None,
+        }
+    } else if let Some(pane_id) = activate {
+        let worktree = project.active_worktree_mut();
+        if let Some(tab) = worktree
+            .terminals
+            .iter_mut()
+            .find(|tab| tab.pane(pane_id).is_some())
+        {
+            tab.active_pane = pane_id;
+        }
+        worktree.active_terminal = Some(pane_id);
+        rt.set_terminal_focus(pane_id);
+    }
+    // OSC titles are intentionally not mapped onto tab names: stable keeps
+    // the user-visible console title stable (a shell alias must not rename
+    // the tab).
+}
+
+/// Equal-size pane areas with a 1px gutter between neighbours.
+fn split_pane_rects(content: Rect, count: usize, split: lazecode_core::PaneSplit) -> Vec<Rect> {
+    if count <= 1 {
+        return vec![content];
+    }
+    const GAP: f32 = 1.0;
+    let n = count as f32;
+    let mut rects = Vec::with_capacity(count);
+    match split {
+        lazecode_core::PaneSplit::Column => {
+            let height = ((content.height() - GAP * (n - 1.0)) / n).max(1.0);
+            for index in 0..count {
+                let top = content.top() + index as f32 * (height + GAP);
+                rects.push(Rect::from_min_max(
+                    Pos2::new(content.left(), top),
+                    Pos2::new(content.right(), top + height),
+                ));
+            }
+        }
+        lazecode_core::PaneSplit::Row | lazecode_core::PaneSplit::None => {
+            let width = ((content.width() - GAP * (n - 1.0)) / n).max(1.0);
+            for index in 0..count {
+                let left = content.left() + index as f32 * (width + GAP);
+                rects.push(Rect::from_min_max(
+                    Pos2::new(left, content.top()),
+                    Pos2::new(left + width, content.bottom()),
+                ));
+            }
+        }
+    }
+    rects
 }
 
 fn draw_empty(ui: &mut Ui, theme: &Theme, rect: Rect, text: &str) {

@@ -8,6 +8,72 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 原生 Git clean/smudge 管线接入暂存、部分提交、状态与 checkout：
+  `.gitattributes` 的 `text`/`eol`/`ident`/`filter`、`core.autocrlf`/
+  `core.eol`、用户 `filter.<driver>.clean|smudge` 命令，以及由
+  `.git/lfs/objects` 支撑的 LFS pointer clean/smudge（不执行 `git-lfs`
+  二进制）。required filter 失败会中止；optional filter 失败回退原始字节。
+- 事务化分支切换：checkout 前快照受影响的 worktree 路径与索引，物化或
+  HEAD 更新失败时回滚，不再留下半切换的工作树。
+- 纯 Rust 统一 diff 应用：hunk 暂存/取消暂存/丢弃与 patch 的
+  apply/reverse/cached-apply；二进制与 rename patch 显式拒绝。`git init`
+  与 discard 改用 `gix`/直接索引写入。
+- 终端标签支持最多 4 个分屏（`向右分屏`/`向下分屏`），每个分屏独立 PTY，
+  具有活动分屏焦点、单分屏关闭按钮与 row/column 等分布局。关闭最后一个
+  分屏才会关闭标签；重启与控制台列表精确到分屏。
+- 原生 `git reset --soft/--mixed/--hard`（支持分支与 detached HEAD，失败时
+  回滚索引/工作树）；drop-HEAD 与 squash 复用该实现。忽略文件状态与待推送
+  提交数改由 `gix` 计算（不再调用 `git status --ignored` / `git rev-list`），
+  LFS status/track 也已原生实现。
+- Shelf 全量/按路径恢复改走原生 patch 应用，不再启动 `git apply`。
+- Shelf/复制为 Patch 的差异改由原生 HEAD→工作树生成（覆盖已跟踪、
+  未跟踪、删除、mode 变化与缺失末尾换行）；输出可被 `git apply --check`
+  接受，架藏不再启动 `git diff`。
+- 原生 Git stash：push（支持 message、`-u`、`--keep-index`）、list、files、
+  apply、pop、drop。实现会写入与 Git 兼容的 stash/index/untracked 提交及
+  `refs/stash` reflog，因此与 `git` CLI 双向互通。
+- 可选的语言服务器集成，覆盖稳定版的 11 种语言
+  （`python/go/rust/c/cpp/java/ruby/php/kotlin/swift/lua`）：进程生命周期、
+  JSON-RPC 分帧、文档同步、诊断、悬停、补全、跳转定义、格式化、重命名与
+  文档符号。缺少 server 或崩溃时静默降级为语法高亮，不启动 Node。按产品
+  决策默认关闭（实验性）；开启后状态栏显示当前文件的错误/警告数。
+- 真实 `rust-analyzer` 的忽略式端到端测试
+  （`cargo test -p lazecode-core --test lsp_e2e -- --ignored`）以及 mock
+  server 生命周期测试。
+
+### 修复
+
+- 工作树状态与提交暂存改为比较规范化（filter 后）字节，CRLF、`$Id$`
+  与 LFS pointer 文件不会仅因工作树表示不同而被误报为已修改。
+- 部分提交不再把未勾选文件取消暂存：提交树由 HEAD + 勾选路径构建，仅回写
+  这些路径的索引项。
+- 提交与部分提交现在按 git 顺序执行 `pre-commit`、`prepare-commit-msg`、
+  `commit-msg`、`post-commit`；hook 失败会中止，`commit-msg` 的改写会作为
+  最终提交信息。切换分支会执行 `post-checkout`（失败仅记录，不阻断）。
+- 历史改写安全：`drop` 拒绝 merge 提交、非 HEAD 祖先以及已存在于远程分支的
+  提交；`squash` 只接受最新的一段连续提交；merge/rebase/reset 校验以 `-`
+  开头的 ref；`merge --continue` 与 `cherry-pick --continue` 保持 git 自身
+  语义，不再静默 skip。
+- 冲突处理：未合并索引项显示为 `C` 并进入 Merge Conflicts 组（不再落到
+  Unversioned）；delete/modify 冲突选择删除侧时执行 `git rm`；合并编辑器在
+  仍有冲突标记时禁止标记解决，并显示后端错误。
+- Git 路径/架藏边界：discard 与冲突写回校验仓库相对路径及符号链接祖先；
+  架藏删除/重命名/导入/读取拒绝 `..`、路径分隔符与控制字符。
+- Git 读取：blame 复用每个提交的作者/时间；文件历史跟随重命名；子模块路径
+  解析修正；ahead/behind 与待推送计数优先使用已配置 upstream，再回退
+  `origin`；变更列表写入失败会回显，损坏 JSON 会备份。
+- 终端：输出结束后不再永久 60fps 重绘；256 色使用 xterm 调色板；Cmd+F
+  聚焦查找框并在打开时拦截 shell 输入；选区高亮/复制包含最后一个单元格、
+  按字素簇复制并跳过 NUL 哨兵；括号粘贴中和控制字节且无法被内容提前结束；
+  鼠标按下/释放/拖拽与滚轮坐标按指针发送；滚动条方向与触控板小数滚动修复；
+  输出唤醒合并保留最后一帧；解析线程 panic 会关闭会话而不是永久卡死；
+  shell 走白名单且剥离凭据环境变量；每个工作树最多 10 个控制台，底部
+  dock 高度持久化。
+- 状态栏显示真实编码（UTF-16/Latin-1 等），不再固定为 “Latin-1”；终端
+  查找栏关闭时清除搜索高亮。
+
 ### 变更
 
 - 页面重制地基（`feat-ui-redesign` 分支）：设计令牌层整体逐字移植稳定版

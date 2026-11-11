@@ -1,6 +1,6 @@
 # LazeCode native rewrite — implementation status
 
-> Branch: `feat-rust`. This document is the honest state of the pure-Rust
+> Branch: `feat-ui-redesign`. This document is the honest state of the pure-Rust
 > rewrite relative to `docs/design/architecture.md`. It is updated with the
 > code; if a capability is not listed as implemented, assume it is not.
 
@@ -55,16 +55,22 @@ Read path:
 - `discover`, worktree resolution, HEAD/branch/detached/unborn state.
 - Status computed from HEAD tree vs index vs worktree, including staged and
   unstaged states, untracked files, per-file added/deleted line counts and
-  binary detection.
-- Branch list (local/remote), tags, ahead/behind against `origin/<branch>`
-  via merge-base.
+  binary detection. Ignored files/directories come from a native `gix-dir`
+  walk (no `git status` subprocess).
+- Branch list (local/remote), tags, ahead/behind against the configured upstream (falling back to
+  `origin/<branch>`) via merge-base.
 - Log with parent lists, refs, lane graph layout (lanes/edges computed from
   real DAG topology), commit details and changed-file stats; filters for
   author, date (`--since`), path (lockstep HEAD/worktree diff tree walk),
   topo/date/first-parent/no-merges, all-refs (heads+remotes, stash excluded)
   and branch dotted ranges (`left..right` mapped to a hidden-ancestor walk).
 - File diff, commit diff stats, blame (porcelain parser), per-file history,
-  submodule status, LFS status/track, stash list/show-files.
+  submodule status. LFS status/track and stash list/files are native
+  (`.gitattributes` read/write + pointer detection); remote LFS pull is
+  explicitly unimplemented (the network transport is a separate milestone).
+  The `git` binary remains only for blame, network sync and history
+  rewrite (except native reset); read-only status/log/diff and the write
+  paths above are `gix`/pure Rust.
 - Compare branches as a persistent central editor tab (`TabKind::Compare`,
   stable CompareBranchesView page design): upper/lower panes with a
   draggable splitter (persisted in `settings.compare_split`), per-side
@@ -85,31 +91,58 @@ Write path:
   HEAD, commit/amend (author/committer from Git config), branch create, delete
   and switch (switch is refused unless the worktree and editor buffers are
   clean; tracked files are materialised/deleted and the index is rewritten).
+- Clean/smudge filters on stage, partial commit, status and checkout:
+  `.gitattributes` `text`/`eol`/`ident`/`filter`, `core.autocrlf`/`core.eol`,
+  user `filter.<driver>.clean|smudge` commands (required-filter failures
+  abort; optional failures degrade to raw bytes), and a native LFS path
+  (`filter=lfs` pointer clean/smudge with `.git/lfs/objects` storage; the
+  `git-lfs` binary is never executed). Staged/committed blobs are canonical,
+  and status compares canonical worktree bytes so CRLF/LFS files do not
+  appear modified merely because of filters.
+- Branch checkout is transactional: every affected path is snapshotted,
+  materialisation/index/HEAD updates run under that journal, and any failure
+  restores the worktree and index instead of leaving a hybrid tree.
+- Unified-diff apply/reverse/cached-apply is pure Rust (`crates/lazecode-git/
+  src/patch.rs`): add/delete/modify, multiple files, mode changes,
+  `\ No newline at end of file`, exact context matching and worktree
+  rollback on write failure. Binary and rename patches are rejected
+  explicitly rather than applied incorrectly. `git apply` is no longer used.
+- Commit and partial-commit now run the standard hooks in git order:
+  `pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit`. A failing
+  hook aborts the commit; a `commit-msg` rewrite is used as the final message.
+  Branch switches run `post-checkout` (its failure is logged, not fatal, like
+  git). Hooks run as user external processes (not the `git` binary).
 - The index writer refuses v4, split-index, untracked-cache, FSMonitor and
   resolve-undo indexes instead of silently dropping those extensions.
-- Hunk-level stage/unstage/discard from the diff tab through
-  `git apply --whitespace=nowarn --check` (worktree, `--cached` and reverse
-  paths; the patch is piped over stdin — a temp-file variant on macOS
-  flaked at high parallel-test load with `corrupt patch at :N`, stdin is
-  observably stable over a 12-run soak).
-- Remote sync porcelain: push (`--force-with-lease`, `--set-upstream`),
+- Hunk-level stage/unstage/discard from the diff tab uses the pure-Rust
+  patch applier (worktree, `--cached` and reverse paths). `git init` and
+  per-path/per-directory discard also use `gix`/direct index writes; only the
+  still-listed porcelain read/history paths below invoke the `git` binary.
+- `pending_count` is native merge-base/count over the configured upstream.
+- Remote sync porcelain (still uses the `git` binary): push (`--force-with-lease`, `--set-upstream`),
   pull (merge/rebase/ff-only), fetch (`--all --prune`), clone (non-empty
   target refused); remote list/add/remove/rename/set-url.
-- History rewrite porcelain: merge, rebase (+continue/abort/skip),
+- Native `reset --soft/--mixed/--hard` (branch or detached HEAD, index and
+  worktree transaction with rollback); drop-HEAD/squash reuse it.
+- History rewrite porcelain (still uses the `git` binary): merge, rebase (+continue/abort/skip),
   interactive rebase (UI-arranged todo executed through a
   GIT_SEQUENCE_EDITOR shim; conflicts fall through to the sequencer bar),
   cherry-pick (+continue/abort, editor neutralised, empty picks skipped),
-  revert, drop (HEAD via reset, others via rebase --onto with a hash
+  revert, drop (HEAD via native reset, others via rebase --onto with a hash
   whitelist), squash (merge-base --is-ancestor ordering; root gotcha
-  special-cased), reset (soft/mixed/hard) with a clean-tree gate; sequencer
+  special-cased); sequencer
   state introspection (MERGE_HEAD / rebase-merge|apply / CHERRY_PICK_HEAD /
   REVERT_HEAD) drives a conflict bar with continue/abort routed per kind.
-- Stash push (optional message, `-u` for untracked)/list/show/files/apply/
-  drop; shelves live in `.git/lazecode-shelves/*.patch` (whole-tree or
-  path-scoped save — the retract step reuses the per-file discard so
-  staged-new files leave both worktree and index — restore, partial apply
-  via `--include` gated on a `--check` pre-pass, delete, per-file listing
-  for the unshelve dialog). Porcelain rename, tag create (lightweight)/delete.
+- Native stash: push (message, `-u` for untracked, `--keep-index`),
+  list/files/apply/pop/drop, including stash/index/untracked commits and
+  the `refs/stash` reflog. Stashes are readable by the `git` CLI and
+  vice-versa. Shelves live in `.git/lazecode-shelves/*.patch` (whole-tree
+  or path-scoped save — the retract step reuses the per-file discard so
+  staged-new files leave both worktree and index — native patch generation,
+  native full restore, native path-filtered partial restore, delete,
+  per-file listing for the unshelve dialog). Generated patches are accepted
+  by `git apply --check` and preserve missing final newlines; porcelain
+  rename, tag create (lightweight)/delete remain.
 
 ### Changes list (source-control sidebar)
 
@@ -171,20 +204,29 @@ Not implemented (explicit):
   `Extras` zero-width clusters) and the interned style table; bg-only cells
   keep their inline backgrounds.
 - Hot scrollback (default 10 000 lines; settings offer 5k/10k/20k/50k),
-  resize, keyboard encoding (Ctrl/Alt, application cursor, function keys),
-  bracketed paste, IME commit, SGR mouse clicks/wheel, selection and Cmd+C,
-  OSC title, bell count.
+  resize, keyboard encoding (Ctrl/Alt including Ctrl+Alt, application
+  cursor, function keys), bracketed paste with control-byte sanitisation,
+  IME commit, SGR/X10 mouse press/release/drag/wheel at the pointer cell,
+  selection (inclusive endpoints, grapheme clusters) and Cmd+C, OSC title,
+  bell count, 256-colour palette, and fractional trackpad wheel accumulation.
 - Scrollback search runs rio-vt's `RegexSearch` DFAs over the whole grid
   (character classes work; smart-case follows the Alacritty/less
   convention: lowercase queries fold, uppercase queries are
-  case-sensitive). Invalid regexes fall back to a literal scan.
+  case-sensitive). Invalid regexes fall back to a literal scan. Cmd+F
+  focuses the find field and suppresses PTY key forwarding while open.
 - Freeze fix for high-throughput output: PTY-wake notifies are coalesced to
-  at most one per 16 ms (frame budget) while explicit state changes stay
-  immediate, and the focused pane caps repaints at 60 fps. Verified with a
-  500k-line flood: the viewport converges, input stays responsive and a
-  12-run soak shows no stall.
-- Multiple console tabs per project, restart/stop, per-session title and
-  elapsed time; sessions are bound to their project.
+  at most one per 16 ms (frame budget) with a trailing timer so the final
+  frame is never lost; explicit state changes stay immediate, and the
+  focused pane caps repaints at 60 fps only while output is recent.
+- Multiple console tabs per project (capped at 10 panes per worktree), with
+  up to 4 split panes per tab (`Split Right`/`Split Down`, row/column
+  equal-size layout, active-pane ring, hover close per pane, pane close
+  removes the tab only when the last pane closes). Tab strip stays one entry
+  per tab; restart/stop targets one pane, and per-pane title/elapsed time are
+  preserved. Sessions are bound to their project. The shell is restricted to
+  a login-shell allow-list and common credential environment variables are
+  stripped before spawn.
+- Bottom-dock height and right-dock width/placement persist across launches.
 
 Not implemented (explicit):
 
@@ -192,7 +234,8 @@ Not implemented (explicit):
 - kitty graphics, OSC 133 prompt marks, OSC 7/9;9 cwd tracking (rio exposes
   the OSC 7 cwd on `Crosswords.current_directory`; not surfaced yet),
   OSC 52;
-- split panes, mouse drag/motion reporting beyond basic clicks/wheel;
+- kitty keyboard protocol/modifyOtherKeys, key-release events, and the
+  screen-reader text mirror;
 - rio-vt's hyperlink/vi-mode surfaces;
 - custom GPU offscreen terminal renderer with an integer-pixel grid (the
   current renderer paints cell runs through the egui painter and caches the
@@ -200,10 +243,33 @@ Not implemented (explicit):
 
 ### LSP
 
-Not implemented in this pass. The editor opens, edits, saves, highlights and
-searches without a language server. The architecture doc's optional
-11-language LSP client remains future work; no Node-based languages are
-started.
+The optional 11-language language-server client now lives in
+`lazecode-core::lsp` and is wired into the editor. It is **default-off**
+(Settings → Editor → Language servers (experimental)); the product default is
+syntax highlighting only.
+
+- one server per `(workspace root, language)`; candidates match the stable
+  table (`pyright`/`basedpyright`/`pylsp`, `gopls`, `rust-analyzer`,
+  `clangd`, `jdtls`, `solargraph`, `intelephense`,
+  `kotlin-language-server`, `sourcekit-lsp`, `lua-language-server`);
+- JSON-RPC over stdio with Content-Length framing, bounded reader/writer
+  queues, per-request deadlines, server-request replies
+  (`workspace/configuration`, `applyEdit`, progress/registration), process
+  -group termination and crash visibility;
+- full-text `didOpen`/`didChange` (200 ms debounce)/`didClose` sync with
+  versions; UTF-16 ↔ Unicode-scalar position conversion is tested against
+  surrogate pairs;
+- editor surfaces: inline diagnostics with status-bar counts and hover,
+  async hover tooltips, completion popup (trigger characters or
+  Ctrl+Space), Cmd+Click/F12 definition, Option+Cmd+L formatting,
+  F2/workspace rename (open buffers and closed files), Cmd+Shift+O document
+  symbols, plus palette entries;
+- missing servers or crashes degrade silently to syntax highlighting; no
+  Node runtime is started. TS/JS/JSON/CSS/HTML remain highlight-only.
+
+The lifecycle is covered by a mock-server test and an ignored end-to-end
+test against real `rust-analyzer`
+(`cargo test -p lazecode-core --test lsp_e2e -- --ignored`).
 
 ### Packaging
 
@@ -214,7 +280,7 @@ started.
 
 | crate | responsibility |
 |---|---|
-| `lazecode-core` | project/workspace model, tabs, settings, layout, commands, toasts, workspace persistence |
+| `lazecode-core` | project/workspace model, tabs, settings, layout, commands, toasts, workspace persistence, LSP client/diagnostics |
 | `lazecode-fs` | tree scan, encoding-aware file IO, search, watchers |
 | `lazecode-text` | rope documents, undo, incremental syntax cache, diff model |
 | `lazecode-git` | gix read/write porcelain limited to the list above |
@@ -231,8 +297,9 @@ workspace under `crates/`.
 ## 3. Verification performed
 
 ```sh
-cargo test --workspace          # 102 tests, all passing
+cargo test --workspace          # 141 tests, all passing
 cargo clippy --workspace --all-targets   # clean
+cargo test -p lazecode-core --test lsp_e2e -- --ignored  # real rust-analyzer
 cargo build --release -p lazecode-app    # native binary
 ./scripts/build-app.sh --debug           # dist/LazeCode.app launches
 cargo run -p lazecode-app --bin snapshot -- /tmp/laze.png "$PWD" editor zh

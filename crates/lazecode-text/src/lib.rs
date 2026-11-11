@@ -5,6 +5,7 @@
 
 pub mod diff;
 pub mod document;
+pub mod lsp;
 pub mod syntax;
 
 pub use diff::{
@@ -13,4 +14,5 @@ pub use diff::{
 };
 pub use document::{Cursor, Document, MatchOptions, Motion, Selection};
 pub use lazecode_fs::{Eol, TextFile};
+pub use lsp::LspTextEdit;
 pub use syntax::{HighlightSpan, SyntaxHighlighter, TokenKind};

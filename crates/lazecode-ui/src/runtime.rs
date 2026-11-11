@@ -76,6 +76,9 @@ pub enum MenuKind {
     /// Terminal tab right-click context menu (payload: title).
     TerminalTabContext {
         project: usize,
+        /// Tab owning the menu.
+        tab_id: u64,
+        /// Active pane of that tab (copy cwd / rename / close pane targets).
         terminal_id: u64,
     },
     /// 提交信息历史下拉（dock 内时钟按钮）：列出 settings.commit_history。
@@ -286,6 +289,16 @@ pub enum DialogState {
         value: String,
         error: Option<String>,
     },
+    /// LSP `textDocument/rename` (F2). `path`/`line`/`col` pin the symbol;
+    /// `value` is the new name.
+    RenameSymbol {
+        tab_id: u64,
+        path: String,
+        line: usize,
+        col: usize,
+        value: String,
+        error: Option<String>,
+    },
     NewChangelist {
         value: String,
         error: Option<String>,
@@ -382,7 +395,67 @@ pub struct PaletteState {
     pub opened_frame: u64,
 }
 
+#[derive(Default)]
+pub struct LspHoverState {
+    pub tab_id: u64,
+    pub line: usize,
+    pub col: usize,
+    pub pointer: egui::Pos2,
+    /// When the pointer settled on this character.
+    pub since: Option<Instant>,
+    pub request: Option<i64>,
+    pub requested_at: Option<Instant>,
+    pub result: Option<lazecode_core::lsp::Hover>,
+}
+
+#[derive(Default)]
+pub struct LspCompletionState {
+    pub tab_id: u64,
+    pub request: Option<i64>,
+    pub requested_at: Option<Instant>,
+    pub items: Vec<lazecode_core::lsp::CompletionItem>,
+    pub selected: usize,
+    /// Start of the word prefix that `insert_text` replaces.
+    pub prefix_start: Cursor,
+    /// Cursor and revision when the request was sent; a response that arrives
+    /// after the user moved or typed is stale and must not be inserted.
+    pub request_cursor: Cursor,
+    pub revision: u64,
+    /// Caret screen position, refreshed by the editor while the popup is open.
+    pub anchor: egui::Pos2,
+}
+
+#[derive(Default)]
+pub struct LspSymbolState {
+    pub tab_id: u64,
+    pub request: Option<i64>,
+    pub requested_at: Option<Instant>,
+    pub items: Vec<lazecode_core::lsp::DocumentSymbol>,
+    pub selected: usize,
+}
+
+/// Cross-frame state for the optional language-server features. Requests are
+/// ids into `AppModel::lsp`; completed responses are polled here each frame.
+#[derive(Default)]
+pub struct LspUiState {
+    pub hover: Option<LspHoverState>,
+    pub completion: Option<LspCompletionState>,
+    pub symbols: Option<LspSymbolState>,
+    /// Set by the editor after a completion trigger character.
+    pub completion_due: Option<(u64, Instant)>,
+    /// Set by Cmd+Click / F12; sent after the current input batch.
+    pub goto_request: Option<(u64, Cursor)>,
+    /// Set by Option+Cmd+L.
+    pub format_request: Option<u64>,
+    /// Set by Cmd+Shift+O.
+    pub symbols_request: Option<u64>,
+    pub goto_pending: Option<i64>,
+    pub format_pending: Option<(u64, i64)>,
+    pub rename_pending: Option<i64>,
+}
+
 pub struct UiRuntime {
+    pub lsp: LspUiState,
     pub palette: PaletteState,
     pub search: SearchState,
     pub find: FindState,
@@ -395,6 +468,10 @@ pub struct UiRuntime {
     pub terminal_drag: Option<u64>,
     pub terminal_scroll_fraction: HashMap<u64, f32>,
     pub terminal_preedit: HashMap<u64, String>,
+    /// Fractional trackpad wheel remainder per terminal session.
+    pub terminal_wheel: HashMap<u64, f32>,
+    /// Last snapshot wake counter per terminal; skips rebuilding unchanged grids.
+    pub terminal_wake: HashMap<u64, u64>,
     pub editor_focus: Option<u64>,
     pub editor_drag: bool,
     pub sidebar_drag: bool,
@@ -475,6 +552,7 @@ pub enum CommitTab {
 impl Default for UiRuntime {
     fn default() -> Self {
         Self {
+            lsp: LspUiState::default(),
             palette: PaletteState::default(),
             search: SearchState::default(),
             find: FindState::default(),
@@ -487,6 +565,8 @@ impl Default for UiRuntime {
             terminal_drag: None,
             terminal_scroll_fraction: HashMap::new(),
             terminal_preedit: HashMap::new(),
+            terminal_wheel: HashMap::new(),
+            terminal_wake: HashMap::new(),
             new_ignore_pattern: String::new(),
             commit_view_menu_frame: 0,
             cmp_view_menu_frame: 0,
@@ -606,14 +686,30 @@ impl UiRuntime {
     }
 
     pub fn clear_terminal_cache(&mut self) {
-        // Snapshots/selections are cheap to rebuild; keyboard focus is not.
-        // Preserve the focused session id so switching away and back does not
-        // silently drop keystrokes.
-        let focus = self.terminal_focus;
+        // Cache entries are keyed by globally unique session ids. Keeping a
+        // stale focus id from another project makes the new project's active
+        // console appear dead until it is clicked, so drop it and let the
+        // panel latch the new active session.
         self.terminal_snapshots.clear();
         self.terminal_selections.clear();
         self.terminal_search.clear();
-        self.terminal_focus = focus;
+        self.terminal_preedit.clear();
+        self.terminal_wheel.clear();
+        self.terminal_focus = None;
+    }
+
+    /// Drop cached rendering state for one closed pane (its PTY is gone).
+    pub fn forget_terminal(&mut self, id: u64) {
+        self.terminal_snapshots.remove(&id);
+        self.terminal_selections.remove(&id);
+        self.terminal_search.remove(&id);
+        self.terminal_preedit.remove(&id);
+        self.terminal_wheel.remove(&id);
+        self.terminal_wake.remove(&id);
+        self.terminal_scroll_fraction.remove(&id);
+        if self.terminal_focus == Some(id) {
+            self.terminal_focus = None;
+        }
     }
 }
 
@@ -654,6 +750,10 @@ pub enum PaletteAction {
     GitTools,
     CompareBranches,
     GoToLine,
+    FormatDocument,
+    GoToSymbol,
+    RenameSymbol,
+    GoToDefinition,
     Quit,
 }
 

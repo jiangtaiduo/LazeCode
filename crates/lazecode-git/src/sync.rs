@@ -2,15 +2,13 @@
 //! drivers; the plumbing stays the same, only the transport/outcome differs.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::anyhow;
 
 use crate::Result;
 
 fn run(root: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .current_dir(root)
+    let output = crate::porcelain(root)
         .args(args)
         .output()
         .map_err(|err| anyhow!("git {:?} failed to spawn: {err}", args.first()))?;
@@ -94,8 +92,7 @@ pub fn push(
     }
     args.push(remote.to_string());
     args.push(format!("refs/heads/{branch}:refs/heads/{branch}"));
-    let output = Command::new("git")
-        .current_dir(root)
+    let output = crate::porcelain(root)
         .args(&args)
         .output()
         .map_err(|err| anyhow!("git push spawn failed: {err}"))?;
@@ -110,8 +107,7 @@ pub fn push(
 
 /// Fetch all remotes and prune stale remote-tracking branches.
 pub fn fetch_all(root: &Path) -> Result<String> {
-    let output = Command::new("git")
-        .current_dir(root)
+    let output = crate::porcelain(root)
         .args(["fetch", "--all", "--prune"])
         .output()
         .map_err(|err| anyhow!("git fetch spawn failed: {err}"))?;
@@ -132,8 +128,7 @@ pub fn pull(root: &Path, mode: PullMode) -> Result<String> {
         PullMode::Merge => "--no-rebase".into(),
         PullMode::FastForwardOnly => "--ff-only".into(),
     });
-    let output = Command::new("git")
-        .current_dir(root)
+    let output = crate::porcelain(root)
         .args(&args)
         .output()
         .map_err(|err| anyhow!("git pull spawn failed: {err}"))?;
@@ -163,7 +158,8 @@ pub fn clone(url: &str, destination: &Path) -> Result<PathBuf> {
             anyhow::bail!("{} already exists and is not empty", destination.display());
         }
     }
-    let output = Command::new("git")
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let output = crate::porcelain(&cwd)
         .arg("clone")
         .arg(url)
         .arg(destination)
@@ -182,18 +178,5 @@ pub fn clone(url: &str, destination: &Path) -> Result<PathBuf> {
 /// (rough `git log @{u}..` estimate — falls back to counting commits not on
 /// origin/<branch>).
 pub fn pending_count(root: &Path, branch: &str) -> Result<usize> {
-    let upstream = format!("origin/{branch}");
-    run(
-        root,
-        &[
-            "rev-list",
-            "--count",
-            &format!("{upstream}..{branch}"),
-            "--",
-        ],
-    )
-    .and_then(|text| {
-        text.parse::<usize>()
-            .map_err(|err| anyhow!("pending count: {err}"))
-    })
+    crate::status::pending_count(root, branch)
 }

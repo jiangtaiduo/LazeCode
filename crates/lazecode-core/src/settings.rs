@@ -74,6 +74,9 @@ impl Default for TerminalSettings {
 pub struct Settings {
     pub theme: ThemeMode,
     pub language: Language,
+    /// Optional language-server integration for the 11 supported languages.
+    /// A missing or crashing server silently degrades to syntax highlighting.
+    pub lsp_enabled: bool,
     pub editor: EditorSettings,
     pub terminal: TerminalSettings,
     pub sidebar_width: f32,
@@ -95,6 +98,7 @@ impl Default for Settings {
         Self {
             theme: ThemeMode::Dark,
             language: Language::English,
+            lsp_enabled: false,
             editor: EditorSettings::default(),
             terminal: TerminalSettings::default(),
             sidebar_width: 262.0,
@@ -201,6 +205,7 @@ pub struct WorkspaceFile {
     pub panel_height: Option<f32>,
     pub terminal_placement: Option<String>,
     pub terminal_width: Option<f32>,
+    pub terminal_height: Option<f32>,
     pub open_tabs: std::collections::BTreeMap<PathBuf, Vec<PathBuf>>,
     pub active_tabs: std::collections::BTreeMap<PathBuf, PathBuf>,
     /// Favorite branches, decorated in the Git log branch tree.

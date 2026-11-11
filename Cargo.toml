@@ -57,6 +57,7 @@ alacritty_terminal = "0.26"
 vte = "0.15"
 portable-pty = "0.9"
 libc = "0.2"
+ring = "0.17"
 
 [profile.release]
 lto = "thin"

@@ -809,6 +809,42 @@ fn draw_file_inner(
 ) {
     let p = theme.palette;
     let settings = model.settings.editor.clone();
+    let Some(path) = model
+        .projects
+        .get(index)
+        .and_then(|project| project.tab_by_id(tab_id))
+        .and_then(|tab| match &tab.kind {
+            TabKind::File(file) => Some(file.doc.path.clone()),
+            _ => None,
+        })
+    else {
+        return;
+    };
+    if rt
+        .lsp
+        .completion
+        .as_ref()
+        .is_some_and(|state| state.tab_id != tab_id)
+    {
+        if let Some(state) = rt.lsp.completion.take() {
+            if let Some(id) = state.request {
+                model.lsp.cancel(id);
+            }
+        }
+    }
+    if rt
+        .lsp
+        .symbols
+        .as_ref()
+        .is_some_and(|state| state.tab_id != tab_id)
+    {
+        if let Some(state) = rt.lsp.symbols.take() {
+            if let Some(id) = state.request {
+                model.lsp.cancel(id);
+            }
+        }
+    }
+    let diagnostics = model.lsp.diagnostics(&path);
     let (font_size, tab_width, line_numbers, current_line, minimap) = (
         settings.font_size,
         settings.tab_width,
@@ -869,6 +905,8 @@ fn draw_file_inner(
         || rt.agent_menu.is_some()
         || !matches!(rt.dialog, DialogState::None);
     let mut pending: Vec<Command> = Vec::new();
+    let mut hover_cursor: Option<Cursor> = None;
+    let mut diag_tooltip: Option<(String, lazecode_core::lsp::DiagnosticSeverity)> = None;
 
     {
         let project = &mut model.projects[index];
@@ -911,11 +949,15 @@ fn draw_file_inner(
             rt.set_editor_focus(tab_id);
         }
         let pointer = response.interact_pointer_pos();
+        let command_click = response.clicked() && ui.input(|input| input.modifiers.command);
         if let Some(pos) = pointer {
             if response.clicked() || response.dragged() {
                 let cursor = cursor_from_pos(pos, content, doc, char_w, line_h, tab_width);
                 let extend = response.dragged() || ui.input(|input| input.modifiers.shift);
                 doc.set_cursor(cursor, extend);
+                if command_click {
+                    rt.lsp.goto_request = Some((tab_id, cursor));
+                }
                 if response.dragged() {
                     rt.editor_drag = true;
                 }
@@ -984,6 +1026,8 @@ fn draw_file_inner(
         let scroll_line = doc.scroll_line;
         let scroll_x = doc.scroll_x;
         let tab_w = tab_width.max(1);
+        let mut line_chars: Vec<char> = Vec::new();
+        let mut line_kinds: Vec<TokenKind> = Vec::new();
         for line_index in first..=last {
             let y = content.top() + (line_index as f32 - scroll_line) * line_h;
             if line_index == first && scroll_line.fract() > 0.0 {
@@ -1057,7 +1101,57 @@ fn draw_file_inner(
                 tab_w,
                 &font,
                 theme,
+                &mut line_chars,
+                &mut line_kinds,
             );
+            // LSP diagnostics: one underline per diagnostic per visible line.
+            // Multi-line ranges clip to the current row.
+            if !diagnostics.is_empty() {
+                let text_len = text.chars().count();
+                let line_u32 = line_index as u32;
+                for diagnostic in diagnostics {
+                    let start = diagnostic.range.start;
+                    let end = diagnostic.range.end;
+                    if line_u32 < start.line || line_u32 > end.line {
+                        continue;
+                    }
+                    let start_col = if line_u32 == start.line {
+                        lazecode_text::lsp::char_col_for_utf16(&text, start.character)
+                    } else {
+                        0
+                    }
+                    .min(text_len);
+                    let mut end_col = if line_u32 == end.line {
+                        lazecode_text::lsp::char_col_for_utf16(&text, end.character)
+                    } else {
+                        text_len
+                    }
+                    .min(text_len);
+                    if end_col <= start_col {
+                        if start.line != end.line {
+                            continue;
+                        }
+                        end_col = (start_col + 1).min(text_len);
+                    }
+                    let v0 = Document::visual_col(&text, start_col, tab_w);
+                    let v1 = Document::visual_col(&text, end_col, tab_w);
+                    let x0 = (content.left() + v0 as f32 * char_w - scroll_x).max(content.left());
+                    let x1 = (content.left() + v1 as f32 * char_w - scroll_x)
+                        .max(x0 + 2.0)
+                        .min(content.right());
+                    if x1 <= content.left() || x0 >= content.right() {
+                        continue;
+                    }
+                    let y_line = y + line_h - 2.0;
+                    painter.line_segment(
+                        [Pos2::new(x0, y_line), Pos2::new(x1, y_line)],
+                        Stroke::new(
+                            1.5,
+                            crate::lsp_ui::diagnostic_color(theme, diagnostic.severity),
+                        ),
+                    );
+                }
+            }
             let leading_spaces = text.chars().take_while(|c| *c == ' ').count();
             let leading_tabs = text.chars().take_while(|c| *c == '\t').count();
             let total_indent_cols = leading_tabs * tab_w + leading_spaces;
@@ -1083,6 +1177,11 @@ fn draw_file_inner(
             let x = content.left() + vcol as f32 * char_w - doc.scroll_x;
             let y = content.top() + (line as f32 - doc.scroll_line) * line_h;
             let cursor_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(char_w, line_h));
+            if let Some(state) = rt.lsp.completion.as_mut() {
+                if state.tab_id == tab_id {
+                    state.anchor = Pos2::new(x, y);
+                }
+            }
             ui.ctx().output_mut(|o| {
                 o.ime = Some(egui::output::IMEOutput {
                     purpose: egui::IMEPurpose::Normal,
@@ -1127,11 +1226,43 @@ fn draw_file_inner(
         if minimap {
             draw_minimap(ui, doc, theme, minimap_rect, view_h, line_h);
         }
+        if !overlays_open {
+            hover_cursor = ui
+                .input(|input| input.pointer.hover_pos())
+                .filter(|pos| content.contains(*pos) && !ui.input(|input| input.pointer.any_down()))
+                .map(|pos| cursor_from_pos(pos, content, doc, char_w, line_h, tab_width));
+        }
+        if let Some(cursor) = hover_cursor {
+            diag_tooltip = crate::lsp_ui::diagnostic_at(doc, diagnostics, cursor)
+                .map(|diagnostic| (diagnostic.message.clone(), diagnostic.severity));
+        }
         let _ = MONO;
     }
 
     for command in pending {
         model.queue(command);
+    }
+    crate::lsp_ui::update_hover(ui.ctx(), model, rt, tab_id, hover_cursor);
+    if rt
+        .lsp
+        .hover
+        .as_ref()
+        .and_then(|state| state.result.as_ref())
+        .is_none()
+    {
+        if let Some((message, severity)) = diag_tooltip {
+            let color = crate::lsp_ui::diagnostic_color(theme, severity);
+            egui::Tooltip::always_open(
+                ui.ctx().clone(),
+                ui.layer_id(),
+                egui::Id::unique(("lsp-diagnostic", tab_id)),
+                egui::PopupAnchor::Pointer,
+            )
+            .show(|ui| {
+                ui.set_max_width(520.0);
+                ui.label(egui::RichText::new(message).size(12.0).color(color));
+            });
+        }
     }
     let _ = (p, rect, tab_id);
     // Find overlay sits above the text.
@@ -1160,12 +1291,16 @@ fn draw_line_runs(
     tab_width: usize,
     font: &FontId,
     theme: &Theme,
+    chars: &mut Vec<char>,
+    kinds: &mut Vec<TokenKind>,
 ) {
     if text.is_empty() {
         return;
     }
-    let chars: Vec<char> = text.chars().collect();
-    let mut kinds = vec![TokenKind::Text; chars.len()];
+    chars.clear();
+    chars.extend(text.chars());
+    kinds.clear();
+    kinds.resize(chars.len(), TokenKind::Text);
     for span in spans {
         for kind in kinds
             .iter_mut()
@@ -1281,9 +1416,24 @@ fn handle_editor_input(
 ) {
     let events = ui.input(|input| input.events.clone());
     for event in events {
+        if handle_completion_event(doc, rt, tab_id, &event) {
+            continue;
+        }
+        if handle_symbol_event(doc, rt, tab_id, &event) {
+            continue;
+        }
         match event {
             Event::Text(text) => {
                 doc.insert_text(&text);
+                if crate::lsp_ui::is_completion_trigger(&text)
+                    && lazecode_core::language_id_for_path(&doc.path).is_some()
+                {
+                    rt.lsp.completion_due = Some((tab_id, std::time::Instant::now()));
+                }
+                if rt.lsp.completion_due.is_some() {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(160));
+                }
             }
             Event::Paste(text) => {
                 doc.insert_text(&text);
@@ -1311,7 +1461,7 @@ fn handle_editor_input(
                 pressed: true,
                 modifiers,
                 ..
-            } if handle_editor_key(ui, doc, pending, key, modifiers) => {
+            } if handle_editor_key(ui, doc, pending, tab_id, rt, key, modifiers) => {
                 ui.ctx().request_repaint();
             }
             _ => {}
@@ -1323,14 +1473,180 @@ fn handle_editor_input(
     let _ = (tab_id, pending);
 }
 
+/// Handle keys while the completion popup is open. Returning `true` consumes
+/// the event; `Enter`/`Tab` insert the selected item, typing closes the popup
+/// and lets the character through.
+fn handle_completion_event(
+    doc: &mut Document,
+    rt: &mut UiRuntime,
+    tab_id: u64,
+    event: &Event,
+) -> bool {
+    let Some(mut state) = rt.lsp.completion.take() else {
+        return false;
+    };
+    if state.tab_id != tab_id {
+        rt.lsp.completion = Some(state);
+        return false;
+    }
+    let mut keep = true;
+    let mut consumed = false;
+    match event {
+        Event::Key {
+            key, pressed: true, ..
+        } => match key {
+            Key::ArrowDown => {
+                if !state.items.is_empty() {
+                    state.selected = (state.selected + 1) % state.items.len();
+                }
+                consumed = true;
+            }
+            Key::ArrowUp => {
+                if !state.items.is_empty() {
+                    state.selected = if state.selected == 0 {
+                        state.items.len() - 1
+                    } else {
+                        state.selected - 1
+                    };
+                }
+                consumed = true;
+            }
+            Key::Enter | Key::Tab => {
+                crate::lsp_ui::accept_completion(doc, &state);
+                keep = false;
+                consumed = true;
+            }
+            Key::Escape => {
+                keep = false;
+                consumed = true;
+            }
+            Key::ArrowLeft | Key::ArrowRight | Key::Delete => {
+                keep = false;
+            }
+            Key::Backspace => {
+                keep = false;
+                rt.lsp.completion_due = Some((tab_id, std::time::Instant::now()));
+            }
+            _ => {}
+        },
+        Event::Text(text) => {
+            keep = false;
+            // Keep filtering: re-request after the character is inserted.
+            if text.chars().all(|ch| ch.is_alphanumeric() || ch == '_') {
+                rt.lsp.completion_due = Some((tab_id, std::time::Instant::now()));
+            }
+        }
+        Event::Paste(_) => keep = false,
+        _ => {}
+    }
+    if keep {
+        rt.lsp.completion = Some(state);
+    }
+    consumed
+}
+
+/// The symbol picker is modal-ish: it swallows typing so a stray character
+/// cannot edit the buffer behind it.
+fn handle_symbol_event(doc: &mut Document, rt: &mut UiRuntime, tab_id: u64, event: &Event) -> bool {
+    let Some(mut state) = rt.lsp.symbols.take() else {
+        return false;
+    };
+    if state.tab_id != tab_id {
+        rt.lsp.symbols = Some(state);
+        return false;
+    }
+    let mut keep = true;
+    match event {
+        Event::Key {
+            key, pressed: true, ..
+        } => match key {
+            Key::ArrowDown => {
+                if !state.items.is_empty() {
+                    state.selected = (state.selected + 1) % state.items.len();
+                }
+            }
+            Key::ArrowUp => {
+                if !state.items.is_empty() {
+                    state.selected = if state.selected == 0 {
+                        state.items.len() - 1
+                    } else {
+                        state.selected - 1
+                    };
+                }
+            }
+            Key::Enter | Key::Tab => {
+                crate::lsp_ui::accept_symbol(doc, &state);
+                keep = false;
+            }
+            Key::Escape => keep = false,
+            _ => {}
+        },
+        Event::Text(_) | Event::Paste(_) => keep = false,
+        _ => {
+            rt.lsp.symbols = Some(state);
+            return false;
+        }
+    }
+    if keep {
+        rt.lsp.symbols = Some(state);
+    }
+    true
+}
+
+pub(crate) fn word_at(doc: &Document, cursor: Cursor) -> String {
+    let line = doc.line_content(cursor.line);
+    let chars: Vec<char> = line.chars().collect();
+    let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let mut start = cursor.col.min(chars.len());
+    while start > 0 && is_word(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = cursor.col.min(chars.len());
+    while end < chars.len() && is_word(chars[end]) {
+        end += 1;
+    }
+    chars[start..end].iter().collect()
+}
+
+#[allow(clippy::too_many_arguments)]
 fn handle_editor_key(
     ui: &mut Ui,
     doc: &mut Document,
     pending: &mut Vec<Command>,
+    tab_id: u64,
+    rt: &mut UiRuntime,
     key: Key,
     modifiers: Modifiers,
 ) -> bool {
     let cmd = modifiers.command;
+    if cmd && modifiers.alt && key == Key::L {
+        rt.lsp.format_request = Some(tab_id);
+        return true;
+    }
+    if cmd && modifiers.shift && key == Key::O {
+        rt.lsp.symbols_request = Some(tab_id);
+        return true;
+    }
+    if modifiers.ctrl && key == Key::Space {
+        rt.lsp.completion_due = Some((tab_id, std::time::Instant::now()));
+        return true;
+    }
+    if key == Key::F12 {
+        rt.lsp.goto_request = Some((tab_id, doc.cursor));
+        return true;
+    }
+    if key == Key::F2 {
+        let word = word_at(doc, doc.cursor);
+        rt.dialog = DialogState::RenameSymbol {
+            tab_id,
+            path: doc.path.to_string_lossy().to_string(),
+            line: doc.cursor.line,
+            col: doc.cursor.col,
+            value: word,
+            error: None,
+        };
+        return true;
+    }
     if cmd {
         match key {
             Key::Z => {

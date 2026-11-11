@@ -1,6 +1,8 @@
 //! Single-file blame and file history, via the `git` porcelain (gix's blame
 //! implementation is still primitive in 0.90), plus submodule inventory and
-//! LFS status/track passthrough.
+//! native LFS status/track (patterns and `.gitattributes` are handled here;
+//! remote LFS pull is explicitly unimplemented rather than shelling out to
+//! `git lfs`).
 
 use std::path::Path;
 
@@ -9,8 +11,7 @@ use anyhow::anyhow;
 use crate::Result;
 
 fn run(root: &Path, args: &[&str]) -> Result<String> {
-    let output = std::process::Command::new("git")
-        .current_dir(root)
+    let output = crate::porcelain(root)
         .args(args)
         .output()
         .map_err(|err| anyhow!("git spawn failed: {err}"))?;
@@ -48,40 +49,39 @@ pub fn blame(root: &Path, path: &str) -> Result<Vec<BlameLine>> {
     }
     let mut pending: Option<Pending> = None;
     let mut entries: Vec<BlameLine> = Vec::new();
+    let mut commit_meta: std::collections::HashMap<String, (String, i64)> =
+        std::collections::HashMap::new();
     for line in output.lines() {
         if let Some(rest) = line.strip_prefix('\t') {
             if let Some(state) = pending.take() {
+                let (author, time) = commit_meta
+                    .get(&state.hash)
+                    .cloned()
+                    .unwrap_or((state.author, state.time));
                 entries.push(BlameLine {
                     hash: state.hash.chars().take(40).collect(),
                     short: state.hash.chars().take(8).collect(),
-                    author: state.author,
-                    time: state.time,
+                    author,
+                    time,
                     line: state.line_no,
                     content: rest.to_string(),
                 });
             }
             continue;
         }
-        // Commit header starts with a 40-hex hash.
+        // Commit header starts with a 40-hex hash. Repeated headers for the
+        // same commit carry no metadata, so reuse the cached author/time.
         if line.len() >= 40 && line.chars().take(40).all(|c| c.is_ascii_hexdigit()) {
             let mut parts = line.splitn(4, ' ');
             let hash = parts.next().unwrap_or("").to_string();
             let line_no: usize = parts.next().unwrap_or("").parse().unwrap_or(0);
-            // The FIRST header row of every commit carries metadata rows
-            // optionally; repeat rows don't re-declare author. Track which
-            // hash we saw metadata for.
-            let known = entries.iter().any(|entry| entry.hash == hash)
-                || pending.as_ref().is_some_and(|state| state.hash == hash);
+            let (author, time) = commit_meta.get(&hash).cloned().unwrap_or_default();
             pending = Some(Pending {
                 hash,
                 line_no,
-                author: String::new(),
-                time: 0,
+                author,
+                time,
             });
-            if !known {
-                continue;
-            }
-            let _ = known;
             continue;
         }
         if let Some(state) = pending.as_mut() {
@@ -89,9 +89,9 @@ pub fn blame(root: &Path, path: &str) -> Result<Vec<BlameLine>> {
                 state.author = rest.to_string();
             } else if let Some(rest) = line.strip_prefix("author-time ") {
                 state.time = rest.parse().unwrap_or(state.time);
-            } else if let Some(rest) = line.strip_prefix("previous ") {
-                // Not used.
-                let _ = rest;
+            }
+            if !state.author.is_empty() {
+                commit_meta.insert(state.hash.clone(), (state.author.clone(), state.time));
             }
         }
     }
@@ -116,6 +116,7 @@ pub fn file_history(root: &Path, path: &str, limit: usize) -> Result<Vec<History
         root,
         &[
             "log",
+            "--follow",
             "--pretty=format:%H%x09%h%x09%an%x09%at%x09%s",
             "-n",
             &limit.to_string(),
@@ -154,18 +155,53 @@ pub struct SubmoduleEntry {
 
 pub fn submodule_list(root: &Path) -> Result<Vec<SubmoduleEntry>> {
     let output = run(root, &["submodule", "status", "--recursive"])?;
+    let mut urls = std::collections::HashMap::new();
+    if let Ok(config) = run(
+        root,
+        &[
+            "config",
+            "-f",
+            ".gitmodules",
+            "--get-regexp",
+            r"^submodule\..*\.path$",
+        ],
+    ) {
+        for line in config.lines() {
+            let Some((key, path)) = line.split_once(' ') else {
+                continue;
+            };
+            let name = key
+                .trim_start_matches("submodule.")
+                .trim_end_matches(".path");
+            if let Ok(url) = run(
+                root,
+                &[
+                    "config",
+                    "-f",
+                    ".gitmodules",
+                    "--get",
+                    &format!("submodule.{name}.url"),
+                ],
+            ) {
+                urls.insert(path.trim().to_string(), url);
+            }
+        }
+    }
     Ok(output
         .lines()
         .filter_map(|line| {
             let status = line.chars().next()?.to_string();
             let rest = line.get(1..)?.trim_start();
-            let (path, url) = match rest.split_once(' ') {
-                Some((path, url)) => (
-                    path.to_string(),
-                    url.trim_matches(|c| c == '(' || c == ')').to_string(),
-                ),
-                None => (rest.to_string(), String::new()),
-            };
+            // `<sha> <path> (<describe>)`: paths may contain spaces, so peel
+            // the hash first and only then look for the optional describe.
+            let after_sha = rest.split_once(' ').map(|(_, tail)| tail).unwrap_or(rest);
+            let path = match after_sha.rfind(" (") {
+                Some(index) => &after_sha[..index],
+                None => after_sha,
+            }
+            .trim()
+            .to_string();
+            let url = urls.get(&path).cloned().unwrap_or_default();
             Some(SubmoduleEntry {
                 path,
                 url,
@@ -191,12 +227,9 @@ pub struct LfsStatus {
 }
 
 pub fn lfs_status(root: &Path) -> LfsStatus {
-    let installed = std::process::Command::new("git")
-        .current_dir(root)
-        .args(["lfs", "version"])
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
+    // The native filter/LFS object path is always available; no `git-lfs`
+    // binary is required to read tracked patterns or clean/smudge files.
+    let installed = true;
     let patterns = std::fs::read_to_string(root.join(".gitattributes"))
         .map(|text| {
             text.lines()
@@ -216,14 +249,36 @@ pub fn lfs_status(root: &Path) -> LfsStatus {
 }
 
 pub fn lfs_track(root: &Path, pattern: &str) -> Result<String> {
-    if pattern.contains(' ') || pattern.contains(';') {
+    if pattern.is_empty()
+        || pattern.contains(' ')
+        || pattern.contains('\t')
+        || pattern.contains(';')
+        || pattern.contains('\n')
+    {
         anyhow::bail!("pattern must be a single glob");
     }
-    run(root, &["lfs", "track", pattern])
+    let path = root.join(".gitattributes");
+    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+    let already = text
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some(pattern) && line.contains("filter=lfs"));
+    if already {
+        return Ok(format!("Already tracking \"{pattern}\""));
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(pattern);
+    text.push_str(" filter=lfs diff=lfs merge=lfs -text\n");
+    lazecode_fs::file::write_atomic(&path, text.as_bytes())?;
+    Ok(format!("Tracking \"{pattern}\""))
 }
 
-pub fn lfs_pull(root: &Path) -> Result<String> {
-    run(root, &["lfs", "pull"])
+pub fn lfs_pull(_root: &Path) -> Result<String> {
+    anyhow::bail!(
+        "LFS pull needs the Git network transport, which is not implemented; \
+         local clean/smudge and the LFS object store are native"
+    )
 }
 
 // ---------------- compare ----------------

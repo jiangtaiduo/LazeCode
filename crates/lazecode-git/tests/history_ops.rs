@@ -63,7 +63,102 @@ fn merge_clean_and_conflict_take_sides() {
     assert_eq!(conflicts.len(), 1);
     assert_eq!(conflicts[0].path, "one.txt");
     assert_eq!(conflicts[0].kind.as_deref(), Some("UU"));
+    let snap = lazecode_git::snapshot(root).unwrap();
+    let conflicted = snap
+        .changes
+        .iter()
+        .find(|change| change.path == "one.txt")
+        .expect("conflicted change row");
+    assert!(conflicted.conflicted);
+    assert_eq!(conflicted.letter(), 'C');
+    assert!(!conflicted.untracked);
     resolve_take(root, "one.txt", true).unwrap();
+}
+
+#[test]
+fn resolve_take_deletion_side_removes_the_file() {
+    let dir = repo();
+    let root = dir.path();
+    commit(root, "gone.txt", "base\n", "base");
+    git(root, true, &["checkout", "-qb", "feature"]);
+    git(root, true, &["rm", "-q", "gone.txt"]);
+    git(root, true, &["commit", "-q", "-m", "delete"]);
+    git(root, true, &["checkout", "-q", "main"]);
+    commit(root, "gone.txt", "main edit\n", "modify");
+    merge(root, "feature").unwrap_err();
+    assert!(root.join("gone.txt").exists());
+    // Taking "theirs" means accepting the deletion, which must be `git rm`,
+    // not writing an empty file and staging it.
+    resolve_take(root, "gone.txt", false).unwrap();
+    assert!(!root.join("gone.txt").exists());
+    assert!(git(root, true, &["ls-files", "gone.txt"]).is_empty());
+    assert!(conflict_list(root).unwrap().is_empty());
+    assert!(matches!(
+        sequencer_state(root).unwrap(),
+        SequencerState::Merge { .. }
+    ));
+}
+
+#[test]
+fn drop_rejects_merge_published_and_foreign_commits() {
+    let dir = repo();
+    let root = dir.path();
+    commit(root, "a.txt", "a\n", "base");
+    git(root, true, &["checkout", "-qb", "side"]);
+    commit(root, "side.txt", "s\n", "side");
+    git(root, true, &["checkout", "-q", "main"]);
+    commit(root, "b.txt", "b\n", "main");
+    merge(root, "side").unwrap();
+    let merge_id = git(root, true, &["rev-parse", "HEAD"]);
+    drop_commit(root, &merge_id, false).unwrap_err();
+
+    // Foreign commit not on HEAD's ancestry.
+    git(root, true, &["checkout", "-q", "--orphan", "orphan"]);
+    git(root, true, &["rm", "-rf", "."]);
+    let foreign = commit(root, "foreign.txt", "f\n", "foreign");
+    git(root, true, &["checkout", "-q", "main"]);
+    let error = drop_commit(root, &foreign, false).unwrap_err().to_string();
+    assert!(error.contains("not an ancestor"), "{error}");
+
+    // Published HEAD (a normal commit; the merge commit above only tests the
+    // merge guard).
+    commit(root, "c.txt", "c\n", "after merge");
+    let bare = tempfile::tempdir().unwrap();
+    git(bare.path(), true, &["init", "-q", "--bare"]);
+    git(
+        root,
+        true,
+        &["remote", "add", "origin", bare.path().to_str().unwrap()],
+    );
+    git(root, true, &["push", "-q", "-u", "origin", "main"]);
+    let head = git(root, true, &["rev-parse", "HEAD"]);
+    let error = drop_commit(root, &head, false).unwrap_err().to_string();
+    assert!(
+        error.contains("published") || error.contains("remote branch"),
+        "{error}"
+    );
+}
+
+#[test]
+fn squash_rejects_non_contiguous_selection() {
+    let dir = repo();
+    let root = dir.path();
+    let _root_commit = commit(root, "a.txt", "a\n", "first");
+    let second = commit(root, "b.txt", "b\n", "second");
+    let third = commit(root, "c.txt", "c\n", "third");
+    let fourth = commit(root, "d.txt", "d\n", "fourth");
+
+    // second+third are older than the unselected fourth: folding them would
+    // also rewrite `fourth`.
+    let error = squash_commits(root, &[second.clone(), third.clone()], Some("folded"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("contiguous"), "{error}");
+
+    // The newest two are a valid contiguous suffix.
+    squash_commits(root, &[third, fourth], Some("folded")).unwrap();
+    let log = git(root, true, &["log", "--oneline"]);
+    assert!(log.contains("folded"), "{log}");
 }
 
 #[test]
@@ -324,4 +419,62 @@ fn interactive_rebase_rejects_bad_action_and_hash() {
         commit: "../not-a-hash".into(),
     }];
     assert!(lazecode_git::rebase_interactive(root, "main", &steps).is_err());
+}
+
+#[test]
+fn discard_refuses_paths_outside_the_worktree() {
+    let dir = repo();
+    let root = dir.path();
+    commit(root, "a.txt", "base\n", "base");
+    let outside = root.parent().unwrap().join("lazecode-outside.txt");
+    std::fs::write(&outside, "keep me\n").unwrap();
+    let result = lazecode_git::discard_file_changes(root, "../lazecode-outside.txt");
+    assert!(result.is_err(), "path traversal must be rejected");
+    assert_eq!(
+        std::fs::read_to_string(&outside).unwrap(),
+        "keep me\n",
+        "outside file must be untouched"
+    );
+    std::fs::remove_file(&outside).ok();
+}
+
+#[test]
+fn reset_soft_mixed_hard_and_detached_head_are_native() {
+    // Soft: HEAD moves, index and worktree keep the old tree.
+    let soft = repo();
+    let root = soft.path();
+    let base = commit(root, "a.txt", "a\n", "base");
+    commit(root, "b.txt", "b\n", "second");
+    reset(root, &base, ResetMode::Soft).unwrap();
+    assert_eq!(git(root, true, &["rev-parse", "HEAD"]), base);
+    assert!(root.join("b.txt").exists());
+    assert!(git(root, true, &["diff", "--cached", "--name-only"]).contains("b.txt"));
+
+    // Mixed: HEAD and index move, worktree keeps the old file as untracked.
+    let mixed = repo();
+    let root = mixed.path();
+    let base = commit(root, "a.txt", "a\n", "base");
+    commit(root, "b.txt", "b\n", "second");
+    reset(root, &base, ResetMode::Mixed).unwrap();
+    assert_eq!(git(root, true, &["rev-parse", "HEAD"]), base);
+    assert!(git(root, true, &["diff", "--cached", "--name-only"]).is_empty());
+    assert!(git(root, true, &["status", "--porcelain"]).contains("?? b.txt"));
+
+    // Hard: worktree follows, tracked files disappear, untracked files stay.
+    let hard = repo();
+    let root = hard.path();
+    let base = commit(root, "a.txt", "a\n", "base");
+    commit(root, "b.txt", "b\n", "second");
+    std::fs::write(root.join("untracked.txt"), "keep\n").unwrap();
+    reset(root, &base, ResetMode::Hard).unwrap();
+    assert!(!root.join("b.txt").exists());
+    assert!(root.join("untracked.txt").exists());
+    assert_eq!(lazecode_git::snapshot(root).unwrap().changes.len(), 1);
+
+    // Detached HEAD: moving it must not move the branch.
+    git(root, true, &["checkout", "-q", "--detach", "main"]);
+    commit(root, "c.txt", "c\n", "detached");
+    reset(root, "HEAD~1", ResetMode::Soft).unwrap();
+    assert_eq!(git(root, true, &["rev-parse", "HEAD"]), base);
+    assert_eq!(git(root, true, &["rev-parse", "main"]), base);
 }

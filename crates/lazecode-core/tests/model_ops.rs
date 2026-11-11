@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
-use lazecode_core::{AppModel, PanelTab, ProjectState, Settings, SidebarView, TabKind, UiState};
+use lazecode_core::{
+    AppModel, PaneSplit, PanelTab, ProjectState, Settings, SidebarView, TabKind, UiState,
+    MAX_PANES_PER_TAB,
+};
 use std::collections::HashSet;
 
 fn model() -> AppModel {
@@ -13,6 +16,7 @@ fn model() -> AppModel {
         recent: Vec::new(),
         commands: Vec::new(),
         notifier: None,
+        lsp: lazecode_core::LspManager::new(true, None),
         should_quit: false,
         version: "test",
         favorite_branches: HashSet::new(),
@@ -84,8 +88,9 @@ fn bad_shell_setting_does_not_drop_the_project() {
     let mut settings = Settings::default();
     settings.terminal.shell = Some("/definitely/not/a/shell".to_string());
     let project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
-    assert!(project.active_worktree().terminals.is_empty());
     assert_eq!(project.tree.file_count, 1);
+    // An unknown shell falls back to /bin/zsh instead of dropping the project.
+    assert_eq!(project.active_worktree().terminals.len(), 1);
 }
 
 #[test]
@@ -154,11 +159,12 @@ fn tabs_and_terminals_batch_closing_operations() {
     );
     let wt = project.active_worktree();
     assert_eq!(wt.terminals.len(), 3);
-    let first_id = wt.terminals[0].id;
+    let first_id = wt.terminals[0].panes[0].id;
 
     project.close_other_terminals(first_id);
     assert_eq!(project.active_worktree().terminals.len(), 1);
-    assert_eq!(project.active_worktree().terminals[0].id, first_id);
+    assert_eq!(project.active_worktree().terminals[0].panes[0].id, first_id);
+    assert_eq!(project.active_worktree().active_terminal, Some(first_id));
 
     project.close_all_terminals();
     assert!(project.active_worktree().terminals.is_empty());
@@ -383,4 +389,213 @@ fn git_ignore_distinction_and_lookup() {
         &snapshot,
         Path::new("crates/lazecode-ui")
     ));
+}
+
+/// A project with one shell tab holding `panes` panes.
+fn split_project(panes: usize) -> (tempfile::TempDir, Settings, ProjectState, u64, u64) {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings::default();
+    let mut project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
+    let worktree = project.active_worktree();
+    assert_eq!(worktree.terminals.len(), 1, "project opens one shell tab");
+    let tab_id = worktree.terminals[0].id;
+    let first = worktree.terminals[0].panes[0].id;
+    let mut active = first;
+    for slot in 1..panes {
+        let direction = if slot % 2 == 1 {
+            PaneSplit::Row
+        } else {
+            PaneSplit::Column
+        };
+        active = project
+            .split_terminal(active, direction, &settings, None)
+            .unwrap();
+    }
+    (dir, settings, project, first, tab_id)
+}
+
+#[test]
+fn terminal_split_creates_independent_panes_up_to_limit() {
+    let (_dir, settings, mut project, first, tab_id) = split_project(1);
+    let second = project
+        .split_terminal(first, PaneSplit::Row, &settings, None)
+        .unwrap();
+    assert_eq!(
+        project.active_worktree().terminals.len(),
+        1,
+        "splitting adds a pane, not a tab"
+    );
+    let third = project
+        .split_terminal(second, PaneSplit::Column, &settings, None)
+        .unwrap();
+    let fourth = project
+        .split_terminal(third, PaneSplit::Row, &settings, None)
+        .unwrap();
+
+    let tab = project.active_worktree().tab_by_id(tab_id).unwrap();
+    assert_eq!(tab.panes.len(), MAX_PANES_PER_TAB);
+    let ids: Vec<u64> = tab.panes.iter().map(|pane| pane.id).collect();
+    assert_eq!(ids, vec![first, second, third, fourth]);
+    let sessions: HashSet<u64> = tab.panes.iter().map(|pane| pane.session.id).collect();
+    assert_eq!(
+        sessions.len(),
+        MAX_PANES_PER_TAB,
+        "each pane owns its own PTY"
+    );
+    assert_eq!(tab.split, PaneSplit::Row, "the last split direction wins");
+    assert_eq!(tab.active_pane, fourth);
+    assert_eq!(project.active_worktree().active_terminal, Some(fourth));
+
+    // A fifth split of the same tab is refused and changes nothing.
+    let err = project
+        .split_terminal(fourth, PaneSplit::Column, &settings, None)
+        .unwrap_err();
+    assert!(err.contains('4'), "unexpected error: {err}");
+    let tab = project.active_worktree().tab_by_id(tab_id).unwrap();
+    assert_eq!(tab.panes.len(), MAX_PANES_PER_TAB);
+    assert_eq!(tab.split, PaneSplit::Row);
+    assert_eq!(tab.active_pane, fourth);
+}
+
+#[test]
+fn terminal_active_pane_drives_tab_label() {
+    let (_dir, _settings, mut project, first, tab_id) = split_project(2);
+    let worktree = project.active_worktree();
+    let tab = worktree.tab_by_id(tab_id).unwrap();
+    let second = tab.panes[1].id;
+
+    // `active_terminal` is the active pane; the tab is derived from it.
+    assert_eq!(worktree.active_terminal, Some(second));
+    assert_eq!(worktree.active_tab_id(), Some(tab_id));
+
+    project.term_by_id_mut(second).unwrap().title = "pane-two".into();
+    assert_eq!(
+        project.active_worktree().tab_by_id(tab_id).unwrap().title(),
+        "pane-two"
+    );
+
+    project.active_worktree_mut().active_terminal = Some(first);
+    project
+        .active_worktree_mut()
+        .tab_by_id_mut(tab_id)
+        .unwrap()
+        .active_pane = first;
+    assert_eq!(
+        project.active_worktree().tab_by_id(tab_id).unwrap().title(),
+        project.term_by_id(first).unwrap().title
+    );
+    assert_eq!(project.active_worktree().active_tab_id(), Some(tab_id));
+}
+
+#[test]
+fn terminal_close_pane_keeps_tab_until_last_pane() {
+    let (_dir, _settings, mut project, first, tab_id) = split_project(3);
+    let tab = project.active_worktree().tab_by_id(tab_id).unwrap();
+    let second = tab.panes[1].id;
+    let third = tab.panes[2].id;
+
+    // Closing the active pane moves focus to the previous pane.
+    project.close_terminal(third);
+    let worktree = project.active_worktree();
+    assert_eq!(worktree.terminals.len(), 1, "the tab survives");
+    let tab = worktree.tab_by_id(tab_id).unwrap();
+    assert_eq!(tab.panes.len(), 2);
+    assert_eq!(tab.active_pane, second);
+    assert_eq!(worktree.active_terminal, Some(second));
+    assert!(project.term_by_id(third).is_none());
+
+    // Closing a non-active pane leaves the active pane alone.
+    project.close_terminal(first);
+    let worktree = project.active_worktree();
+    let tab = worktree.tab_by_id(tab_id).unwrap();
+    assert_eq!(tab.panes.len(), 1);
+    assert_eq!(tab.split, PaneSplit::None, "single pane loses the split");
+    assert_eq!(tab.active_pane, second);
+    assert_eq!(worktree.active_terminal, Some(second));
+
+    // The last pane takes the tab with it.
+    project.close_terminal(second);
+    assert!(project.active_worktree().terminals.is_empty());
+    assert_eq!(project.active_worktree().active_terminal, None);
+}
+
+#[test]
+fn terminal_close_tab_tears_down_every_pane() {
+    let (_dir, settings, mut project, first, tab_a) = split_project(2);
+    let second = project.active_worktree().terminals[0].panes[1].id;
+    let pane_b = project
+        .open_terminal(
+            None,
+            None,
+            lazecode_terminal::SessionKind::Shell,
+            &settings,
+            None,
+        )
+        .unwrap();
+
+    project.active_worktree_mut().active_terminal = Some(second);
+    project.close_terminal_tab(tab_a);
+    let worktree = project.active_worktree();
+    assert_eq!(worktree.terminals.len(), 1);
+    assert!(worktree.tab_by_id(tab_a).is_none());
+    assert!(project.term_by_id(first).is_none());
+    assert!(project.term_by_id(second).is_none());
+    // The surviving tab's pane becomes active.
+    assert_eq!(worktree.active_terminal, Some(pane_b));
+    let last_tab = worktree.terminals[0].id;
+    assert_eq!(worktree.active_tab_id(), Some(last_tab));
+
+    // Closing the last tab leaves the worktree with no consoles.
+    project.close_terminal_tab(last_tab);
+    assert!(project.active_worktree().terminals.is_empty());
+    assert_eq!(project.active_worktree().active_terminal, None);
+}
+
+#[test]
+fn terminal_restart_replaces_only_the_targeted_pane() {
+    let (_dir, settings, mut project, first, tab_id) = split_project(2);
+    let second = project.active_worktree().terminals[0].panes[1].id;
+    let old_first = project.term_by_id(first).unwrap().session.id;
+    let old_second = project.term_by_id(second).unwrap().session.id;
+    project.term_by_id_mut(first).unwrap().title = "custom".into();
+
+    project.restart_terminal(first, &settings, None).unwrap();
+    let fresh = project.term_by_id(first).unwrap();
+    assert_ne!(fresh.session.id, old_first, "targeted pane respawned");
+    assert_eq!(fresh.title, "custom", "restart keeps the custom title");
+    assert_eq!(
+        project.term_by_id(second).unwrap().session.id,
+        old_second,
+        "sibling pane is untouched"
+    );
+    let worktree = project.active_worktree();
+    assert_eq!(worktree.active_terminal, Some(first));
+    assert_eq!(worktree.tab_by_id(tab_id).unwrap().active_pane, first);
+}
+
+#[test]
+fn terminal_close_others_keeps_active_tab_and_panes() {
+    let (_dir, settings, mut project, first, tab_a) = split_project(2);
+    let second = project.active_worktree().terminals[0].panes[1].id;
+    let third = project
+        .open_terminal(
+            None,
+            None,
+            lazecode_terminal::SessionKind::Shell,
+            &settings,
+            None,
+        )
+        .unwrap();
+    project.active_worktree_mut().active_terminal = Some(first);
+
+    project.close_other_terminals(first);
+    let worktree = project.active_worktree();
+    assert_eq!(worktree.terminals.len(), 1);
+    assert_eq!(worktree.terminals[0].id, tab_a);
+    assert_eq!(worktree.terminals[0].panes.len(), 2);
+    assert_eq!(worktree.terminals[0].active_pane, first);
+    assert_eq!(worktree.active_terminal, Some(first));
+    assert_eq!(worktree.active_tab_id(), Some(tab_a));
+    assert!(project.term_by_id(third).is_none());
+    assert!(project.term_by_id(second).is_some());
 }

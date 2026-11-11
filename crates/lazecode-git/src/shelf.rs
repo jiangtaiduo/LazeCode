@@ -137,10 +137,10 @@ pub fn stash_push(
     let index_map = index_map(&index_file);
     drop(index_file);
 
-    let snapshot = crate::status::snapshot(root)?;
+    let snapshot = crate::status::changed_paths(root)?;
     let mut work_map = head_map.clone();
     let mut untracked_map = TreeMap::new();
-    for change in &snapshot.changes {
+    for change in &snapshot {
         if change.conflicted {
             anyhow::bail!("cannot stash unresolved conflicts");
         }
@@ -585,8 +585,7 @@ pub fn shelf_save_paths(root: &Path, name: &str, paths: &[String]) -> Result<()>
     let name = sanitize_shelf_name(name)?;
     let name = name.as_str();
     let selected: Vec<String> = if paths.is_empty() {
-        crate::status::snapshot(root)?
-            .changes
+        crate::status::changed_paths(root)?
             .into_iter()
             .map(|change| change.path)
             .collect()

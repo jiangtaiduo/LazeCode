@@ -1,8 +1,9 @@
 //! History rewrite (merge/rebase/cherry-pick/revert/reset/drop/squash) and
-//! sequencer-state introspection. `reset` is native (gix refs/index/tree); the
-//! remaining sequencer paths are driven by the `git` porcelain. Every rewrite
-//! rejects a dirty worktree first (matching main's safety model) unless the
-//! caller explicitly passes `force`.
+//! sequencer-state introspection. Reset, merge and clean rebase are native
+//! (gix refs/index/tree/merge); conflicted rebase, cherry-pick and revert still
+//! fall back to the `git` porcelain. Every rewrite rejects a dirty worktree
+//! first (matching main's safety model) unless the caller explicitly passes
+//! `force`.
 
 use std::path::Path;
 
@@ -15,7 +16,8 @@ use crate::ops::{
     open_index, remove_empty_parents, safe_worktree_join, write_index, CheckoutBackup,
 };
 use crate::tree::{
-    commit_tree_map, index_map, index_state_from_tree, materialize_tree, tree_has_gitlinks,
+    commit_tree_map, head_tree_map, index_map, index_state_from_tree, materialize_tree,
+    tree_has_gitlinks, tree_map,
 };
 use crate::{discover, workdir, Result};
 
@@ -117,7 +119,112 @@ fn validated_hash(hash: &str) -> Result<&str> {
 pub fn merge(root: &Path, ref_name: &str) -> Result<String> {
     require_clean(root)?;
     let ref_name = validated_ref(ref_name)?;
-    run(root, &["merge", "--no-edit", ref_name]).map(|_| "merged".to_string())
+    let repo = discover(root)?;
+    let workdir = workdir(&repo)?;
+    let target = repo
+        .rev_parse_single(gix::bstr::BStr::new(ref_name))?
+        .detach();
+    let head = repo.head_id()?.detach();
+    let base = repo.merge_base(head, target)?.map(|id| id.detach());
+    if base == Some(head) {
+        reset(root, &target.to_string(), ResetMode::Hard)?;
+        return Ok("fast-forwarded".to_string());
+    }
+    if base == Some(target) {
+        return Ok("Already up to date".to_string());
+    }
+
+    let labels = gix::merge::blob::builtin_driver::text::Labels {
+        ancestor: None,
+        current: Some(gix::bstr::BStr::new("HEAD")),
+        other: Some(gix::bstr::BStr::new(ref_name)),
+    };
+    let mut outcome =
+        repo.merge_commits(head, target, labels, repo.tree_merge_options()?.into())?;
+    let tree_id = outcome.tree_merge.tree.write()?.detach();
+    let merged = tree_map(&repo, tree_id)?;
+    let head_map = head_tree_map(&repo)?;
+    let how = gix::merge::tree::TreatAsUnresolved::git();
+    let unresolved = outcome.tree_merge.has_unresolved_conflicts(how);
+    let message = format!("Merge branch '{ref_name}'");
+
+    for path in merged.keys().chain(head_map.keys()) {
+        safe_worktree_join(&workdir, path)?;
+    }
+    let backup = CheckoutBackup::capture(&repo, &workdir, merged.keys().chain(head_map.keys()))?;
+    let old_index = std::fs::read(repo.index_path()).ok();
+    let result = (|| -> Result<()> {
+        for path in head_map.keys() {
+            if merged.contains_key(path) {
+                continue;
+            }
+            let relative = crate::ops::validate_repo_path(path)?;
+            let absolute = workdir.join(&relative);
+            match std::fs::symlink_metadata(&absolute) {
+                Ok(metadata) if metadata.is_dir() => {
+                    anyhow::bail!("refusing to remove directory {}", absolute.display());
+                }
+                Ok(_) => {
+                    std::fs::remove_file(&absolute)?;
+                    remove_empty_parents(&workdir, &relative);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        materialize_tree(&repo, &merged)?;
+
+        let mut state = index_state_from_tree(&repo, &merged);
+        if unresolved {
+            gix::merge::tree::apply_index_entries(
+                &outcome.tree_merge.conflicts,
+                how,
+                &mut state,
+                gix::merge::tree::apply_index_entries::RemovalMode::Prune,
+            );
+        }
+        write_index(gix::index::File::from_state(state, repo.index_path()))?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if let Err(restore_error) = backup.restore() {
+            log::error!("merge rollback failed: {restore_error}");
+        }
+        match old_index {
+            Some(bytes) => {
+                let _ = lazecode_fs::file::write_atomic(&repo.index_path(), &bytes);
+            }
+            None => {
+                let _ = std::fs::remove_file(repo.index_path());
+            }
+        }
+        return Err(error);
+    }
+    backup.discard();
+
+    if unresolved {
+        let git_dir = repo.git_dir();
+        lazecode_fs::file::write_atomic(
+            &git_dir.join("MERGE_HEAD"),
+            format!("{target}\n").as_bytes(),
+        )?;
+        lazecode_fs::file::write_atomic(
+            &git_dir.join("ORIG_HEAD"),
+            format!("{head}\n").as_bytes(),
+        )?;
+        lazecode_fs::file::write_atomic(
+            &git_dir.join("MERGE_MSG"),
+            format!("{message}\n").as_bytes(),
+        )?;
+        return Err(anyhow!("merge conflict: resolve the unmerged files"));
+    }
+
+    let commit = repo
+        .new_commit(message, tree_id, [head, target])?
+        .id()
+        .detach();
+    update_head(&repo, commit, "merge")?;
+    Ok("merged".to_string())
 }
 
 pub fn merge_abort(root: &Path) -> Result<String> {
@@ -143,8 +250,70 @@ pub fn merge_continue(root: &Path) -> Result<String> {
 
 pub fn rebase(root: &Path, onto: &str) -> Result<String> {
     require_clean(root)?;
-    let onto = validated_ref(onto)?;
-    run(root, &["rebase", onto]).map(|_| "rebased".to_string())
+    let onto_name = validated_ref(onto)?;
+    let repo = discover(root)?;
+    let onto_id = repo
+        .rev_parse_single(gix::bstr::BStr::new(onto_name))?
+        .detach();
+    let head = repo.head_id()?.detach();
+    let Some(base) = repo.merge_base(head, onto_id)?.map(|id| id.detach()) else {
+        anyhow::bail!("cannot rebase: no common ancestor with {onto_name}");
+    };
+    if base == head {
+        reset(root, &onto_id.to_string(), ResetMode::Hard)?;
+        return Ok("fast-forwarded".to_string());
+    }
+    if base == onto_id {
+        return Ok("Already up to date".to_string());
+    }
+
+    let mut commits: Vec<ObjectId> = repo
+        .rev_walk([head])
+        .with_hidden([base])
+        .all()?
+        .map(|info| Ok(info?.id))
+        .collect::<Result<Vec<_>>>()?;
+    commits.reverse();
+    let labels = gix::merge::blob::builtin_driver::text::Labels {
+        ancestor: None,
+        current: Some(gix::bstr::BStr::new("onto")),
+        other: Some(gix::bstr::BStr::new("commit")),
+    };
+    let how = gix::merge::tree::TreatAsUnresolved::git();
+    let mut current = onto_id;
+    for commit_id in commits {
+        let commit = repo.find_commit(commit_id)?;
+        let parent_tree = match commit.parent_ids().next() {
+            Some(parent) => repo.find_commit(parent.detach())?.tree_id()?.detach(),
+            None => repo.empty_tree().id,
+        };
+        let commit_tree = commit.tree_id()?.detach();
+        let current_tree = repo.find_commit(current)?.tree_id()?.detach();
+        let mut outcome = repo.merge_trees(
+            parent_tree,
+            current_tree,
+            commit_tree,
+            labels,
+            repo.tree_merge_options()?,
+        )?;
+        if outcome.has_unresolved_conflicts(how) {
+            // Keep the porcelain sequencer for conflicted rebases; nothing
+            // was written to refs/index/worktree yet.
+            return run(root, &["rebase", onto_name]).map(|_| "rebased".to_string());
+        }
+        let tree = outcome.tree.write()?.detach();
+        let message = commit.message_raw()?.to_string();
+        let author = commit.author()?;
+        let committer = repo
+            .committer()
+            .ok_or_else(|| anyhow!("Committer identity is not configured"))??;
+        current = repo
+            .new_commit_as(committer, author, message, tree, [current])?
+            .id()
+            .detach();
+    }
+    reset(root, &current.to_string(), ResetMode::Hard)?;
+    Ok("rebased".to_string())
 }
 
 pub fn rebase_continue(root: &Path) -> Result<String> {

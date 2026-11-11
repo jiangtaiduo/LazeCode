@@ -121,7 +121,7 @@ fn head_info(repo: &gix::Repository, id: ObjectId) -> Result<HeadInfo> {
     })
 }
 
-pub(crate) fn changes(repo: &gix::Repository, workdir: &Path) -> Result<Vec<Change>> {
+pub(crate) fn collect_changes(repo: &gix::Repository, workdir: &Path) -> Result<Vec<Change>> {
     let head_map = head_tree_map(repo)?;
     let index = repo.index_or_empty()?;
     let index_entries = index.entries();
@@ -238,6 +238,21 @@ pub(crate) fn changes(repo: &gix::Repository, workdir: &Path) -> Result<Vec<Chan
     }
 
     let mut changes: Vec<Change> = acc.into_values().collect();
+    changes.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(changes)
+}
+
+/// Lightweight change scan for stash/shelf: paths and staged/unstaged state
+/// only. Skips per-file diff stats, ignored entries and ahead/behind walking.
+pub fn changed_paths(root: &Path) -> Result<Vec<Change>> {
+    let repo = discover(root)?;
+    let workdir = workdir(&repo)?;
+    collect_changes(&repo, &workdir)
+}
+
+pub(crate) fn changes(repo: &gix::Repository, workdir: &Path) -> Result<Vec<Change>> {
+    let head_map = head_tree_map(repo)?;
+    let mut changes = collect_changes(repo, workdir)?;
     for change in &mut changes {
         let (old, new) = file_sides(repo, workdir, &change.path, &head_map)?;
         let (additions, deletions, binary) = compute_stats(&old, &new);
@@ -245,7 +260,6 @@ pub(crate) fn changes(repo: &gix::Repository, workdir: &Path) -> Result<Vec<Chan
         change.deletions = deletions;
         change.binary = binary;
     }
-    changes.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(changes)
 }
 

@@ -37,6 +37,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (tracked, untracked, deletions, mode changes and missing final newlines);
   the output is accepted by `git apply --check`. No `git diff` process is
   spawned for shelving.
+- Stash and shelf save use a lightweight change scan (no per-file diff
+  stats, ignored-directory walk or ahead/behind traversal), cutting worktree
+  I/O for these actions.
 - Native Git stash: push (message, `-u`, `--keep-index`), list, files,
   apply, pop and drop. The implementation writes Git-compatible
   stash/index/untracked commits and `refs/stash` reflog entries, so stashes

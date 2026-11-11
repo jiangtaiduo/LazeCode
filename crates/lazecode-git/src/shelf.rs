@@ -91,6 +91,7 @@ fn worktree_entry(
     root: &Path,
     path: &str,
     absolute: &Path,
+    filters: &mut crate::filter::FilterContext<'_>,
 ) -> Result<Option<TreeEntry>> {
     use std::os::unix::fs::PermissionsExt;
     match std::fs::symlink_metadata(absolute) {
@@ -103,7 +104,7 @@ fn worktree_entry(
             }))
         }
         Ok(metadata) if metadata.is_file() => {
-            let data = crate::filter::clean_file_in(repo, root, path, absolute)?;
+            let data = filters.clean_file(root, path, absolute)?;
             Ok(Some(TreeEntry {
                 oid: repo.write_blob(&data)?.detach(),
                 mode: if metadata.permissions().mode() & 0o111 != 0 {
@@ -140,6 +141,7 @@ pub fn stash_push(
     let snapshot = crate::status::changed_paths(root)?;
     let mut work_map = head_map.clone();
     let mut untracked_map = TreeMap::new();
+    let mut filters = crate::filter::FilterContext::new(&repo)?;
     for change in &snapshot {
         if change.conflicted {
             anyhow::bail!("cannot stash unresolved conflicts");
@@ -148,7 +150,7 @@ pub fn stash_push(
             continue;
         }
         let absolute = safe_worktree_join(&workdir, &change.path)?;
-        let entry = worktree_entry(&repo, root, &change.path, &absolute)?;
+        let entry = worktree_entry(&repo, root, &change.path, &absolute, &mut filters)?;
         if change.untracked {
             if let Some(entry) = entry {
                 untracked_map.insert(change.path.clone(), entry);
@@ -349,12 +351,13 @@ fn entry_worktree(
     root: &Path,
     path: &str,
     entry: &TreeEntry,
+    filters: &mut crate::filter::FilterContext<'_>,
 ) -> Result<(Vec<u8>, u32)> {
     let data = blob_bytes(repo, entry.oid)?;
     if entry.mode == 0o120000 {
         Ok((data, entry.mode))
     } else {
-        let data = crate::filter::smudge_in(repo, root, path, &entry.oid.to_string(), data)?;
+        let data = filters.smudge(root, path, &entry.oid.to_string(), data)?;
         Ok((data, entry.mode))
     }
 }
@@ -369,6 +372,7 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
     let workdir = workdir(&repo)?;
     let stash_id = stash_oid(&repo, stash)?;
     let (_, base, index, new) = stash_trees(&repo, stash_id)?;
+    let mut filters = crate::filter::FilterContext::new(&repo)?;
     let mut actions: Vec<(String, StashAction)> = Vec::new();
     for path in new.keys().chain(base.keys()) {
         let old = base.get(path);
@@ -378,14 +382,14 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
         }
         let current = read_worktree(&safe_worktree_join(&workdir, path)?)?;
         let old_data = old
-            .map(|entry| entry_worktree(&repo, root, path, entry))
+            .map(|entry| entry_worktree(&repo, root, path, entry, &mut filters))
             .transpose()?;
         let index_data = index
             .get(path)
-            .map(|entry| entry_worktree(&repo, root, path, entry))
+            .map(|entry| entry_worktree(&repo, root, path, entry, &mut filters))
             .transpose()?;
         let new_data = new_entry
-            .map(|entry| entry_worktree(&repo, root, path, entry))
+            .map(|entry| entry_worktree(&repo, root, path, entry, &mut filters))
             .transpose()?;
         if current == new_data {
             continue;
@@ -643,6 +647,7 @@ pub fn diff_patch_paths(root: &Path, paths: &[String]) -> Result<String> {
     let repo = discover(root)?;
     let workdir = workdir(&repo)?;
     let head_map = head_tree_map(&repo)?;
+    let mut filters = crate::filter::FilterContext::new(&repo)?;
     let mut output = String::new();
     for raw in paths {
         let raw = raw.trim();
@@ -653,7 +658,7 @@ pub fn diff_patch_paths(root: &Path, paths: &[String]) -> Result<String> {
         let path = relative.to_string_lossy().replace('\\', "/");
         let absolute = safe_worktree_join(&workdir, &path)?;
         let old = head_map.get(&path).copied();
-        let new = worktree_entry(&repo, root, &path, &absolute)?;
+        let new = worktree_entry(&repo, root, &path, &absolute, &mut filters)?;
         if old == new {
             continue;
         }

@@ -253,8 +253,9 @@ pub fn changed_paths(root: &Path) -> Result<Vec<Change>> {
 pub(crate) fn changes(repo: &gix::Repository, workdir: &Path) -> Result<Vec<Change>> {
     let head_map = head_tree_map(repo)?;
     let mut changes = collect_changes(repo, workdir)?;
+    let mut filters = crate::filter::FilterContext::new(repo)?;
     for change in &mut changes {
-        let (old, new) = file_sides(repo, workdir, &change.path, &head_map)?;
+        let (old, new) = file_sides(repo, workdir, &change.path, &head_map, &mut filters)?;
         let (additions, deletions, binary) = compute_stats(&old, &new);
         change.additions = additions;
         change.deletions = deletions;
@@ -364,6 +365,7 @@ fn file_sides(
     workdir: &Path,
     path: &str,
     head_map: &TreeMap,
+    filters: &mut crate::filter::FilterContext<'_>,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
     let old = head_map
         .get(path)
@@ -380,14 +382,13 @@ fn file_sides(
             if data == old {
                 data
             } else {
-                crate::filter::clean_in(repo, workdir, path, data)?
+                filters.clean(workdir, path, data)?
             }
         }
         Ok(metadata)
-            if metadata.is_file()
-                && crate::filter::filter_driver_in(repo, path)?.as_deref() == Some("lfs") =>
+            if metadata.is_file() && filters.filter_driver(path)?.as_deref() == Some("lfs") =>
         {
-            crate::filter::clean_file_in(repo, workdir, path, &worktree)?
+            filters.clean_file(workdir, path, &worktree)?
         }
         _ => Vec::new(),
     };

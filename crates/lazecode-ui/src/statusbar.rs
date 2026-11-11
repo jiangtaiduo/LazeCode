@@ -107,7 +107,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     painter.vline(
         x,
         (rect.top() + 6.0)..=(rect.bottom() - 6.0),
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
     x += 9.0;
 
@@ -173,7 +173,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     painter.vline(
         x,
         (rect.top() + 6.0)..=(rect.bottom() - 6.0),
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
     x += 9.0;
 

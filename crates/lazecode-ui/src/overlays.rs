@@ -91,7 +91,7 @@ pub struct UpdateState {
 }
 
 impl UpdateState {
-    fn busy(&self) -> bool {
+    pub(crate) fn busy(&self) -> bool {
         self.job
             .as_ref()
             .map(|job| job.snapshot())
@@ -2021,7 +2021,9 @@ fn draw_branch_context_menu(
     } else {
         crate::tr!(model, "Mark favorite", "标记收藏")
     };
-    let height = items.len() as f32 * MENU_ROW_H + 8.0;
+    // The favorite row is drawn after `items`, so include it in the frame.
+    let extra_row = if is_multi { 0.0 } else { MENU_ROW_H };
+    let height = items.len() as f32 * MENU_ROW_H + extra_row + 8.0;
     let rect = popover_rect(screen, menu.anchor, 260.0, height);
     menu_frame(ui, rect, theme);
     // 稳定版分支右键菜单没有标题行（BranchContextMenu 无 header）。
@@ -4475,8 +4477,8 @@ fn draw_commit_view_options_menu(
     }
     if rt.commit_tree_view {
         ui.painter().text(
-            Pos2::new(item_tree.left() + 10.0, item_tree.center().y),
-            Align2::LEFT_CENTER,
+            Pos2::new(item_tree.right() - 34.0, item_tree.center().y),
+            Align2::RIGHT_CENTER,
             "✓",
             FontId::proportional(11.0),
             p.menu_item_text,
@@ -4522,8 +4524,8 @@ fn draw_commit_view_options_menu(
     }
     if rt.commit_show_ignored {
         ui.painter().text(
-            Pos2::new(item_ignored.left() + 10.0, item_ignored.center().y),
-            Align2::LEFT_CENTER,
+            Pos2::new(item_ignored.right() - 12.0, item_ignored.center().y),
+            Align2::RIGHT_CENTER,
             "✓",
             FontId::proportional(11.0),
             p.menu_item_text,
@@ -4873,7 +4875,7 @@ fn draw_branch_menu(
     };
 
     // 下拉菜单最大高度为app窗口高度的80%，内容未超限时用内容撑起高度
-    let top_h = if has_filter { 42.0 } else { 172.0 };
+    let top_h = if has_filter { 42.0 } else { 148.0 };
     let mut sections_h = 0.0f32;
     if !has_filter && !recent_branches.is_empty() {
         sections_h += 22.0;
@@ -4893,7 +4895,7 @@ fn draw_branch_menu(
             sections_h += remote_branches.len() as f32 * 26.0 + 4.0;
         }
     }
-    if !filtered_tags.is_empty() || !has_filter {
+    if !filtered_tags.is_empty() {
         sections_h += 22.0;
         if has_filter || !rt.branch_sections_collapsed.contains("tags") {
             sections_h += filtered_tags.len() as f32 * 26.0 + 4.0;
@@ -4963,6 +4965,7 @@ fn draw_branch_menu(
         text_rect,
         TextEdit::singleline(&mut query)
             .frame(egui::Frame::NONE)
+            .align(egui::Align2::LEFT_CENTER)
             .hint_text(crate::tr!(
                 model,
                 "Search for branches and actions",
@@ -5019,14 +5022,6 @@ fn draw_branch_menu(
                 shortcut: "⌥N",
                 id: 4,
             },
-            TopAction {
-                label: "Checkout Tag or Revision...",
-                label_zh: "检出标签或修订版本...",
-                icon: Icon::Tag,
-                icon_accent: false,
-                shortcut: "",
-                id: 5,
-            },
         ];
 
         for act in &actions {
@@ -5039,32 +5034,22 @@ fn draw_branch_menu(
                 ui.painter()
                     .rect_filled(row, egui::CornerRadius::same(3), p.hover);
             }
-            if act.id == 5 {
-                ui.painter().text(
-                    Pos2::new(row.left() + 10.0, row.center().y),
-                    Align2::LEFT_CENTER,
-                    crate::tr!(model, act.label, act.label_zh),
-                    FontId::proportional(12.5),
-                    p.text,
-                );
-            } else {
-                paint_icon(
-                    ui.painter(),
-                    Rect::from_center_size(
-                        Pos2::new(row.left() + 14.0, row.center().y),
-                        Vec2::splat(13.0),
-                    ),
-                    act.icon,
-                    if act.icon_accent { p.accent } else { p.text2 },
-                );
-                ui.painter().text(
-                    Pos2::new(row.left() + 28.0, row.center().y),
-                    Align2::LEFT_CENTER,
-                    crate::tr!(model, act.label, act.label_zh),
-                    FontId::proportional(12.5),
-                    p.text,
-                );
-            }
+            paint_icon(
+                ui.painter(),
+                Rect::from_center_size(
+                    Pos2::new(row.left() + 14.0, row.center().y),
+                    Vec2::splat(13.0),
+                ),
+                act.icon,
+                if act.icon_accent { p.accent } else { p.text2 },
+            );
+            ui.painter().text(
+                Pos2::new(row.left() + 28.0, row.center().y),
+                Align2::LEFT_CENTER,
+                crate::tr!(model, act.label, act.label_zh),
+                FontId::proportional(12.5),
+                p.text,
+            );
             if !act.shortcut.is_empty() {
                 ui.painter().text(
                     Pos2::new(row.right() - 8.0, row.center().y),
@@ -5099,13 +5084,6 @@ fn draw_branch_menu(
                     }
                     4 => {
                         rt.dialog = DialogState::NewBranch {
-                            value: String::new(),
-                            error: None,
-                        };
-                        close = true;
-                    }
-                    5 => {
-                        rt.dialog = DialogState::CheckoutRevision {
                             value: String::new(),
                             error: None,
                         };
@@ -5313,7 +5291,7 @@ fn draw_branch_menu(
                             );
 
                             let row_screen = Rect::from_min_size(row_rect.min, row_rect.size());
-                            if resp.hovered() || resp.clicked() {
+                            if resp.clicked() {
                                 let _ = sec_key;
                                 hovered_branch_row = Some((b.clone(), row_screen));
                             }
@@ -5337,7 +5315,7 @@ fn draw_branch_menu(
                     "remote",
                 );
 
-                if !filtered_tags.is_empty() || !has_filter {
+                if !filtered_tags.is_empty() {
                     let is_collapsed = !has_filter && rt.branch_sections_collapsed.contains("tags");
                     let (hdr_rect, hdr_resp) = ui
                         .allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::click());
@@ -5553,7 +5531,7 @@ fn draw_branch_menu(
             ]
         };
 
-        let sub_w = 260.0;
+        let sub_w = 340.0f32.min((screen.width() - 16.0).max(220.0));
         let sub_h = items
             .iter()
             .map(|it| match it {
@@ -5638,12 +5616,16 @@ fn draw_branch_menu(
                     };
 
                     let text_color = if *is_danger { p.rose } else { p.text };
-                    ui.painter().text(
-                        Pos2::new(row.left() + 10.0, row.center().y),
-                        Align2::LEFT_CENTER,
-                        display_text,
+                    text_clipped(
+                        ui.painter(),
+                        Rect::from_min_max(
+                            Pos2::new(row.left() + 10.0, row.top()),
+                            Pos2::new(row.right() - 8.0, row.bottom()),
+                        ),
+                        &display_text,
                         FontId::proportional(12.0),
                         text_color,
+                        Align2::LEFT_CENTER,
                     );
 
                     if !shortcut.is_empty() {
@@ -5882,7 +5864,7 @@ fn draw_conflict_tool(
     ui.painter().hline(
         header_rect.x_range(),
         header_rect.bottom() - 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
 
     ui.painter().text(
@@ -6042,12 +6024,12 @@ fn draw_conflict_tool(
     ui.painter().vline(
         left_rect.right() + 1.0,
         body_rect.y_range(),
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
     ui.painter().vline(
         mid_rect.right() + 1.0,
         body_rect.y_range(),
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
 
     // Left: Ours
@@ -6377,7 +6359,7 @@ fn draw_stash_manager_dialog(
     ui.painter().hline(
         header.x_range(),
         header.bottom() - 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
     ui.painter().text(
         Pos2::new(header.left() + 16.0, header.center().y),
@@ -6535,7 +6517,7 @@ fn draw_shelf_manager_dialog(
     ui.painter().hline(
         header.x_range(),
         header.bottom() - 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
     ui.painter().text(
         Pos2::new(header.left() + 16.0, header.center().y),
@@ -6751,7 +6733,7 @@ fn draw_file_history_dialog(
     ui.painter().hline(
         header.x_range(),
         header.bottom() - 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
     ui.painter().text(
         Pos2::new(header.left() + 16.0, header.center().y),
@@ -6942,7 +6924,7 @@ fn draw_git_tools_dialog(
     ui.painter().hline(
         header.x_range(),
         header.bottom() - 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
     ui.painter().text(
         Pos2::new(header.left() + 16.0, header.center().y),
@@ -7378,7 +7360,7 @@ fn draw_interactive_rebase_dialog(
     ui.painter().hline(
         header.x_range(),
         header.bottom() - 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
     ui.painter().text(
         Pos2::new(header.left() + 16.0, header.center().y),

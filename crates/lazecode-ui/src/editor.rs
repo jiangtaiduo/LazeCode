@@ -150,7 +150,7 @@ fn draw_tabbar(
     ui.painter().hline(
         rect.x_range(),
         rect.bottom() - 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
     let project = &model.projects[index];
     /// (tab id, title, path, dirty, badge label)
@@ -414,7 +414,7 @@ fn draw_crumbs(
     for (part_index, part) in parts.iter().enumerate() {
         let last = part_index + 1 == parts.len();
         let width = part.chars().count() as f32 * 6.5 + 4.0;
-        if x + width > rect.right() - 30.0 {
+        if x + width > rect.right() - 112.0 {
             break;
         }
         ui.painter().text(
@@ -438,10 +438,10 @@ fn draw_crumbs(
     let mut btn_x = rect.right() - 36.0;
 
     // Blame toggle button
-    btn_x -= 56.0;
+    btn_x -= 76.0;
     let blame_rect = Rect::from_min_size(
         Pos2::new(btn_x, rect.center().y - 10.0),
-        Vec2::new(52.0, 20.0),
+        Vec2::new(72.0, 20.0),
     );
     let b_label = if is_annotated {
         "✓ Blame"
@@ -453,6 +453,8 @@ fn draw_crumbs(
         toggle_blame = true;
     }
 
+    let zh = model.settings.language.is_zh();
+    let mut blame_notice = None;
     if toggle_blame {
         if let Some(tab) = model.projects[index].tab_mut_by_id(tab_id) {
             if let TabKind::File(file) = &mut tab.kind {
@@ -463,10 +465,28 @@ fn draw_crumbs(
                         .unwrap_or(&file_path)
                         .to_string_lossy()
                         .to_string();
-                    file.blame = lazecode_git::blame(&project_root, &rel).ok();
+                    match lazecode_git::blame(&project_root, &rel) {
+                        Ok(lines) if lines.is_empty() => {
+                            blame_notice = Some(if zh {
+                                "该文件没有可用的 Blame 数据".to_string()
+                            } else {
+                                "No blame data for this file".to_string()
+                            });
+                        }
+                        Ok(lines) => file.blame = Some(lines),
+                        Err(err) => {
+                            blame_notice = Some(format!(
+                                "{}: {err}",
+                                if zh { "Blame 失败" } else { "Blame failed" }
+                            ));
+                        }
+                    }
                 }
             }
         }
+    }
+    if let Some(message) = blame_notice {
+        model.toast(message, lazecode_core::ToastKind::Warning);
     }
 
     let toggle_rect = Rect::from_center_size(
@@ -530,7 +550,7 @@ fn draw_markdown_toolbar(
     ui.painter().hline(
         rect.x_range(),
         rect.bottom() - 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
 
     // Left title: "Markdown"
@@ -576,7 +596,7 @@ fn draw_markdown_toolbar(
     ui.painter().rect_stroke(
         pill_rect,
         egui::CornerRadius::same(4),
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
         StrokeKind::Inside,
     );
 
@@ -688,7 +708,7 @@ fn draw_image_tab(
     ui.painter().hline(
         bar_rect.x_range(),
         bar_rect.top() + 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
     ui.painter().rect_filled(bar_rect, 0.0, p.panel);
 
@@ -774,7 +794,7 @@ fn draw_file(
         ui.painter().vline(
             rect.min.x + half_w + 0.5,
             rect.y_range(),
-            Stroke::new(1.0, p.border),
+            Stroke::new(1.0, p.border_soft),
         );
 
         draw_file_inner(
@@ -897,13 +917,7 @@ fn draw_file_inner(
     // A modal surface owns the keyboard even when it has no text field (e.g.
     // settings or a confirmation dialog). Otherwise typing behind it would
     // silently edit the focused buffer.
-    let overlays_open = rt.settings_open
-        || rt.about_open
-        || rt.search.open
-        || model.ui.command_palette_open
-        || rt.menu.is_some()
-        || rt.agent_menu.is_some()
-        || !matches!(rt.dialog, DialogState::None);
+    let overlays_open = rt.blocks_input(model);
     let mut pending: Vec<Command> = Vec::new();
     let mut hover_cursor: Option<Cursor> = None;
     let mut diag_tooltip: Option<(String, lazecode_core::lsp::DiagnosticSeverity)> = None;
@@ -1623,7 +1637,7 @@ fn handle_editor_key(
         rt.lsp.format_request = Some(tab_id);
         return true;
     }
-    if cmd && modifiers.shift && key == Key::O {
+    if cmd && modifiers.alt && key == Key::O {
         rt.lsp.symbols_request = Some(tab_id);
         return true;
     }
@@ -1631,7 +1645,7 @@ fn handle_editor_key(
         rt.lsp.completion_due = Some((tab_id, std::time::Instant::now()));
         return true;
     }
-    if key == Key::F12 {
+    if key == Key::F12 || (cmd && !modifiers.shift && !modifiers.alt && key == Key::B) {
         rt.lsp.goto_request = Some((tab_id, doc.cursor));
         return true;
     }
@@ -1953,7 +1967,7 @@ fn draw_diff(
     ui.painter().hline(
         toolbar.x_range(),
         toolbar.bottom() - 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
     let titlebar = Rect::from_min_size(
         Pos2::new(rect.left(), toolbar.bottom()),
@@ -1963,7 +1977,7 @@ fn draw_diff(
     ui.painter().hline(
         titlebar.x_range(),
         titlebar.bottom() - 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
 
     let mut nav_target: Option<String> = None;
@@ -3188,10 +3202,10 @@ fn draw_welcome(
         p.text,
     );
     let entries = [
-        (crate::tr!(model, "Command palette", "命令面板"), "⌘K"),
-        (crate::tr!(model, "Toggle explorer", "切换资源管理器"), "⌘B"),
-        (crate::tr!(model, "Toggle console", "切换控制台"), "⌘J"),
-        (crate::tr!(model, "Open Git log", "打开 Git 日志"), "⌘⇧G"),
+        (crate::tr!(model, "Command palette", "命令面板"), "⌘⇧A"),
+        (crate::tr!(model, "Toggle explorer", "切换资源管理器"), "⌘1"),
+        (crate::tr!(model, "Commit", "提交"), "⌘K"),
+        (crate::tr!(model, "Open Git log", "打开 Git 日志"), "⌘9"),
         (crate::tr!(model, "Find in files", "在文件中查找"), "⌘⇧F"),
     ];
     let mut row_y = shortcuts.top() + 36.0;

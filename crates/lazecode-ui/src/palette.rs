@@ -247,21 +247,21 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
         Icon::Sidebar,
         crate::tr!(model, "Toggle explorer", "切换资源管理器"),
         crate::tr!(model, "Show or hide the sidebar", "显示或隐藏侧栏"),
-        Some("⌘B"),
+        Some("⌘1"),
         PaletteAction::ToggleSidebar,
     );
     action(
         Icon::Panel,
         crate::tr!(model, "Toggle console", "切换控制台"),
         crate::tr!(model, "Show or hide the bottom panel", "显示或隐藏底部面板"),
-        Some("⌘J"),
+        Some("⌘4"),
         PaletteAction::ToggleConsole,
     );
     action(
         Icon::GitLog,
         crate::tr!(model, "Open Git log", "打开 Git 日志"),
         crate::tr!(model, "Commit graph and details", "提交图与详情"),
-        Some("⌘⇧G"),
+        Some("⌘9"),
         PaletteAction::OpenGitLog,
     );
     action(
@@ -400,7 +400,7 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
             "List symbols in the active file",
             "列出当前文件中的符号"
         ),
-        Some("⌘⇧O"),
+        Some("⌥⌘O"),
         PaletteAction::GoToSymbol,
     );
     action(
@@ -454,7 +454,7 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
         Icon::Plus,
         crate::tr!(model, "New console", "新建控制台"),
         crate::tr!(model, "Start a shell in the project", "在项目中启动 shell"),
-        Some("⌘T"),
+        Some("⌘⇧T"),
         PaletteAction::NewTerminal,
     );
     action(

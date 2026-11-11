@@ -235,10 +235,13 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     crate::theme::body_gradient(&painter, layout.full, theme.dark);
     painter.rect_filled(layout.titlebar, 0.0, p.titlebar);
     painter.rect_filled(layout.strip, 0.0, p.rail);
+    // The activity rail is part of the shell chrome; its edge must not read
+    // as a second window divider. Keep the sidebar/stage divider below at
+    // `border`, which is the deliberate pane separator.
     painter.vline(
         layout.strip.right() - 0.5,
         layout.strip.y_range(),
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.hairline),
     );
     if let Some(sidebar) = layout.sidebar {
         painter.rect_filled(sidebar, 0.0, p.sidebar);
@@ -253,7 +256,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     painter.hline(
         layout.status.x_range(),
         layout.status.top() + 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
     if let Some(panel) = layout.panel {
         painter.rect_filled(panel, 0.0, p.panel);
@@ -322,6 +325,18 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     }
     crate::statusbar::draw(ui, model, rt, &theme, layout.status);
     crate::lsp_ui::draw_popups(ui, model, rt, &theme);
+
+    // Egui resolves clicks against the previous pass' widget list, so a
+    // full-screen blocker registered here is above the whole shell but below
+    // every overlay drawn after it. Without it the translucent scrims let
+    // clicks reach the editor, sidebar, splitters and titlebar underneath.
+    if rt.blocks_input(model) {
+        ui.interact(
+            layout.full,
+            ui.scope_id().with("lazecode-modal-input-blocker"),
+            egui::Sense::click_and_drag(),
+        );
+    }
 
     if rt.settings_open {
         crate::settings::draw(ui, model, rt, &theme);

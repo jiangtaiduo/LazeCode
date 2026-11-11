@@ -20,7 +20,7 @@ fn command_shift() -> Modifiers {
 
 pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     let ctx = ui.ctx();
-    let palette_open = model.ui.command_palette_open;
+    let blocked = rt.blocks_input(model);
     let mut open_palette = false;
     let mut toggle_sidebar = false;
     let mut toggle_panel = false;
@@ -29,11 +29,11 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     let mut save = false;
     let mut new_terminal = false;
     let mut git_log = false;
+    let mut open_commit = false;
     let mut search = false;
     let mut find = false;
     let mut open_project = false;
     let mut close_tab = false;
-    let mut switch_project: Option<usize> = None;
     let mut close_overlay = false;
     let mut goto_line = false;
     let mut new_file = false;
@@ -43,45 +43,53 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     let mut undo = false;
     let mut redo = false;
     ctx.input_mut(|input| {
-        if input.consume_key(command_only(), Key::K) || input.consume_key(command_only(), Key::P) {
+        if input.consume_key(command_shift(), Key::A) {
             open_palette = true;
         }
         // ^P：稳定版 Group by Directory 切换（源控抽屉可见时）。
-        if input.consume_key(egui::Modifiers::CTRL, Key::P) {
+        if !blocked && input.consume_key(egui::Modifiers::CTRL, Key::P) {
             toggle_tree_view = true;
         }
-        if input.consume_key(command_only(), Key::B) {
+        if !blocked && input.consume_key(command_only(), Key::Num1) {
             toggle_sidebar = true;
         }
-        if input.consume_key(command_only(), Key::J) {
+        if !blocked && input.consume_key(command_only(), Key::Num4) {
             toggle_panel = true;
         }
-        if input.consume_key(command_only(), Key::Backtick)
-            || input.consume_key(Modifiers::ALT, Key::F12)
+        if !blocked
+            && (input.consume_key(command_only(), Key::Backtick)
+                || input.consume_key(Modifiers::ALT, Key::F12))
         {
             toggle_terminal = true;
         }
         if input.consume_key(command_only(), Key::Comma) {
             open_settings = true;
         }
-        if input.consume_key(command_only(), Key::S) {
+        if !blocked && input.consume_key(command_only(), Key::S) {
             save = true;
         }
-        if input.consume_key(command_shift(), Key::Z) {
+        if !blocked && input.consume_key(command_shift(), Key::Z) {
             redo = true;
-        } else if input.consume_key(command_only(), Key::Z) {
+        } else if !blocked && input.consume_key(command_only(), Key::Z) {
             undo = true;
         }
-        if input.consume_key(command_only(), Key::W) {
-            close_tab = true;
+        if !blocked && input.consume_key(command_only(), Key::K) {
+            open_commit = true;
         }
-        if input.consume_key(command_only(), Key::T) {
+        if input.consume_key(command_only(), Key::W) {
+            if blocked {
+                close_overlay = true;
+            } else {
+                close_tab = true;
+            }
+        }
+        if !blocked && input.consume_key(command_shift(), Key::T) {
             new_terminal = true;
         }
-        if input.consume_key(command_only(), Key::O) {
+        if !blocked && input.consume_key(command_only(), Key::O) {
             open_project = true;
         }
-        if input.consume_key(command_shift(), Key::G) {
+        if !blocked && input.consume_key(command_only(), Key::Num9) {
             git_log = true;
         }
         if input.consume_key(command_shift(), Key::F) {
@@ -93,35 +101,20 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
             mac_cmd: true,
             ..Default::default()
         };
-        if input.consume_key(cmd_alt, Key::U) {
+        if !blocked && input.consume_key(cmd_alt, Key::U) {
             unshelve_silent = true;
         }
-        if input.consume_key(command_shift(), Key::U) {
+        if !blocked && input.consume_key(command_shift(), Key::U) {
             unshelve_dialog = true;
         }
-        if input.consume_key(command_only(), Key::F) {
+        if !blocked && input.consume_key(command_only(), Key::F) {
             find = true;
         }
-        if input.consume_key(command_only(), Key::L) {
+        if !blocked && input.consume_key(command_only(), Key::L) {
             goto_line = true;
         }
-        if input.consume_key(command_only(), Key::N) {
+        if !blocked && input.consume_key(command_only(), Key::N) {
             new_file = true;
-        }
-        if input.consume_key(command_only(), Key::Num1) {
-            switch_project = Some(0);
-        }
-        if input.consume_key(command_only(), Key::Num2) {
-            switch_project = Some(1);
-        }
-        if input.consume_key(command_only(), Key::Num3) {
-            switch_project = Some(2);
-        }
-        if input.consume_key(command_only(), Key::Num4) {
-            switch_project = Some(3);
-        }
-        if input.consume_key(command_only(), Key::Num5) {
-            switch_project = Some(4);
         }
         if input.key_pressed(Key::Escape) {
             close_overlay = true;
@@ -180,6 +173,11 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     }
     if open_project {
         model.queue(Command::OpenProjectDialog);
+    }
+    if open_commit {
+        model.ui.sidebar_visible = true;
+        model.ui.sidebar_view = lazecode_core::SidebarView::Git;
+        rt.commit_tab = crate::runtime::CommitTab::Commit;
     }
     if git_log {
         if model.ui.panel_visible && model.ui.panel_tab == PanelTab::Git {
@@ -271,27 +269,8 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
             };
         }
     }
-    if let Some(index) = switch_project {
-        model.switch_project(index);
-        rt.clear_terminal_cache();
-    }
     if close_overlay {
-        if model.ui.command_palette_open {
-            model.ui.command_palette_open = false;
-            rt.palette.focus_requested = false;
-        } else if rt.settings_open {
-            rt.settings_open = false;
-        } else if rt.search.open {
-            rt.search.open = false;
-        } else if rt.find.open {
-            rt.find.open = false;
-        } else if !matches!(rt.dialog, DialogState::None) {
-            rt.dialog = DialogState::None;
-        } else if rt.menu.is_some() {
-            rt.menu = None;
-        } else if palette_open {
-            model.ui.command_palette_open = false;
-        }
+        rt.close_overlay(model);
     }
     if (unshelve_silent || unshelve_dialog) && rt.commit_tab == crate::runtime::CommitTab::Shelf {
         if let Some(name) = rt.shelf_selected.clone() {

@@ -267,10 +267,20 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
             })
         });
     let target_reveal = model.ui.tree_reveal.clone();
+    // `show_rows` only builds visible rows, so a row outside the viewport can
+    // never call `scroll_to_me`. Move the scroll offset before virtualization
+    // and clear the request after the frame.
+    let reveal_offset = target_reveal
+        .as_ref()
+        .and_then(|(rel, _)| rows.iter().position(|row| &row.path == rel))
+        .map(|index| (index as f32 * ROW_H - list_rect.height() * 0.5 + ROW_H * 0.5).max(0.0));
     super::app_ui::region(ui, list_rect, "tree-scroll", |ui| {
-        let area = egui::ScrollArea::vertical()
+        let mut area = egui::ScrollArea::vertical()
             .id_salt("tree")
             .auto_shrink([false, false]);
+        if let Some(offset) = reveal_offset {
+            area = area.vertical_scroll_offset(offset);
+        }
         area.show_rows(ui, ROW_H, rows.len(), |ui, range| {
             for index in range {
                 let row = &rows[index];
@@ -295,13 +305,10 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
                 if let Some((target_rel, quiet)) = &target_reveal {
                     if &row.path == target_rel {
                         if *quiet {
-                            // 对齐稳定版 revealPath(path, 'nearest') 语义：仅当节点不在当前可视视口内时才微调滚动，已在视野内则绝对不移动！
                             response.scroll_to_me(None);
                         } else {
-                            // 手动点击定位按钮：强制滚动居中 (align: 'center')
                             response.scroll_to_me(Some(egui::Align::Center));
                         }
-                        model.ui.tree_reveal = None;
                     }
                 }
                 if let Some((flash_path, at)) = &model.ui.locate_flash {
@@ -589,6 +596,9 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
             }
         });
     });
+    if target_reveal.is_some() {
+        model.ui.tree_reveal = None;
+    }
 }
 
 fn collect_matches(
@@ -828,7 +838,7 @@ fn source_control(
     ui.painter().hline(
         head.x_range(),
         head.bottom() - 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
 
     // ----- 工具栏（28px，22×22 图标按钮，稳定版 commit-toolbar） -----
@@ -955,7 +965,7 @@ fn source_control(
     ui.painter().hline(
         toolbar.x_range(),
         toolbar.bottom() - 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
 
     let project = model.active_project().unwrap();
@@ -1109,6 +1119,11 @@ fn source_control(
     }
     let mut unversioned: Vec<usize> = Vec::new();
     for (index, change) in changes.iter().enumerate() {
+        // Ignored paths live only in the Ignored Files group; never let the
+        // synthetic entries fall through into a changelist/Changes group.
+        if ignored_indices.contains(&index) {
+            continue;
+        }
         if change.untracked {
             // 未跟踪文件不参与 changelist 分组，固定进 Unversioned Files
             // （对齐稳定版语义）。
@@ -2114,10 +2129,11 @@ fn draw_commit_dock(
 ) {
     let p = theme.palette;
     let _ = changes;
+    // Commit message box: internal separator, not a pane divider.
     ui.painter().hline(
         rect.x_range(),
         rect.top() + 0.5,
-        Stroke::new(1.0, p.border_soft),
+        Stroke::new(1.0, p.hairline),
     );
     // 稳定版 commit-bottom-box：padding 10 / gap 8。
     // 1) 选项行：提交信息历史按钮（右对齐，无历史时禁用态）。
@@ -2861,7 +2877,7 @@ pub fn compare_drawer(
     ui.painter().hline(
         head.x_range(),
         head.bottom() - 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
     let from8: String = session.from.chars().take(8).collect();
     let to8: String = session.to.chars().take(8).collect();
@@ -2913,8 +2929,11 @@ pub fn compare_drawer(
         Vec2::new(rect.width(), CMP_TOOLBAR_H),
     );
     ui.painter().rect_filled(tb, 0.0, p.bg);
-    ui.painter()
-        .hline(tb.x_range(), tb.bottom() - 0.5, Stroke::new(1.0, p.border));
+    ui.painter().hline(
+        tb.x_range(),
+        tb.bottom() - 0.5,
+        Stroke::new(1.0, p.border_soft),
+    );
     let swap_btn = Rect::from_center_size(
         Pos2::new(tb.left() + 18.0, tb.center().y),
         Vec2::new(20.0, 20.0),

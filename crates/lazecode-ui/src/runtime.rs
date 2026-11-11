@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use lazecode_core::AppModel;
 use lazecode_fs::SearchHit;
 use lazecode_terminal::Snapshot;
 use lazecode_text::Cursor;
@@ -630,8 +631,56 @@ impl Default for UiRuntime {
 }
 
 impl UiRuntime {
+    /// True while a full-screen surface or popover owns input. Used by the
+    /// shell to place a full-screen hit-test blocker and by the editor and
+    /// terminal to keep keystrokes out of the document behind it.
+    pub fn blocks_input(&self, model: &AppModel) -> bool {
+        self.settings_open
+            || self.about_open
+            || self.search.open
+            || model.ui.command_palette_open
+            || self.menu.is_some()
+            || self.agent_menu.is_some()
+            || self.update_open
+            || !matches!(self.dialog, DialogState::None)
+    }
+
+    /// Close the topmost overlay. Used by Escape and by the native Cmd+W
+    /// menu accelerator while a modal (settings, dialog, update, menu) owns
+    /// input; it must never close the editor tab underneath.
+    pub fn close_overlay(&mut self, model: &mut AppModel) {
+        if model.ui.command_palette_open {
+            model.ui.command_palette_open = false;
+            self.palette.focus_requested = false;
+        } else if self.update_open {
+            if !self.update.busy() {
+                self.update_open = false;
+            }
+        } else if !matches!(self.dialog, DialogState::None) {
+            self.dialog = DialogState::None;
+        } else if self.menu.is_some()
+            || self.tree_submenu.is_some()
+            || self.branch_submenu.is_some()
+        {
+            self.menu = None;
+            self.tree_submenu = None;
+            self.branch_submenu = None;
+        } else if self.agent_menu.is_some() {
+            self.agent_menu = None;
+        } else if self.settings_open {
+            self.settings_open = false;
+        } else if self.about_open {
+            self.about_open = false;
+        } else if self.search.open {
+            self.search.open = false;
+        } else if self.find.open {
+            self.find.open = false;
+        }
+    }
+
     pub fn open_menu(&mut self, kind: MenuKind, anchor: egui::Rect, payload: Option<String>) {
         self.tree_submenu = None;
+        self.branch_submenu = None;
         self.menu = Some(MenuState {
             kind,
             anchor,

@@ -100,6 +100,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Fixed UI fonts are memory-mapped instead of copied whole into the heap.
+  The eight fallback files (Apple Color Emoji, Songti, Heiti, Hiragino,
+  SF Pro, Menlo, Monaco, SF Mono) previously added ~335 MiB of dirty
+  `Malloc Large`; they now stay file-backed. Startup footprint dropped from
+  ~517 MiB to ~80 MiB in the measured build, with the same glyph coverage.
 - Modal surfaces now install a full-screen hit-test blocker: clicks no
   longer reach the editor, tabs, tree, splitters or titlebar behind Settings,
   dialogs, menus, search, the command palette or the update window. Native

@@ -120,7 +120,16 @@ pub fn face(family: &str) -> Option<&'static FontFace> {
 /// The mapping is read-only; font files are system assets and are not
 /// modified while the app runs.
 pub fn load(face: &FontFace) -> Option<FontData> {
-    let file = std::fs::File::open(&face.path).ok()?;
+    load_path(&face.path, face.index)
+}
+
+/// Load any font file without copying its bytes into the heap.
+///
+/// `FontData::from_blob` keeps the mapping alive for as long as egui uses the
+/// face, so fallback fonts (including the 184 MiB emoji collection) stay
+/// file-backed instead of inflating the dirty footprint.
+pub fn load_path(path: &std::path::Path, index: u32) -> Option<FontData> {
+    let file = std::fs::File::open(path).ok()?;
     let mmap = unsafe { memmap2::Mmap::map(&file).ok()? };
-    Some(FontData::from_blob(Arc::new(Mapped(mmap)), face.index))
+    Some(FontData::from_blob(Arc::new(Mapped(mmap)), index))
 }

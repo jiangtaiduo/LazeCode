@@ -592,6 +592,7 @@ pub fn all_commit_file_dir_paths(node: &CommitFileTreeNode) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ChangeKind;
 
     fn dummy_commit(id: &str, parents: &[&str]) -> CommitInfo {
         CommitInfo {
@@ -650,6 +651,38 @@ mod tests {
         assert_eq!(layout["a1"].straight, vec![1]);
         assert_eq!(layout["base"].node, 0);
         assert_eq!(layout["base"].ins, vec![1]);
+    }
+
+    #[test]
+    fn commit_file_tree_empty_collapsed_set_expands_every_level() {
+        let files = vec![
+            FileStat {
+                path: "a/b/c/deep.rs".into(),
+                kind: ChangeKind::Modified,
+                additions: 1,
+                deletions: 0,
+                binary: false,
+            },
+            FileStat {
+                path: "a/top.rs".into(),
+                kind: ChangeKind::Added,
+                additions: 2,
+                deletions: 0,
+                binary: false,
+            },
+        ];
+        let tree = build_commit_file_tree(&files);
+        let dirs = all_commit_file_dir_paths(&tree);
+        assert_eq!(dirs, vec!["a", "a/b", "a/b/c"]);
+
+        let expanded = flatten_commit_file_tree(&tree, &HashSet::new(), 0);
+        assert!(expanded.iter().any(|row| row.path == "a/b/c/deep.rs"));
+        assert!(expanded.iter().any(|row| row.path == "a/top.rs"));
+
+        let collapsed: HashSet<String> = dirs.into_iter().collect();
+        let folded = flatten_commit_file_tree(&tree, &collapsed, 0);
+        assert!(!folded.iter().any(|row| row.path == "a/b/c/deep.rs"));
+        assert!(!folded.iter().any(|row| row.path == "a/top.rs"));
     }
 
     #[test]

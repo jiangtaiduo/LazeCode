@@ -1,6 +1,6 @@
 use egui::{
-    Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Painter, Pos2, Rect,
-    Stroke, TextStyle,
+    Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, FontTweak, Painter, Pos2,
+    Rect, Stroke, TextStyle,
 };
 
 use lazecode_core::ThemeMode;
@@ -417,91 +417,204 @@ impl Theme {
 }
 
 /// Install the macOS system fonts so the shell matches the design instead of
-/// falling back to egui's bundled Ubuntu/Hack defaults. UI stack mirrors the
-/// stable `--font-ui`: SF Pro → PingFang SC → (CJK fallbacks) → emoji.
-pub fn install_fonts(ctx: &egui::Context) {
+/// falling back to egui's bundled Ubuntu/Hack defaults. The default UI stack
+/// mirrors the stable `--font-ui` (SF Pro → PingFang SC → CJK fallbacks),
+/// but Chinese mode puts PingFang SC first so mixed CJK/Latin runs and
+/// punctuation share one set of metrics instead of switching fonts per glyph.
+/// Users can override the UI, editor and terminal families in Settings.
+pub fn install_fonts(ctx: &egui::Context, settings: &lazecode_core::Settings) {
+    use std::sync::Arc;
+
+    use egui::epaint::text::VariationCoords;
+
     let mut fonts = FontDefinitions::default();
 
-    let mut add = |name: &str, path: &str, index: u32| {
+    let mut add_path = |name: &str, path: &str, index: u32, tweak: Option<FontTweak>| {
         if let Ok(bytes) = std::fs::read(path) {
             let data = FontData {
                 index,
+                tweak: tweak.unwrap_or_default(),
                 ..FontData::from_owned(bytes)
             };
-            fonts
-                .font_data
-                .insert(name.to_owned(), std::sync::Arc::new(data));
+            fonts.font_data.insert(name.to_owned(), Arc::new(data));
             true
         } else {
             false
         }
     };
 
-    let has_ui = add("SF Pro", "/System/Library/Fonts/SFNS.ttf", 0);
-    let has_mono = add("SF Mono", "/System/Library/Fonts/SFNSMono.ttf", 0);
-    let has_menlo = add("Menlo", "/System/Library/Fonts/Menlo.ttc", 0);
-    let has_monaco = add("Monaco", "/System/Library/Fonts/Monaco.ttf", 0);
-    let has_cjk = add(
+    // SF Pro's variable font defaults to the 28pt Display optical size, which
+    // is too tight for 11-15pt UI text; 17pt is the Text optical size.
+    let sf_tweak = FontTweak {
+        coords: VariationCoords::new([("opsz", 17.0)]),
+        ..Default::default()
+    };
+    let has_ui = add_path(
+        "SF Pro",
+        "/System/Library/Fonts/SFNS.ttf",
+        0,
+        Some(sf_tweak.clone()),
+    );
+    let has_mono = add_path("SF Mono", "/System/Library/Fonts/SFNSMono.ttf", 0, None);
+    let has_menlo = add_path("Menlo", "/System/Library/Fonts/Menlo.ttc", 0, None);
+    let has_monaco = add_path("Monaco", "/System/Library/Fonts/Monaco.ttf", 0, None);
+    let has_cjk = add_path(
         "Hiragino Sans GB",
         "/System/Library/Fonts/Hiragino Sans GB.ttc",
         0,
+        None,
     );
-    let has_heiti = add("Heiti SC", "/System/Library/Fonts/STHeiti Light.ttc", 1);
-    let has_cjk_serif = add(
+    let has_heiti = add_path(
+        "Heiti SC",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        1,
+        None,
+    );
+    let has_cjk_serif = add_path(
         "Songti SC",
         "/System/Library/Fonts/Supplemental/Songti.ttc",
         0,
+        None,
     );
-    let has_emoji = add(
+    let has_emoji = add_path(
         "Apple Color Emoji",
         "/System/Library/Fonts/Apple Color Emoji.ttc",
         0,
+        None,
     );
 
+    // PingFang lives in AssetsV2 on recent macOS releases; fontdb finds it
+    // through the platform font directories.
+    let has_pingfang = crate::fonts::face("PingFang SC")
+        .and_then(crate::fonts::load)
+        .map(|data| {
+            fonts
+                .font_data
+                .insert("PingFang SC".to_owned(), Arc::new(data));
+        })
+        .is_some();
+
+    let mut add_custom = |key: &str, family: &str| {
+        let face = crate::fonts::face(family)?;
+        let mut data = crate::fonts::load(face)?;
+        if family.eq_ignore_ascii_case("SF Pro") {
+            data = data.tweak(sf_tweak.clone());
+        }
+        fonts.font_data.insert(key.to_owned(), Arc::new(data));
+        Some(())
+    };
+    let ui_custom = add_custom("@ui-font", &settings.ui_font).is_some();
+    let editor_custom = add_custom("@editor-font", &settings.editor.font_family).is_some();
+    let terminal_custom = add_custom("@terminal-font", &settings.terminal.font_family).is_some();
+
+    fn push_unique(stack: &mut Vec<String>, name: &str) {
+        if !stack.iter().any(|existing| existing == name) {
+            stack.push(name.to_owned());
+        }
+    }
+
     let mut proportional = Vec::new();
-    if has_ui {
-        proportional.push("SF Pro".to_owned());
+    if ui_custom {
+        push_unique(&mut proportional, "@ui-font");
+    } else if settings.language.is_zh() {
+        if has_pingfang {
+            push_unique(&mut proportional, "PingFang SC");
+        }
+        if has_ui {
+            push_unique(&mut proportional, "SF Pro");
+        }
+    } else {
+        if has_ui {
+            push_unique(&mut proportional, "SF Pro");
+        }
+        if has_pingfang {
+            push_unique(&mut proportional, "PingFang SC");
+        }
     }
     if has_cjk {
-        proportional.push("Hiragino Sans GB".to_owned());
+        push_unique(&mut proportional, "Hiragino Sans GB");
     }
     if has_heiti {
-        proportional.push("Heiti SC".to_owned());
+        push_unique(&mut proportional, "Heiti SC");
     }
     if has_cjk_serif {
-        proportional.push("Songti SC".to_owned());
+        push_unique(&mut proportional, "Songti SC");
     }
     if has_emoji {
-        proportional.push("Apple Color Emoji".to_owned());
+        push_unique(&mut proportional, "Apple Color Emoji");
     }
-    proportional.extend(["Ubuntu-Light".to_owned(), "Hack".to_owned()]);
+    push_unique(&mut proportional, "Ubuntu-Light");
+    push_unique(&mut proportional, "Hack");
     fonts
         .families
         .insert(FontFamily::Proportional, proportional);
 
     let mut mono = Vec::new();
+    if editor_custom {
+        push_unique(&mut mono, "@editor-font");
+    }
     if has_menlo {
-        mono.push("Menlo".to_owned());
+        push_unique(&mut mono, "Menlo");
     }
     if has_mono {
-        mono.push("SF Mono".to_owned());
+        push_unique(&mut mono, "SF Mono");
     }
     if has_monaco {
-        mono.push("Monaco".to_owned());
+        push_unique(&mut mono, "Monaco");
+    }
+    if has_pingfang {
+        push_unique(&mut mono, "PingFang SC");
     }
     if has_cjk {
-        mono.push("Hiragino Sans GB".to_owned());
+        push_unique(&mut mono, "Hiragino Sans GB");
     }
     if has_heiti {
-        mono.push("Heiti SC".to_owned());
+        push_unique(&mut mono, "Heiti SC");
     }
     if has_emoji {
-        mono.push("Apple Color Emoji".to_owned());
+        push_unique(&mut mono, "Apple Color Emoji");
     }
-    mono.push("Hack".to_owned());
+    push_unique(&mut mono, "Hack");
     fonts.families.insert(FontFamily::Monospace, mono);
 
+    // Terminal cells are painted at a fixed advance width, so they get their
+    // own family and can follow the editor without changing editor metrics.
+    let mut terminal = Vec::new();
+    if terminal_custom {
+        push_unique(&mut terminal, "@terminal-font");
+    } else if editor_custom {
+        push_unique(&mut terminal, "@editor-font");
+    }
+    if has_menlo {
+        push_unique(&mut terminal, "Menlo");
+    }
+    if has_mono {
+        push_unique(&mut terminal, "SF Mono");
+    }
+    if has_monaco {
+        push_unique(&mut terminal, "Monaco");
+    }
+    if has_pingfang {
+        push_unique(&mut terminal, "PingFang SC");
+    }
+    if has_cjk {
+        push_unique(&mut terminal, "Hiragino Sans GB");
+    }
+    if has_emoji {
+        push_unique(&mut terminal, "Apple Color Emoji");
+    }
+    push_unique(&mut terminal, "Hack");
+    fonts
+        .families
+        .insert(FontFamily::Name("lazecode-terminal".into()), terminal);
+
     ctx.set_fonts(fonts);
+}
+
+/// Font used for terminal cells (custom family so it can differ from the
+/// editor).
+pub fn terminal_font(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name("lazecode-terminal".into()))
 }
 
 pub const BODY: f32 = 13.5;
@@ -599,4 +712,83 @@ pub fn body_gradient(painter: &Painter, rect: Rect, dark: bool) {
         }
     }
     painter.add(egui::Shape::Mesh(std::sync::Arc::new(mesh)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lazecode_core::{Language, Settings};
+
+    fn install(settings: &Settings) -> egui::Context {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx, settings);
+        let mut output = ctx.run_ui(Default::default(), |_| {});
+        output.textures_delta.clear();
+        ctx
+    }
+
+    fn first(ctx: &egui::Context, family: FontFamily) -> String {
+        ctx.fonts(|fonts| {
+            fonts
+                .definitions()
+                .families
+                .get(&family)
+                .and_then(|stack| stack.first())
+                .cloned()
+                .unwrap_or_default()
+        })
+    }
+
+    #[test]
+    fn custom_font_families_lead_their_stacks() {
+        let settings = Settings {
+            ui_font: "SF Mono".into(),
+            editor: lazecode_core::settings::EditorSettings {
+                font_family: "Menlo".into(),
+                ..Default::default()
+            },
+            terminal: lazecode_core::settings::TerminalSettings {
+                font_family: "SF Mono".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ctx = install(&settings);
+        assert_eq!(first(&ctx, FontFamily::Proportional), "@ui-font");
+        assert_eq!(first(&ctx, FontFamily::Monospace), "@editor-font");
+        assert_eq!(
+            first(&ctx, FontFamily::Name("lazecode-terminal".into())),
+            "@terminal-font"
+        );
+    }
+
+    #[test]
+    fn terminal_follows_editor_until_overridden() {
+        let settings = Settings {
+            editor: lazecode_core::settings::EditorSettings {
+                font_family: "Menlo".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ctx = install(&settings);
+        assert_eq!(first(&ctx, FontFamily::Monospace), "@editor-font");
+        assert_eq!(
+            first(&ctx, FontFamily::Name("lazecode-terminal".into())),
+            "@editor-font"
+        );
+    }
+
+    #[test]
+    fn chinese_ui_prefers_pingfang_when_installed() {
+        if crate::fonts::face("PingFang SC").is_none() {
+            return;
+        }
+        let settings = Settings {
+            language: Language::Chinese,
+            ..Settings::default()
+        };
+        let ctx = install(&settings);
+        assert_eq!(first(&ctx, FontFamily::Proportional), "PingFang SC");
+    }
 }

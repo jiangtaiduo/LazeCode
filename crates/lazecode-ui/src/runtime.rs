@@ -495,6 +495,9 @@ pub struct UiRuntime {
     /// 分支比较页：详情列宽度分隔条拖拽中。
     pub compare_details_drag: bool,
     pub settings_open: bool,
+    /// Settings changed the UI/editor/terminal font: reinstall before the
+    /// next frame so egui does not keep galleys from the old atlas.
+    pub fonts_dirty: bool,
     pub about_open: bool,
     /// Software update window (settings → Updates / auto-check notice).
     pub update_open: bool,
@@ -591,6 +594,7 @@ impl Default for UiRuntime {
             compare_split_drag: false,
             compare_details_drag: false,
             settings_open: false,
+            fonts_dirty: false,
             about_open: false,
             update_open: false,
             update: UpdateState::default(),

@@ -730,7 +730,9 @@ pub struct ProjectState {
     /// 随机互换）。
     pub ref_selection: Vec<String>,
     pub favorites: std::collections::HashSet<String>,
-    pub commit_file_dirs_expanded: std::collections::HashSet<String>,
+    /// Directories whose children are hidden in the commit-details file tree.
+    /// Empty means every directory is expanded.
+    pub commit_file_dirs_collapsed: std::collections::HashSet<String>,
     pub commit_files_root_collapsed: bool,
     pub tags: Vec<String>,
     /// HEAD anchor of each tag (short hash), for the tags rows.
@@ -867,7 +869,7 @@ impl ProjectState {
             ref_dirs_expanded: init_dirs,
             ref_selection: Vec::new(),
             favorites: std::collections::HashSet::new(),
-            commit_file_dirs_expanded: std::collections::HashSet::new(),
+            commit_file_dirs_collapsed: std::collections::HashSet::new(),
             commit_files_root_collapsed: false,
             tags: Vec::new(),
             tag_targets: Vec::new(),

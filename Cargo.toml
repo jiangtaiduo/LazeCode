@@ -57,6 +57,8 @@ alacritty_terminal = "0.26"
 vte = "0.15"
 portable-pty = "0.9"
 libc = "0.2"
+fontdb = { version = "0.23", features = ["fs", "memmap"] }
+memmap2 = "0.9"
 ring = "0.17"
 imara-diff = { package = "gix-imara-diff", version = "0.3" }
 flate2 = "1"

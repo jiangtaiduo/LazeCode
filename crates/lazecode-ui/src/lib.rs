@@ -4,6 +4,7 @@ pub mod app_ui;
 pub mod compare;
 pub mod diff_view;
 mod editor;
+pub mod fonts;
 pub mod i18n;
 pub mod icons;
 pub mod icons_svg;

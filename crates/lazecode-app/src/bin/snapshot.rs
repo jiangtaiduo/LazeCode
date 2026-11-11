@@ -30,6 +30,16 @@ fn main() -> anyhow::Result<()> {
     if language == "zh" {
         settings.language = lazecode_core::Language::Chinese;
     }
+    // Visual harness override, e.g. LAZE_UI_FONT="SF Pro".
+    if let Ok(font) = std::env::var("LAZE_UI_FONT") {
+        settings.ui_font = font;
+    }
+    if let Ok(font) = std::env::var("LAZE_EDITOR_FONT") {
+        settings.editor.font_family = font;
+    }
+    if let Ok(font) = std::env::var("LAZE_TERMINAL_FONT") {
+        settings.terminal.font_family = font;
+    }
     let mut pending_jump: Option<(u64, usize)> = None;
     let mut model = AppModel {
         settings: settings.clone(),
@@ -174,6 +184,14 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        if mode == "editor" {
+            if let Some(index) = project.tabs.iter().position(|tab| {
+                matches!(&tab.kind, lazecode_core::TabKind::File(file)
+                    if file.doc.path.ends_with("crates/lazecode-ui/src/editor.rs"))
+            }) {
+                project.active_tab = Some(project.tabs[index].id);
+            }
+        }
         if let Some(commit) = project.log.first() {
             let id = commit.id.clone();
             project.selected_commit = Some(id.clone());
@@ -183,6 +201,7 @@ fn main() -> anyhow::Result<()> {
             "git" => {
                 model.ui.panel_tab = PanelTab::Git;
                 model.ui.panel_visible = true;
+                model.ui.terminal_visible = false;
                 model.ui.sidebar_view = SidebarView::Git;
             }
             "terminal" | "panes" => {
@@ -223,6 +242,14 @@ fn main() -> anyhow::Result<()> {
     }
     match mode.as_str() {
         "settings" => runtime.settings_open = true,
+        "settings-editor" => {
+            runtime.settings_open = true;
+            model.ui.settings_section = 1;
+        }
+        "settings-terminal" => {
+            runtime.settings_open = true;
+            model.ui.settings_section = 2;
+        }
         "palette" => model.ui.command_palette_open = true,
         "search" => {
             runtime.search.open = true;
@@ -263,7 +290,7 @@ fn main() -> anyhow::Result<()> {
         _ => {}
     }
     let ctx = egui::Context::default();
-    lazecode_ui::install_fonts(&ctx);
+    lazecode_ui::install_fonts(&ctx, &settings);
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(W, H));
     let mut viewports = egui::ViewportIdMap::default();
     viewports.insert(

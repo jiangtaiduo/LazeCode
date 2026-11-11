@@ -350,8 +350,19 @@ pub fn smudge_lfs_to_file_in(
     data: &[u8],
     target: &Path,
 ) -> Result<bool> {
-    let _ = root;
     let attributes = attributes(repo, path)?;
+    smudge_lfs_to_file_with(repo, root, path, &attributes, data, target)
+}
+
+fn smudge_lfs_to_file_with(
+    repo: &gix::Repository,
+    root: &Path,
+    path: &str,
+    attributes: &Attributes,
+    data: &[u8],
+    target: &Path,
+) -> Result<bool> {
+    let _ = (root, path);
     if attributes.filter.as_deref() != Some("lfs") {
         return Ok(false);
     }
@@ -401,6 +412,111 @@ pub fn clean_in(repo: &gix::Repository, root: &Path, path: &str, data: Vec<u8>) 
     let _ = workdir(repo)?;
     let attributes = attributes(repo, path)?;
     clean_with(repo, root, path, &attributes, data)
+}
+
+/// Reusable attribute/filter session. Building the attributes stack once
+/// avoids re-reading the index and global attributes for every changed file.
+pub struct FilterContext<'repo> {
+    stack: gix::AttributeStack<'repo>,
+}
+
+impl<'repo> FilterContext<'repo> {
+    pub fn new(repo: &'repo gix::Repository) -> Result<Self> {
+        let index = repo.index_or_empty()?;
+        let stack = repo.attributes_only(
+            &index,
+            gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
+        )?;
+        Ok(Self { stack })
+    }
+
+    pub fn repo(&self) -> &gix::Repository {
+        self.stack.repo
+    }
+
+    fn attributes(&mut self, path: &str) -> Result<Attributes> {
+        let mut outcome = self
+            .stack
+            .selected_attribute_matches(["text", "eol", "filter", "ident"]);
+        {
+            let platform = self.stack.at_entry(path, None)?;
+            platform.matching_attributes(&mut outcome);
+        }
+        let mut attributes = Attributes::default();
+        for matched in outcome.iter_selected() {
+            let name = matched.assignment.name.as_str();
+            match (name, &matched.assignment.state) {
+                ("text", StateRef::Set) => attributes.text = Some(true),
+                ("text", StateRef::Unset | StateRef::Unspecified) => attributes.text = Some(false),
+                ("text", StateRef::Value(value)) if value.as_bstr() == "auto" => {
+                    attributes.text_auto = true;
+                }
+                ("eol", StateRef::Value(value)) => {
+                    attributes.eol = Some(value.as_bstr().to_string())
+                }
+                ("filter", StateRef::Value(value)) => {
+                    attributes.filter = Some(value.as_bstr().to_string())
+                }
+                ("ident", StateRef::Set) => attributes.ident = Some(true),
+                ("ident", StateRef::Unset | StateRef::Unspecified) => {
+                    attributes.ident = Some(false)
+                }
+                _ => {}
+            }
+        }
+        Ok(attributes)
+    }
+
+    pub fn filter_driver(&mut self, path: &str) -> Result<Option<String>> {
+        Ok(self.attributes(path)?.filter)
+    }
+
+    pub fn clean(&mut self, root: &Path, path: &str, data: Vec<u8>) -> Result<Vec<u8>> {
+        let attributes = self.attributes(path)?;
+        clean_with(self.stack.repo, root, path, &attributes, data)
+    }
+
+    pub fn clean_file(&mut self, root: &Path, path: &str, source: &Path) -> Result<Vec<u8>> {
+        let attributes = self.attributes(path)?;
+        if attributes.filter.as_deref() == Some("lfs") {
+            return lfs_clean_file(self.stack.repo, source);
+        }
+        let data = std::fs::read(source)?;
+        clean_with(self.stack.repo, root, path, &attributes, data)
+    }
+
+    pub fn smudge(&mut self, root: &Path, path: &str, oid: &str, data: Vec<u8>) -> Result<Vec<u8>> {
+        let attributes = self.attributes(path)?;
+        let mut data = data;
+        if let Some(driver) = attributes.filter.as_deref() {
+            if driver == "lfs" {
+                data = lfs_smudge(self.stack.repo, &data)?;
+            } else if let Some(filtered) =
+                run_driver_filter(self.stack.repo, root, driver, "smudge", path, &data)?
+            {
+                data = filtered;
+            }
+        }
+        if attributes.ident == Some(true) {
+            data = expand_ident(&data, oid);
+        }
+        if is_text(self.stack.repo, &attributes, &data) && should_crlf(self.stack.repo, &attributes)
+        {
+            data = to_crlf(&data);
+        }
+        Ok(data)
+    }
+
+    pub fn smudge_lfs_to_file(
+        &mut self,
+        root: &Path,
+        path: &str,
+        data: &[u8],
+        target: &Path,
+    ) -> Result<bool> {
+        let attributes = self.attributes(path)?;
+        smudge_lfs_to_file_with(self.stack.repo, root, path, &attributes, data, target)
+    }
 }
 
 /// Return the configured filter driver for a path, without touching bytes.

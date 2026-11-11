@@ -165,6 +165,7 @@ pub fn stage(root: &Path, paths: &[String]) -> Result<()> {
     let file = open_index(&repo)?;
     let index_path = file.path().to_path_buf();
     let (mut state, _) = file.into_parts();
+    let mut filters = crate::filter::FilterContext::new(&repo)?;
     for path in paths {
         validate_repo_path(path)?;
         let abs = safe_worktree_join(&workdir, path)?;
@@ -196,7 +197,7 @@ pub fn stage(root: &Path, paths: &[String]) -> Result<()> {
         } else if !meta.is_file() {
             anyhow::bail!("{path} is not a regular file; refusing to stage it");
         } else {
-            let lfs = crate::filter::filter_driver_in(&repo, path)?.as_deref() == Some("lfs");
+            let lfs = filters.filter_driver(path)?.as_deref() == Some("lfs");
             if !lfs && meta.len() > crate::MAX_STAGE_BYTES {
                 anyhow::bail!(
                     "{path} is too large to stage ({:.1} MiB, limit {:.0} MiB); configure filter=lfs for large files",
@@ -210,7 +211,7 @@ pub fn stage(root: &Path, paths: &[String]) -> Result<()> {
             } else {
                 Mode::FILE
             };
-            (crate::filter::clean_file_in(&repo, root, path, &abs)?, mode)
+            (filters.clean_file(root, path, &abs)?, mode)
         };
         let id = repo.write_blob(&data)?.detach();
         let stat = gix::index::fs::Metadata::from_path_no_follow(&abs)
@@ -328,6 +329,7 @@ fn commit_checked_inner(
     // The real index is never staged/un-staged, so previously staged files
     // outside the checked set keep their index state (stable partial commit).
     let mut tree_map = head_tree_map(&repo)?;
+    let mut filters = crate::filter::FilterContext::new(&repo)?;
     for path in paths {
         validate_repo_path(path)?;
         let abs = safe_worktree_join(&workdir, path)?;
@@ -347,7 +349,7 @@ fn commit_checked_inner(
         } else if !meta.is_file() {
             anyhow::bail!("{path} is not a regular file; refusing to commit it");
         } else {
-            let lfs = crate::filter::filter_driver_in(&repo, path)?.as_deref() == Some("lfs");
+            let lfs = filters.filter_driver(path)?.as_deref() == Some("lfs");
             if !lfs && meta.len() > crate::MAX_STAGE_BYTES {
                 anyhow::bail!(
                     "{path} is too large to commit ({:.1} MiB, limit {:.0} MiB); configure filter=lfs for large files",
@@ -361,7 +363,7 @@ fn commit_checked_inner(
             } else {
                 0o100644
             };
-            (crate::filter::clean_file_in(&repo, root, path, &abs)?, mode)
+            (filters.clean_file(root, path, &abs)?, mode)
         };
         let oid = repo.write_blob(&data)?.detach();
         tree_map.insert(path.clone(), TreeEntry { oid, mode });

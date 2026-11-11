@@ -62,6 +62,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   from the native object store; ignored status is cached per worktree and
   invalidated by watcher events; ahead/behind and pending counts use the
   commit-graph-aware gix revision walk.
+- Native merge (`gix::merge_commits`) with conflict stages/markers and
+  merge commit creation; native clean rebase preserving author identity.
+  Conflicted rebase, cherry-pick and revert still use the sequencer
+  porcelain.
 - Native Git stash: push (message, `-u`, `--keep-index`), list, files,
   apply, pop and drop. The implementation writes Git-compatible
   stash/index/untracked commits and `refs/stash` reflog entries, so stashes

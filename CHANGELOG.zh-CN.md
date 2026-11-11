@@ -51,6 +51,9 @@
 - stash apply 文本三方合并并写入冲突标记；大 LFS 对象流式写出；忽略文件
   状态按 worktree 缓存并由 watcher 失效；ahead/behind 与待推送计数改用
   支持 commit-graph 的 gix revision walk。
+- 原生 merge（`gix::merge_commits`）：冲突 stage/标记与合并提交；原生
+  干净 rebase 并保留作者身份。冲突 rebase、cherry-pick、revert 仍走
+  sequencer porcelain。
 - 原生 Git stash：push（支持 message、`-u`、`--keep-index`）、list、files、
   apply、pop、drop。实现会写入与 Git 兼容的 stash/index/untracked 提交及
   `refs/stash` reflog，因此与 `git` CLI 双向互通。

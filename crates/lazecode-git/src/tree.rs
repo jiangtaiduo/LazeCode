@@ -80,6 +80,13 @@ pub fn head_tree_map(repo: &gix::Repository) -> Result<TreeMap> {
     Ok(map)
 }
 
+pub fn tree_map(repo: &gix::Repository, tree: ObjectId) -> Result<TreeMap> {
+    let tree = repo.find_tree(tree)?;
+    let mut map = TreeMap::new();
+    collect_tree(repo, tree, "", &mut map)?;
+    Ok(map)
+}
+
 pub fn commit_tree_map(repo: &gix::Repository, commit: ObjectId) -> Result<TreeMap> {
     let commit = repo.find_commit(commit)?;
     let tree = commit.tree()?;

@@ -131,7 +131,13 @@ Write path:
   remote list/add/remove/rename/set-url.
 - Native `reset --soft/--mixed/--hard` (branch or detached HEAD, index and
   worktree transaction with rollback); drop-HEAD/squash reuse it.
-- History rewrite porcelain (still uses the `git` binary): merge, rebase (+continue/abort/skip),
+- Native merge via `gix::merge_commits`: fast-forward/up-to-date detection,
+  merged tree, unmerged index stages, conflict-marker worktree, `MERGE_HEAD`/
+  `ORIG_HEAD`/`MERGE_MSG`, and a real merge commit for clean merges.
+- Native clean rebase: replays first-parent commits with `merge_trees`,
+  preserves author identity, then hard-resets the branch; conflicted rebases
+  fall back to the porcelain sequencer without touching refs/worktree first.
+- History rewrite porcelain (still uses the `git` binary): conflicted rebase (+continue/abort/skip),
   interactive rebase (UI-arranged todo executed through a
   GIT_SEQUENCE_EDITOR shim; conflicts fall through to the sequencer bar),
   cherry-pick (+continue/abort, editor neutralised, empty picks skipped),

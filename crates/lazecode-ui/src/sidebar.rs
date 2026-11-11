@@ -969,6 +969,7 @@ fn source_control(
                 staged: None,
                 unstaged: None,
                 untracked: false,
+                conflicted: false,
                 additions: 0,
                 deletions: 0,
                 binary: false,
@@ -2270,33 +2271,38 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             let group_running = worktree
                 .terminals
                 .iter()
-                .filter(|terminal| terminal.session.is_running())
+                .flat_map(|tab| tab.panes.iter())
+                .filter(|pane| pane.session.is_running())
                 .count();
             let label = if worktree.is_main {
                 project.name.clone()
             } else {
                 format!("{} · {}", project.name, worktree.name)
             };
-            for (terminal_index, terminal) in worktree.terminals.iter().enumerate() {
-                let secs = terminal.started.elapsed().as_secs();
-                rows.push(Row {
-                    project: project_index,
-                    worktree: worktree_index,
-                    terminal: terminal.id,
-                    name: terminal.title.clone(),
-                    command: if let Some(command) = terminal.spawn_command.clone() {
-                        command
-                    } else if terminal.title != terminal.session.command_label {
-                        terminal.session.command_label.clone()
-                    } else {
-                        crate::tr!(model, "default shell", "默认 shell").to_string()
-                    },
-                    running: terminal.session.is_running(),
-                    elapsed: format_elapsed(secs),
-                    group: label.clone(),
-                    group_start: terminal_index == 0,
-                    group_running,
-                });
+            let mut pane_index = 0usize;
+            for tab in &worktree.terminals {
+                for terminal in &tab.panes {
+                    let secs = terminal.started.elapsed().as_secs();
+                    rows.push(Row {
+                        project: project_index,
+                        worktree: worktree_index,
+                        terminal: terminal.id,
+                        name: terminal.title.clone(),
+                        command: if let Some(command) = terminal.spawn_command.clone() {
+                            command
+                        } else if terminal.title != terminal.session.command_label {
+                            terminal.session.command_label.clone()
+                        } else {
+                            crate::tr!(model, "default shell", "默认 shell").to_string()
+                        },
+                        running: terminal.session.is_running(),
+                        elapsed: format_elapsed(secs),
+                        group: label.clone(),
+                        group_start: pane_index == 0,
+                        group_running,
+                    });
+                    pane_index += 1;
+                }
             }
         }
     }
@@ -2448,12 +2454,20 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                     if response.clicked() {
                         model.switch_project(row.project);
                         model.projects[row.project].active_worktree = row.worktree;
-                        model.projects[row.project].worktrees[row.worktree].active_terminal =
-                            Some(row.terminal);
+                        let worktree = &mut model.projects[row.project].worktrees[row.worktree];
+                        if let Some(tab) = worktree
+                            .terminals
+                            .iter_mut()
+                            .find(|tab| tab.pane(row.terminal).is_some())
+                        {
+                            tab.active_pane = row.terminal;
+                        }
+                        worktree.active_terminal = Some(row.terminal);
                         model.ui.panel_visible = true;
                         model.ui.terminal_visible = true;
                         model.ui.panel_visible = false;
                         rt.clear_terminal_cache();
+                        rt.set_terminal_focus(row.terminal);
                     }
                 }
                 ui.add_space(10.0);

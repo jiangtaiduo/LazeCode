@@ -171,6 +171,8 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     rt.frame_count = rt.frame_count.wrapping_add(1);
     egui_extras::install_image_loaders(ui.ctx());
+    model.sync_lsp();
+    crate::lsp_ui::poll(ui.ctx(), model, rt);
     let theme = Theme::for_mode(model.settings.theme);
     if rt.applied_theme != Some(model.settings.theme) {
         theme.apply(ui.ctx());
@@ -204,6 +206,21 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         if let Some(pos) = ui.ctx().pointer_interact_pos() {
             if !layout.editor.contains(pos) {
                 rt.editor_focus = None;
+                if let Some(state) = rt.lsp.completion.take() {
+                    if let Some(id) = state.request {
+                        model.lsp.cancel(id);
+                    }
+                }
+                if let Some(state) = rt.lsp.symbols.take() {
+                    if let Some(id) = state.request {
+                        model.lsp.cancel(id);
+                    }
+                }
+                if let Some(state) = rt.lsp.hover.take() {
+                    if let Some(id) = state.request {
+                        model.lsp.cancel(id);
+                    }
+                }
             }
             if !layout.panel.is_some_and(|panel| panel.contains(pos)) {
                 rt.terminal_focus = None;
@@ -304,6 +321,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         crate::panel::draw(ui, model, rt, &theme, panel);
     }
     crate::statusbar::draw(ui, model, rt, &theme, layout.status);
+    crate::lsp_ui::draw_popups(ui, model, rt, &theme);
 
     if rt.settings_open {
         crate::settings::draw(ui, model, rt, &theme);

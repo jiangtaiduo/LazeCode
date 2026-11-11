@@ -21,7 +21,12 @@ fn main() -> anyhow::Result<()> {
     let mode = args.next().unwrap_or_else(|| "editor".to_string());
     let language = args.next().unwrap_or_else(|| "en".to_string());
 
-    let mut settings = Settings::default();
+    let mut settings = lazecode_core::Settings {
+        // The offscreen snapshot is a deterministic visual harness; spawning
+        // real language servers there would add latency and orphan processes.
+        lsp_enabled: false,
+        ..Settings::default()
+    };
     if language == "zh" {
         settings.language = lazecode_core::Language::Chinese;
     }
@@ -35,6 +40,7 @@ fn main() -> anyhow::Result<()> {
         recent: Vec::new(),
         commands: Vec::new(),
         notifier: None,
+        lsp: lazecode_core::LspManager::new(settings.lsp_enabled, None),
         should_quit: false,
         version: env!("CARGO_PKG_VERSION"),
         favorite_branches: HashSet::new(),
@@ -151,6 +157,23 @@ fn main() -> anyhow::Result<()> {
             model.ui.panel_visible = false;
             model.ui.terminal_visible = false;
         }
+        if mode == "panes" {
+            for direction in [
+                lazecode_core::PaneSplit::Row,
+                lazecode_core::PaneSplit::Column,
+                lazecode_core::PaneSplit::Row,
+            ] {
+                let Some(pane) = project.active_worktree().active_terminal else {
+                    break;
+                };
+                if project
+                    .split_terminal(pane, direction, &settings, None)
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }
         if let Some(commit) = project.log.first() {
             let id = commit.id.clone();
             project.selected_commit = Some(id.clone());
@@ -162,7 +185,7 @@ fn main() -> anyhow::Result<()> {
                 model.ui.panel_visible = true;
                 model.ui.sidebar_view = SidebarView::Git;
             }
-            "terminal" => {
+            "terminal" | "panes" => {
                 model.ui.terminal_visible = true;
                 model.ui.panel_visible = false;
                 model.ui.panel_visible = true;

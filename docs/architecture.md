@@ -10,7 +10,7 @@ There is no WebView, JavaScript runtime or bundled Node.
 
 | crate | responsibility |
 |---|---|
-| `lazecode-core` | projects, tabs, terminals, settings, commands, persistence |
+| `lazecode-core` | projects, tabs, terminals, settings, commands, persistence, LSP client and diagnostics |
 | `lazecode-fs` | project tree, encoding-aware file I/O, search, watcher |
 | `lazecode-text` | rope documents, undo, incremental syntax highlighting, diff |
 | `lazecode-git` | `gix` status/log/diff and a limited write porcelain |
@@ -44,6 +44,12 @@ app ──▶ ui ──▶ core ──▶ fs
   snapshot.
 - File watchers are polled at a low frequency; change batches reload the tree,
   clean editor buffers and schedule a Git status refresh.
+- Language servers are optional and scoped per `(workspace root, language)`.
+  Each server has a reader thread and a bounded writer queue; the UI drains
+  completed responses once per frame. Documents use full-text `didChange`
+  with a 200 ms debounce. Diagnostics stay in `lazecode-core::lsp`;
+  `lazecode-ui::lsp_ui` renders hover, completion, the symbol picker,
+  formatting/rename edits and the status-bar counts.
 
 ## Git
 

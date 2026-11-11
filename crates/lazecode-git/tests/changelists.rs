@@ -12,17 +12,17 @@ fn create_assign_remove_round_trip() {
     let mut lists = Changelists::open(dir.path());
     assert_eq!(lists.lists(), ["Default"]);
 
-    lists.create_list("Feature");
-    lists.create_list("Feature"); // duplicate ignored
+    lists.create_list("Feature").unwrap();
+    lists.create_list("Feature").unwrap(); // duplicate ignored
     assert_eq!(lists.lists(), ["Default", "Feature"]);
 
-    lists.assign("src/a.rs", "Feature");
+    lists.assign("src/a.rs", "Feature").unwrap();
     assert_eq!(lists.list_of("src/a.rs"), "Feature");
     assert!(lists.files_of("Feature").contains(&"src/a.rs".to_string()));
     assert!(lists.files_of("Default").is_empty());
 
     // Removing the list returns the files and re-homes them to Default.
-    let moved = lists.remove_list("Feature");
+    let moved = lists.remove_list("Feature").unwrap();
     assert_eq!(moved, vec!["src/a.rs".to_string()]);
     assert!(lists.list_of("src/a.rs") != "Feature");
     assert!(lists.files_of("Feature").is_empty());
@@ -32,7 +32,7 @@ fn create_assign_remove_round_trip() {
 fn default_list_is_undeletable() {
     let dir = repo();
     let mut lists = Changelists::open(dir.path());
-    lists.remove_list("Default");
+    lists.remove_list("Default").unwrap();
     assert!(lists.lists().contains(&"Default".to_string()));
 }
 
@@ -41,8 +41,8 @@ fn persists_across_instances() {
     let dir = repo();
     {
         let mut lists = Changelists::open(dir.path());
-        lists.create_list("Persistent");
-        lists.assign("x.txt", "Persistent");
+        lists.create_list("Persistent").unwrap();
+        lists.assign("x.txt", "Persistent").unwrap();
     }
     let lists = Changelists::open(dir.path());
     assert_eq!(lists.list_of("x.txt"), "Persistent");
@@ -59,7 +59,9 @@ fn assign_many_and_create_checked() {
     assert!(lists.create_list_checked("  ").is_err());
 
     // assign_many 一次落盘多条归属。
-    lists.assign_many(&["a.txt".to_string(), "b.txt".to_string()], "Work");
+    lists
+        .assign_many(&["a.txt".to_string(), "b.txt".to_string()], "Work")
+        .unwrap();
     assert_eq!(lists.list_of("a.txt"), "Work");
     assert_eq!(lists.list_of("b.txt"), "Work");
 
@@ -98,7 +100,7 @@ fn resolves_linked_worktree_git_dir() {
 
     let side = dir.path().join("side");
     let mut lists = Changelists::open(&side);
-    lists.assign("a.txt", "Default");
+    lists.assign("a.txt", "Default").unwrap();
     // 落点在主仓库的 .git/worktrees/<name>/ 下，而不是 side/.git（它是文件）。
     assert!(!side.join(".git").is_dir());
     let found = std::fs::read_dir(root.join(".git/worktrees"))

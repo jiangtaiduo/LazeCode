@@ -93,6 +93,9 @@ pub fn encode_key(stroke: KeyStroke, modes: &Modes) -> Option<Vec<u8>> {
                     _ => None,
                 };
                 if let Some(code) = code {
+                    if stroke.alt {
+                        out.push('\x1b');
+                    }
                     out.push(code as char);
                 } else if stroke.alt {
                     out.push('\x1b');
@@ -107,7 +110,12 @@ pub fn encode_key(stroke: KeyStroke, modes: &Modes) -> Option<Vec<u8>> {
                 out.push(ch);
             }
         }
-        TerminalKey::Enter => out.push('\r'),
+        TerminalKey::Enter => {
+            if stroke.alt {
+                out.push('\x1b');
+            }
+            out.push('\r');
+        }
         TerminalKey::Tab => {
             if stroke.shift {
                 out.push_str("\x1b[Z");
@@ -116,8 +124,18 @@ pub fn encode_key(stroke: KeyStroke, modes: &Modes) -> Option<Vec<u8>> {
             }
         }
         TerminalKey::BackTab => out.push_str("\x1b[Z"),
-        TerminalKey::Backspace => out.push('\x7f'),
-        TerminalKey::Escape => out.push('\x1b'),
+        TerminalKey::Backspace => {
+            if stroke.alt {
+                out.push('\x1b');
+            }
+            out.push('\x7f');
+        }
+        TerminalKey::Escape => {
+            if stroke.alt {
+                out.push('\x1b');
+            }
+            out.push('\x1b');
+        }
         TerminalKey::Up => out.push_str(&cursor_seq('A', modes, stroke)),
         TerminalKey::Down => out.push_str(&cursor_seq('B', modes, stroke)),
         TerminalKey::Right => out.push_str(&cursor_seq('C', modes, stroke)),
@@ -152,17 +170,32 @@ pub fn encode_key(stroke: KeyStroke, modes: &Modes) -> Option<Vec<u8>> {
 }
 
 /// Paste encoding honours DEC bracketed paste so shells do not execute the
-/// pasted text.
+/// pasted text. Control bytes are neutralised so a pasted `ESC[201~` cannot
+/// terminate the paste state machine early and inject keystrokes.
 pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
+    let text = sanitize_paste(text, bracketed);
     let mut out = String::with_capacity(text.len() + 16);
     if bracketed {
         out.push_str("\x1b[200~");
-        out.push_str(text);
+        out.push_str(&text);
         out.push_str("\x1b[201~");
     } else {
-        out.push_str(text);
+        out.push_str(&text);
     }
     out.into_bytes()
+}
+
+fn sanitize_paste(text: &str, bracketed: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\n' if !bracketed => out.push('\r'),
+            '\n' | '\r' | '\t' => out.push(ch),
+            ch if ch.is_control() => out.push(' '),
+            ch => out.push(ch),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -223,5 +256,31 @@ mod tests {
     #[test]
     fn bracketed_paste() {
         assert_eq!(encode_paste("ls", true), b"\x1b[200~ls\x1b[201~");
+    }
+
+    #[test]
+    fn bracket_paste_cannot_be_terminated_by_pasted_escape() {
+        let encoded = String::from_utf8(encode_paste("a\x1b[201~rm -rf /", true)).unwrap();
+        assert_eq!(encoded.matches("\x1b[201~").count(), 1);
+        assert!(encoded.starts_with("\x1b[200~"));
+        assert!(encoded.ends_with("\x1b[201~"));
+        assert!(!encoded.contains("a\x1b[201~"));
+    }
+
+    #[test]
+    fn plain_paste_normalises_newlines_and_control_bytes() {
+        let encoded = String::from_utf8(encode_paste("a\nb\x00c\x07", false)).unwrap();
+        assert_eq!(encoded, "a\rb c ");
+    }
+
+    #[test]
+    fn ctrl_alt_letter_keeps_the_meta_prefix() {
+        let stroke = KeyStroke {
+            key: TerminalKey::Char('a'),
+            ctrl: true,
+            alt: true,
+            shift: false,
+        };
+        assert_eq!(encode_key(stroke, &modes()).unwrap(), vec![0x1b, 0x01]);
     }
 }

@@ -11,10 +11,16 @@ use lazecode_terminal::{Notifier, Session, SessionKind, SpawnOptions};
 use lazecode_text::Document;
 
 use crate::commands::Command;
+use crate::lsp::{self, LspManager, ServerKey};
 use crate::settings::{canonical, Language, Settings, ThemeMode, WorkspaceFile};
 
 static NEXT_TAB: AtomicU64 = AtomicU64::new(1);
 static NEXT_TERMINAL: AtomicU64 = AtomicU64::new(1);
+/// Stable caps consoles per project; each PTY costs two file descriptors and
+/// macOS GUI processes inherit a small soft limit. Panes count as consoles.
+const MAX_TERMINALS_PER_WORKTREE: usize = 10;
+/// Stable `MAX_PANES_PER_TAB`: a tab splits into at most four panes.
+pub const MAX_PANES_PER_TAB: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarView {
@@ -446,13 +452,59 @@ impl Tab {
     }
 }
 
-pub struct TerminalTab {
+/// One PTY inside a terminal tab. Stable keeps one session per split pane;
+/// the tab only groups them for display.
+pub struct TerminalPane {
     pub id: u64,
     pub session: Session,
     pub title: String,
     pub kind: SessionKind,
     pub spawn_command: Option<String>,
     pub started: Instant,
+}
+
+/// How the panes of a terminal tab are arranged (stable
+/// `.terminal-split-row` / `.terminal-split-column`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PaneSplit {
+    /// One pane filling the tab.
+    #[default]
+    None,
+    /// Panes side by side (`Split Right`).
+    Row,
+    /// Panes stacked (`Split Down`).
+    Column,
+}
+
+pub struct TerminalTab {
+    pub id: u64,
+    /// At least one pane; a tab disappears when its last pane closes.
+    pub panes: Vec<TerminalPane>,
+    /// Pane that owns keyboard focus and whose title the tab shows.
+    pub active_pane: u64,
+    pub split: PaneSplit,
+}
+
+impl TerminalTab {
+    pub fn is_running(&self) -> bool {
+        self.panes.iter().any(|pane| pane.session.is_running())
+    }
+
+    pub fn pane(&self, id: u64) -> Option<&TerminalPane> {
+        self.panes.iter().find(|pane| pane.id == id)
+    }
+
+    pub fn pane_mut(&mut self, id: u64) -> Option<&mut TerminalPane> {
+        self.panes.iter_mut().find(|pane| pane.id == id)
+    }
+
+    /// Tab label: the active pane's title, like stable's tab `name`.
+    pub fn title(&self) -> &str {
+        self.pane(self.active_pane)
+            .or_else(|| self.panes.first())
+            .map(|pane| pane.title.as_str())
+            .unwrap_or_default()
+    }
 }
 
 /// One worktree of a project: a checkout with its own tree, Git state,
@@ -466,7 +518,10 @@ pub struct WorktreeState {
     pub tree: FileTree,
     pub git: Option<RepoSnapshot>,
     pub git_error: Option<String>,
+    /// Terminal tabs of this worktree; each tab holds one or more panes.
     pub terminals: Vec<TerminalTab>,
+    /// Active **pane** id (the pane that owns focus). Stable's
+    /// `activeTabByProject` is derived from the tab that owns this pane.
     pub active_terminal: Option<u64>,
     pub watcher: Option<ProjectWatcher>,
     pub last_watch_poll: Instant,
@@ -492,6 +547,40 @@ impl WorktreeState {
         self.git
             .as_ref()
             .is_some_and(|git| is_snapshot_ignored(git, rel_path))
+    }
+
+    pub fn tab_by_id(&self, tab_id: u64) -> Option<&TerminalTab> {
+        self.terminals.iter().find(|tab| tab.id == tab_id)
+    }
+
+    pub fn tab_by_id_mut(&mut self, tab_id: u64) -> Option<&mut TerminalTab> {
+        self.terminals.iter_mut().find(|tab| tab.id == tab_id)
+    }
+
+    /// Tab that owns `pane_id`.
+    pub fn tab_of_pane(&self, pane_id: u64) -> Option<&TerminalTab> {
+        self.terminals
+            .iter()
+            .find(|tab| tab.pane(pane_id).is_some())
+    }
+
+    pub fn pane(&self, pane_id: u64) -> Option<&TerminalPane> {
+        self.terminals.iter().find_map(|tab| tab.pane(pane_id))
+    }
+
+    /// Tab containing the active pane (stable's active tab).
+    pub fn active_tab(&self) -> Option<&TerminalTab> {
+        let pane_id = self.active_terminal?;
+        self.tab_of_pane(pane_id).or_else(|| self.terminals.first())
+    }
+
+    pub fn active_tab_id(&self) -> Option<u64> {
+        self.active_tab().map(|tab| tab.id)
+    }
+
+    /// Number of PTYs in this worktree (used for the per-worktree cap).
+    pub fn pane_count(&self) -> usize {
+        self.terminals.iter().map(|tab| tab.panes.len()).sum()
     }
 
     /// Load the tree/git/watcher state of one checkout without spawning a
@@ -1401,10 +1490,17 @@ impl ProjectState {
         }
     }
 
-    pub fn close_other_terminals(&mut self, id: u64) {
+    /// Close every terminal tab except the one that owns `pane_id`.
+    pub fn close_other_terminals(&mut self, pane_id: u64) {
         let wt = self.active_worktree_mut();
-        wt.terminals.retain(|term| term.id == id);
-        wt.active_terminal = Some(id);
+        let Some(tab_id) = wt.tab_of_pane(pane_id).map(|tab| tab.id) else {
+            return;
+        };
+        wt.terminals.retain(|tab| tab.id == tab_id);
+        if let Some(tab) = wt.tab_by_id_mut(tab_id) {
+            tab.active_pane = pane_id;
+        }
+        wt.active_terminal = Some(pane_id);
     }
 
     pub fn close_all_terminals(&mut self) {
@@ -1427,23 +1523,24 @@ impl ProjectState {
         }
     }
 
-    pub fn term_by_id(&self, id: u64) -> Option<&TerminalTab> {
-        self.worktrees
-            .iter()
-            .find_map(|wt| wt.terminals.iter().find(|terminal| terminal.id == id))
+    /// Pane view (`TerminalPane`) by id across every worktree.
+    pub fn term_by_id(&self, id: u64) -> Option<&TerminalPane> {
+        self.worktrees.iter().find_map(|wt| wt.pane(id))
     }
 
-    pub fn term_by_id_mut(&mut self, id: u64) -> Option<&mut TerminalTab> {
+    pub fn term_by_id_mut(&mut self, id: u64) -> Option<&mut TerminalPane> {
         self.worktrees
             .iter_mut()
-            .find_map(|wt| wt.terminals.iter_mut().find(|terminal| terminal.id == id))
+            .find_map(|wt| wt.terminals.iter_mut().find_map(|tab| tab.pane_mut(id)))
     }
 
-    /// Console index (in the pane) that owns the terminal id.
-    pub fn active_terminal_owner(&self, id: u64) -> Option<(usize, usize)> {
+    /// (worktree, tab, pane) indices owning `pane_id`.
+    pub fn pane_owner(&self, id: u64) -> Option<(usize, usize, usize)> {
         for (wt_index, wt) in self.worktrees.iter().enumerate() {
-            if let Some(term_index) = wt.terminals.iter().position(|terminal| terminal.id == id) {
-                return Some((wt_index, term_index));
+            for (tab_index, tab) in wt.terminals.iter().enumerate() {
+                if let Some(pane_index) = tab.panes.iter().position(|pane| pane.id == id) {
+                    return Some((wt_index, tab_index, pane_index));
+                }
             }
         }
         None
@@ -1461,8 +1558,9 @@ impl ProjectState {
         self.open_terminal_in(cwd, command, title, kind, settings, notifier)
     }
 
-    /// Open a console inside the active worktree rooted at `cwd` (which
-    /// differs for linked worktrees).
+    /// Open a console tab with a single pane inside the active worktree
+    /// rooted at `cwd` (which differs for linked worktrees). Returns the pane
+    /// id, which is what every focus/close/restart API speaks.
     pub fn open_terminal_in(
         &mut self,
         cwd: PathBuf,
@@ -1472,52 +1570,152 @@ impl ProjectState {
         settings: &Settings,
         notifier: Option<Arc<dyn Notifier>>,
     ) -> Result<u64, String> {
-        let shell = settings.terminal.shell.clone();
-        let options = SpawnOptions {
-            shell,
-            command: command.clone(),
-            cwd: cwd.clone(),
-            cols: 110,
-            rows: 28,
-            scrollback: settings.terminal.scrollback,
-            notifier,
-            kind,
-        };
-        let session = lazecode_terminal::spawn(options).map_err(|err| err.to_string())?;
-        let id = NEXT_TERMINAL.fetch_add(1, Ordering::Relaxed);
+        if self.active_worktree().pane_count() >= MAX_TERMINALS_PER_WORKTREE {
+            return Err(if settings.language.is_zh() {
+                format!("此工作树最多同时打开 {MAX_TERMINALS_PER_WORKTREE} 个控制台")
+            } else {
+                format!("This worktree supports at most {MAX_TERMINALS_PER_WORKTREE} consoles")
+            });
+        }
+        let session = spawn_pane(cwd, command.clone(), kind, settings, notifier)?;
+        let tab_id = NEXT_TERMINAL.fetch_add(1, Ordering::Relaxed);
+        let pane_id = NEXT_TERMINAL.fetch_add(1, Ordering::Relaxed);
         let title = title.unwrap_or_else(|| session.command_label.clone());
-        let terminal = self.active_worktree_mut();
-        terminal.terminals.push(TerminalTab {
-            id,
-            session,
-            title,
-            kind,
-            spawn_command: command,
-            started: Instant::now(),
+        let worktree = self.active_worktree_mut();
+        worktree.terminals.push(TerminalTab {
+            id: tab_id,
+            panes: vec![TerminalPane {
+                id: pane_id,
+                session,
+                title,
+                kind,
+                spawn_command: command,
+                started: Instant::now(),
+            }],
+            active_pane: pane_id,
+            split: PaneSplit::None,
         });
-        terminal.active_terminal = Some(id);
-        Ok(id)
+        worktree.active_terminal = Some(pane_id);
+        Ok(pane_id)
     }
 
-    pub fn close_terminal(&mut self, id: u64) {
+    /// Split the tab that owns `pane_id`, adding a fresh shell pane and
+    /// making it active. Mirrors stable `splitPane` (max 4 panes per tab,
+    /// plain shell in the same worktree directory).
+    pub fn split_terminal(
+        &mut self,
+        pane_id: u64,
+        direction: PaneSplit,
+        settings: &Settings,
+        notifier: Option<Arc<dyn Notifier>>,
+    ) -> Result<u64, String> {
+        let Some((wt_index, tab_index, _)) = self.pane_owner(pane_id) else {
+            return Err("terminal not found".into());
+        };
+        let wt = &self.worktrees[wt_index];
+        if wt.terminals[tab_index].panes.len() >= MAX_PANES_PER_TAB {
+            return Err(if settings.language.is_zh() {
+                format!("每个标签最多 {MAX_PANES_PER_TAB} 个分屏")
+            } else {
+                format!("This tab supports at most {MAX_PANES_PER_TAB} panes")
+            });
+        }
+        if wt.pane_count() >= MAX_TERMINALS_PER_WORKTREE {
+            return Err(if settings.language.is_zh() {
+                format!("此工作树最多同时打开 {MAX_TERMINALS_PER_WORKTREE} 个控制台")
+            } else {
+                format!("This worktree supports at most {MAX_TERMINALS_PER_WORKTREE} consoles")
+            });
+        }
+        let cwd = wt.path.clone();
+        let session = spawn_pane(cwd, None, SessionKind::Shell, settings, notifier)?;
+        let new_id = NEXT_TERMINAL.fetch_add(1, Ordering::Relaxed);
+        let title = session.command_label.clone();
+        let wt = &mut self.worktrees[wt_index];
+        let tab = &mut wt.terminals[tab_index];
+        tab.panes.push(TerminalPane {
+            id: new_id,
+            session,
+            title,
+            kind: SessionKind::Shell,
+            spawn_command: None,
+            started: Instant::now(),
+        });
+        tab.split = direction;
+        tab.active_pane = new_id;
+        wt.active_terminal = Some(new_id);
+        Ok(new_id)
+    }
+
+    /// Close one pane. Closing the last pane of a tab removes the tab.
+    pub fn close_terminal(&mut self, pane_id: u64) {
+        let Some((wt_index, tab_index, _)) = self.pane_owner(pane_id) else {
+            return;
+        };
+        let wt = &mut self.worktrees[wt_index];
+        let Some(pane_index) = wt.terminals[tab_index]
+            .panes
+            .iter()
+            .position(|pane| pane.id == pane_id)
+        else {
+            return;
+        };
+        let tab = &mut wt.terminals[tab_index];
+        tab.panes.remove(pane_index);
+        if tab.active_pane == pane_id {
+            let fallback = pane_index.saturating_sub(1);
+            tab.active_pane = tab
+                .panes
+                .get(fallback)
+                .or_else(|| tab.panes.first())
+                .map(|pane| pane.id)
+                .unwrap_or_default();
+        }
+        if tab.panes.is_empty() {
+            wt.terminals.remove(tab_index);
+            if wt.active_terminal == Some(pane_id) || wt.active_terminal.is_none() {
+                wt.active_terminal = wt
+                    .terminals
+                    .get(tab_index.saturating_sub(1))
+                    .or_else(|| wt.terminals.first())
+                    .map(|tab| tab.active_pane);
+            }
+        } else {
+            if tab.panes.len() == 1 {
+                tab.split = PaneSplit::None;
+            }
+            if wt.active_terminal == Some(pane_id) || wt.active_terminal.is_none() {
+                wt.active_terminal = Some(tab.active_pane);
+            }
+        }
+    }
+
+    /// Close a whole terminal tab (all of its panes).
+    pub fn close_terminal_tab(&mut self, tab_id: u64) {
         let Some(wt_index) = self
             .worktrees
             .iter()
-            .position(|wt| wt.terminals.iter().any(|terminal| terminal.id == id))
+            .position(|wt| wt.terminals.iter().any(|tab| tab.id == tab_id))
         else {
             return;
         };
         let wt = &mut self.worktrees[wt_index];
-        let Some(index) = wt.terminals.iter().position(|terminal| terminal.id == id) else {
+        let Some(tab_index) = wt.terminals.iter().position(|tab| tab.id == tab_id) else {
             return;
         };
-        wt.terminals.remove(index);
-        if wt.active_terminal == Some(id) {
+        let owned_active = wt.active_terminal.is_none_or(|pane| {
+            wt.terminals[tab_index]
+                .panes
+                .iter()
+                .any(|pane_entry| pane_entry.id == pane)
+        });
+        wt.terminals.remove(tab_index);
+        if owned_active {
             wt.active_terminal = wt
                 .terminals
-                .get(index.saturating_sub(1))
+                .get(tab_index.saturating_sub(1))
                 .or_else(|| wt.terminals.first())
-                .map(|terminal| terminal.id);
+                .map(|tab| tab.active_pane);
         }
     }
 
@@ -1527,32 +1725,45 @@ impl ProjectState {
         settings: &Settings,
         notifier: Option<Arc<dyn Notifier>>,
     ) -> Result<(), String> {
-        let Some((wt_index, term_index)) = self.active_terminal_owner(id) else {
+        let Some((wt_index, tab_index, pane_index)) = self.pane_owner(id) else {
             return Err("terminal not found".into());
         };
         let wt = &mut self.worktrees[wt_index];
-        let old = &wt.terminals[term_index];
+        let old = &wt.terminals[tab_index].panes[pane_index];
         let command = old.spawn_command.clone();
         let title = old.title.clone();
         let kind = old.kind;
-        let shell = settings.terminal.shell.clone();
-        let session = lazecode_terminal::spawn(SpawnOptions {
-            shell,
-            command,
-            cwd: wt.path.clone(),
-            cols: 110,
-            rows: 28,
-            scrollback: settings.terminal.scrollback,
-            notifier,
-            kind,
-        })
-        .map_err(|err| err.to_string())?;
-        wt.terminals[term_index].session = session;
-        wt.terminals[term_index].title = title;
-        wt.terminals[term_index].started = Instant::now();
+        let session = spawn_pane(wt.path.clone(), command, kind, settings, notifier)?;
+        let tab = &mut wt.terminals[tab_index];
+        let pane = &mut tab.panes[pane_index];
+        pane.session = session;
+        pane.title = title;
+        pane.started = Instant::now();
+        tab.active_pane = id;
         wt.active_terminal = Some(id);
         Ok(())
     }
+}
+
+/// Spawn one PTY for a terminal pane.
+fn spawn_pane(
+    cwd: PathBuf,
+    command: Option<String>,
+    kind: SessionKind,
+    settings: &Settings,
+    notifier: Option<Arc<dyn Notifier>>,
+) -> Result<Session, String> {
+    lazecode_terminal::spawn(SpawnOptions {
+        shell: settings.terminal.shell.clone(),
+        command,
+        cwd,
+        cols: 110,
+        rows: 28,
+        scrollback: settings.terminal.scrollback,
+        notifier,
+        kind,
+    })
+    .map_err(|err| err.to_string())
 }
 
 pub struct AppModel {
@@ -1564,6 +1775,8 @@ pub struct AppModel {
     pub recent: Vec<PathBuf>,
     pub commands: Vec<Command>,
     pub notifier: Option<Arc<dyn Notifier>>,
+    /// Optional language-server sessions + aggregated diagnostics.
+    pub lsp: LspManager,
     pub should_quit: bool,
     pub version: &'static str,
     /// Favorite local branches the branch tree decorates/pins.
@@ -1574,6 +1787,7 @@ pub struct AppModel {
 impl AppModel {
     pub fn new(settings: Settings, notifier: Option<Arc<dyn Notifier>>) -> Self {
         let workspace = WorkspaceFile::load();
+        let lsp = LspManager::new(settings.lsp_enabled, notifier.clone());
         let mut model = Self {
             ui: UiState {
                 sidebar_width: settings.sidebar_width,
@@ -1592,6 +1806,7 @@ impl AppModel {
                     _ => TerminalPlacement::Bottom,
                 },
                 terminal_width: workspace.terminal_width.unwrap_or(480.0),
+                terminal_height: workspace.terminal_height.unwrap_or(340.0),
                 git_subtab: GitSubtab::Log,
                 ..Default::default()
             },
@@ -1602,6 +1817,7 @@ impl AppModel {
             recent: workspace.recent.clone(),
             commands: Vec::new(),
             notifier,
+            lsp,
             should_quit: false,
             version: env!("CARGO_PKG_VERSION"),
             favorite_branches: workspace.favorite_branches.iter().cloned().collect(),
@@ -1794,12 +2010,66 @@ impl AppModel {
         self.toasts.retain(|toast| toast.expires > now);
     }
 
+    /// Drive the optional language-server integration: apply protocol events,
+    /// start servers for open buffers, send debounced document changes and
+    /// close sessions whose files disappeared. Called once per rendered frame.
+    pub fn sync_lsp(&mut self) {
+        if self.lsp.enabled() != self.settings.lsp_enabled {
+            self.lsp.set_enabled(self.settings.lsp_enabled);
+        }
+        if !self.settings.lsp_enabled {
+            return;
+        }
+        self.lsp.poll();
+        let mut active = HashSet::new();
+        {
+            let lsp = &mut self.lsp;
+            for project in &self.projects {
+                for tab in &project.tabs {
+                    let TabKind::File(file) = &tab.kind else {
+                        continue;
+                    };
+                    let Some(language) = lsp::language_id_for_path(&file.doc.path) else {
+                        continue;
+                    };
+                    let root = lsp_root_for(project, &file.doc.path);
+                    let key = ServerKey::new(root, language);
+                    if !lsp.ensure_server(&key) {
+                        continue;
+                    }
+                    active.insert(file.doc.path.clone());
+                    let needs_text =
+                        lsp.document_needs_text(&key, &file.doc.path, file.doc.revision);
+                    if needs_text {
+                        lsp.note_document(
+                            key,
+                            file.doc.path.clone(),
+                            language,
+                            file.doc.revision,
+                            file.doc.text(),
+                        );
+                    } else {
+                        lsp.touch_document(&key, &file.doc.path);
+                    }
+                }
+            }
+        }
+        self.lsp.retain_documents(&active);
+    }
+
+    /// Stop every language server. Called on quit so children do not outlive
+    /// the app (they are not tied to our process group by OS defaults).
+    pub fn shutdown_lsp(&mut self) {
+        self.lsp.shutdown_all();
+    }
+
     pub fn total_running(&self) -> usize {
         self.projects
             .iter()
             .flat_map(|project| project.worktrees.iter())
             .flat_map(|worktree| worktree.terminals.iter())
-            .filter(|terminal| terminal.session.is_running())
+            .flat_map(|tab| tab.panes.iter())
+            .filter(|pane| pane.session.is_running())
             .count()
     }
 
@@ -1894,6 +2164,7 @@ impl AppModel {
                 .to_string(),
             ),
             terminal_width: Some(self.ui.terminal_width),
+            terminal_height: Some(self.ui.terminal_height),
             open_tabs: BTreeMap::new(),
             active_tabs: BTreeMap::new(),
             active_worktrees: BTreeMap::new(),
@@ -1993,6 +2264,22 @@ fn tone_for(path: &Path) -> (u8, u8, u8) {
     }
     TONES[(hash % TONES.len() as u64) as usize]
 }
+/// Language-server workspace root for one open file.
+///
+/// A linked worktree has its own checkout and therefore its own server; the
+/// longest matching worktree root wins. Single-file projects register their
+/// parent directory as the root, so files outside a project still get a valid
+/// server root (a file path as `current_dir` would fail at spawn).
+fn lsp_root_for(project: &ProjectState, path: &Path) -> PathBuf {
+    project
+        .worktrees
+        .iter()
+        .filter(|worktree| path.starts_with(&worktree.path))
+        .max_by_key(|worktree| worktree.path.components().count())
+        .map(|worktree| worktree.path.clone())
+        .unwrap_or_else(|| project.root.clone())
+}
+
 /// Helper to determine if a relative path (or any of its ancestors) is ignored by Git.
 pub fn is_snapshot_ignored(git: &lazecode_git::RepoSnapshot, rel_path: &std::path::Path) -> bool {
     if rel_path.as_os_str().is_empty() {

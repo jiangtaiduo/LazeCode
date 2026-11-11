@@ -29,6 +29,8 @@ pub fn draw(
     search: &mut TermSearchState,
     focus: bool,
     preedit: &mut String,
+    wheel_accum: &mut f32,
+    refresh: bool,
     theme: &Theme,
     rect: Rect,
     session_id: u64,
@@ -38,12 +40,16 @@ pub fn draw(
     if focus {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(500));
+    } else {
+        preedit.clear();
     }
-    session.snapshot_into(snapshot);
-    // Cap repaint rate for output-heavy sessions: the notifier wakes the UI
-    // for every PTY batch; this repaint cap keeps the frame budget at 60fps
-    // maximum so a `cat` of a 100MB file cannot starve input handling.
-    if session.last_output_ms().is_some() && focus {
+    let refresh = refresh || snapshot.rows == 0;
+    if refresh {
+        session.snapshot_into(snapshot);
+    }
+    // A session keeps producing output; only request a capped 60 fps while
+    // output is actually recent. `last_output_ms` is an age, not a timestamp.
+    if focus && session.last_output_ms().is_some_and(|age| age < 120) {
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(16));
     }
@@ -57,6 +63,10 @@ pub fn draw(
     let rows = ((inner.height() / line_h).floor() as usize).max(2);
     if cols != snapshot.cols || rows != snapshot.rows {
         session.resize(cols as u16, rows as u16);
+        // Absolute selection endpoints cannot survive reflow.
+        *selection = None;
+        *wheel_accum = 0.0;
+        session.snapshot_into(snapshot);
     }
     let cols = snapshot.cols.max(1);
     let rows = snapshot.rows.max(1);
@@ -87,26 +97,52 @@ pub fn draw(
 
     let mouse_reporting = modes.mouse_click || modes.mouse_drag || modes.mouse_motion;
     if let Some(pos) = pointer {
-        if response.clicked() {
-            if mouse_reporting && !ui.input(|input| input.modifiers.shift) {
-                send_mouse(
-                    session,
-                    snapshot,
-                    pos,
-                    inner,
-                    line_h,
-                    char_w,
-                    0,
-                    true,
-                    snapshot.modes.sgr_mouse,
-                );
-            } else {
-                let point = selection_end(pos);
-                *selection = Some(TermSelection {
-                    start: point,
-                    end: point,
+        let shift = ui.input(|input| input.modifiers.shift);
+        if mouse_reporting && !shift {
+            let (primary_pressed, primary_released, secondary_pressed, secondary_released) = ui
+                .input(|input| {
+                    (
+                        input.pointer.primary_pressed(),
+                        input.pointer.primary_released(),
+                        input.pointer.secondary_pressed(),
+                        input.pointer.secondary_released(),
+                    )
                 });
+            let (middle_pressed, middle_released) = ui.input(|input| {
+                (
+                    input.pointer.button_pressed(egui::PointerButton::Middle),
+                    input.pointer.button_released(egui::PointerButton::Middle),
+                )
+            });
+            let sgr = snapshot.modes.sgr_mouse;
+            if primary_pressed {
+                send_mouse(session, snapshot, pos, inner, line_h, char_w, 0, true, sgr);
             }
+            if primary_released {
+                send_mouse(session, snapshot, pos, inner, line_h, char_w, 0, false, sgr);
+            }
+            if middle_pressed {
+                send_mouse(session, snapshot, pos, inner, line_h, char_w, 1, true, sgr);
+            }
+            if middle_released {
+                send_mouse(session, snapshot, pos, inner, line_h, char_w, 1, false, sgr);
+            }
+            if secondary_pressed {
+                send_mouse(session, snapshot, pos, inner, line_h, char_w, 2, true, sgr);
+            }
+            if secondary_released {
+                send_mouse(session, snapshot, pos, inner, line_h, char_w, 2, false, sgr);
+            }
+            // Drag motion uses button code 32 (motion with left held).
+            if snapshot.modes.mouse_drag && response.dragged() {
+                send_mouse(session, snapshot, pos, inner, line_h, char_w, 32, true, sgr);
+            }
+        } else if response.clicked() {
+            let point = selection_end(pos);
+            *selection = Some(TermSelection {
+                start: point,
+                end: point,
+            });
         } else if response.dragged() {
             if let Some(sel) = selection.as_mut() {
                 sel.end = selection_end(pos);
@@ -114,7 +150,7 @@ pub fn draw(
         }
     }
 
-    if focus && !ui.ctx().egui_wants_keyboard_input() {
+    if focus && !search.open && !ui.ctx().egui_wants_keyboard_input() {
         handle_input(ui, session, snapshot, preedit, session_id);
         if let Some(sel) = selection.as_ref() {
             if ui.input(|input| input.modifiers.command && input.key_pressed(Key::C)) {
@@ -126,20 +162,37 @@ pub fn draw(
         }
         if ui.input(|input| input.modifiers.command && input.key_pressed(Key::F)) {
             search.open = true;
+            search.focus_requested = true;
+            search.query.clear();
+            search.matches.clear();
+            search.index = 0;
         }
     }
 
-    // Wheel: scroll history unless the program owns the mouse.
+    // Wheel: scroll history unless the program owns the mouse. Fractional
+    // trackpad deltas are accumulated so slow gestures are not lost.
     if response.hovered() {
         let dy = ui.input(|input| input.smooth_scroll_delta.y);
-        if dy.abs() > 0.5 {
+        if dy.abs() > 0.0 {
             if mouse_reporting && !ui.input(|input| input.modifiers.shift) {
                 let button = if dy > 0.0 { 64 } else { 65 };
-                send_wheel(session, button, snapshot.modes.sgr_mouse);
+                send_wheel(
+                    session,
+                    snapshot,
+                    &inner,
+                    line_h,
+                    char_w,
+                    pos_or(pointer, inner),
+                    button,
+                );
             } else {
-                let delta = (dy / line_h).round() as i32;
-                session.scroll_delta(delta);
-                session.snapshot_into(snapshot);
+                *wheel_accum += dy / line_h;
+                let whole = wheel_accum.trunc() as i32;
+                if whole != 0 {
+                    *wheel_accum -= whole as f32;
+                    session.scroll_delta(whole);
+                    session.snapshot_into(snapshot);
+                }
             }
         }
     }
@@ -160,35 +213,6 @@ pub fn draw(
     for row in 0..rows {
         let abs_line = snapshot.absolute_line(row);
         let y = inner.top() + row as f32 * line_h;
-        // Selection band.
-        if let (Some(start), Some(end)) = (sel_start, sel_end) {
-            if abs_line >= start.0 && abs_line <= end.0 {
-                let first_col = if abs_line == start.0 { start.1 } else { 0 };
-                let last_col = if abs_line == end.0 { end.1 } else { cols };
-                if last_col > first_col {
-                    painter.rect_filled(
-                        Rect::from_min_size(
-                            Pos2::new(inner.left() + first_col as f32 * char_w, y),
-                            Vec2::new((last_col - first_col) as f32 * char_w, line_h),
-                        ),
-                        0.0,
-                        p.selection,
-                    );
-                }
-            }
-        }
-        if let Some(hit) = search_match {
-            if hit.line == abs_line {
-                painter.rect_filled(
-                    Rect::from_min_size(
-                        Pos2::new(inner.left() + hit.col as f32 * char_w, y),
-                        Vec2::new(hit.len as f32 * char_w, line_h),
-                    ),
-                    0.0,
-                    p.accent_soft,
-                );
-            }
-        }
 
         // Background pass first, so text is never painted over by a later
         // background run.
@@ -202,14 +226,58 @@ pub fn draw(
                 std::mem::swap(&mut fg, &mut bg);
             }
             if bg != default_bg {
+                let width = if cell.attrs & ATTR_WIDE != 0 {
+                    2.0 * char_w
+                } else {
+                    char_w
+                };
                 painter.rect_filled(
                     Rect::from_min_size(
                         Pos2::new(inner.left() + col as f32 * char_w, y),
-                        Vec2::new(char_w, line_h),
+                        Vec2::new(
+                            width.min(inner.right() - (inner.left() + col as f32 * char_w)),
+                            line_h,
+                        ),
                     ),
                     0.0,
                     bg,
                 );
+            }
+        }
+
+        // Selection and search are overlays on top of cell backgrounds.
+        if let (Some(start), Some(end)) = (sel_start, sel_end) {
+            if abs_line >= start.0 && abs_line <= end.0 {
+                let first_col = if abs_line == start.0 { start.1 } else { 0 };
+                let last_col = if abs_line == end.0 {
+                    (end.1 + 1).min(cols)
+                } else {
+                    cols
+                };
+                if last_col > first_col {
+                    painter.rect_filled(
+                        Rect::from_min_size(
+                            Pos2::new(inner.left() + first_col as f32 * char_w, y),
+                            Vec2::new((last_col - first_col) as f32 * char_w, line_h),
+                        ),
+                        0.0,
+                        p.selection,
+                    );
+                }
+            }
+        }
+        if search.open {
+            if let Some(hit) = search_match {
+                if hit.line == abs_line {
+                    painter.rect_filled(
+                        Rect::from_min_size(
+                            Pos2::new(inner.left() + hit.col as f32 * char_w, y),
+                            Vec2::new(hit.len as f32 * char_w, line_h),
+                        ),
+                        0.0,
+                        p.accent_soft,
+                    );
+                }
             }
         }
 
@@ -422,13 +490,15 @@ pub fn draw(
         let content_h = (history + rows) as f32 * line_h;
         let viewport_h = rows as f32 * line_h;
         let mut offset = (history.saturating_sub(snapshot.display_offset)) as f32 * line_h;
-        let before = offset;
         if crate::widgets::scrollbar(ui, track, content_h, viewport_h, &mut offset, theme) {
             let target = (offset / line_h).round() as i32;
-            let current = (history.saturating_sub(snapshot.display_offset)) as i32;
-            session.scroll_delta(target - current);
+            let current = history.saturating_sub(snapshot.display_offset) as i32;
+            // `Scroll::Delta` is positive-up: dragging the thumb toward the
+            // top must increase display_offset, i.e. decrease the offset from
+            // the top.
+            session.scroll_delta(current - target);
+            session.snapshot_into(snapshot);
         }
-        let _ = before;
     }
 
     // Terminal search overlay.
@@ -493,9 +563,27 @@ fn resolve(color: ColorSpec, p: &crate::theme::Palette) -> Color32 {
         ColorSpec::DefaultFg => p.text,
         ColorSpec::DefaultBg => p.terminal_bg,
         ColorSpec::Cursor => p.accent,
-        ColorSpec::Indexed(index) => p.ansi[(index as usize).min(15)],
+        ColorSpec::Indexed(index) => indexed_color(index, p),
         ColorSpec::Rgb(r, g, b) => Color32::from_rgb(r, g, b),
     }
+}
+
+/// xterm 256-color palette: 0-15 come from the app's ANSI theme, 16-231 are
+/// the 6×6×6 cube, 232-255 the grayscale ramp.
+fn indexed_color(index: u8, p: &crate::theme::Palette) -> Color32 {
+    const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+    if index < 16 {
+        return p.ansi[index as usize];
+    }
+    if index < 232 {
+        let offset = (index - 16) as usize;
+        let r = LEVELS[offset / 36];
+        let g = LEVELS[(offset % 36) / 6];
+        let b = LEVELS[offset % 6];
+        return Color32::from_rgb(r, g, b);
+    }
+    let value = 8 + (index - 232) * 10;
+    Color32::from_rgb(value, value, value)
 }
 
 fn brighten(fg: Color32, spec: ColorSpec, p: &crate::theme::Palette) -> Color32 {
@@ -696,7 +784,7 @@ fn selection_text(snapshot: &Snapshot, selection: &TermSelection) -> String {
         let row = row as usize;
         let first = if line == start_line { start_col } else { 0 };
         let last = if line == end_line {
-            end_col.min(snapshot.cols)
+            (end_col + 1).min(snapshot.cols)
         } else {
             snapshot.cols
         };
@@ -706,7 +794,11 @@ fn selection_text(snapshot: &Snapshot, selection: &TermSelection) -> String {
             if cell.attrs & ATTR_SPACER != 0 || cell.attrs & ATTR_LEADING_SPACER != 0 {
                 continue;
             }
-            text.push(cell.ch);
+            if let Some(cluster) = &cell.text {
+                text.push_str(cluster);
+            } else if cell.ch != '\0' {
+                text.push(cell.ch);
+            }
         }
         out.push_str(text.trim_end());
         if line != end_line {
@@ -737,7 +829,40 @@ fn send_mouse(
         let sequence = format!("\x1b[<{button};{col};{row}{suffix}");
         session.write(sequence.as_bytes());
     } else {
-        // Legacy X10 encoding: ESC [ M Cb Cx Cy with 32-biased bytes.
+        // Legacy X10 encoding: ESC [ M Cb Cx Cy with 32-biased bytes. A
+        // release is button 3 regardless of which button was held.
+        let legacy_button = if press { button } else { 3 };
+        let bytes = [
+            0x1b,
+            b'[',
+            b'M',
+            (32 + legacy_button).min(255) as u8,
+            (32 + col).min(255) as u8,
+            (32 + row).min(255) as u8,
+        ];
+        session.write(&bytes);
+    }
+}
+
+fn send_wheel(
+    session: &Session,
+    snapshot: &Snapshot,
+    inner: &Rect,
+    line_h: f32,
+    char_w: f32,
+    pos: Pos2,
+    button: u16,
+) {
+    let row = (((pos.y - inner.top()) / line_h).floor().max(0.0) as usize)
+        .min(snapshot.rows.saturating_sub(1))
+        + 1;
+    let col = (((pos.x - inner.left()) / char_w).floor().max(0.0) as usize)
+        .min(snapshot.cols.saturating_sub(1))
+        + 1;
+    if snapshot.modes.sgr_mouse {
+        let sequence = format!("\x1b[<{button};{col};{row}M");
+        session.write(sequence.as_bytes());
+    } else {
         let bytes = [
             0x1b,
             b'[',
@@ -750,14 +875,8 @@ fn send_mouse(
     }
 }
 
-fn send_wheel(session: &Session, button: u16, sgr: bool) {
-    if sgr {
-        let sequence = format!("\x1b[<{button};1;1M");
-        session.write(sequence.as_bytes());
-    } else {
-        let bytes = [0x1b, b'[', b'M', (32 + button).min(255) as u8, 33, 33];
-        session.write(&bytes);
-    }
+fn pos_or(pos: Option<Pos2>, inner: Rect) -> Pos2 {
+    pos.unwrap_or_else(|| inner.center())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -812,6 +931,11 @@ fn draw_search(
         if let Some(hit) = state.matches.first() {
             session.scroll_to_line(hit.line);
         }
+    }
+    if ui.input(|input| input.key_pressed(Key::Escape)) {
+        state.open = false;
+        state.matches.clear();
+        return;
     }
     if ui.input(|input| input.key_pressed(Key::Enter)) && !state.matches.is_empty() {
         state.index = (state.index + 1) % state.matches.len();
@@ -874,6 +998,7 @@ fn draw_search(
     paint_icon(ui.painter(), close.shrink(3.0), Icon::X, p.text3);
     if close_response.clicked() {
         state.open = false;
+        state.matches.clear();
     }
 }
 
@@ -927,5 +1052,23 @@ mod tests {
         assert!(cjk_galley.size().x > char_w);
         assert!(ascii_galley.size().x > 0.0);
         assert!(char_w > 0.0);
+    }
+
+    #[test]
+    fn indexed_colors_cover_the_256_palette() {
+        let palette = crate::theme::Theme::for_mode(lazecode_core::ThemeMode::Dark).palette;
+        assert_eq!(
+            indexed_color(196, &palette),
+            egui::Color32::from_rgb(255, 0, 0)
+        );
+        assert_eq!(
+            indexed_color(46, &palette),
+            egui::Color32::from_rgb(0, 255, 0)
+        );
+        assert_eq!(
+            indexed_color(232, &palette),
+            egui::Color32::from_rgb(8, 8, 8)
+        );
+        assert_eq!(indexed_color(15, &palette), palette.ansi[15]);
     }
 }

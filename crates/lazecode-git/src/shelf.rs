@@ -1,26 +1,22 @@
-//! Stash and shelves ("贮藏架"). Stash rides the porcelain (`git stash`);
-//! shelves are LazeCode-owned patch files under `.git/lazecode-shelves/`,
-//! applicable later (or partially) via `git apply`.
+//! Stash and shelves ("贮藏架"). Stash is native: stash/index/untracked
+//! commits, `refs/stash` reflog, apply/pop/drop, keep-index and untracked
+//! handling. Shelves are LazeCode-owned patch files under
+//! `.git/lazecode-shelves/`; save, full restore and path-filtered partial
+//! restore are all native (HEAD/worktree diff generation + patch applier).
 
 use std::path::Path;
 
 use anyhow::anyhow;
+use gix::hash::ObjectId;
+use gix::refs::transaction::{LogChange, PreviousValue, RefEdit, RefLog};
+use gix::refs::Target;
 
-use crate::{discover, Result};
-
-fn run(root: &Path, args: &[&str]) -> Result<String> {
-    let output = std::process::Command::new("git")
-        .current_dir(root)
-        .args(args)
-        .output()
-        .map_err(|err| anyhow!("git spawn failed: {err}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !output.status.success() {
-        return Err(anyhow!("{}{}", stdout.trim(), stderr.trim()));
-    }
-    Ok(stdout.trim().to_string())
-}
+use crate::ops::{open_index, remove_empty_parents, safe_worktree_join, CheckoutBackup};
+use crate::tree::{
+    blob_bytes, commit_tree_map, head_tree_map, index_map, index_state_from_tree, materialize_tree,
+    write_tree_from_index, TreeEntry, TreeMap,
+};
+use crate::{discover, workdir, Result};
 
 // ---------------- stash ----------------
 
@@ -32,17 +28,95 @@ pub struct StashEntry {
 }
 
 pub fn stash_list(root: &Path) -> Result<Vec<StashEntry>> {
-    let output = run(root, &["stash", "list", "--format=%gd%x09%gs"])?;
-    Ok(output
-        .lines()
-        .filter_map(|line| {
-            let (name, subject) = line.split_once('\t')?;
-            Some(StashEntry {
-                name: name.to_string(),
-                subject: subject.to_string(),
-            })
-        })
-        .collect())
+    let repo = discover(root)?;
+    let Ok(reference) = repo.find_reference("refs/stash") else {
+        return Ok(Vec::new());
+    };
+    let mut platform = reference.log_iter();
+    let Some(lines) = platform
+        .rev()
+        .map_err(|err| anyhow!("cannot read stash reflog: {err}"))?
+    else {
+        return Ok(Vec::new());
+    };
+    let mut entries = Vec::new();
+    for (index, line) in lines.enumerate() {
+        let line = line.map_err(|err| anyhow!("cannot parse stash reflog: {err}"))?;
+        entries.push(StashEntry {
+            name: format!("stash@{{{index}}}"),
+            subject: String::from_utf8_lossy(line.message.as_ref()).to_string(),
+        });
+    }
+    Ok(entries)
+}
+
+fn parse_stash_index(spec: &str) -> Option<usize> {
+    let inner = spec.strip_prefix("stash@{")?.strip_suffix('}')?;
+    inner.parse().ok()
+}
+
+fn stash_oid(repo: &gix::Repository, spec: &str) -> Result<ObjectId> {
+    if let Some(index) = parse_stash_index(spec) {
+        let reference = repo
+            .find_reference("refs/stash")
+            .map_err(|_| anyhow!("no stash entries"))?;
+        let mut platform = reference.log_iter();
+        let Some(lines) = platform
+            .rev()
+            .map_err(|err| anyhow!("cannot read stash reflog: {err}"))?
+        else {
+            anyhow::bail!("no stash entries");
+        };
+        for (current, line) in lines.enumerate() {
+            if current == index {
+                return Ok(line
+                    .map_err(|err| anyhow!("cannot parse stash reflog: {err}"))?
+                    .new_oid);
+            }
+        }
+        anyhow::bail!("stash entry {spec} does not exist");
+    }
+    Ok(repo
+        .rev_parse_single(gix::bstr::BStr::new(spec))
+        .map_err(|err| anyhow!("cannot resolve stash '{spec}': {err}"))?
+        .detach())
+}
+
+fn write_map_tree(repo: &gix::Repository, map: &TreeMap) -> Result<ObjectId> {
+    write_tree_from_index(repo, &index_state_from_tree(repo, map))
+}
+
+fn worktree_entry(
+    repo: &gix::Repository,
+    root: &Path,
+    path: &str,
+    absolute: &Path,
+) -> Result<Option<TreeEntry>> {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::symlink_metadata(absolute) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            let target = std::fs::read_link(absolute)?;
+            let data = target.to_string_lossy().into_owned().into_bytes();
+            Ok(Some(TreeEntry {
+                oid: repo.write_blob(&data)?.detach(),
+                mode: 0o120000,
+            }))
+        }
+        Ok(metadata) if metadata.is_file() => {
+            let data = crate::filter::clean_file(root, path, absolute)?;
+            Ok(Some(TreeEntry {
+                oid: repo.write_blob(&data)?.detach(),
+                mode: if metadata.permissions().mode() & 0o111 != 0 {
+                    0o100755
+                } else {
+                    0o100644
+                },
+            }))
+        }
+        Ok(_) => anyhow::bail!("{path} is not a regular file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub fn stash_push(
@@ -51,49 +125,372 @@ pub fn stash_push(
     keep_index: bool,
     include_untracked: bool,
 ) -> Result<String> {
-    let mut args: Vec<&str> = vec!["stash", "push"];
+    let repo = discover(root)?;
+    let workdir = workdir(&repo)?;
+    let head = repo.head()?;
+    if head.is_unborn() {
+        anyhow::bail!("cannot stash without a commit");
+    }
+    let head_id = repo.head_id()?.detach();
+    let head_map = head_tree_map(&repo)?;
+    let index_file = open_index(&repo)?;
+    let index_map = index_map(&index_file);
+    drop(index_file);
+
+    let snapshot = crate::status::snapshot(root)?;
+    let mut work_map = head_map.clone();
+    let mut untracked_map = TreeMap::new();
+    for change in &snapshot.changes {
+        if change.conflicted {
+            anyhow::bail!("cannot stash unresolved conflicts");
+        }
+        if change.untracked && !include_untracked {
+            continue;
+        }
+        let absolute = safe_worktree_join(&workdir, &change.path)?;
+        let entry = worktree_entry(&repo, root, &change.path, &absolute)?;
+        if change.untracked {
+            if let Some(entry) = entry {
+                untracked_map.insert(change.path.clone(), entry);
+            }
+            continue;
+        }
+        match entry {
+            Some(entry) => {
+                work_map.insert(change.path.clone(), entry);
+            }
+            None => {
+                work_map.remove(&change.path);
+            }
+        }
+    }
+    if work_map == head_map && index_map == head_map && untracked_map.is_empty() {
+        anyhow::bail!("No local changes to save");
+    }
+
+    let branch = head
+        .referent_name()
+        .map(|name| name.shorten().to_string())
+        .unwrap_or_else(|| "HEAD".to_string());
+    let head_commit = repo.find_commit(head_id)?;
+    let message_text = head_commit.message_raw()?.to_string();
+    let subject = message_text.lines().next().unwrap_or("").trim().to_string();
+    let short = crate::short_id(&head_id);
+    let stash_message = match message.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(text) => format!("On {branch}: {text}"),
+        None => format!("WIP on {branch}: {short} {subject}"),
+    };
+
+    let index_tree = write_map_tree(&repo, &index_map)?;
+    let index_commit = repo
+        .new_commit(
+            format!("index on {branch}: {short} {subject}"),
+            index_tree,
+            [head_id],
+        )?
+        .id()
+        .detach();
+    let untracked_commit = if untracked_map.is_empty() {
+        None
+    } else {
+        let tree = write_map_tree(&repo, &untracked_map)?;
+        Some(
+            repo.new_commit(
+                format!("untracked files on {branch}: {short} {subject}"),
+                tree,
+                std::iter::empty::<ObjectId>(),
+            )?
+            .id()
+            .detach(),
+        )
+    };
+    let work_tree = write_map_tree(&repo, &work_map)?;
+    let mut parents = vec![head_id, index_commit];
+    if let Some(untracked) = untracked_commit {
+        parents.push(untracked);
+    }
+    let stash_id = repo
+        .new_commit(&stash_message, work_tree, parents)?
+        .id()
+        .detach();
+    let edit = RefEdit::update_with_log(
+        "refs/stash".try_into()?,
+        Target::Object(stash_id),
+        PreviousValue::Any,
+        LogChange {
+            mode: RefLog::AndReference,
+            force_create_reflog: true,
+            message: stash_message.clone().into(),
+        },
+    );
+    repo.edit_reference(edit)?;
+
     if keep_index {
-        args.push("--keep-index");
+        switch_worktree(&repo, &workdir, &index_map, &head_map)?;
+    } else {
+        crate::history::reset(root, "HEAD", crate::history::ResetMode::Hard)?;
     }
     if include_untracked {
-        // `git stash -u`：未跟踪文件一并入栈，对齐 IDE「Include untracked
-        // files」选项；stash push 默认不触碰 untracked。
-        args.push("-u");
+        for path in untracked_map.keys() {
+            let absolute = safe_worktree_join(&workdir, path)?;
+            let _ = std::fs::remove_file(&absolute);
+            remove_empty_parents(&workdir, Path::new(path));
+        }
     }
-    if let Some(message) = message.map(str::trim).filter(|m| !m.is_empty()) {
-        args.push("-m");
-        args.push(message);
-    }
-    run(root, &args)
+    Ok(format!(
+        "Saved working directory and index state {stash_message}"
+    ))
 }
 
-/// Files touched by a stash entry, for previewing before applying.
-/// `--include-untracked` 让 `-u` 贮藏的未跟踪文件也出现在清单里。
+/// Apply `target` to the worktree, deleting tracked paths that are no longer
+/// present. Used by `stash --keep-index`; the index itself is untouched.
+fn switch_worktree(
+    repo: &gix::Repository,
+    workdir: &Path,
+    target: &TreeMap,
+    old: &TreeMap,
+) -> Result<()> {
+    for path in old.keys().chain(target.keys()) {
+        safe_worktree_join(workdir, path)?;
+    }
+    let backup = CheckoutBackup::capture(repo, workdir, old.keys().chain(target.keys()))?;
+    let result = (|| -> Result<()> {
+        for path in old.keys() {
+            if target.contains_key(path) {
+                continue;
+            }
+            let absolute = safe_worktree_join(workdir, path)?;
+            match std::fs::symlink_metadata(&absolute) {
+                Ok(metadata) if metadata.is_dir() => {
+                    anyhow::bail!("refusing to remove directory {}", absolute.display());
+                }
+                Ok(_) => {
+                    std::fs::remove_file(&absolute)?;
+                    remove_empty_parents(workdir, Path::new(path));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        materialize_tree(repo, target)
+    })();
+    if let Err(error) = result {
+        if let Err(restore_error) = backup.restore() {
+            log::error!("stash worktree rollback failed: {restore_error}");
+        }
+        return Err(error);
+    }
+    backup.discard();
+    Ok(())
+}
+
+fn stash_trees(
+    repo: &gix::Repository,
+    stash: ObjectId,
+) -> Result<(ObjectId, TreeMap, TreeMap, TreeMap)> {
+    let commit = repo.find_commit(stash)?;
+    let parents: Vec<ObjectId> = commit.parent_ids().map(|id| id.detach()).collect();
+    let base_id = *parents
+        .first()
+        .ok_or_else(|| anyhow!("stash has no base commit"))?;
+    let base = commit_tree_map(repo, base_id)?;
+    let index = match parents.get(1) {
+        Some(index) => commit_tree_map(repo, *index)?,
+        None => base.clone(),
+    };
+    let mut new = commit_tree_map(repo, stash)?;
+    if let Some(untracked) = parents.get(2) {
+        new.extend(commit_tree_map(repo, *untracked)?);
+    }
+    Ok((base_id, base, index, new))
+}
+
 pub fn stash_files(root: &Path, stash: &str) -> Result<Vec<String>> {
-    let output = run(
-        root,
-        &[
-            "stash",
-            "show",
-            "--include-untracked",
-            "--name-only",
-            "--format=",
-            stash,
-        ],
-    )?;
-    Ok(output.lines().map(str::to_string).collect())
+    let repo = discover(root)?;
+    let stash = stash_oid(&repo, stash)?;
+    let (_, base, _, new) = stash_trees(&repo, stash)?;
+    let mut paths = Vec::new();
+    for path in new.keys().chain(base.keys()) {
+        if new.get(path) != base.get(path) {
+            paths.push(path.clone());
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn read_worktree(path: &Path) -> Result<Option<(Vec<u8>, u32)>> {
+    use std::os::unix::fs::PermissionsExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Ok(Some((
+            std::fs::read_link(path)?
+                .to_string_lossy()
+                .into_owned()
+                .into_bytes(),
+            0o120000,
+        ))),
+        Ok(metadata) if metadata.is_file() => Ok(Some((
+            std::fs::read(path)?,
+            if metadata.permissions().mode() & 0o111 != 0 {
+                0o100755
+            } else {
+                0o100644
+            },
+        ))),
+        Ok(_) => anyhow::bail!("{} is not a regular file", path.display()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn entry_worktree(
+    repo: &gix::Repository,
+    root: &Path,
+    path: &str,
+    entry: &TreeEntry,
+) -> Result<(Vec<u8>, u32)> {
+    let data = blob_bytes(repo, entry.oid)?;
+    if entry.mode == 0o120000 {
+        Ok((data, entry.mode))
+    } else {
+        let data = crate::filter::smudge(root, path, &entry.oid.to_string(), data)?;
+        Ok((data, entry.mode))
+    }
+}
+
+enum StashAction {
+    Write { mode: u32, data: Vec<u8> },
+    Delete,
 }
 
 pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
-    run(root, &["stash", "apply", stash])
+    let repo = discover(root)?;
+    let workdir = workdir(&repo)?;
+    let stash_id = stash_oid(&repo, stash)?;
+    let (_, base, index, new) = stash_trees(&repo, stash_id)?;
+    let mut actions: Vec<(String, StashAction)> = Vec::new();
+    for path in new.keys().chain(base.keys()) {
+        let old = base.get(path);
+        let new_entry = new.get(path);
+        if old == new_entry {
+            continue;
+        }
+        let current = read_worktree(&safe_worktree_join(&workdir, path)?)?;
+        let old_data = old
+            .map(|entry| entry_worktree(&repo, root, path, entry))
+            .transpose()?;
+        let index_data = index
+            .get(path)
+            .map(|entry| entry_worktree(&repo, root, path, entry))
+            .transpose()?;
+        let new_data = new_entry
+            .map(|entry| entry_worktree(&repo, root, path, entry))
+            .transpose()?;
+        if current == new_data {
+            continue;
+        }
+        if current != old_data && current != index_data {
+            anyhow::bail!("stash apply conflict at '{path}'");
+        }
+        match new_entry {
+            Some(entry) => actions.push((
+                path.clone(),
+                StashAction::Write {
+                    mode: entry.mode,
+                    data: new_data
+                        .as_ref()
+                        .map(|(data, _)| data.clone())
+                        .unwrap_or_default(),
+                },
+            )),
+            None => actions.push((path.clone(), StashAction::Delete)),
+        }
+    }
+    if actions.is_empty() {
+        return Ok("stash applied".to_string());
+    }
+    let backup = CheckoutBackup::capture(&repo, &workdir, actions.iter().map(|(path, _)| path))?;
+    let result = (|| -> Result<()> {
+        for (path, action) in actions {
+            let absolute = safe_worktree_join(&workdir, &path)?;
+            match action {
+                StashAction::Delete => {
+                    std::fs::remove_file(&absolute)?;
+                    remove_empty_parents(&workdir, Path::new(&path));
+                }
+                StashAction::Write { mode, data } => {
+                    if let Some(parent) = absolute.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    if mode == 0o120000 {
+                        let _ = std::fs::remove_file(&absolute);
+                        std::os::unix::fs::symlink(
+                            String::from_utf8_lossy(&data).to_string(),
+                            &absolute,
+                        )?;
+                    } else {
+                        lazecode_fs::file::write_atomic(&absolute, &data)?;
+                        use std::os::unix::fs::PermissionsExt;
+                        let perms = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
+                        std::fs::set_permissions(
+                            &absolute,
+                            std::fs::Permissions::from_mode(perms),
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if let Err(restore_error) = backup.restore() {
+            log::error!("stash apply rollback failed: {restore_error}");
+        }
+        return Err(error);
+    }
+    backup.discard();
+    Ok("stash applied".to_string())
 }
 
 pub fn stash_pop(root: &Path, stash: &str) -> Result<String> {
-    run(root, &["stash", "pop", stash])
+    let result = stash_apply(root, stash)?;
+    stash_drop(root, stash)?;
+    Ok(result)
 }
 
 pub fn stash_drop(root: &Path, stash: &str) -> Result<String> {
-    run(root, &["stash", "drop", stash])
+    let index = parse_stash_index(stash).ok_or_else(|| anyhow!("invalid stash name '{stash}'"))?;
+    let repo = discover(root)?;
+    let common = repo.common_dir();
+    let log_path = common.join("logs/refs/stash");
+    let content =
+        std::fs::read_to_string(&log_path).map_err(|_| anyhow!("no stash reflog entries"))?;
+    let mut lines: Vec<&str> = content.lines().collect();
+    if index >= lines.len() {
+        anyhow::bail!("stash entry {stash} does not exist");
+    }
+    lines.remove(lines.len() - 1 - index);
+    let ref_path = common.join("refs/stash");
+    if lines.is_empty() {
+        // Delete through gix first so a packed refs/stash cannot reappear
+        // when only the loose file is removed.
+        if let Ok(reference) = repo.find_reference("refs/stash") {
+            let _ = reference.delete();
+        }
+        let _ = std::fs::remove_file(&log_path);
+        let _ = std::fs::remove_file(&ref_path);
+        return Ok(format!("Dropped {stash}"));
+    }
+    let mut log = lines.join("\n");
+    log.push('\n');
+    lazecode_fs::file::write_atomic(&log_path, log.as_bytes())?;
+    let top = lines
+        .last()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .ok_or_else(|| anyhow!("corrupt stash reflog"))?;
+    lazecode_fs::file::write_atomic(&ref_path, format!("{top}\n").as_bytes())?;
+    Ok(format!("Dropped {stash}"))
 }
 
 // ---------------- shelves ----------------
@@ -113,6 +510,29 @@ fn shelves_dir(root: &Path) -> std::path::PathBuf {
         Ok(repo) => repo.git_dir().join(SHELVES_DIR),
         Err(_) => Path::new(".git").join(SHELVES_DIR),
     }
+}
+
+/// Shelf names become file names under `.git/lazecode-shelves`. Reject path
+/// separators, `..`, control characters and the reserved `.`/`..` names so a
+/// rename/import cannot escape that directory.
+fn sanitize_shelf_name(name: &str) -> Result<String> {
+    let name = name.trim();
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains("..")
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains(':')
+        || name.chars().any(char::is_control)
+    {
+        anyhow::bail!("unsuitable shelf name '{name}'");
+    }
+    Ok(name.to_string())
+}
+
+fn shelf_path(root: &Path, name: &str) -> Result<std::path::PathBuf> {
+    Ok(shelves_dir(root).join(format!("{}.patch", sanitize_shelf_name(name)?)))
 }
 
 pub fn shelf_list(root: &Path) -> Result<Vec<ShelfEntry>> {
@@ -162,23 +582,18 @@ pub fn shelf_save(root: &Path, name: &str) -> Result<()> {
 }
 
 pub fn shelf_save_paths(root: &Path, name: &str, paths: &[String]) -> Result<()> {
-    let name = name.trim();
-    if name.is_empty() || name.contains("..") || name.contains('/') {
-        anyhow::bail!("unsuitable shelf name '{name}'");
-    }
-    let output = if paths.is_empty() {
-        // 全树架藏：`git diff HEAD` 只覆盖已跟踪变更，未跟踪新文件必须
-        // 单独以 --no-index 补进补丁（否则架藏后它们仍散落在工作区）。
-        let tracked = run(root, &["-c", "core.quotepath=false", "diff", "HEAD"])?;
-        let mut all = patch_paths(&tracked);
-        all.extend(list_untracked(root));
-        if all.is_empty() {
-            anyhow::bail!("nothing to shelve (no tracked changes)");
-        }
-        diff_patch_paths(root, &all)?
+    let name = sanitize_shelf_name(name)?;
+    let name = name.as_str();
+    let selected: Vec<String> = if paths.is_empty() {
+        crate::status::snapshot(root)?
+            .changes
+            .into_iter()
+            .map(|change| change.path)
+            .collect()
     } else {
-        diff_patch_paths(root, paths)?
+        paths.to_vec()
     };
+    let output = diff_patch_paths(root, &selected)?;
     if output.trim().is_empty() {
         anyhow::bail!("nothing to shelve (no tracked changes)");
     }
@@ -223,73 +638,121 @@ pub fn shelf_save_paths(root: &Path, name: &str, paths: &[String]) -> Result<()>
 /// untracked file (they never appear in `git diff`). Port of the stable
 /// version's patch builder used by shelve/copy-patch flows.
 pub fn diff_patch_paths(root: &Path, paths: &[String]) -> Result<String> {
-    let cleaned: Vec<&str> = paths
-        .iter()
-        .map(|path| path.trim())
-        .filter(|path| !path.is_empty())
-        .collect();
-    if cleaned.is_empty() {
+    if paths.is_empty() {
         return Ok(String::new());
     }
-    let mut tracked_args: Vec<&str> = vec![
-        "-c",
-        "core.quotepath=false",
-        "diff",
-        "--no-color",
-        "--no-ext-diff",
-        "HEAD",
-        "--",
-    ];
-    tracked_args.extend(cleaned.iter().copied());
-    let output = run(root, &tracked_args)?;
-    let mut patch = output;
-
-    // 未跟踪文件：一次 `git ls-files -z` 批量判定已跟踪集合（稳定版的
-    // 优化：避免逐文件 spawn），差集中的普通文件逐个生成 /dev/null 补丁。
-    let mut ls_args: Vec<&str> = vec!["-c", "core.quotepath=false", "ls-files", "-z", "--"];
-    ls_args.extend(cleaned.iter().copied());
-    let tracked_out = run_raw(root, &ls_args)?;
-    let tracked: std::collections::HashSet<String> = tracked_out
-        .split('\0')
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| {
-            entry
-                .trim_start_matches('"')
-                .trim_end_matches('"')
-                .to_string()
-        })
-        .collect();
-    for path in cleaned {
-        if tracked.contains(path) || !root.join(path).is_file() {
+    let repo = discover(root)?;
+    let workdir = workdir(&repo)?;
+    let head_map = head_tree_map(&repo)?;
+    let mut output = String::new();
+    for raw in paths {
+        let raw = raw.trim();
+        if raw.is_empty() {
             continue;
         }
-        // --no-index 有差异时退出码为 1，属正常输出路径。
-        if let Ok(text) = run_diff_allow_one(
-            root,
-            &[
-                "-c",
-                "core.quotepath=false",
-                "diff",
-                "--no-color",
-                "--no-ext-diff",
-                "--no-index",
-                "--",
-                "/dev/null",
-                path,
-            ],
-        ) {
-            // `run` 会 trim 尾部换行；补丁节之间必须以换行分隔，
-            // 否则 git apply 报 "corrupt patch"。
-            if !patch.is_empty() && !patch.ends_with('\n') {
-                patch.push('\n');
+        let relative = crate::ops::validate_repo_path(raw)?;
+        let path = relative.to_string_lossy().replace('\\', "/");
+        let absolute = safe_worktree_join(&workdir, &path)?;
+        let old = head_map.get(&path).copied();
+        let new = worktree_entry(&repo, root, &path, &absolute)?;
+        if old == new {
+            continue;
+        }
+        output.push_str(&render_patch_section(&repo, &path, old, new)?);
+    }
+    Ok(output)
+}
+
+fn render_patch_section(
+    repo: &gix::Repository,
+    path: &str,
+    old: Option<TreeEntry>,
+    new: Option<TreeEntry>,
+) -> Result<String> {
+    let mut out = String::new();
+    out.push_str(&format!("diff --git a/{path} b/{path}\n"));
+    match (old, new) {
+        (None, Some(entry)) => out.push_str(&format!("new file mode {:06o}\n", entry.mode)),
+        (Some(entry), None) => out.push_str(&format!("deleted file mode {:06o}\n", entry.mode)),
+        (Some(old), Some(new)) if old.mode != new.mode => {
+            out.push_str(&format!(
+                "old mode {:06o}\nnew mode {:06o}\n",
+                old.mode, new.mode
+            ));
+        }
+        _ => {}
+    }
+    match old {
+        Some(_) => out.push_str(&format!("--- a/{path}\n")),
+        None => out.push_str("--- /dev/null\n"),
+    }
+    match new {
+        Some(_) => out.push_str(&format!("+++ b/{path}\n")),
+        None => out.push_str("+++ /dev/null\n"),
+    }
+
+    let old_data = old
+        .map(|entry| blob_bytes(repo, entry.oid))
+        .transpose()?
+        .unwrap_or_default();
+    let new_data = new
+        .map(|entry| blob_bytes(repo, entry.oid))
+        .transpose()?
+        .unwrap_or_default();
+    if old_data == new_data {
+        return Ok(out);
+    }
+    let is_binary = |bytes: &[u8]| bytes.iter().take(8000).any(|byte| *byte == 0);
+    if is_binary(&old_data) || is_binary(&new_data) {
+        anyhow::bail!("binary files are not supported in shelf patches");
+    }
+    let old_text = std::str::from_utf8(&old_data)
+        .map_err(|_| anyhow!("non-UTF8 files are not supported in shelf patches"))?;
+    let new_text = std::str::from_utf8(&new_data)
+        .map_err(|_| anyhow!("non-UTF8 files are not supported in shelf patches"))?;
+    let diff = lazecode_text::diff::diff_text_with_context(old_text, new_text, 3);
+    let old_total = text_line_count(old_text);
+    let new_total = text_line_count(new_text);
+    let old_no_newline = !old_text.is_empty() && !old_text.ends_with('\n');
+    let new_no_newline = !new_text.is_empty() && !new_text.ends_with('\n');
+    for hunk in &diff.hunks {
+        out.push_str(&hunk.header);
+        out.push('\n');
+        for line in &hunk.lines {
+            let sign = match line.kind {
+                lazecode_text::diff::DiffLineKind::Context => ' ',
+                lazecode_text::diff::DiffLineKind::Add => '+',
+                lazecode_text::diff::DiffLineKind::Delete => '-',
+            };
+            out.push(sign);
+            out.push_str(&line.text);
+            out.push('\n');
+            let no_newline = match line.kind {
+                lazecode_text::diff::DiffLineKind::Context => {
+                    (old_no_newline && line.old_lineno == Some(old_total as u32))
+                        || (new_no_newline && line.new_lineno == Some(new_total as u32))
+                }
+                lazecode_text::diff::DiffLineKind::Delete => {
+                    old_no_newline && line.old_lineno == Some(old_total as u32)
+                }
+                lazecode_text::diff::DiffLineKind::Add => {
+                    new_no_newline && line.new_lineno == Some(new_total as u32)
+                }
+            };
+            if no_newline {
+                out.push_str("\\ No newline at end of file\n");
             }
-            patch.push_str(&text);
         }
     }
-    if !patch.is_empty() && !patch.ends_with('\n') {
-        patch.push('\n');
+    Ok(out)
+}
+
+fn text_line_count(text: &str) -> usize {
+    if text.is_empty() {
+        0
+    } else {
+        text.matches('\n').count() + usize::from(!text.ends_with('\n'))
     }
-    Ok(patch)
 }
 
 /// Paths touched by a shelf patch (the `b/` side of each `diff --git`
@@ -315,68 +778,11 @@ fn patch_paths(patch: &str) -> Vec<String> {
     paths
 }
 
-fn run_raw(root: &Path, args: &[&str]) -> Result<String> {
-    let output = std::process::Command::new("git")
-        .current_dir(root)
-        .args(args)
-        .output()
-        .map_err(|err| anyhow!("git spawn failed: {err}"))?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// `--no-index` 差异比较以退出码 1 表示「有差异」，属预期结果；
-/// 只有其他码才算失败（对齐稳定版 run_git_diff 的语义）。
-fn run_diff_allow_one(root: &Path, args: &[&str]) -> Result<String> {
-    let output = std::process::Command::new("git")
-        .current_dir(root)
-        .args(args)
-        .output()
-        .map_err(|err| anyhow!("git spawn failed: {err}"))?;
-    let code = output.status.code();
-    if !output.status.success() && code != Some(1) {
-        return Err(anyhow!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// 未跟踪文件清单（respect gitignore），供全树架藏补齐 diff 看不到的
-/// 新文件。
-fn list_untracked(root: &Path) -> Vec<String> {
-    match run_raw(
-        root,
-        &[
-            "-c",
-            "core.quotepath=false",
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ],
-    ) {
-        Ok(out) => out
-            .split('\0')
-            .filter(|entry| !entry.is_empty() && root.join(entry).is_file())
-            .map(str::to_string)
-            .collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
 pub fn shelf_delete(root: &Path, name: &str) -> Result<()> {
     // 稳定版语义：删除先进入「Recently Deleted」，可恢复、可彻底清除。
+    let name = sanitize_shelf_name(name)?;
     let dir = shelves_dir(root);
-    let file = dir.join(format!("{}.patch", name.trim()));
+    let file = dir.join(format!("{name}.patch"));
     let deleted_dir = dir.join("deleted");
     std::fs::create_dir_all(&deleted_dir)
         .map_err(|err| anyhow!("cannot create deleted dir: {err}"))?;
@@ -384,7 +790,7 @@ pub fn shelf_delete(root: &Path, name: &str) -> Result<()> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let target = deleted_dir.join(format!("{}.{}.patch", name.trim(), stamp));
+    let target = deleted_dir.join(format!("{name}.{stamp}.patch"));
     std::fs::rename(&file, &target).map_err(|err| anyhow!("cannot delete shelf: {err}"))
 }
 
@@ -420,6 +826,7 @@ pub fn shelf_list_deleted(root: &Path) -> Result<Vec<ShelfEntry>> {
 
 /// 从「Recently Deleted」恢复架藏（重命名回主目录）。
 pub fn shelf_restore_deleted(root: &Path, name: &str) -> Result<()> {
+    let name = sanitize_shelf_name(name)?;
     let dir = shelves_dir(root);
     let deleted_dir = dir.join("deleted");
     let mut best: Option<(std::path::PathBuf, u64)> = None;
@@ -430,7 +837,7 @@ pub fn shelf_restore_deleted(root: &Path, name: &str) -> Result<()> {
                 continue;
             };
             if let Some((deleted_name, stamp)) = base.rsplit_once('.') {
-                if deleted_name == name.trim() {
+                if deleted_name == name {
                     let stamp = stamp.parse::<u64>().unwrap_or(0);
                     if best
                         .as_ref()
@@ -445,7 +852,7 @@ pub fn shelf_restore_deleted(root: &Path, name: &str) -> Result<()> {
     let Some((path, _)) = best else {
         return Err(anyhow!("no deleted shelf named {name}"));
     };
-    let target = dir.join(format!("{}.patch", name.trim()));
+    let target = dir.join(format!("{name}.patch"));
     if target.exists() {
         return Err(anyhow!("a shelf named {name} already exists"));
     }
@@ -454,6 +861,7 @@ pub fn shelf_restore_deleted(root: &Path, name: &str) -> Result<()> {
 
 /// 彻底删除「最近删除」里的架藏（不可恢复）。
 pub fn shelf_purge_deleted(root: &Path, name: &str) -> Result<()> {
+    let name = sanitize_shelf_name(name)?;
     let deleted_dir = shelves_dir(root).join("deleted");
     let mut removed = false;
     if let Ok(read) = std::fs::read_dir(&deleted_dir) {
@@ -464,7 +872,7 @@ pub fn shelf_purge_deleted(root: &Path, name: &str) -> Result<()> {
             };
             if base
                 .rsplit_once('.')
-                .is_some_and(|(deleted_name, _)| deleted_name == name.trim())
+                .is_some_and(|(deleted_name, _)| deleted_name == name)
             {
                 let _ = std::fs::remove_file(item.path());
                 removed = true;
@@ -480,9 +888,8 @@ pub fn shelf_purge_deleted(root: &Path, name: &str) -> Result<()> {
 
 /// 重命名架藏（重命名主目录下的补丁文件）。
 pub fn shelf_rename(root: &Path, from: &str, to: &str) -> Result<()> {
-    let dir = shelves_dir(root);
-    let from = dir.join(format!("{}.patch", from.trim()));
-    let to = dir.join(format!("{}.patch", to.trim()));
+    let from = shelf_path(root, from)?;
+    let to = shelf_path(root, to)?;
     if !from.exists() {
         return Err(anyhow!("no shelf to rename"));
     }
@@ -493,7 +900,7 @@ pub fn shelf_rename(root: &Path, from: &str, to: &str) -> Result<()> {
 }
 
 pub fn shelf_patch(root: &Path, name: &str) -> Result<String> {
-    let file = shelves_dir(root).join(format!("{}.patch", name.trim()));
+    let file = shelf_path(root, name)?;
     std::fs::read_to_string(&file).map_err(|err| anyhow!("cannot read shelf: {err}"))
 }
 
@@ -509,62 +916,51 @@ pub fn shelf_restore(root: &Path, name: &str, delete_after: bool) -> Result<()> 
 
 /// Apply only the hunks of the shelf that touch `paths` (partial apply).
 pub fn shelf_restore_partial(root: &Path, name: &str, paths: &[String]) -> Result<()> {
-    let mut patch = shelf_patch(root, name)?;
-    if !patch.ends_with('\n') {
-        patch.push('\n');
+    let patch = shelf_patch(root, name)?;
+    let selected: std::collections::HashSet<&str> = paths
+        .iter()
+        .map(|path| path.trim())
+        .filter(|path| !path.is_empty())
+        .collect();
+    if selected.is_empty() {
+        return Ok(());
     }
-    // git apply supports path selection below `--include`/`--exclude`.
-    let mut args: Vec<&str> = vec!["apply", "--whitespace=nowarn", "--check"];
-    for path in paths {
-        args.push("--include");
-        args.push(path);
+    let mut filtered = String::new();
+    let mut starts = Vec::new();
+    let mut offset = 0usize;
+    for line in patch.split_inclusive('\n') {
+        if line.starts_with("diff --git ") {
+            starts.push(offset);
+        }
+        offset += line.len();
     }
-    let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(root).args(&args).arg("-");
-    use std::io::Write;
-    let mut child = cmd
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .expect("piped")
-        .write_all(patch.as_bytes())?;
-    let check = child.wait_with_output()?;
-    if !check.status.success() {
-        return Err(anyhow!(
-            "partial apply does not match: {}",
-            String::from_utf8_lossy(&check.stderr).trim()
-        ));
+    starts.push(patch.len());
+    if starts.len() == 1 {
+        // No `diff --git` headers: treat the whole patch as one section.
+        if patch_paths(&patch)
+            .iter()
+            .any(|path| selected.contains(path.as_str()))
+        {
+            filtered.push_str(&patch);
+        }
+    } else {
+        for window in starts.windows(2) {
+            let section = &patch[window[0]..window[1]];
+            if patch_paths(section)
+                .iter()
+                .any(|path| selected.contains(path.as_str()))
+            {
+                if !filtered.is_empty() && !filtered.ends_with('\n') {
+                    filtered.push('\n');
+                }
+                filtered.push_str(section);
+            }
+        }
     }
-    // Checked, now really apply.
-    let mut args: Vec<&str> = vec!["apply", "--whitespace=nowarn"];
-    for path in paths {
-        args.push("--include");
-        args.push(path);
+    if filtered.trim().is_empty() {
+        return Ok(());
     }
-    let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(root).args(&args).arg("-");
-    let mut child = cmd
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .expect("piped")
-        .write_all(patch.as_bytes())?;
-    let applied = child.wait_with_output()?;
-    if !applied.status.success() {
-        return Err(anyhow!(
-            "partial apply failed: {}",
-            String::from_utf8_lossy(&applied.stderr).trim()
-        ));
-    }
-    Ok(())
+    crate::apply_patch(root, &filtered, false, false)
 }
 
 /// Import an external `.patch` file into the shelf repository.
@@ -578,11 +974,13 @@ pub fn shelf_import_patch(root: &Path, patch_path: &Path, name: Option<&str>) ->
         anyhow::bail!("patch file is empty");
     }
     let shelf_name = match name.filter(|n| !n.trim().is_empty()) {
-        Some(n) => n.trim().to_string(),
-        None => patch_path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Imported Patch".to_string()),
+        Some(n) => sanitize_shelf_name(n)?,
+        None => sanitize_shelf_name(
+            &patch_path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Imported Patch".to_string()),
+        )?,
     };
     let dir = shelves_dir(root);
     std::fs::create_dir_all(&dir)?;

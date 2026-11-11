@@ -677,7 +677,7 @@ tree-sitter 不用；**LSP 只保留 11 种语言，且是可选增强**（客�
 | commit/tree/blob merge 原语 | 可用 | 用原语编排 |
 | worktree 创建、submodule 列表 | 可用 | 直接用；remove/edit 自己实现 |
 | push | 未实现 | 自己实现协议 |
-| checkout/switch/restore/reset 编排 | 未实现 | 自己实现 |
+| checkout/switch/restore/reset 编排 | checkout/switch/reset 已实现（事务化回滚 + clean/smudge）；restore 仍走 porcelain | 自己实现 |
 | merge 工作流（MERGE_HEAD/冲突） | 未实现 | 自己实现 |
 | rebase | 未实现 | 自己实现 sequencer |
 | cherry-pick/revert | 未实现 | 自己实现 sequencer |
@@ -689,7 +689,7 @@ tree-sitter 不用；**LSP 只保留 11 种语言，且是可选增强**（客�
 | blame | 基础单文件 commit annotation 可用 | `gix-blame` 缺 worktree changes、shallow、rename、ignore、完整 corner cases；需补或限范围 |
 | FETCH_HEAD 写回 | 未实现 | 自己实现 |
 | submodule 编辑/worktree 删除 | 未实现 | 自己实现 |
-| LFS | 无 | 自实现 status/pull/track + smudge/clean（§7.4）；不执行外部 `git lfs` 数据路径 |
+| LFS | clean/smudge + `.git/lfs/objects` 本地对象存储、status/track 已实现；远程 pull 未实现（网络 transport 里程碑） | 自实现 status/pull/track + smudge/clean（§7.4）；不执行外部 `git lfs` 数据路径 |
 | signed commits/tags | 未实现 | 暂不支持（当前产品未要求） |
 | SSH | 调用外部 `ssh` | 默认用 `russh` 实现 transport；系统 OpenSSH 仅非默认 `system-ssh-compat` feature |
 | HTTPS | reqwest/rustls | 可用 |
@@ -793,7 +793,7 @@ tree-sitter 不用；**LSP 只保留 11 种语言，且是可选增强**（客�
   - **smudge**：checkout 时把 pointer 换成对象内容，大文件流式写盘；
   - **clean**：add/commit 时把大文件换成 pointer，写入对象存储；
   - filter 接入 `checkout`/`index` 流程，支持 `filter.lfs` 配置；不能依赖外部 `git-lfs`。
-- **实现层事实**：`gix-worktree-state 0.90` 的 checkout 已支持 `text`/`ident`/clean/smudge/filter process（crate-status [x]），但**没有 submodule/sparse 目录**；`gix-filter` 自身 base 仍多为 [ ]。LFS smudge/clean 只能接 `gix-worktree-state` 这一层并自写 filter 进程，不能假设高层 `gix` checkout 或 `gix-filter` 已提供完整 LFS 管线。
+- **实现层事实**：`gix-worktree-state 0.90` 的 checkout 已支持 `text`/`ident`/clean/smudge/filter process（crate-status [x]），但**没有 submodule/sparse 目录**；`gix-filter` 自身 base 仍多为 [ ]。本分支在 `lazecode-git/src/filter.rs` 自实现了 attributes/config 查询、用户 filter 进程、LFS pointer 与本地对象存储，并接入 stage/commit/status/checkout；LFS 大文件走流式 hash（clean）与流式对象写盘（smudge），不再受 16 MiB stage 上限限制。
 - **锁（`POST /locks`）**：产品未要求，不做。
 - 所有缓存有上限；大文件流式写盘，不整块进内存。
 - **顺序约束**：LFS filter 必须在 M5 checkout 替换前完成，不能推到 M7；否则第一版纯 Rust checkout 就会破坏 LFS 仓库。

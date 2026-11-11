@@ -8,6 +8,95 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Native Git clean/smudge pipeline on stage, partial commit, status and
+  checkout: `.gitattributes` `text`/`eol`/`ident`/`filter`, `core.autocrlf`/
+  `core.eol`, user `filter.<driver>.clean|smudge` commands, and LFS pointer
+  clean/smudge backed by `.git/lfs/objects` (the `git-lfs` binary is never
+  executed). Required-filter failures abort; optional-filter failures fall
+  back to raw bytes.
+- Transactional branch checkout: affected worktree paths and the index are
+  snapshotted and restored if materialisation or the HEAD update fails,
+  instead of leaving a half-switched tree.
+- Pure-Rust unified-diff application for hunk stage/unstage/discard and patch
+  apply/reverse/cached-apply; binary and rename patches are rejected
+  explicitly. `git init` and discard now use `gix`/direct index writes.
+- Terminal tabs now host up to four split panes (`Split Right`/`Split Down`),
+  each with an independent PTY, active-pane focus, per-pane close, and
+  row/column equal-size layout. Closing the last pane closes the tab; restart
+  and console listings target the exact pane.
+- Native `git reset --soft/--mixed/--hard` for branch and detached HEAD,
+  including index/worktree rollback on failure; drop-HEAD and squash reuse
+  it. Ignored-file status and pending-commit counts are now computed by
+  `gix` (no `git status --ignored` / `git rev-list`), and LFS status/track
+  are native.
+- Shelf full/partial restore now runs through the native patch applier
+  instead of spawning `git apply`.
+- Shelf/copy-as-patch diffs are generated natively from HEAD vs worktree
+  (tracked, untracked, deletions, mode changes and missing final newlines);
+  the output is accepted by `git apply --check`. No `git diff` process is
+  spawned for shelving.
+- Native Git stash: push (message, `-u`, `--keep-index`), list, files,
+  apply, pop and drop. The implementation writes Git-compatible
+  stash/index/untracked commits and `refs/stash` reflog entries, so stashes
+  interoperate with the `git` CLI in both directions.
+- Optional language-server integration for the stable 11-language set
+  (`python/go/rust/c/cpp/java/ruby/php/kotlin/swift/lua`) with process
+  lifecycle, JSON-RPC framing, document sync, diagnostics, hover,
+  completion, definition, formatting, rename and document symbols. Missing
+  servers or crashes degrade to syntax highlighting; no Node runtime is
+  started. It is default-off (experimental) per product decision; the
+  status bar shows per-file error/warning counts when enabled.
+- An ignored end-to-end test against real `rust-analyzer`
+  (`cargo test -p lazecode-core --test lsp_e2e -- --ignored`) plus a
+  mock-server lifecycle test.
+
+### Fixed
+
+- Worktree status and commit staging now compare canonical (filtered) bytes,
+  so CRLF files, `$Id$` files and LFS pointers are not reported as modified
+  just because the worktree representation differs from the blob.
+- Partial commits no longer un-stage files outside the checked set; the
+  commit tree is built from HEAD + checked paths and only those index
+  entries are rewritten.
+- Commit and partial-commit now run `pre-commit`, `prepare-commit-msg`,
+  `commit-msg` and `post-commit`; hook failures abort and message rewrites
+  are honoured. Branch switches run `post-checkout` with the old/new HEAD
+  and flag `1` (its failure is logged only).
+- History rewrite safety: `drop` refuses merge commits, commits outside
+  HEAD's ancestry and commits already contained in a remote branch;
+  `squash` only accepts the newest contiguous commit suffix; merge/rebase/
+  reset validate option-like ref names; `merge --continue` and
+  `cherry-pick --continue` keep git's own semantics instead of silently
+  skipping.
+- Conflict handling: unmerged index entries are reported as `C` rows and
+  land in the Merge Conflicts subgroup (no longer untracked); taking the
+  deleted side of a delete/modify conflict uses `git rm`; the merge editor
+  refuses to mark a file resolved while conflict markers remain and
+  surfaces backend errors.
+- Git path/shelf containment: discard and conflict writes validate
+  repository-relative paths and symlink ancestors; shelf names reject
+  `..`, separators and control characters on delete/rename/import/read.
+- Git reads: blame reuses per-commit author/time metadata, file history
+  follows renames, submodule paths parse correctly, ahead/behind and
+  pending counts use the configured upstream before falling back to
+  `origin`, and changelist writes surface persistence errors and back up
+  corrupt JSON.
+- Terminal: no permanent 60 fps repaint after output; 256-colour indices
+  render the xterm palette; Cmd+F focuses the find field and swallows
+  shell input while open; selection highlights/copies its final cell,
+  grapheme clusters and skips NUL sentinel cells; bracketed paste
+  neutralises control bytes and cannot be terminated early; mouse press/
+  release/drag is emitted and wheel coordinates follow the pointer;
+  scrollbar direction and fractional trackpad deltas are fixed; output
+  wake coalescing keeps the trailing frame; parser panics close the session
+  instead of freezing it; shells are allow-listed and credential env vars
+  are stripped; consoles are capped at 10 per worktree and the bottom dock
+  height persists.
+- Status bar shows the real encoding (UTF-16/Latin-1/…) instead of always
+  “Latin-1”; the terminal search highlight clears when the bar closes.
+
 ### Changed
 
 - UI redesign groundwork (branch `feat-ui-redesign`): the design-token layer

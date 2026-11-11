@@ -36,7 +36,11 @@ pub enum Command {
         from: String,
         to: String,
     },
-    CreateTag(String),
+    CreateTag {
+        name: String,
+        /// Commit to tag; empty means HEAD.
+        commit: String,
+    },
     DeleteTag(String),
     CherryPick {
         hash: String,
@@ -119,6 +123,15 @@ pub enum Command {
     UndoCommitHead,
     EditCommitMessageHead(String),
     GoToLine(usize),
+    /// Open or activate a file and place the caret at an LSP position
+    /// (`character` is a UTF-16 code-unit column from the server).
+    OpenFileAt {
+        path: std::path::PathBuf,
+        line: u32,
+        character: u32,
+    },
+    /// Apply an LSP workspace edit (rename) to open buffers and files on disk.
+    ApplyWorkspaceEdit(crate::lsp::WorkspaceEdit),
     FetchAll,
     Push {
         remote: String,

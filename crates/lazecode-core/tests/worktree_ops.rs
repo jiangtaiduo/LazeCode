@@ -52,6 +52,7 @@ fn model(project: ProjectState) -> (AppModel, usize) {
         recent: Vec::new(),
         commands: Vec::new(),
         notifier: None,
+        lsp: lazecode_core::LspManager::new(true, None),
         should_quit: false,
         version: "test",
         favorite_branches: HashSet::new(),
@@ -100,11 +101,15 @@ fn worktree_create_console_remove_round_trip() {
         )
         .unwrap();
     assert_eq!(repo.active_worktree().terminals.len(), 1);
-    assert_eq!(repo.active_worktree().terminals[0].id, id);
+    assert_eq!(repo.active_worktree().terminals[0].panes[0].id, id);
+    assert_eq!(repo.active_worktree().active_terminal, Some(id));
     assert_eq!(repo.worktrees[0].terminals.len(), 1);
-    let main_terminal_id = repo.worktrees[0].terminals[0].id;
+    let main_terminal_id = repo.worktrees[0].terminals[0].panes[0].id;
     assert_ne!(main_terminal_id, id, "terminal ids must not collide");
-    let session_cwd = repo.active_worktree().terminals[0].session.cwd.clone();
+    let session_cwd = repo.active_worktree().terminals[0].panes[0]
+        .session
+        .cwd
+        .clone();
     assert_eq!(session_cwd, created);
 
     // Git state per worktree is independent: the linked worktree is detached

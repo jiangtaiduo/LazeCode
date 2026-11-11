@@ -24,6 +24,16 @@ fn init() -> tempfile::TempDir {
     dir
 }
 
+#[cfg(unix)]
+fn install_hook(root: &Path, name: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = root.join(".git/hooks");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 #[test]
 fn snapshot_stage_commit_and_log() {
     let dir = init();
@@ -152,6 +162,50 @@ fn amend_replaces_head() {
 }
 
 #[test]
+fn commit_hooks_can_block_and_rewrite_the_message() {
+    let dir = init();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    lazecode_git::stage(root, &["a.txt".into()]).unwrap();
+
+    install_hook(root, "pre-commit", "exit 1");
+    let error = lazecode_git::commit(root, "blocked", false)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("pre-commit"), "{error}");
+    assert!(lazecode_git::snapshot(root).unwrap().head.is_none());
+
+    std::fs::remove_file(root.join(".git/hooks/pre-commit")).unwrap();
+    install_hook(root, "commit-msg", "printf 'rewritten by hook\\n' > \"$1\"");
+    lazecode_git::commit(root, "original", false).unwrap();
+    assert_eq!(
+        git(root, &["log", "-1", "--pretty=%s"]),
+        "rewritten by hook"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn checkout_runs_post_checkout_hook() {
+    let dir = init();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    lazecode_git::stage(root, &["a.txt".into()]).unwrap();
+    lazecode_git::commit(root, "base", false).unwrap();
+    lazecode_git::create_branch(root, "feature", false).unwrap();
+    install_hook(
+        root,
+        "post-checkout",
+        "printf '%s' \"$3\" > post-checkout-flag",
+    );
+    lazecode_git::checkout_branch(root, "feature").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("post-checkout-flag")).unwrap(),
+        "1"
+    );
+}
+
+#[test]
 fn commit_checked_keeps_unchecked_paths_dirty() {
     let dir = init();
     std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
@@ -184,7 +238,12 @@ fn commit_checked_keeps_unchecked_paths_dirty() {
         .iter()
         .find(|change| change.path == "b.txt")
         .expect("b remains dirty");
-    assert!(b.staged.is_none());
+    // Stable partial commit leaves files outside the checked set staged.
+    assert!(
+        b.staged.is_some(),
+        "unchecked staged file must keep its index state: {b:?}"
+    );
+    assert!(b.unstaged.is_none());
 }
 
 #[test]
@@ -348,4 +407,93 @@ fn checkout_refuses_branch_checked_out_in_other_worktree() {
         .unwrap_err()
         .to_string();
     assert!(del_err.contains("checked out in worktree"), "{del_err}");
+}
+
+#[test]
+fn discard_restores_tracked_and_drops_untracked_without_git_cli() {
+    let dir = init();
+    std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "base", false).unwrap();
+
+    std::fs::write(dir.path().join("a.txt"), "changed\n").unwrap();
+    lazecode_git::discard_file_changes(dir.path(), "a.txt").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+        "one\n"
+    );
+    assert!(lazecode_git::snapshot(dir.path())
+        .unwrap()
+        .changes
+        .is_empty());
+
+    std::fs::create_dir(dir.path().join("tmp")).unwrap();
+    std::fs::write(dir.path().join("tmp/untracked.txt"), "x\n").unwrap();
+    lazecode_git::stage(dir.path(), &["tmp/untracked.txt".into()]).unwrap();
+    lazecode_git::discard_file_changes(dir.path(), "tmp/untracked.txt").unwrap();
+    assert!(!dir.path().join("tmp/untracked.txt").exists());
+    assert!(lazecode_git::snapshot(dir.path())
+        .unwrap()
+        .changes
+        .is_empty());
+    lazecode_git::discard_file_changes(dir.path(), "tmp").unwrap();
+    assert!(!dir.path().join("tmp").exists());
+}
+
+#[test]
+fn git_init_uses_gix_and_produces_a_usable_repository() {
+    let dir = tempfile::tempdir().unwrap();
+    lazecode_git::git_init(dir.path()).unwrap();
+    git(dir.path(), &["config", "user.name", "Tester"]);
+    git(dir.path(), &["config", "user.email", "tester@example.com"]);
+    std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "initial", false).unwrap();
+    assert_eq!(
+        lazecode_git::snapshot(dir.path())
+            .unwrap()
+            .head
+            .unwrap()
+            .message,
+        "initial"
+    );
+}
+
+#[test]
+fn ahead_behind_uses_configured_upstream_not_only_origin() {
+    let dir = init();
+    std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "base", false).unwrap();
+    let base = git(dir.path(), &["rev-parse", "HEAD"]);
+    std::fs::write(dir.path().join("a.txt"), "two\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "next", false).unwrap();
+    git(
+        dir.path(),
+        &["update-ref", "refs/remotes/upstream/main", &base],
+    );
+    git(dir.path(), &["config", "branch.main.remote", "upstream"]);
+    git(
+        dir.path(),
+        &["config", "branch.main.merge", "refs/heads/main"],
+    );
+    let snapshot = lazecode_git::snapshot(dir.path()).unwrap();
+    assert_eq!(snapshot.ahead, 1);
+    assert_eq!(snapshot.behind, 0);
+}
+
+#[test]
+fn ignored_entries_match_git_ignored_matching() {
+    let dir = init();
+    std::fs::write(dir.path().join(".gitignore"), "ignored.txt\ntarget/\n").unwrap();
+    std::fs::write(dir.path().join("tracked.txt"), "ok\n").unwrap();
+    std::fs::write(dir.path().join("ignored.txt"), "no\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+    std::fs::write(dir.path().join("target/debug/out"), "no\n").unwrap();
+    lazecode_git::stage(dir.path(), &[".gitignore".into(), "tracked.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "base", false).unwrap();
+    let (all, dirs) = lazecode_git::ignored_entries(dir.path()).unwrap();
+    assert_eq!(all, vec!["ignored.txt".to_string(), "target".to_string()]);
+    assert_eq!(dirs, vec!["target".to_string()]);
 }

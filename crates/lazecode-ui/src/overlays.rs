@@ -77,6 +77,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             }
             MenuKind::TerminalTabContext {
                 project,
+                tab_id,
                 terminal_id,
             } => {
                 let payload = menu.payload.clone();
@@ -88,6 +89,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                     screen,
                     menu,
                     project,
+                    tab_id,
                     terminal_id,
                     payload.as_deref().unwrap_or(""),
                 );
@@ -433,7 +435,8 @@ fn draw_project_menu(
             .worktrees
             .iter()
             .flat_map(|worktree| worktree.terminals.iter())
-            .filter(|terminal| terminal.session.is_running())
+            .flat_map(|tab| tab.panes.iter())
+            .filter(|pane| pane.session.is_running())
             .count();
         if running > 0 {
             live_dot(
@@ -2150,74 +2153,192 @@ fn draw_terminal_tab_context_menu(
     screen: Rect,
     menu: MenuState,
     project_idx: usize,
+    tab_id: u64,
     terminal_id: u64,
     title: &str,
 ) {
     let p = theme.palette;
+    // 与稳定版 TerminalTabContextMenu 同序：Copy / 分屏 / 关闭 / 标签批量关闭 / 重命名。
+    let tab_info = model.projects.get(project_idx).and_then(|project| {
+        project.worktrees.iter().find_map(|worktree| {
+            worktree
+                .tab_by_id(tab_id)
+                .map(|tab| (tab.panes.len(), worktree.path.clone()))
+        })
+    });
+    let pane_count = tab_info.as_ref().map_or(0, |(count, _)| *count);
+    let tab_path = tab_info.map(|(_, path)| path).unwrap_or_default();
+    let can_split = pane_count < lazecode_core::MAX_PANES_PER_TAB;
+    let can_close_pane = pane_count > 1;
+
+    #[derive(Clone, Copy)]
+    enum Item {
+        Row(&'static str, &'static str, u8, bool),
+        Sep,
+    }
     let items = [
-        (
-            crate::tr!(model, "Copy working directory", "复制工作目录"),
+        Item::Row(
+            "Copy Working Directory",
+            "复制工作目录",
             0,
+            tab_path.as_os_str().is_empty(),
         ),
-        (crate::tr!(model, "Rename tab…", "重命名标签…"), 1),
-        (crate::tr!(model, "Close", "关闭"), 2),
-        (crate::tr!(model, "Close others", "关闭其他"), 3),
-        (crate::tr!(model, "Close all", "关闭全部"), 4),
+        Item::Sep,
+        Item::Row("Split Right", "向右分屏", 1, !can_split),
+        Item::Row("Split Down", "向下分屏", 2, !can_split),
+        Item::Row("Close Pane", "关闭分屏", 3, !can_close_pane),
+        Item::Sep,
+        Item::Row("Close", "关闭", 4, false),
+        Item::Sep,
+        Item::Row("Close Others", "关闭其他", 5, false),
+        Item::Row("Close All", "关闭全部", 6, false),
+        Item::Sep,
+        Item::Row("Rename…", "重命名…", 7, false),
     ];
 
-    let height = items.len() as f32 * MENU_ROW_H + 8.0;
+    let rows = items
+        .iter()
+        .filter(|item| !matches!(item, Item::Sep))
+        .count();
+    let seps = items.len() - rows;
+    let height = rows as f32 * MENU_ROW_H + seps as f32 * 8.0 + 12.0;
     let rect = popover_rect(screen, menu.anchor, 200.0, height);
     menu_frame(ui, rect, theme);
 
-    // 稳定版右键菜单没有标题行，直接列菜单项。
+    let zh = model.settings.language.is_zh();
     let mut action: Option<u8> = None;
     let mut close = false;
-    let row_start = rect.top() + 4.0;
-    for (i, (label, code)) in items.iter().enumerate() {
-        let row = Rect::from_min_size(
-            Pos2::new(rect.left() + 8.0, row_start + i as f32 * MENU_ROW_H),
-            Vec2::new(rect.width() - 16.0, 26.0),
-        );
-        let response = ui.interact(row, ui.scope_id().with(("ttab_ctx", i)), Sense::click());
-        if response.hovered() {
-            ui.painter()
-                .rect_filled(row, egui::CornerRadius::same(3), p.hover);
-        }
-        ui.painter().text(
-            Pos2::new(row.left() + 10.0, row.center().y),
-            Align2::LEFT_CENTER,
-            *label,
-            FontId::proportional(12.5),
-            p.text,
-        );
-        if response.clicked() {
-            action = Some(*code);
+    let mut y = rect.top() + 6.0;
+    let mut row_index = 0usize;
+    for item in &items {
+        match item {
+            Item::Sep => {
+                ui.painter().hline(
+                    (rect.left() + 8.0)..=(rect.right() - 8.0),
+                    y + 3.5,
+                    Stroke::new(1.0, p.border_soft),
+                );
+                y += 8.0;
+            }
+            Item::Row(en, cn, code, disabled) => {
+                let row = Rect::from_min_size(
+                    Pos2::new(rect.left() + 4.0, y),
+                    Vec2::new(rect.width() - 8.0, 22.0),
+                );
+                let response = ui.interact(
+                    row,
+                    ui.scope_id().with(("ttab_ctx", row_index)),
+                    Sense::click(),
+                );
+                if !*disabled && response.hovered() {
+                    ui.painter()
+                        .rect_filled(row, egui::CornerRadius::same(4), p.hover);
+                }
+                ui.painter().text(
+                    Pos2::new(row.left() + 10.0, row.center().y),
+                    Align2::LEFT_CENTER,
+                    if zh { *cn } else { *en },
+                    FontId::proportional(12.5),
+                    if *disabled { p.text3 } else { p.text },
+                );
+                if !*disabled && response.clicked() {
+                    action = Some(*code);
+                }
+                y += MENU_ROW_H;
+                row_index += 1;
+            }
         }
     }
 
     if let Some(code) = action {
+        // Collect the panes a close operation tears down so their cached
+        // render state can be dropped afterwards.
+        let mut doomed: Vec<u64> = Vec::new();
+        let settings = model.settings.clone();
+        let notifier = model.notifier.clone();
+        let mut notice: Option<String> = None;
+        let mut focus: Option<u64> = None;
         if let Some(project) = model.projects.get_mut(project_idx) {
             match code {
                 0 => {
-                    let cwd = project.active_worktree().path.clone();
-                    ui.ctx().copy_text(cwd.display().to_string());
-                    model.toast(
-                        crate::tr!(model, "Working directory copied", "已复制工作目录").to_string(),
-                        ToastKind::Info,
-                    );
+                    if tab_path.as_os_str().is_empty() {
+                        // Disabled row; nothing to copy.
+                    } else {
+                        ui.ctx().copy_text(tab_path.display().to_string());
+                    }
                 }
-                1 => {
+                1 | 2 => {
+                    let direction = if code == 1 {
+                        lazecode_core::PaneSplit::Row
+                    } else {
+                        lazecode_core::PaneSplit::Column
+                    };
+                    match project.split_terminal(terminal_id, direction, &settings, notifier) {
+                        Ok(id) => focus = Some(id),
+                        Err(err) => notice = Some(err),
+                    }
+                }
+                3 => {
+                    doomed.push(terminal_id);
+                    project.close_terminal(terminal_id);
+                }
+                4 => {
+                    if let Some(tab) = project
+                        .worktrees
+                        .iter()
+                        .find_map(|worktree| worktree.tab_by_id(tab_id))
+                    {
+                        doomed.extend(tab.panes.iter().map(|pane| pane.id));
+                    }
+                    project.close_terminal_tab(tab_id);
+                }
+                5 => {
+                    let worktree = project.active_worktree();
+                    if let Some(keep) = worktree.tab_of_pane(terminal_id).map(|tab| tab.id) {
+                        doomed.extend(
+                            worktree
+                                .terminals
+                                .iter()
+                                .filter(|tab| tab.id != keep)
+                                .flat_map(|tab| tab.panes.iter().map(|pane| pane.id)),
+                        );
+                    }
+                    project.close_other_terminals(terminal_id);
+                }
+                6 => {
+                    doomed.extend(
+                        project
+                            .active_worktree()
+                            .terminals
+                            .iter()
+                            .flat_map(|tab| tab.panes.iter().map(|pane| pane.id)),
+                    );
+                    project.close_all_terminals();
+                }
+                7 => {
                     rt.dialog = DialogState::RenameTerminal {
                         terminal_id,
                         value: title.to_string(),
                         error: None,
                     };
                 }
-                2 => project.close_terminal(terminal_id),
-                3 => project.close_other_terminals(terminal_id),
-                4 => project.close_all_terminals(),
                 _ => {}
             }
+        }
+        for id in doomed {
+            rt.forget_terminal(id);
+        }
+        if let Some(id) = focus {
+            rt.set_terminal_focus(id);
+        }
+        if code == 0 && !tab_path.as_os_str().is_empty() {
+            model.toast(
+                crate::tr!(model, "Working directory copied", "已复制工作目录").to_string(),
+                ToastKind::Info,
+            );
+        }
+        if let Some(message) = notice {
+            model.toast(message, ToastKind::Error);
         }
         close = true;
     }
@@ -5200,21 +5321,44 @@ fn draw_conflict_tool(
     } else {
         format!("Resolve ({count_conflicts} left)")
     };
-    if primary_button(ui, save_rect, &save_label, None, true, theme).clicked() {
+    if primary_button(
+        ui,
+        save_rect,
+        &save_label,
+        None,
+        count_conflicts == 0,
+        theme,
+    )
+    .clicked()
+        && count_conflicts == 0
+    {
         if let Some(active) = model.active_project {
             let root = model.projects[active].root.clone();
-            let _ = lazecode_git::mark_conflict_resolved(&root, path, Some(worktree));
-            model.queue(Command::RefreshLog);
-            model.toast(
-                if zh {
-                    format!("已解决 {path}")
-                } else {
-                    format!("Resolved {path}")
-                },
-                ToastKind::Info,
-            );
+            match lazecode_git::mark_conflict_resolved(&root, path, Some(worktree)) {
+                Ok(()) => {
+                    model.queue(Command::RefreshLog);
+                    model.toast(
+                        if zh {
+                            format!("已解决 {path}")
+                        } else {
+                            format!("Resolved {path}")
+                        },
+                        ToastKind::Info,
+                    );
+                    *close = true;
+                }
+                Err(error) => {
+                    model.toast(
+                        if zh {
+                            format!("无法标记解决: {error}")
+                        } else {
+                            format!("Could not mark resolved: {error}")
+                        },
+                        ToastKind::Error,
+                    );
+                }
+            }
         }
-        *close = true;
     }
     btn_x -= 8.0;
 
@@ -7168,6 +7312,16 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             380.0,
             210.0,
         ),
+        DialogState::RenameSymbol { .. } => (
+            crate::tr!(model, "Rename symbol", "重命名符号"),
+            crate::tr!(
+                model,
+                "Rename this symbol and every reference through the language server.",
+                "通过语言服务器重命名该符号及其全部引用。"
+            ),
+            440.0,
+            210.0,
+        ),
         DialogState::RenameTerminal { .. } => (
             crate::tr!(model, "Rename console tab", "重命名控制台标签"),
             crate::tr!(
@@ -7651,8 +7805,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 Vec2::splat(16.0),
             );
             if crate::widgets::checkbox(ui, upstream_rect, *set_upstream, theme).clicked() {
-                // `set_upstream` is a field captured from dialog, so flip it
-                // directly (checkbox closure takes the value by copy).
+                *set_upstream = !*set_upstream;
             }
             ui.painter().text(
                 Pos2::new(rect.left() + 36.0, checkbox_y),
@@ -7968,6 +8121,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         | DialogState::RenamePath { value, error, .. }
         | DialogState::NewShelf { value, error, .. }
         | DialogState::GoToLine { value, error }
+        | DialogState::RenameSymbol { value, error, .. }
         | DialogState::RenameTerminal { value, error, .. }
         | DialogState::NewChangelist { value, error } => {
             let input = Rect::from_min_size(
@@ -8400,6 +8554,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         }
         DialogState::NewShelf { .. } => crate::tr!(model, "Save", "保存"),
         DialogState::GoToLine { .. } => crate::tr!(model, "Go", "跳转"),
+        DialogState::RenameSymbol { .. } => crate::tr!(model, "Rename", "重命名"),
         DialogState::RenameTerminal { .. } => crate::tr!(model, "Rename", "重命名"),
         DialogState::NewChangelist { .. } => crate::tr!(model, "Create", "创建"),
         DialogState::StashCreate { .. } => crate::tr!(model, "Stash", "贮藏"),
@@ -8642,7 +8797,10 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                         ),
                     };
                 } else {
-                    model.queue(Command::CreateTag(name));
+                    model.queue(Command::CreateTag {
+                        name,
+                        commit: commit_hint.clone(),
+                    });
                     close = true;
                 }
             }
@@ -8860,6 +9018,77 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                     }
                 }
                 close = true;
+            }
+            DialogState::RenameSymbol {
+                tab_id,
+                path,
+                line,
+                col,
+                value,
+                ..
+            } => {
+                let new_name = value.trim().to_string();
+                if new_name.is_empty() {
+                    rt.dialog = DialogState::RenameSymbol {
+                        tab_id: *tab_id,
+                        path: path.clone(),
+                        line: *line,
+                        col: *col,
+                        value: new_name,
+                        error: Some(
+                            crate::tr!(model, "Enter a new name", "请输入新名称").to_string(),
+                        ),
+                    };
+                } else {
+                    let path_buf = std::path::PathBuf::from(path);
+                    let position = model.projects.iter().find_map(|project| {
+                        project.tabs.iter().find_map(|tab| match &tab.kind {
+                            TabKind::File(file) if file.doc.path == path_buf => {
+                                Some(file.doc.lsp_position(lazecode_text::Cursor {
+                                    line: *line,
+                                    col: *col,
+                                }))
+                            }
+                            _ => None,
+                        })
+                    });
+                    let message = match position {
+                        Some((lsp_line, lsp_character)) => {
+                            match model
+                                .lsp
+                                .rename(&path_buf, lsp_line, lsp_character, &new_name)
+                            {
+                                Some(id) => {
+                                    rt.lsp.rename_pending = Some(id);
+                                    close = true;
+                                    None
+                                }
+                                None => Some(
+                                    crate::tr!(
+                                        model,
+                                        "No language server is available",
+                                        "没有可用的语言服务器"
+                                    )
+                                    .to_string(),
+                                ),
+                            }
+                        }
+                        None => Some(
+                            crate::tr!(model, "The file is no longer open", "文件已不再打开")
+                                .to_string(),
+                        ),
+                    };
+                    if let Some(error) = message {
+                        rt.dialog = DialogState::RenameSymbol {
+                            tab_id: *tab_id,
+                            path: path.clone(),
+                            line: *line,
+                            col: *col,
+                            value: new_name,
+                            error: Some(error),
+                        };
+                    }
+                }
             }
             DialogState::NewChangelist { value, .. } => {
                 let name = value.trim().to_string();

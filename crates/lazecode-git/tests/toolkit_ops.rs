@@ -1,7 +1,7 @@
 use lazecode_git::{
     blame, compare_commits, diff_patch_paths, file_history, shelf_delete, shelf_files, shelf_list,
-    shelf_patch, shelf_restore, shelf_restore_partial, shelf_save, shelf_save_paths, stash_apply,
-    stash_drop, stash_files, stash_list, stash_push, submodule_list,
+    shelf_patch, shelf_rename, shelf_restore, shelf_restore_partial, shelf_save, shelf_save_paths,
+    stash_apply, stash_drop, stash_files, stash_list, stash_pop, stash_push, submodule_list,
 };
 use std::path::Path;
 use std::process::Command;
@@ -294,4 +294,250 @@ fn stash_push_can_include_untracked_files() {
         "brand new\n"
     );
     stash_drop(root, "stash@{0}").unwrap();
+}
+
+#[test]
+fn shelf_names_cannot_escape_the_shelf_directory() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+    shelf_save(root, "safe").unwrap();
+    // Rename/read/save with traversal segments must be rejected before any
+    // file outside `.git/lazecode-shelves` is touched.
+    assert!(shelf_rename(root, "safe", "../pwn").is_err());
+    assert!(shelf_patch(root, "../anything").is_err());
+    assert!(!root.join(".git/pwn.patch").exists());
+    assert!(shelf_rename(root, "safe", "renamed").is_ok());
+    assert!(shelf_patch(root, "renamed").unwrap().contains("a.txt"));
+}
+
+#[test]
+fn lfs_status_and_track_use_native_attributes() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new("git")
+        .current_dir(dir.path())
+        .args(["init", "-q", "-b", "main"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let status = lazecode_git::lfs_status(dir.path());
+    assert!(status.installed);
+    assert!(status.patterns.is_empty());
+    assert_eq!(
+        lazecode_git::lfs_track(dir.path(), "*.bin").unwrap(),
+        "Tracking \"*.bin\""
+    );
+    let attributes = std::fs::read_to_string(dir.path().join(".gitattributes")).unwrap();
+    assert_eq!(attributes, "*.bin filter=lfs diff=lfs merge=lfs -text\n");
+    let status = lazecode_git::lfs_status(dir.path());
+    assert_eq!(status.patterns, vec!["*.bin".to_string()]);
+    assert_eq!(
+        lazecode_git::lfs_track(dir.path(), "*.bin").unwrap(),
+        "Already tracking \"*.bin\""
+    );
+    assert!(lazecode_git::lfs_track(dir.path(), "a b").is_err());
+}
+
+#[test]
+fn native_stash_is_git_compatible_both_ways() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+    stash_push(root, Some("ours"), false, false).unwrap();
+    assert!(git(root, &["stash", "list", "--format=%gs"]).contains("ours"));
+    git(root, &["stash", "apply", "-q", "stash@{0}"]);
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "one\ntwo\n"
+    );
+    git(root, &["checkout", "--", "a.txt"]);
+
+    std::fs::write(root.join("a.txt"), "one\nthree\n").unwrap();
+    git(root, &["stash", "push", "-q", "-m", "theirs"]);
+    let list = stash_list(root).unwrap();
+    assert!(list[0].subject.contains("theirs"), "{list:?}");
+    stash_apply(root, "stash@{0}").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "one\nthree\n"
+    );
+    stash_drop(root, "stash@{0}").unwrap();
+    assert!(!stash_list(root)
+        .unwrap()
+        .iter()
+        .any(|s| s.subject.contains("theirs")));
+}
+
+#[test]
+fn stash_drop_middle_reindexes_and_apply_works() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+    stash_push(root, Some("first"), false, false).unwrap();
+    std::fs::write(root.join("a.txt"), "one\nthree\n").unwrap();
+    stash_push(root, Some("second"), false, false).unwrap();
+    let list = stash_list(root).unwrap();
+    assert_eq!(list.len(), 2);
+    assert!(list[0].subject.contains("second"));
+    assert!(list[1].subject.contains("first"));
+
+    stash_drop(root, "stash@{1}").unwrap();
+    let list = stash_list(root).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].name, "stash@{0}");
+    assert!(list[0].subject.contains("second"));
+    stash_apply(root, "stash@{0}").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "one\nthree\n"
+    );
+}
+
+#[test]
+fn stash_pop_applies_then_drops() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "one\npop\n").unwrap();
+    stash_push(root, Some("pop me"), false, false).unwrap();
+    stash_pop(root, "stash@{0}").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "one\npop\n"
+    );
+    assert!(stash_list(root).unwrap().is_empty());
+}
+
+#[test]
+fn stash_keep_index_keeps_staged_and_applies_unstaged() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+    git(root, &["add", "a.txt"]);
+    std::fs::write(root.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+    stash_push(root, Some("keep"), true, false).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "one\ntwo\n"
+    );
+    let status = git(root, &["status", "--porcelain"]);
+    assert!(status.contains("a.txt"), "{status}");
+    stash_apply(root, "stash@{0}").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "one\ntwo\nthree\n"
+    );
+}
+
+#[test]
+fn stash_apply_preserves_mode_only_changes() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = repo();
+    let root = dir.path();
+    std::fs::set_permissions(root.join("a.txt"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    stash_push(root, Some("mode"), false, false).unwrap();
+    assert_eq!(
+        std::fs::metadata(root.join("a.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o644
+    );
+    stash_apply(root, "stash@{0}").unwrap();
+    assert_eq!(
+        std::fs::metadata(root.join("a.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+}
+
+#[test]
+fn native_diff_patch_is_git_apply_compatible() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("del.txt"), "bye\n").unwrap();
+    git(root, &["add", "del.txt"]);
+    git(root, &["commit", "-qm", "delete base"]);
+
+    std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+    std::fs::write(root.join("new.txt"), "brand new\n").unwrap();
+    std::fs::remove_file(root.join("del.txt")).unwrap();
+    let patch = diff_patch_paths(
+        root,
+        &[
+            "a.txt".to_string(),
+            "new.txt".to_string(),
+            "del.txt".to_string(),
+        ],
+    )
+    .unwrap();
+    assert!(patch.contains("diff --git a/new.txt b/new.txt"), "{patch}");
+    let mut child = Command::new("git")
+        .current_dir(root)
+        .args(["apply", "--check", "--reverse", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(patch.as_bytes())
+        .unwrap();
+    let checked = child.wait_with_output().unwrap();
+    assert!(
+        checked.status.success(),
+        "git apply --check -R failed: {}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+
+    lazecode_git::apply_patch(root, &patch, false, true).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "one\n"
+    );
+    assert!(!root.join("new.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("del.txt")).unwrap(),
+        "bye\n"
+    );
+}
+
+#[test]
+fn native_diff_patch_preserves_missing_final_newline() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "old").unwrap();
+    git(root, &["commit", "-qam", "no newline"]);
+    std::fs::write(root.join("a.txt"), "new").unwrap();
+    let patch = diff_patch_paths(root, &["a.txt".to_string()]).unwrap();
+    assert!(patch.contains("\\ No newline at end of file"), "{patch}");
+    let mut child = Command::new("git")
+        .current_dir(root)
+        .args(["apply", "--check", "--reverse", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(patch.as_bytes())
+        .unwrap();
+    let checked = child.wait_with_output().unwrap();
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    lazecode_git::apply_patch(root, &patch, false, true).unwrap();
+    assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"old");
 }

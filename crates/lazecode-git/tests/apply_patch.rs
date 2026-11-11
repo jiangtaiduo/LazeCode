@@ -60,5 +60,5 @@ fn apply_patch_rejects_broken_and_empty() {
     let err = apply_patch(dir.path(), broken, false, false)
         .unwrap_err()
         .to_string();
-    assert!(err.contains("patch check failed"), "{err}");
+    assert!(err.contains("does not apply"), "{err}");
 }

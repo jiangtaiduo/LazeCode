@@ -173,6 +173,8 @@ pub(crate) struct Shared {
     exit_code: AtomicI32,
     last_output_ms: AtomicU64,
     last_notify_ms: AtomicU64,
+    pending_notify: AtomicBool,
+    timer_running: AtomicBool,
     wake: AtomicU64,
     size: Mutex<(u16, u16)>,
     notifier: Option<Arc<dyn Notifier>>,
@@ -185,11 +187,31 @@ impl Shared {
     /// Reader-batch wakes are coalesced to at most one per 16ms — the frame
     /// rate the UI repaints at anyway — while explicit state changes (swap-in
     /// of a child exit, kill, scroll) always go through immediately.
-    fn notify_output(&self) {
+    ///
+    /// A trailing batch inside the window arms a one-shot timer so the final
+    /// frame is not lost when output stops (an unfocused console would
+    /// otherwise stay visually stale).
+    fn notify_output(self: &Arc<Self>) {
         self.wake.fetch_add(1, Ordering::Relaxed);
         let now = now_ms();
         let last = self.last_notify_ms.load(Ordering::Relaxed);
         if now.saturating_sub(last) < 16 {
+            self.pending_notify.store(true, Ordering::Relaxed);
+            if !self.timer_running.swap(true, Ordering::Relaxed) {
+                let shared = Arc::clone(self);
+                let _ = std::thread::Builder::new()
+                    .name("lazecode-term-wake".to_string())
+                    .spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(16));
+                        if shared.pending_notify.swap(false, Ordering::Relaxed) {
+                            shared.last_notify_ms.store(now_ms(), Ordering::Relaxed);
+                            if let Some(notifier) = &shared.notifier {
+                                notifier.notify();
+                            }
+                        }
+                        shared.timer_running.store(false, Ordering::Relaxed);
+                    });
+            }
             return;
         }
         if self
@@ -373,14 +395,6 @@ fn style_of(
     style_spec(&style)
 }
 
-fn fg_of(cell: rio_vt::crosswords::square::Square, styles: &[Style]) -> ColorSpec {
-    style_of(cell, styles).0
-}
-
-fn bg_of(cell: rio_vt::crosswords::square::Square, styles: &[Style]) -> ColorSpec {
-    style_of(cell, styles).1
-}
-
 pub struct Session {
     pub id: u64,
     pub kind: SessionKind,
@@ -559,11 +573,12 @@ impl Session {
                                 for zw in &ex.zerowidth {
                                     buffer.push(*zw);
                                 }
+                                let (fg, bg, _) = style_of(cell, styles);
                                 snap.cells[row * cols + col] = CellData {
                                     ch,
                                     text: Some(Arc::<str>::from(buffer)),
-                                    fg: fg_of(cell, styles),
-                                    bg: bg_of(cell, styles),
+                                    fg,
+                                    bg,
                                     attrs,
                                 };
                                 continue;
@@ -642,6 +657,8 @@ impl Session {
         if target != current {
             term.scroll_display(Scroll::Delta(target - current));
         }
+        drop(term);
+        self.shared.notify();
     }
 
     /// Case-insensitive search across scrollback + screen.
@@ -824,6 +841,43 @@ impl Drop for Session {
     }
 }
 
+const ALLOWED_SHELLS: &[&str] = &["zsh", "bash", "fish", "sh", "nu", "pwsh"];
+
+/// Console programs are user-configured, but only known login shells are
+/// accepted; anything else falls back to `/bin/zsh` instead of executing an
+/// arbitrary path supplied by repository content or a stale setting.
+fn resolve_shell(requested: Option<String>) -> String {
+    let requested = requested
+        .filter(|shell| !shell.trim().is_empty())
+        .or_else(|| {
+            std::env::var("SHELL")
+                .ok()
+                .filter(|shell| !shell.trim().is_empty())
+        });
+    let Some(candidate) = requested else {
+        return "/bin/zsh".to_string();
+    };
+    let name = std::path::Path::new(&candidate)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if !ALLOWED_SHELLS.contains(&name) {
+        log::warn!("refusing unknown shell '{candidate}'; using /bin/zsh");
+        return "/bin/zsh".to_string();
+    }
+    let path = std::path::Path::new(&candidate);
+    if path.is_absolute() && path.is_file() {
+        return candidate;
+    }
+    for dir in ["/bin", "/usr/bin", "/opt/homebrew/bin", "/usr/local/bin"] {
+        let path = std::path::Path::new(dir).join(name);
+        if path.is_file() {
+            return path.to_string_lossy().into_owned();
+        }
+    }
+    "/bin/zsh".to_string()
+}
+
 pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
     let cols = options.cols.max(10);
     let rows = options.rows.max(2);
@@ -835,12 +889,7 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
         pixel_height: 0,
     })?;
 
-    let shell = options
-        .shell
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("SHELL").ok().filter(|s| !s.trim().is_empty()))
-        .unwrap_or_else(|| "/bin/zsh".to_string());
+    let shell = resolve_shell(options.shell.clone());
 
     let mut command = CommandBuilder::new(&shell);
     if let Some(task) = options.command.as_deref().filter(|s| !s.trim().is_empty()) {
@@ -856,6 +905,24 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
     command.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
     command.env("LAZECODE", "1");
     command.env("SHELL", &shell);
+    // Do not hand the IDE's own credentials to a spawned shell/agent.
+    for key in [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AZURE_CLIENT_SECRET",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITLAB_TOKEN",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "NPM_TOKEN",
+        "NUGET_API_KEY",
+        "DOCKER_AUTH_CONFIG",
+    ] {
+        command.env_remove(key);
+    }
 
     let mut child = pair.slave.spawn_command(command)?;
     drop(pair.slave);
@@ -909,6 +976,8 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
         exit_code: AtomicI32::new(i32::MIN),
         last_output_ms: AtomicU64::new(0),
         last_notify_ms: AtomicU64::new(0),
+        pending_notify: AtomicBool::new(false),
+        timer_running: AtomicBool::new(false),
         wake: AtomicU64::new(0),
         size: Mutex::new((cols, rows)),
         notifier: options.notifier.clone(),
@@ -977,10 +1046,15 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
                         reader_shared
                             .last_output_ms
                             .store(now_ms().max(1), Ordering::Relaxed);
-                        {
+                        let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             let mut term = reader_term.lock();
                             processor.advance(&mut *term, &buffer[..n]);
-                            drop(term);
+                        }));
+                        if parsed.is_err() {
+                            // A VT parser panic must not leave the session
+                            // marked running with a frozen screen.
+                            log::error!("terminal parser panicked; closing session");
+                            break;
                         }
                         reader_shared.notify_output();
                     }

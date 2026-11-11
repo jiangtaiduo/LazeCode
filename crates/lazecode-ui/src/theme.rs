@@ -1,6 +1,6 @@
 use egui::{
-    Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, FontTweak, Painter, Pos2,
-    Rect, Stroke, TextStyle,
+    Color32, CornerRadius, FontDefinitions, FontFamily, FontId, FontTweak, Painter, Pos2, Rect,
+    Stroke, TextStyle,
 };
 
 use lazecode_core::ThemeMode;
@@ -430,12 +430,8 @@ pub fn install_fonts(ctx: &egui::Context, settings: &lazecode_core::Settings) {
     let mut fonts = FontDefinitions::default();
 
     let mut add_path = |name: &str, path: &str, index: u32, tweak: Option<FontTweak>| {
-        if let Ok(bytes) = std::fs::read(path) {
-            let data = FontData {
-                index,
-                tweak: tweak.unwrap_or_default(),
-                ..FontData::from_owned(bytes)
-            };
+        if let Some(mut data) = crate::fonts::load_path(std::path::Path::new(path), index) {
+            data.tweak = tweak.unwrap_or_default();
             fonts.font_data.insert(name.to_owned(), Arc::new(data));
             true
         } else {

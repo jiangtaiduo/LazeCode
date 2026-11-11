@@ -228,7 +228,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         Icon::GitLog,
         log_active,
         None,
-        crate::tr!(model, "Git Log · ⌘⇧G", "Git 日志 · ⌘⇧G").to_string(),
+        crate::tr!(model, "Git Log · ⌘9", "Git 日志 · ⌘9").to_string(),
     );
     if response.clicked() {
         if log_active {

@@ -148,7 +148,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             Vec2::new(input.width(), 32.0),
         );
         ui.painter()
-            .hline(input.x_range(), row2.top(), Stroke::new(1.0, p.border));
+            .hline(input.x_range(), row2.top(), Stroke::new(1.0, p.border_soft));
 
         let rep_field_rect = Rect::from_min_max(
             Pos2::new(row2.left() + 14.0, row2.top() + 4.0),

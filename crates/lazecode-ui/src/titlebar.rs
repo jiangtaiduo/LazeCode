@@ -57,7 +57,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         rt.open_palette();
         model.ui.command_palette_open = true;
     }
-    logo_response.on_hover_text(crate::tr!(model, "Command palette · ⌘K", "命令面板 · ⌘K"));
+    logo_response.on_hover_text(crate::tr!(model, "Command palette · ⌘⇧A", "命令面板 · ⌘⇧A"));
     x = logo_rect.right() + 10.0;
 
     // 多项目模式下展示其它项目的切换头像；单项目时直接展示项目胶囊，避免重复绘制双重头像。
@@ -224,7 +224,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     painter.vline(
         x - 3.5,
         (top + 10.0)..=(rect.bottom() - 10.0),
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
 
     // Branch chip only exists with an open project.

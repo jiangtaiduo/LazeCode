@@ -154,203 +154,224 @@ impl LazeApp {
             self.install_menu();
         }
         while let Ok(event) = muda::MenuEvent::receiver().try_recv() {
-            log::info!("menu action: {}", event.id().0);
-            match event.id().0.as_str() {
-                "about" => {
-                    self.runtime.settings_open = true;
-                    self.model.ui.settings_section = 3;
-                    self.model.ui.command_palette_open = false;
-                    self.runtime.search.open = false;
-                }
-                "settings" => {
-                    self.runtime.settings_open = true;
-                    self.runtime.about_open = false;
-                    self.model.ui.command_palette_open = false;
-                    self.runtime.search.open = false;
-                }
-                "quit" => self.request_quit(event_loop),
-                "open-project" => self.model.queue(lazecode_core::Command::OpenProjectDialog),
-                "new-window" => {
-                    let exe = std::env::current_exe();
-                    let spawned =
-                        exe.and_then(|exe| std::process::Command::new(exe).spawn().map(|_| ()));
-                    if let Err(error) = spawned {
-                        self.model.toast(
-                            format!("Cannot open a new window: {error}"),
-                            lazecode_core::ToastKind::Error,
-                        );
+            let action = event.id().0.as_str();
+            log::info!("menu action: {action}");
+            let blocked = self.runtime.blocks_input(&self.model);
+            if blocked && action == "close-tab" {
+                self.runtime.close_overlay(&mut self.model);
+            }
+            // Native menu accelerators bypass egui's shortcut handler. While
+            // a modal owns input, only global surfaces and Cmd+W (close the
+            // modal) may run; never toggle the shell or close a hidden tab.
+            let allowed = matches!(
+                action,
+                "settings"
+                    | "about"
+                    | "quit"
+                    | "new-window"
+                    | "palette"
+                    | "find"
+                    | "save"
+                    | "save-all"
+            );
+            if !blocked || allowed {
+                match action {
+                    "about" => {
+                        self.runtime.settings_open = true;
+                        self.model.ui.settings_section = 3;
+                        self.model.ui.command_palette_open = false;
+                        self.runtime.search.open = false;
                     }
-                }
-                "new-file" => {
-                    if let Some(project) = self.model.active_project() {
-                        self.runtime.dialog = lazecode_ui::runtime::DialogState::NewFile {
-                            dir: project.root.clone(),
-                            value: String::new(),
+                    "settings" => {
+                        self.runtime.settings_open = true;
+                        self.runtime.about_open = false;
+                        self.model.ui.command_palette_open = false;
+                        self.runtime.search.open = false;
+                    }
+                    "quit" => self.request_quit(event_loop),
+                    "open-project" => self.model.queue(lazecode_core::Command::OpenProjectDialog),
+                    "new-window" => {
+                        let exe = std::env::current_exe();
+                        let spawned =
+                            exe.and_then(|exe| std::process::Command::new(exe).spawn().map(|_| ()));
+                        if let Err(error) = spawned {
+                            self.model.toast(
+                                format!("Cannot open a new window: {error}"),
+                                lazecode_core::ToastKind::Error,
+                            );
+                        }
+                    }
+                    "new-file" => {
+                        if let Some(project) = self.model.active_project() {
+                            self.runtime.dialog = lazecode_ui::runtime::DialogState::NewFile {
+                                dir: project.root.clone(),
+                                value: String::new(),
+                                error: None,
+                            };
+                        }
+                    }
+                    "clone-repo" => {
+                        self.runtime.dialog = lazecode_ui::runtime::DialogState::CloneRepo {
+                            url: String::new(),
+                            dest: String::new(),
                             error: None,
                         };
                     }
-                }
-                "clone-repo" => {
-                    self.runtime.dialog = lazecode_ui::runtime::DialogState::CloneRepo {
-                        url: String::new(),
-                        dest: String::new(),
-                        error: None,
-                    };
-                }
-                "close-project" => {
-                    if let Some(active) = self.model.active_project {
-                        self.model
-                            .queue(lazecode_core::Command::CloseProject(active));
+                    "close-project" => {
+                        if let Some(active) = self.model.active_project {
+                            self.model
+                                .queue(lazecode_core::Command::CloseProject(active));
+                        }
                     }
-                }
-                "new-console" => self.model.queue(lazecode_core::Command::NewTerminal),
-                "undo" => {
-                    if let Some(project) = self.model.active_project_mut() {
-                        if let Some(id) = project.active_tab {
-                            if let Some(tab) = project.tab_mut_by_id(id) {
-                                if let lazecode_core::TabKind::File(file_tab) = &mut tab.kind {
-                                    file_tab.doc.undo();
+                    "new-console" => self.model.queue(lazecode_core::Command::NewTerminal),
+                    "undo" => {
+                        if let Some(project) = self.model.active_project_mut() {
+                            if let Some(id) = project.active_tab {
+                                if let Some(tab) = project.tab_mut_by_id(id) {
+                                    if let lazecode_core::TabKind::File(file_tab) = &mut tab.kind {
+                                        file_tab.doc.undo();
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                "redo" => {
-                    if let Some(project) = self.model.active_project_mut() {
-                        if let Some(id) = project.active_tab {
-                            if let Some(tab) = project.tab_mut_by_id(id) {
-                                if let lazecode_core::TabKind::File(file_tab) = &mut tab.kind {
-                                    file_tab.doc.redo();
+                    "redo" => {
+                        if let Some(project) = self.model.active_project_mut() {
+                            if let Some(id) = project.active_tab {
+                                if let Some(tab) = project.tab_mut_by_id(id) {
+                                    if let lazecode_core::TabKind::File(file_tab) = &mut tab.kind {
+                                        file_tab.doc.redo();
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                "save-all" => self.model.queue(lazecode_core::Command::SaveAll),
-                "goto-line" => {
-                    self.model.ui.goto_line_open = true;
-                    self.model.ui.goto_line_input.clear();
-                }
-                "git-commit" => {
-                    self.model.ui.sidebar_visible = true;
-                    self.model.ui.sidebar_view = lazecode_core::SidebarView::Git;
-                }
-                "git-push" => {
-                    if let Some(project) = self.model.active_project() {
-                        self.runtime.dialog = lazecode_ui::runtime::DialogState::Push {
-                            remote: project
-                                .remotes
-                                .first()
-                                .map(|r| r.name.clone())
-                                .unwrap_or_else(|| "origin".into()),
-                            branch: project.branch(),
-                            set_upstream: false,
+                    "save-all" => self.model.queue(lazecode_core::Command::SaveAll),
+                    "goto-line" => {
+                        self.model.ui.goto_line_open = true;
+                        self.model.ui.goto_line_input.clear();
+                    }
+                    "git-commit" => {
+                        self.model.ui.sidebar_visible = true;
+                        self.model.ui.sidebar_view = lazecode_core::SidebarView::Git;
+                    }
+                    "git-push" => {
+                        if let Some(project) = self.model.active_project() {
+                            self.runtime.dialog = lazecode_ui::runtime::DialogState::Push {
+                                remote: project
+                                    .remotes
+                                    .first()
+                                    .map(|r| r.name.clone())
+                                    .unwrap_or_else(|| "origin".into()),
+                                branch: project.branch(),
+                                set_upstream: false,
+                                status: None,
+                            };
+                        }
+                    }
+                    "git-pull" => {
+                        self.runtime.dialog = lazecode_ui::runtime::DialogState::Pull {
+                            mode: lazecode_git::PullMode::Merge,
                             status: None,
                         };
                     }
-                }
-                "git-pull" => {
-                    self.runtime.dialog = lazecode_ui::runtime::DialogState::Pull {
-                        mode: lazecode_git::PullMode::Merge,
-                        status: None,
-                    };
-                }
-                "git-fetch" => {
-                    self.model.queue(lazecode_core::Command::FetchAll);
-                }
-                "git-remotes" => {
-                    let remotes = self
-                        .model
-                        .active_project()
-                        .map(|p| p.remotes.clone())
-                        .unwrap_or_default();
-                    self.runtime.dialog = lazecode_ui::runtime::DialogState::Remotes {
-                        remotes,
-                        new_name: String::new(),
-                        new_url: String::new(),
-                        error: None,
-                    };
-                }
-                "git-stashes" => {
-                    self.runtime.dialog = lazecode_ui::runtime::DialogState::StashManager {
-                        stashes: Vec::new(),
-                        selected: 0,
-                        error: None,
-                        loaded: false,
-                    };
-                }
-                "git-shelves" => {
-                    self.runtime.dialog = lazecode_ui::runtime::DialogState::ShelfManager {
-                        shelves: Vec::new(),
-                        selected: 0,
-                        error: None,
-                        loaded: false,
-                    };
-                }
-                "git-tools" => {
-                    self.runtime.dialog = lazecode_ui::runtime::DialogState::GitTools {
-                        tab: lazecode_ui::runtime::GitToolsTab::Submodules,
-                        submodules: Vec::new(),
-                        lfs_status: None,
-                        loaded: (false, false),
-                    };
-                }
-                "git-refresh" => {
-                    self.model.queue(lazecode_core::Command::ReloadGit);
-                    self.model.queue(lazecode_core::Command::ReloadTree);
-                }
-                "save" => {
-                    if let Some(project) = self.model.active_project() {
-                        let command = match project.active_tab {
-                            Some(id) => lazecode_core::Command::SaveTab(id),
-                            None => lazecode_core::Command::SaveAll,
-                        };
-                        self.model.queue(command);
+                    "git-fetch" => {
+                        self.model.queue(lazecode_core::Command::FetchAll);
                     }
-                }
-                "close-tab" => {
-                    if let Some(project) = self.model.active_project_mut() {
-                        if let Some(id) = project.active_tab {
-                            if let Some(tab) = project.tab_by_id(id) {
-                                if tab.is_dirty() {
-                                    self.runtime.dialog =
-                                        lazecode_ui::runtime::DialogState::CloseDirtyTab {
-                                            tab_id: id,
-                                            name: tab.title(),
-                                        };
-                                } else {
-                                    project.close_tab(id);
-                                    self.runtime.editor_focus = None;
+                    "git-remotes" => {
+                        let remotes = self
+                            .model
+                            .active_project()
+                            .map(|p| p.remotes.clone())
+                            .unwrap_or_default();
+                        self.runtime.dialog = lazecode_ui::runtime::DialogState::Remotes {
+                            remotes,
+                            new_name: String::new(),
+                            new_url: String::new(),
+                            error: None,
+                        };
+                    }
+                    "git-stashes" => {
+                        self.runtime.dialog = lazecode_ui::runtime::DialogState::StashManager {
+                            stashes: Vec::new(),
+                            selected: 0,
+                            error: None,
+                            loaded: false,
+                        };
+                    }
+                    "git-shelves" => {
+                        self.runtime.dialog = lazecode_ui::runtime::DialogState::ShelfManager {
+                            shelves: Vec::new(),
+                            selected: 0,
+                            error: None,
+                            loaded: false,
+                        };
+                    }
+                    "git-tools" => {
+                        self.runtime.dialog = lazecode_ui::runtime::DialogState::GitTools {
+                            tab: lazecode_ui::runtime::GitToolsTab::Submodules,
+                            submodules: Vec::new(),
+                            lfs_status: None,
+                            loaded: (false, false),
+                        };
+                    }
+                    "git-refresh" => {
+                        self.model.queue(lazecode_core::Command::ReloadGit);
+                        self.model.queue(lazecode_core::Command::ReloadTree);
+                    }
+                    "save" => {
+                        if let Some(project) = self.model.active_project() {
+                            let command = match project.active_tab {
+                                Some(id) => lazecode_core::Command::SaveTab(id),
+                                None => lazecode_core::Command::SaveAll,
+                            };
+                            self.model.queue(command);
+                        }
+                    }
+                    "close-tab" => {
+                        if let Some(project) = self.model.active_project_mut() {
+                            if let Some(id) = project.active_tab {
+                                if let Some(tab) = project.tab_by_id(id) {
+                                    if tab.is_dirty() {
+                                        self.runtime.dialog =
+                                            lazecode_ui::runtime::DialogState::CloseDirtyTab {
+                                                tab_id: id,
+                                                name: tab.title(),
+                                            };
+                                    } else {
+                                        project.close_tab(id);
+                                        self.runtime.editor_focus = None;
+                                    }
                                 }
                             }
                         }
                     }
+                    "toggle-explorer" => {
+                        self.model.ui.sidebar_visible = !self.model.ui.sidebar_visible;
+                    }
+                    "toggle-console" => {
+                        self.model.ui.panel_visible = !self.model.ui.panel_visible;
+                    }
+                    "git-log" => {
+                        self.model.ui.panel_visible = true;
+                        self.model.ui.panel_tab = lazecode_core::PanelTab::Git;
+                        self.model.queue(lazecode_core::Command::RefreshLog);
+                    }
+                    "palette" => {
+                        self.runtime.open_palette();
+                        self.runtime.settings_open = false;
+                        self.runtime.search.open = false;
+                        self.model.ui.command_palette_open = true;
+                    }
+                    "find" => {
+                        self.runtime.search.open = true;
+                        self.runtime.search.focus_requested = true;
+                        self.runtime.search.searched = false;
+                        self.runtime.settings_open = false;
+                        self.model.ui.command_palette_open = false;
+                    }
+                    _ => {}
                 }
-                "toggle-explorer" => {
-                    self.model.ui.sidebar_visible = !self.model.ui.sidebar_visible;
-                }
-                "toggle-console" => {
-                    self.model.ui.panel_visible = !self.model.ui.panel_visible;
-                }
-                "git-log" => {
-                    self.model.ui.panel_visible = true;
-                    self.model.ui.panel_tab = lazecode_core::PanelTab::Git;
-                    self.model.queue(lazecode_core::Command::RefreshLog);
-                }
-                "palette" => {
-                    self.runtime.open_palette();
-                    self.runtime.settings_open = false;
-                    self.runtime.search.open = false;
-                    self.model.ui.command_palette_open = true;
-                }
-                "find" => {
-                    self.runtime.search.open = true;
-                    self.runtime.search.focus_requested = true;
-                    self.runtime.search.searched = false;
-                    self.runtime.settings_open = false;
-                    self.model.ui.command_palette_open = false;
-                }
-                _ => {}
             }
             if let Some(gfx) = &self.gfx {
                 gfx.window.request_redraw();
@@ -830,7 +851,7 @@ fn build_menu(zh: bool) -> Option<Menu> {
                 "new-console",
                 pick(zh, "New Console", "新建控制台"),
                 true,
-                accel(Code::KeyT),
+                accel_shift(Code::KeyT),
             ),
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id("save", pick(zh, "Save", "保存"), true, accel(Code::KeyS)),
@@ -880,19 +901,19 @@ fn build_menu(zh: bool) -> Option<Menu> {
                 "toggle-explorer",
                 pick(zh, "Explorer", "资源管理器"),
                 true,
-                accel(Code::KeyB),
+                accel(Code::Digit1),
             ),
             &MenuItem::with_id(
                 "toggle-console",
                 pick(zh, "Console", "控制台"),
                 true,
-                accel(Code::KeyJ),
+                accel(Code::Digit4),
             ),
             &MenuItem::with_id(
                 "git-log",
                 pick(zh, "Git Log", "Git 日志"),
                 true,
-                accel_shift(Code::KeyG),
+                accel(Code::Digit9),
             ),
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id(
@@ -914,7 +935,7 @@ fn build_menu(zh: bool) -> Option<Menu> {
                 "palette",
                 pick(zh, "Command Palette…", "命令面板…"),
                 true,
-                accel(Code::KeyK),
+                accel_shift(Code::KeyA),
             ),
             &MenuItem::with_id(
                 "find",
@@ -937,14 +958,24 @@ fn build_menu(zh: bool) -> Option<Menu> {
         "Git",
         true,
         &[
-            &MenuItem::with_id("git-commit", pick(zh, "Commit…", "提交…"), true, None),
+            &MenuItem::with_id(
+                "git-commit",
+                pick(zh, "Commit…", "提交…"),
+                true,
+                accel(Code::KeyK),
+            ),
             &MenuItem::with_id(
                 "git-push",
                 pick(zh, "Push…", "推送…"),
                 true,
                 accel_shift(Code::KeyK),
             ),
-            &MenuItem::with_id("git-pull", pick(zh, "Pull…", "拉取…"), true, None),
+            &MenuItem::with_id(
+                "git-pull",
+                pick(zh, "Pull…", "拉取…"),
+                true,
+                accel(Code::KeyT),
+            ),
             &MenuItem::with_id("git-fetch", pick(zh, "Fetch", "获取远程更新"), true, None),
             &MenuItem::with_id(
                 "git-remotes",

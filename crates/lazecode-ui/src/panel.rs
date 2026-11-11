@@ -240,7 +240,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     ui.painter().hline(
         head.x_range(),
         head.bottom() - 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
     let body = Rect::from_min_max(Pos2::new(rect.left(), head.bottom()), rect.max);
     draw_git_panel(ui, model, rt, theme, head, body);
@@ -260,7 +260,7 @@ pub fn draw_terminal_dock(
     ui.painter().hline(
         head.x_range(),
         head.bottom() - 0.5,
-        Stroke::new(1.0, p.border),
+        Stroke::new(1.0, p.border_soft),
     );
     let bar = ui.interact(head, ui.scope_id().with("term-head-bar"), Sense::click());
     if bar.double_clicked() {
@@ -483,6 +483,9 @@ pub fn draw_terminal_dock(
         Pos2::new(body.left() + 14.0, body.top() + 12.0),
         Pos2::new(body.right() - 14.0, body.bottom() - 12.0),
     );
+    // Overlays own the keyboard; don't feed their keystrokes to the shell.
+    let overlays_open = rt.blocks_input(model);
+    let font_size = model.settings.terminal.font_size;
     let project = &mut model.projects[index];
     let Some(tab_id) = project.active_worktree().active_tab_id() else {
         draw_empty(ui, theme, body, "No consoles open");
@@ -515,27 +518,18 @@ pub fn draw_terminal_dock(
                 ui.painter().hline(
                     content.x_range(),
                     area.top() - 0.5,
-                    Stroke::new(1.0, p.border),
+                    Stroke::new(1.0, p.border_soft),
                 );
             }
             _ => {
                 ui.painter().vline(
                     area.left() - 0.5,
                     content.y_range(),
-                    Stroke::new(1.0, p.border),
+                    Stroke::new(1.0, p.border_soft),
                 );
             }
         }
     }
-    // Overlays own the keyboard; don't feed their keystrokes to the shell.
-    let overlays_open = rt.settings_open
-        || rt.about_open
-        || rt.search.open
-        || model.ui.command_palette_open
-        || rt.menu.is_some()
-        || rt.agent_menu.is_some()
-        || !matches!(rt.dialog, crate::runtime::DialogState::None);
-    let font_size = model.settings.terminal.font_size;
     let multi = pane_ids.len() > 1;
     let mut activate: Option<u64> = None;
     let mut close_pane: Option<u64> = None;
@@ -1797,7 +1791,7 @@ fn draw_git_log(
             if is_active_split {
                 Stroke::new(2.0, p.accent)
             } else {
-                Stroke::new(1.0, p.border)
+                Stroke::new(1.0, p.border_soft)
             },
         );
     }
@@ -1838,7 +1832,7 @@ fn draw_git_log(
             if is_active_split {
                 Stroke::new(2.0, p.accent)
             } else {
-                Stroke::new(1.0, p.border)
+                Stroke::new(1.0, p.border_soft)
             },
         );
     }
@@ -2308,6 +2302,7 @@ fn draw_branch_list(
             ),
             TextEdit::singleline(&mut query_value)
                 .frame(egui::Frame::NONE)
+                .align(egui::Align2::LEFT_CENTER)
                 .hint_text(crate::tr!(model, "Filter branches", "过滤分支"))
                 .font(FontId::proportional(11.0)),
         );
@@ -2341,7 +2336,6 @@ fn draw_branch_list(
     let expanded_dirs: std::collections::HashSet<String> =
         model.projects[index].ref_dirs_expanded.clone();
     let mut toggle_dir: Option<String> = None;
-    let mut pick_ref: Option<(String, bool)> = None; // (name, remote)
     let mut open_menu: Option<(String, bool, Rect)> = None; // branch name + remote flag + anchor
 
     let curr_branch = branches.iter().find(|b| b.name == current);
@@ -2574,7 +2568,6 @@ fn draw_branch_list(
                                     .ref_selection
                                     .push(branch.name.clone());
                             }
-                            pick_ref = Some((branch.name.clone(), branch.remote));
                         }
                         if response.double_clicked() {
                             model.queue(Command::CheckoutBranch(branch.name.clone()));
@@ -2675,7 +2668,6 @@ fn draw_branch_list(
                                         .ref_selection
                                         .push(branch.name.clone());
                                 }
-                                pick_ref = Some((branch.name.clone(), true));
                             }
                             y += row_h;
                         }
@@ -2742,16 +2734,6 @@ fn draw_branch_list(
         } else {
             model.projects[index].ref_dirs_expanded.insert(dir);
         }
-    }
-    if let Some((name, remote)) = pick_ref {
-        // Click sets the log branch filter (keep multi-select for M5 batch ops).
-        let query = name.clone();
-        if let Some(project) = model.projects.get_mut(index) {
-            project.log_query.branch = query;
-            project.log_query.all_refs = false;
-        }
-        model.queue(Command::LogFilterChanged);
-        let _ = remote;
     }
     if let Some((name, remote, anchor)) = open_menu {
         rt.open_menu(

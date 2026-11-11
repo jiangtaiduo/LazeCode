@@ -100,6 +100,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Modal surfaces now install a full-screen hit-test blocker: clicks no
+  longer reach the editor, tabs, tree, splitters or titlebar behind Settings,
+  dialogs, menus, search, the command palette or the update window. Native
+  menu accelerators are guarded too, and `⌘W` closes the modal instead of the
+  hidden tab underneath.
+- Pane borders are tiered: real window splits keep a clear `border`, while
+  pane headers, toolbars, internal column splits and the activity rail use
+  `border_soft`/`hairline`.
+- Git log branch rows only select on click (double-click still checks out);
+  they no longer set the log branch filter. Tags are refreshed with the
+  branch job and appear in both the branch popup and Git log. Empty Tags
+  sections are hidden, the branch popup drops “Checkout Tag or Revision”,
+  cascading submenus open on click only, and long submenu labels are clipped
+  inside the menu.
+- Ignored files appear only in the Ignored Files group and the check mark is
+  right-aligned; the commit view-options checks no longer overlap labels.
+  Settings update notes wrap inside the panel.
+- File-tree auto-locate scrolls virtualized rows by offset before rendering,
+  so files outside the viewport are revealed. The Blame button is wide
+  enough for its label and reports empty/failed blame instead of doing
+  nothing.
+- Shortcuts follow the macOS PyCharm keymap: `⌘⇧A` find action, `⌘1`
+  Project, `⌘4` bottom panel, `⌘9` Git, `⌘K` commit, `⌘⇧K` push, `⌘T`
+  update/pull, `⌘⇧T` new console, `⌘B` declaration, `⌥⌘O` symbols.
 - Mixed CJK/Latin UI typography: Chinese mode now leads with PingFang SC so
   punctuation and mixed runs share one font's metrics, English falls back
   from SF Pro to PingFang SC instead of Hiragino, and SF Pro uses the 17pt

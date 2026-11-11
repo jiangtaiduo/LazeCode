@@ -111,6 +111,7 @@ pub enum JobResult {
     BranchesLoaded {
         root: PathBuf,
         result: Vec<BranchInfo>,
+        tags: Vec<String>,
     },
     CommitDetails {
         root: PathBuf,
@@ -313,9 +314,11 @@ impl JobQueue {
         let job_root = root.clone();
         self.spawn("branches", key, move || {
             let result = lazecode_git::branches(&job_root).unwrap_or_default();
+            let tags = lazecode_git::tags(&job_root).unwrap_or_default();
             JobResult::BranchesLoaded {
                 root: job_root,
                 result,
+                tags,
             }
         });
     }
@@ -3085,13 +3088,14 @@ impl JobQueue {
                 project.log_branch = branch;
                 project.log_loading = false;
             }
-            JobResult::BranchesLoaded { root, result } => {
+            JobResult::BranchesLoaded { root, result, tags } => {
                 if let Some(project) = model
                     .projects
                     .iter_mut()
                     .find(|project| project.root == root)
                 {
                     project.branches = result;
+                    project.tags = tags;
                 }
             }
             JobResult::CommitDetails { root, id, result } => {

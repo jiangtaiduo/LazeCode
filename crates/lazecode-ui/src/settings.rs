@@ -1021,17 +1021,20 @@ fn updates(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme,
             p.text3,
         );
     } else {
-        ui.painter().text(
-            Pos2::new(rect.left(), y),
-            Align2::LEFT_CENTER,
-            crate::tr!(
-                model,
-                "Updates stay disabled until both fields are filled in. Only HTTPS, file:// URLs and local paths are accepted; artifacts are SHA-256 checked and Ed25519 verified.",
-                "两项都填写后才会启用更新。仅接受 HTTPS、file:// 或本地路径；下载后会校验 SHA-256 与 Ed25519 签名。"
-            ),
+        let note = crate::tr!(
+            model,
+            "Updates stay disabled until both fields are filled in. Only HTTPS, file:// URLs and local paths are accepted; artifacts are SHA-256 checked and Ed25519 verified.",
+            "两项都填写后才会启用更新。仅接受 HTTPS、file:// 或本地路径；下载后会校验 SHA-256 与 Ed25519 签名。"
+        );
+        let galley = ui.painter().layout(
+            note.to_string(),
             FontId::proportional(10.5),
             p.amber,
+            rect.width(),
         );
+        ui.painter()
+            .with_clip_rect(rect)
+            .galley(Pos2::new(rect.left(), y - 7.0), galley, p.amber);
     }
 
     if changed {

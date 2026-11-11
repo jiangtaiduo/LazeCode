@@ -141,7 +141,8 @@ Write path:
 - Native stash: push (message, `-u` for untracked, `--keep-index`),
   list/files/apply/pop/drop, including stash/index/untracked commits and
   the `refs/stash` reflog. Apply performs a text three-way merge with
-  conflict markers; large LFS objects stream from the native object store.
+  conflict markers and unmerged index stages; large LFS objects stream from
+  the native object store.
   Stashes are readable by the `git` CLI and vice-versa. Shelves live in `.git/lazecode-shelves/*.patch` (whole-tree
   or path-scoped save — the retract step reuses the per-file discard so
   staged-new files leave both worktree and index — native patch generation,

@@ -37,8 +37,8 @@
   操作只构建一次 attributes 栈，不再逐文件重建。
 - Stash 与架藏保存改用轻量变更扫描（不再计算逐文件增删统计、忽略目录
   遍历与 ahead/behind），减少工作树 I/O。
-- stash apply 在两侧修改同一文件时执行文本三方合并并写入 Git 风格冲突
-  标记；无冲突时自动合并。大 LFS 文件从 `.git/lfs/objects` 流式写出，
+- stash apply 在两侧修改同一文件时执行文本三方合并，写入 Git 风格
+  冲突标记及未合并索引 stage；无冲突时自动合并。大 LFS 文件从 `.git/lfs/objects` 流式写出，
   不再整块读入内存。
 - 忽略文件状态按 worktree 缓存，并由 watcher 事件失效（2 秒兜底 TTL），
   避免每次 snapshot 都遍历目录。

@@ -575,6 +575,10 @@ fn stash_apply_writes_conflict_markers_on_overlap() {
     assert!(content.contains(">>>>>>>"), "{content}");
     assert!(content.contains("ours"), "{content}");
     assert!(content.contains("theirs"), "{content}");
+    let unmerged = git(root, &["ls-files", "-u"]);
+    assert!(unmerged.contains("1\ta.txt"), "{unmerged}");
+    assert!(unmerged.contains("2\ta.txt"), "{unmerged}");
+    assert!(unmerged.contains("3\ta.txt"), "{unmerged}");
     // A conflicted pop must keep the stash entry.
     assert_eq!(stash_list(root).unwrap().len(), 1);
 }

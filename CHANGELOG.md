@@ -37,6 +37,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (tracked, untracked, deletions, mode changes and missing final newlines);
   the output is accepted by `git apply --check`. No `git diff` process is
   spawned for shelving.
+- Git clean/smudge/status/stage/checkout reuse the already-open repository
+  instead of rediscovering it per file.
 - Stash and shelf save use a lightweight change scan (no per-file diff
   stats, ignored-directory walk or ahead/behind traversal), cutting worktree
   I/O for these actions.

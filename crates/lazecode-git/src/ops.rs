@@ -196,7 +196,7 @@ pub fn stage(root: &Path, paths: &[String]) -> Result<()> {
         } else if !meta.is_file() {
             anyhow::bail!("{path} is not a regular file; refusing to stage it");
         } else {
-            let lfs = crate::filter::filter_driver(root, path)?.as_deref() == Some("lfs");
+            let lfs = crate::filter::filter_driver_in(&repo, path)?.as_deref() == Some("lfs");
             if !lfs && meta.len() > crate::MAX_STAGE_BYTES {
                 anyhow::bail!(
                     "{path} is too large to stage ({:.1} MiB, limit {:.0} MiB); configure filter=lfs for large files",
@@ -210,7 +210,7 @@ pub fn stage(root: &Path, paths: &[String]) -> Result<()> {
             } else {
                 Mode::FILE
             };
-            (crate::filter::clean_file(root, path, &abs)?, mode)
+            (crate::filter::clean_file_in(&repo, root, path, &abs)?, mode)
         };
         let id = repo.write_blob(&data)?.detach();
         let stat = gix::index::fs::Metadata::from_path_no_follow(&abs)
@@ -347,7 +347,7 @@ fn commit_checked_inner(
         } else if !meta.is_file() {
             anyhow::bail!("{path} is not a regular file; refusing to commit it");
         } else {
-            let lfs = crate::filter::filter_driver(root, path)?.as_deref() == Some("lfs");
+            let lfs = crate::filter::filter_driver_in(&repo, path)?.as_deref() == Some("lfs");
             if !lfs && meta.len() > crate::MAX_STAGE_BYTES {
                 anyhow::bail!(
                     "{path} is too large to commit ({:.1} MiB, limit {:.0} MiB); configure filter=lfs for large files",
@@ -361,7 +361,7 @@ fn commit_checked_inner(
             } else {
                 0o100644
             };
-            (crate::filter::clean_file(root, path, &abs)?, mode)
+            (crate::filter::clean_file_in(&repo, root, path, &abs)?, mode)
         };
         let oid = repo.write_blob(&data)?.detach();
         tree_map.insert(path.clone(), TreeEntry { oid, mode });

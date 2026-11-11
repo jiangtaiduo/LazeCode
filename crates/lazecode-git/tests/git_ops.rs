@@ -497,3 +497,29 @@ fn ignored_entries_match_git_ignored_matching() {
     assert_eq!(all, vec!["ignored.txt".to_string(), "target".to_string()]);
     assert_eq!(dirs, vec!["target".to_string()]);
 }
+
+#[test]
+fn ahead_behind_cache_invalidates_when_upstream_moves() {
+    let dir = init();
+    std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "base", false).unwrap();
+    let base = git(dir.path(), &["rev-parse", "HEAD"]);
+    std::fs::write(dir.path().join("a.txt"), "two\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "next", false).unwrap();
+    let head = git(dir.path(), &["rev-parse", "HEAD"]);
+    git(
+        dir.path(),
+        &["update-ref", "refs/remotes/origin/main", &base],
+    );
+    let first = lazecode_git::snapshot(dir.path()).unwrap();
+    assert_eq!(first.ahead, 1);
+    git(
+        dir.path(),
+        &["update-ref", "refs/remotes/origin/main", &head],
+    );
+    let second = lazecode_git::snapshot(dir.path()).unwrap();
+    assert_eq!(second.ahead, 0);
+    assert_eq!(second.behind, 0);
+}

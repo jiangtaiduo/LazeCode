@@ -101,3 +101,73 @@ fn push_fetch_pull_against_local_bare_remote() {
     // fetch --prune is a no-op against a healthy remote.
     fetch_all(&second_path).unwrap();
 }
+
+#[test]
+fn fetch_prunes_stale_remote_tracking_refs() {
+    let upstream = tempfile::tempdir().unwrap();
+    let upstream_path = upstream.path().join("origin.git");
+    git(
+        upstream.path(),
+        &["init", "-q", "--bare", upstream_path.to_str().unwrap()],
+    );
+    let work = tempfile::tempdir().unwrap();
+    let root = work.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "user.name", "T"]);
+    git(root, &["config", "user.email", "t@e"]);
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "one"]);
+    remote_add(root, "origin", upstream_path.to_str().unwrap()).unwrap();
+    push(root, "origin", "main", true, false).unwrap();
+
+    let second = tempfile::tempdir().unwrap();
+    let second_path = second.path().join("work");
+    clone(upstream_path.to_str().unwrap(), &second_path).unwrap();
+    let head = git(&second_path, &["rev-parse", "HEAD"]);
+    git(
+        &second_path,
+        &["update-ref", "refs/remotes/origin/gone", &head],
+    );
+    fetch_all(&second_path).unwrap();
+    let refs = git(&second_path, &["for-each-ref", "refs/remotes/origin"]);
+    assert!(!refs.contains("origin/gone"), "{refs}");
+    assert!(refs.contains("origin/main"), "{refs}");
+}
+
+#[test]
+fn push_rejects_non_fast_forward_and_force_overwrites() {
+    let upstream = tempfile::tempdir().unwrap();
+    let upstream_path = upstream.path().join("origin.git");
+    git(
+        upstream.path(),
+        &["init", "-q", "--bare", upstream_path.to_str().unwrap()],
+    );
+    let work = tempfile::tempdir().unwrap();
+    let root = work.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "user.name", "T"]);
+    git(root, &["config", "user.email", "t@e"]);
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "one"]);
+    remote_add(root, "origin", upstream_path.to_str().unwrap()).unwrap();
+    push(root, "origin", "main", true, false).unwrap();
+    assert_eq!(git(root, &["config", "branch.main.remote"]), "origin");
+    assert_eq!(
+        git(root, &["config", "branch.main.merge"]),
+        "refs/heads/main"
+    );
+
+    std::fs::write(root.join("a.txt"), "two\n").unwrap();
+    git(root, &["commit", "-qam", "two"]);
+    push(root, "origin", "main", false, false).unwrap();
+    git(root, &["commit", "--amend", "-qm", "two rewritten"]);
+    let error = push(root, "origin", "main", false, false).unwrap_err();
+    assert!(error.to_string().contains("fast-forward"), "{error}");
+    push(root, "origin", "main", false, true).unwrap();
+    assert_eq!(
+        git(&upstream_path, &["rev-parse", "main"]),
+        git(root, &["rev-parse", "HEAD"])
+    );
+}

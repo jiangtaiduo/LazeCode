@@ -21,6 +21,7 @@ lazecode-text.workspace = true
 lazecode-fs.workspace = true
 ring.workspace = true
 imara-diff.workspace = true
+flate2.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,11 +1,13 @@
-//! Remote sync. Fetch, clone and fast-forward-only pull use gix's blocking
-//! transport; push and pull merge/rebase still use the `git` porcelain until
-//! gix grows a send-pack driver and a merge sequencer.
+//! Remote sync. Push, fetch, clone and fast-forward-only pull use native gix
+//! transport (push speaks receive-pack directly); pull merge/rebase still
+//! uses the `git` porcelain until the merge sequencer lands.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use anyhow::anyhow;
+use gix::refs::transaction::{PreviousValue, RefEdit};
 use gix::remote::Direction;
 
 use crate::{discover, Result};
@@ -77,8 +79,10 @@ pub fn remote_set_url(root: &Path, name: &str, url: &str) -> Result<()> {
 
 // ---------------- sync operations ----------------
 
-/// Push the current branch to `remote`, creating the upstream ref when
-/// `set_upstream` is set. Returns the command's stderr text (for refush).
+/// Push the current branch to `remote` using the native receive-pack
+/// protocol. `force` bypasses the client-side fast-forward check; the command
+/// still carries the last known remote oid, so a changed remote is rejected by
+/// the server (force-with-lease semantics).
 pub fn push(
     root: &Path,
     remote: &str,
@@ -86,30 +90,10 @@ pub fn push(
     set_upstream: bool,
     force: bool,
 ) -> Result<String> {
-    let mut args = vec!["push".to_string()];
-    if force {
-        args.push("--force-with-lease".into());
-    }
-    if set_upstream {
-        args.push("--set-upstream".into());
-    }
-    args.push(remote.to_string());
-    args.push(format!("refs/heads/{branch}:refs/heads/{branch}"));
-    let output = crate::porcelain(root)
-        .args(&args)
-        .output()
-        .map_err(|err| anyhow!("git push spawn failed: {err}"))?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    crate::push::push(root, remote, branch, set_upstream, force)
 }
 
-/// Fetch all remotes. Native gix blocking transport; stale remote-tracking
-/// branches are left in place (prune is not part of the gix fetch API).
+/// Fetch all remotes and prune stale remote-tracking branches.
 pub fn fetch_all(root: &Path) -> Result<String> {
     let repo = discover(root)?;
     let names: Vec<String> = repo
@@ -127,6 +111,36 @@ pub fn fetch_all(root: &Path) -> Result<String> {
         .join("\n"))
 }
 
+fn prune_remote_tracking(
+    repo: &gix::Repository,
+    remote: &str,
+    keep: &HashSet<String>,
+) -> Result<usize> {
+    let prefix = format!("refs/remotes/{remote}/");
+    let mut stale = Vec::new();
+    for reference in repo.references()?.all()? {
+        let reference = reference?;
+        let name = reference.name().as_bstr().to_string();
+        if !name.starts_with(&prefix) || keep.contains(&name) {
+            continue;
+        }
+        let Some(target) = reference.target().try_id().map(|id| id.to_owned()) else {
+            continue;
+        };
+        stale.push((name, target));
+    }
+    let mut removed = 0;
+    for (name, target) in stale {
+        let edit = RefEdit::delete(
+            name.as_str().try_into()?,
+            PreviousValue::MustExistAndMatch(gix::refs::Target::Object(target)),
+        );
+        repo.edit_reference(edit)?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
 fn fetch_remote(repo: &gix::Repository, name: &str) -> Result<()> {
     let remote = repo.find_remote(name)?;
     let connection = remote.connect(Direction::Fetch)?;
@@ -134,7 +148,15 @@ fn fetch_remote(repo: &gix::Repository, name: &str) -> Result<()> {
         gix::progress::Discard,
         gix::remote::ref_map::Options::default(),
     )?;
-    let _outcome = prepare.receive(gix::progress::Discard, &AtomicBool::new(false))?;
+    let outcome = prepare.receive(gix::progress::Discard, &AtomicBool::new(false))?;
+    let keep: HashSet<String> = outcome
+        .ref_map
+        .mappings
+        .iter()
+        .filter_map(|mapping| mapping.local.as_ref())
+        .map(|local| local.to_string())
+        .collect();
+    let _ = prune_remote_tracking(repo, name, &keep)?;
     Ok(())
 }
 

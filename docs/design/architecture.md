@@ -676,7 +676,7 @@ tree-sitter 不用；**LSP 只保留 11 种语言，且是可选增强**（客�
 | status/diff/merge-base | 可用 | 直接用；blame 不是完整 parity |
 | commit/tree/blob merge 原语 | 可用 | 用原语编排 |
 | worktree 创建、submodule 列表 | 可用 | 直接用；remove/edit 自己实现 |
-| push | 未实现 | 自己实现协议 |
+| push | 已实现基础 receive-pack（分支更新/force/lease/upstream；无 delete-ref/tag/atomic） | 自己实现协议 |
 | checkout/switch/restore/reset 编排 | checkout/switch/reset 已实现（事务化回滚 + clean/smudge）；restore 仍走 porcelain | 自己实现 |
 | merge 工作流（MERGE_HEAD/冲突） | 未实现 | 自己实现 |
 | rebase | 未实现 | 自己实现 sequencer |

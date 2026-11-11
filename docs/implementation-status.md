@@ -120,13 +120,15 @@ Write path:
   per-path/per-directory discard also use `gix`/direct index writes; only the
   still-listed porcelain read/history paths below invoke the `git` binary.
 - `pending_count` is native merge-base/count over the configured upstream.
-- Native remote fetch (all remotes), clone and fast-forward-only pull via
-  gix's blocking transport (reqwest + rustls); fast-forward pull verifies the
-  merge-base and uses the native hard reset. Fetch does not prune stale
-  remote-tracking refs yet.
-- Remote sync porcelain (still uses the `git` binary): push
-  (`--force-with-lease`, `--set-upstream`), pull merge/rebase, remote
-  list/add/remove/rename/set-url.
+- Native remote push, fetch (all remotes, prune), clone and
+  fast-forward-only pull via gix's blocking transport (reqwest + rustls).
+  Push speaks receive-pack directly, builds a zlib pack, parses
+  `report-status`, updates the remote-tracking ref and writes
+  `branch.<name>.remote/merge`; non-fast-forward is rejected client-side and
+  force still carries the last known remote oid (lease semantics).
+  Fast-forward pull verifies the merge-base and uses the native hard reset.
+- Remote sync porcelain (still uses the `git` binary): pull merge/rebase,
+  remote list/add/remove/rename/set-url.
 - Native `reset --soft/--mixed/--hard` (branch or detached HEAD, index and
   worktree transaction with rollback); drop-HEAD/squash reuse it.
 - History rewrite porcelain (still uses the `git` binary): merge, rebase (+continue/abort/skip),

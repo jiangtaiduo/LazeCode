@@ -44,9 +44,10 @@
   避免每次 snapshot 都遍历目录。
 - ahead/behind/待推送计数改用 gix revision walk（支持 commit-graph），
   不再手写父提交遍历。
-- 原生远程 fetch、clone 与仅快进 pull，使用 gix blocking transport
-  （reqwest + rustls）。push 与 merge/rebase pull 仍走 porcelain，等待
-  gix 提供 send-pack 与 merge sequencer。
+- 原生远程 push、fetch（含 prune）、clone 与仅快进 pull。push 直接实现
+  receive-pack：自建 zlib pack、解析 report-status、更新 remote-tracking/
+  upstream，并具备 force-with-lease 语义。merge/rebase pull 仍走
+  porcelain，等待 merge sequencer。
 - stash apply 文本三方合并并写入冲突标记；大 LFS 对象流式写出；忽略文件
   状态按 worktree 缓存并由 watcher 失效；ahead/behind 与待推送计数改用
   支持 commit-graph 的 gix revision walk。

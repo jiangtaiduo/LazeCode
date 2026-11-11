@@ -46,8 +46,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stats, ignored-directory walk or ahead/behind traversal), cutting worktree
   I/O for these actions.
 - Stash apply now performs a text three-way merge with Git-style conflict
-  markers when the worktree and the stash both changed the same file; clean
-  merges auto-resolve. Large LFS files stream from `.git/lfs/objects` instead
+  markers and unmerged index stages when the worktree and the stash both
+  changed the same file; clean merges auto-resolve. Large LFS files stream from `.git/lfs/objects` instead
   of being buffered.
 - Ignored-file status is cached per worktree and invalidated by watcher
   events (with a 2s safety TTL), avoiding a directory walk on every snapshot.

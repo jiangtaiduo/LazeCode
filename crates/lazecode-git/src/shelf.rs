@@ -7,11 +7,15 @@
 use std::path::Path;
 
 use anyhow::anyhow;
+use gix::bstr::ByteSlice;
 use gix::hash::ObjectId;
+use gix::index::entry::{Flags, Mode, Stage, Stat};
 use gix::refs::transaction::{LogChange, PreviousValue, RefEdit, RefLog};
 use gix::refs::Target;
 
-use crate::ops::{open_index, remove_empty_parents, safe_worktree_join, CheckoutBackup};
+use crate::ops::{
+    open_index, remove_empty_parents, safe_worktree_join, write_index, CheckoutBackup,
+};
 use crate::tree::{
     blob_bytes, commit_tree_map, head_tree_map, index_map, index_state_from_tree, materialize_tree,
     write_tree_from_index, TreeEntry, TreeMap,
@@ -436,6 +440,63 @@ fn current_matches_entry(
     Ok(read_worktree(&absolute)? == Some(expected))
 }
 
+struct StashConflict {
+    path: String,
+    base: Option<TreeEntry>,
+    ours: Option<TreeEntry>,
+    theirs: Option<TreeEntry>,
+}
+
+fn ours_entry(
+    repo: &gix::Repository,
+    index: &TreeMap,
+    path: &str,
+    current: Option<&(Vec<u8>, u32)>,
+) -> Result<Option<TreeEntry>> {
+    if let Some(entry) = index.get(path) {
+        return Ok(Some(*entry));
+    }
+    match current {
+        Some((data, mode)) => Ok(Some(TreeEntry {
+            oid: repo.write_blob(data)?.detach(),
+            mode: *mode,
+        })),
+        None => Ok(None),
+    }
+}
+
+fn write_conflict_index(repo: &gix::Repository, conflicts: &[StashConflict]) -> Result<()> {
+    let file = open_index(repo)?;
+    let index_path = file.path().to_path_buf();
+    let (mut state, _) = file.into_parts();
+    for conflict in conflicts {
+        state.remove_entries(|_, candidate, _| {
+            candidate
+                .to_str()
+                .map(|path| path == conflict.path)
+                .unwrap_or(false)
+        });
+        for (stage, entry) in [
+            (Stage::Base, conflict.base),
+            (Stage::Ours, conflict.ours),
+            (Stage::Theirs, conflict.theirs),
+        ] {
+            if let Some(entry) = entry {
+                state.dangerously_push_entry(
+                    Stat::default(),
+                    entry.oid,
+                    Flags::from_stage(stage),
+                    Mode::from_bits_truncate(entry.mode),
+                    conflict.path.as_str().into(),
+                );
+            }
+        }
+    }
+    state.remove_tree();
+    state.sort_entries();
+    write_index(gix::index::File::from_state(state, index_path))
+}
+
 fn merge_contents(ancestor: &[u8], current: &[u8], other: &[u8]) -> Option<(Vec<u8>, bool)> {
     let binary = |data: &[u8]| data.iter().take(8000).any(|byte| *byte == 0);
     if binary(ancestor) || binary(current) || binary(other) {
@@ -467,7 +528,7 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
     let (_, base, index, new) = stash_trees(&repo, stash_id)?;
     let mut filters = crate::filter::FilterContext::new(&repo)?;
     let mut actions: Vec<(String, StashAction)> = Vec::new();
-    let mut conflicts: Vec<String> = Vec::new();
+    let mut conflicts: Vec<StashConflict> = Vec::new();
     for path in new.keys().chain(base.keys()) {
         let old = base.get(path);
         let new_entry = new.get(path);
@@ -496,7 +557,12 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
                     },
                 ));
             } else {
-                conflicts.push(path.clone());
+                conflicts.push(StashConflict {
+                    path: path.clone(),
+                    base: old.copied(),
+                    ours: index.get(path).copied(),
+                    theirs: new_entry.copied(),
+                });
             }
             continue;
         }
@@ -557,14 +623,24 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
         {
             actions.push((path.clone(), data));
             if conflict {
-                conflicts.push(path.clone());
+                conflicts.push(StashConflict {
+                    path: path.clone(),
+                    base: old.copied(),
+                    ours: ours_entry(&repo, &index, path, current.as_ref())?,
+                    theirs: new_entry.copied(),
+                });
             }
             continue;
         }
 
         // Delete/modify or binary add/add: keep the current side and report a
         // conflict; Git leaves the index unmerged in this case.
-        conflicts.push(path.clone());
+        conflicts.push(StashConflict {
+            path: path.clone(),
+            base: old.copied(),
+            ours: ours_entry(&repo, &index, path, current.as_ref())?,
+            theirs: new_entry.copied(),
+        });
     }
     if actions.is_empty() && conflicts.is_empty() {
         return Ok("stash applied".to_string());
@@ -623,10 +699,15 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
     }
     backup.discard();
     if !conflicts.is_empty() {
-        conflicts.sort();
+        write_conflict_index(&repo, &conflicts)?;
+        conflicts.sort_by(|a, b| a.path.cmp(&b.path));
         return Err(anyhow!(
             "stash applied with conflicts: {}",
-            conflicts.join(", ")
+            conflicts
+                .iter()
+                .map(|conflict| conflict.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
     }
     Ok("stash applied".to_string())

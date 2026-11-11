@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use gix::hash::ObjectId;
 use gix::index::entry::Stat;
@@ -30,7 +31,7 @@ pub fn snapshot(root: &Path) -> Result<RepoSnapshot> {
         _ => (0, 0),
     };
     let changes = changes(&repo, &workdir)?;
-    let (ignored_files, ignored_dirs) = ignored_entries(&workdir).unwrap_or_default();
+    let (ignored_files, ignored_dirs) = ignored_entries_cached(&workdir).unwrap_or_default();
     Ok(RepoSnapshot {
         root: workdir,
         branch,
@@ -43,6 +44,51 @@ pub fn snapshot(root: &Path) -> Result<RepoSnapshot> {
         ignored_dirs,
         head: info,
     })
+}
+
+#[derive(Clone)]
+struct IgnoredCacheEntry {
+    at: Instant,
+    files: Vec<String>,
+    dirs: Vec<String>,
+}
+
+static IGNORED_CACHE: OnceLock<parking_lot::Mutex<HashMap<PathBuf, IgnoredCacheEntry>>> =
+    OnceLock::new();
+
+fn ignored_cache_key(root: &Path) -> PathBuf {
+    std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf())
+}
+
+/// Drop the ignored-file cache for a worktree. Call this after watcher events.
+pub fn invalidate_ignored_cache(root: &Path) {
+    if let Some(cache) = IGNORED_CACHE.get() {
+        cache.lock().remove(&ignored_cache_key(root));
+    }
+}
+
+fn ignored_entries_cached(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
+    let key = ignored_cache_key(root);
+    let cache = IGNORED_CACHE.get_or_init(|| parking_lot::Mutex::new(HashMap::new()));
+    if let Some(entry) = cache.lock().get(&key) {
+        if entry.at.elapsed() < std::time::Duration::from_secs(2) {
+            return Ok((entry.files.clone(), entry.dirs.clone()));
+        }
+    }
+    let (files, dirs) = ignored_entries(root)?;
+    let mut cache = cache.lock();
+    if cache.len() >= 256 {
+        cache.clear();
+    }
+    cache.insert(
+        key,
+        IgnoredCacheEntry {
+            at: Instant::now(),
+            files: files.clone(),
+            dirs: dirs.clone(),
+        },
+    );
+    Ok((files, dirs))
 }
 
 /// Query entries ignored by `.gitignore` rules.
@@ -525,21 +571,13 @@ pub fn pending_count(root: &Path, branch: &str) -> Result<usize> {
 }
 
 fn count_until(repo: &gix::Repository, from: ObjectId, stop: ObjectId) -> Result<usize> {
-    let mut seen = HashSet::new();
-    let mut queue = vec![from];
     let mut count = 0usize;
-    while let Some(id) = queue.pop() {
-        if id == stop || !seen.insert(id) {
-            continue;
-        }
+    let walk = repo.rev_walk([from]).with_hidden([stop]).all()?;
+    for commit in walk {
+        let _ = commit?;
         count += 1;
-        if count > 20_000 {
+        if count >= 20_000 {
             break;
-        }
-        if let Ok(commit) = repo.find_commit(id) {
-            for parent in commit.parent_ids() {
-                queue.push(parent.detach());
-            }
         }
     }
     Ok(count)

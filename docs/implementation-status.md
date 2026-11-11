@@ -56,7 +56,8 @@ Read path:
 - Status computed from HEAD tree vs index vs worktree, including staged and
   unstaged states, untracked files, per-file added/deleted line counts and
   binary detection. Ignored files/directories come from a native `gix-dir`
-  walk (no `git status` subprocess).
+  walk (no `git status` subprocess), cached per worktree and invalidated by
+  watcher events.
 - Branch list (local/remote), tags, ahead/behind against the configured upstream (falling back to
   `origin/<branch>`) via merge-base.
 - Log with parent lists, refs, lane graph layout (lanes/edges computed from
@@ -119,9 +120,13 @@ Write path:
   per-path/per-directory discard also use `gix`/direct index writes; only the
   still-listed porcelain read/history paths below invoke the `git` binary.
 - `pending_count` is native merge-base/count over the configured upstream.
-- Remote sync porcelain (still uses the `git` binary): push (`--force-with-lease`, `--set-upstream`),
-  pull (merge/rebase/ff-only), fetch (`--all --prune`), clone (non-empty
-  target refused); remote list/add/remove/rename/set-url.
+- Native remote fetch (all remotes), clone and fast-forward-only pull via
+  gix's blocking transport (reqwest + rustls); fast-forward pull verifies the
+  merge-base and uses the native hard reset. Fetch does not prune stale
+  remote-tracking refs yet.
+- Remote sync porcelain (still uses the `git` binary): push
+  (`--force-with-lease`, `--set-upstream`), pull merge/rebase, remote
+  list/add/remove/rename/set-url.
 - Native `reset --soft/--mixed/--hard` (branch or detached HEAD, index and
   worktree transaction with rollback); drop-HEAD/squash reuse it.
 - History rewrite porcelain (still uses the `git` binary): merge, rebase (+continue/abort/skip),
@@ -135,8 +140,9 @@ Write path:
   REVERT_HEAD) drives a conflict bar with continue/abort routed per kind.
 - Native stash: push (message, `-u` for untracked, `--keep-index`),
   list/files/apply/pop/drop, including stash/index/untracked commits and
-  the `refs/stash` reflog. Stashes are readable by the `git` CLI and
-  vice-versa. Shelves live in `.git/lazecode-shelves/*.patch` (whole-tree
+  the `refs/stash` reflog. Apply performs a text three-way merge with
+  conflict markers; large LFS objects stream from the native object store.
+  Stashes are readable by the `git` CLI and vice-versa. Shelves live in `.git/lazecode-shelves/*.patch` (whole-tree
   or path-scoped save — the retract step reuses the per-file discard so
   staged-new files leave both worktree and index — native patch generation,
   native full restore, native path-filtered partial restore, delete,

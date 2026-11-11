@@ -72,7 +72,7 @@ pub use shelf::{
     shelf_restore_deleted, shelf_restore_partial, shelf_save, shelf_save_paths, stash_apply,
     stash_drop, stash_files, stash_list, stash_pop, stash_push, ShelfEntry, StashEntry,
 };
-pub use status::{ignored_entries, ignored_files, snapshot};
+pub use status::{ignored_entries, ignored_files, invalidate_ignored_cache, snapshot};
 pub use sync::{
     clone, fetch_all, pending_count, pull, push, remote_add, remote_list, remote_remove,
     remote_rename, remote_set_url, PullMode, RemoteInfo,

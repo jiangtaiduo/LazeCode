@@ -523,3 +523,18 @@ fn ahead_behind_cache_invalidates_when_upstream_moves() {
     assert_eq!(second.ahead, 0);
     assert_eq!(second.behind, 0);
 }
+
+#[test]
+fn ignored_snapshot_cache_invalidates_explicitly() {
+    let dir = init();
+    std::fs::write(dir.path().join(".gitignore"), "*.tmp\n").unwrap();
+    std::fs::write(dir.path().join("a.tmp"), "no\n").unwrap();
+    let first = lazecode_git::snapshot(dir.path()).unwrap();
+    assert_eq!(first.ignored_files, vec!["a.tmp".to_string()]);
+    std::fs::write(dir.path().join("b.tmp"), "no\n").unwrap();
+    let cached = lazecode_git::snapshot(dir.path()).unwrap();
+    assert!(!cached.ignored_files.iter().any(|path| path == "b.tmp"));
+    lazecode_git::invalidate_ignored_cache(dir.path());
+    let fresh = lazecode_git::snapshot(dir.path()).unwrap();
+    assert!(fresh.ignored_files.iter().any(|path| path == "b.tmp"));
+}

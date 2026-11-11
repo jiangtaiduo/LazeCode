@@ -541,3 +541,62 @@ fn native_diff_patch_preserves_missing_final_newline() {
     lazecode_git::apply_patch(root, &patch, false, true).unwrap();
     assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"old");
 }
+
+#[test]
+fn stash_apply_three_way_merges_non_overlapping_edits() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+    git(root, &["commit", "-qam", "base"]);
+    std::fs::write(root.join("a.txt"), "one\ntwo\nTHREE\n").unwrap();
+    git(root, &["stash", "push", "-q", "-m", "theirs"]);
+    std::fs::write(root.join("a.txt"), "ONE\ntwo\nthree\n").unwrap();
+    stash_apply(root, "stash@{0}").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "ONE\ntwo\nTHREE\n"
+    );
+}
+
+#[test]
+fn stash_apply_writes_conflict_markers_on_overlap() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "base\n").unwrap();
+    git(root, &["commit", "-qam", "base"]);
+    std::fs::write(root.join("a.txt"), "theirs\n").unwrap();
+    git(root, &["stash", "push", "-q", "-m", "theirs"]);
+    std::fs::write(root.join("a.txt"), "ours\n").unwrap();
+    let error = stash_apply(root, "stash@{0}").unwrap_err().to_string();
+    assert!(error.contains("conflicts"), "{error}");
+    let content = std::fs::read_to_string(root.join("a.txt")).unwrap();
+    assert!(content.contains("<<<<<<<"), "{content}");
+    assert!(content.contains("======="), "{content}");
+    assert!(content.contains(">>>>>>>"), "{content}");
+    assert!(content.contains("ours"), "{content}");
+    assert!(content.contains("theirs"), "{content}");
+    // A conflicted pop must keep the stash entry.
+    assert_eq!(stash_list(root).unwrap().len(), 1);
+}
+
+#[test]
+fn stash_apply_streams_large_lfs_objects() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join(".gitattributes"), "*.bin filter=lfs -text\n").unwrap();
+    let old = vec![1u8; 17 * 1024 * 1024];
+    std::fs::write(root.join("big.bin"), &old).unwrap();
+    git(root, &["add", ".gitattributes", "big.bin"]);
+    git(root, &["commit", "-qm", "lfs base"]);
+
+    let new = vec![2u8; 17 * 1024 * 1024];
+    std::fs::write(root.join("big.bin"), &new).unwrap();
+    stash_push(root, Some("lfs change"), false, false).unwrap();
+    assert_eq!(
+        std::fs::read(root.join("big.bin")).unwrap(),
+        old,
+        "stash push must restore the base LFS object"
+    );
+    stash_apply(root, "stash@{0}").unwrap();
+    assert_eq!(std::fs::read(root.join("big.bin")).unwrap(), new);
+}

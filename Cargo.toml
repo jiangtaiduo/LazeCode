@@ -52,12 +52,13 @@ regex = "1"
 globset = "0.4"
 encoding_rs = "0.8"
 chardetng = "0.1"
-gix = { version = "0.90", default-features = false, features = ["basic", "status", "excludes", "dirwalk", "attributes", "credentials", "merge", "sha1", "worktree-mutation"] }
+gix = { version = "0.90", default-features = false, features = ["basic", "status", "excludes", "dirwalk", "attributes", "credentials", "merge", "sha1", "worktree-mutation", "blocking-network-client", "blocking-http-transport-reqwest-rust-tls"] }
 alacritty_terminal = "0.26"
 vte = "0.15"
 portable-pty = "0.9"
 libc = "0.2"
 ring = "0.17"
+imara-diff = { package = "gix-imara-diff", version = "0.3" }
 
 [profile.release]
 lto = "thin"

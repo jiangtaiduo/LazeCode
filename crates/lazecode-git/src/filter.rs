@@ -507,6 +507,18 @@ impl<'repo> FilterContext<'repo> {
         Ok(data)
     }
 
+    /// Return LFS pointer metadata when `path` is filtered through LFS.
+    pub fn lfs_pointer_info(&mut self, path: &str, data: &[u8]) -> Result<Option<(String, u64)>> {
+        if self.attributes(path)?.filter.as_deref() != Some("lfs") {
+            return Ok(None);
+        }
+        Ok(lfs_pointer(data))
+    }
+
+    pub fn lfs_object_path(&self, oid: &str) -> std::path::PathBuf {
+        lfs_object_path(self.stack.repo, oid)
+    }
+
     pub fn smudge_lfs_to_file(
         &mut self,
         root: &Path,

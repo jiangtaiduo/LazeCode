@@ -10,6 +10,16 @@
 
 ### 新增
 
+- 原生历史 sequencer：cherry-pick/revert 的干净/冲突路径、冲突 rebase 的
+  停止/继续/中止/跳过、原生冲突列表/内容/解决接口，并保留作者身份。
+  交互式 rebase 与 merge abort/continue 仍走 porcelain。
+- 终端冷/磁盘回滚：有界 spool、稳定行 id、按需回填、搜索与关闭清理；
+  kitty graphics 传输/放置/删除与有界图片缓存；kitty keyboard/
+  modifyOtherKeys 的释放/重复事件；accesskit 终端文本镜像。
+- 签名更新器：manifest 检查、semver 门禁、有界下载、SHA-256 + Ed25519
+  校验、可回滚的原子可执行文件替换、设置 → 更新界面与自动检查。
+- 文件 → 新建窗口（Cmd+Shift+N）启动独立 LazeCode 进程。
+
 - 原生 Git clean/smudge 管线接入暂存、部分提交、状态与 checkout：
   `.gitattributes` 的 `text`/`eol`/`ident`/`filter`、`core.autocrlf`/
   `core.eol`、用户 `filter.<driver>.clean|smudge` 命令，以及由

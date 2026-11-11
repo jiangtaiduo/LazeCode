@@ -1,23 +1,26 @@
 //! History rewrite (merge/rebase/cherry-pick/revert/reset/drop/squash) and
-//! sequencer-state introspection. Reset, merge and clean rebase are native
-//! (gix refs/index/tree/merge); conflicted rebase, cherry-pick and revert still
-//! fall back to the `git` porcelain. Every rewrite rejects a dirty worktree
-//! first (matching main's safety model) unless the caller explicitly passes
-//! `force`.
+//! sequencer-state introspection. Reset, merge, rebase, cherry-pick, revert
+//! and conflict resolution are native (gix refs/index/tree/merge); only the
+//! interactive-rebase todo shim, drop/squash and a few read-only helpers still
+//! invoke the `git` porcelain. Every rewrite rejects a dirty worktree first
+//! (matching main's safety model) unless the caller explicitly passes `force`.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::anyhow;
+use gix::bstr::ByteSlice;
 use gix::hash::ObjectId;
+use gix::index::entry::{Flags, Mode, Stage, Stat};
 use gix::refs::transaction::{PreviousValue, RefEdit};
 use gix::refs::{FullName, Target};
 
 use crate::ops::{
-    open_index, remove_empty_parents, safe_worktree_join, write_index, CheckoutBackup,
+    open_conflicted_index, remove_empty_parents, safe_worktree_join, write_index, CheckoutBackup,
 };
 use crate::tree::{
-    commit_tree_map, head_tree_map, index_map, index_state_from_tree, materialize_tree,
-    tree_has_gitlinks, tree_map,
+    blob_bytes, commit_tree_map, head_tree_map, index_state_from_tree, materialize_tree,
+    tree_has_gitlinks, tree_map, write_tree_from_index, TreeEntry, TreeMap,
 };
 use crate::{discover, workdir, Result};
 
@@ -248,10 +251,140 @@ pub fn merge_continue(root: &Path) -> Result<String> {
 
 // ---------------- rebase ----------------
 
+/// Native rebase state, stored under `.git/rebase-merge/`. The directory name
+/// matches Git's merge backend so [`sequencer_state`] and the UI banner see an
+/// in-flight rebase; the `lazecode` marker distinguishes it from a rebase that
+/// the interactive porcelain started.
+#[derive(Clone, Debug)]
+struct RebaseMeta {
+    dir: std::path::PathBuf,
+    head_name: Option<String>,
+    orig_head: ObjectId,
+    onto: ObjectId,
+    stopped: Option<ObjectId>,
+    current: ObjectId,
+    todo: Vec<ObjectId>,
+}
+
+impl RebaseMeta {
+    fn load(repo: &gix::Repository) -> Result<Option<Self>> {
+        let dir = repo.git_dir().join("rebase-merge");
+        if !dir.join("lazecode").exists() {
+            return Ok(None);
+        }
+        let read = |name: &str| -> Result<String> {
+            std::fs::read_to_string(dir.join(name))
+                .map(|text| text.trim().to_string())
+                .map_err(|error| anyhow!("rebase state is corrupt: cannot read {name}: {error}"))
+        };
+        let parse = |name: &str, text: &str| -> Result<ObjectId> {
+            ObjectId::from_hex(text.as_bytes())
+                .map_err(|_| anyhow!("rebase state is corrupt: {name} is not a commit id"))
+        };
+        let stopped = read("stopped-sha")?;
+        let todo = read("git-rebase-todo")?;
+        Ok(Some(Self {
+            head_name: {
+                let name = read("head-name")?;
+                (!name.is_empty()).then_some(name)
+            },
+            orig_head: parse("orig-head", &read("orig-head")?)?,
+            onto: parse("onto", &read("onto")?)?,
+            current: parse("current", &read("current")?)?,
+            stopped: if stopped.is_empty() {
+                None
+            } else {
+                Some(parse("stopped-sha", &stopped)?)
+            },
+            todo: todo
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(|line| parse("git-rebase-todo", line))
+                .collect::<Result<Vec<_>>>()?,
+            dir,
+        }))
+    }
+
+    fn save(&self) -> Result<()> {
+        std::fs::create_dir_all(&self.dir)?;
+        std::fs::write(self.dir.join("lazecode"), b"1\n")?;
+        std::fs::write(self.dir.join("orig-head"), format!("{}\n", self.orig_head))?;
+        std::fs::write(self.dir.join("onto"), format!("{}\n", self.onto))?;
+        std::fs::write(self.dir.join("current"), format!("{}\n", self.current))?;
+        std::fs::write(
+            self.dir.join("head-name"),
+            match &self.head_name {
+                Some(name) => format!("{name}\n"),
+                None => String::new(),
+            },
+        )?;
+        match self.stopped {
+            Some(id) => std::fs::write(self.dir.join("stopped-sha"), format!("{id}\n"))?,
+            None => {
+                let _ = std::fs::remove_file(self.dir.join("stopped-sha"));
+            }
+        }
+        let todo: String = self.todo.iter().map(|id| format!("{id}\n")).collect();
+        std::fs::write(self.dir.join("git-rebase-todo"), todo)?;
+        Ok(())
+    }
+
+    fn clear(&self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn head_name(repo: &gix::Repository) -> Result<Option<String>> {
+    let head = repo.head()?;
+    Ok(head.referent_name().map(|name| name.to_string()))
+}
+
+fn detach_head(repo: &gix::Repository, target: ObjectId) -> Result<()> {
+    let mut edit = RefEdit::update(
+        "HEAD".try_into()?,
+        Target::Object(target),
+        PreviousValue::Any,
+        "rebase: detaching HEAD".to_string(),
+    );
+    edit.deref = false;
+    repo.edit_reference(edit)?;
+    Ok(())
+}
+
+fn attach_head(repo: &gix::Repository, name: &str) -> Result<()> {
+    let full: FullName = name.try_into()?;
+    let mut edit = RefEdit::update(
+        "HEAD".try_into()?,
+        Target::Symbolic(full),
+        PreviousValue::Any,
+        format!("rebase: returning to {name}"),
+    );
+    edit.deref = false;
+    repo.edit_reference(edit)?;
+    Ok(())
+}
+
+fn move_reference(repo: &gix::Repository, name: &str, target: ObjectId) -> Result<()> {
+    let full: FullName = name.try_into()?;
+    let mut edit = RefEdit::update(
+        full,
+        Target::Object(target),
+        PreviousValue::Any,
+        "rebase finished".to_string(),
+    );
+    edit.deref = false;
+    repo.edit_reference(edit)?;
+    Ok(())
+}
+
 pub fn rebase(root: &Path, onto: &str) -> Result<String> {
     require_clean(root)?;
     let onto_name = validated_ref(onto)?;
     let repo = discover(root)?;
+    if repo.git_dir().join("rebase-merge").exists() || repo.git_dir().join("rebase-apply").exists()
+    {
+        anyhow::bail!("a rebase is already in progress");
+    }
     let onto_id = repo
         .rev_parse_single(gix::bstr::BStr::new(onto_name))?
         .detach();
@@ -274,21 +407,35 @@ pub fn rebase(root: &Path, onto: &str) -> Result<String> {
         .map(|info| Ok(info?.id))
         .collect::<Result<Vec<_>>>()?;
     commits.reverse();
+    write_git_file(&repo, "ORIG_HEAD", &format!("{head}\n"))?;
+    let meta = RebaseMeta {
+        dir: repo.git_dir().join("rebase-merge"),
+        head_name: head_name(&repo)?,
+        orig_head: head,
+        onto: onto_id,
+        stopped: None,
+        current: onto_id,
+        todo: commits,
+    };
+    rebase_replay(root, &repo, &meta)
+}
+
+/// Replay `meta.todo` on top of `meta.current`. On conflict the merged tree is
+/// checked out with index stages and the sequencer stops; on success the branch
+/// is moved and HEAD reattached.
+fn rebase_replay(root: &Path, repo: &gix::Repository, meta: &RebaseMeta) -> Result<String> {
     let labels = gix::merge::blob::builtin_driver::text::Labels {
         ancestor: None,
         current: Some(gix::bstr::BStr::new("onto")),
         other: Some(gix::bstr::BStr::new("commit")),
     };
     let how = gix::merge::tree::TreatAsUnresolved::git();
-    let mut current = onto_id;
-    for commit_id in commits {
-        let commit = repo.find_commit(commit_id)?;
-        let parent_tree = match commit.parent_ids().next() {
-            Some(parent) => repo.find_commit(parent.detach())?.tree_id()?.detach(),
-            None => repo.empty_tree().id,
-        };
+    let mut current = meta.current;
+    for (position, commit_id) in meta.todo.iter().enumerate() {
+        let commit = repo.find_commit(*commit_id)?;
+        let parent_tree = parent_tree_of(repo, &commit)?;
         let commit_tree = commit.tree_id()?.detach();
-        let current_tree = repo.find_commit(current)?.tree_id()?.detach();
+        let current_tree = tree_of(repo, current)?;
         let mut outcome = repo.merge_trees(
             parent_tree,
             current_tree,
@@ -297,9 +444,18 @@ pub fn rebase(root: &Path, onto: &str) -> Result<String> {
             repo.tree_merge_options()?,
         )?;
         if outcome.has_unresolved_conflicts(how) {
-            // Keep the porcelain sequencer for conflicted rebases; nothing
-            // was written to refs/index/worktree yet.
-            return run(root, &["rebase", onto_name]).map(|_| "rebased".to_string());
+            let tree_id = outcome.tree.write()?.detach();
+            let base_map = tree_map(repo, current_tree)?;
+            detach_head(repo, current)?;
+            write_conflict_state(repo, &base_map, tree_id, &outcome.conflicts)?;
+            let stopped = RebaseMeta {
+                stopped: Some(*commit_id),
+                current,
+                todo: meta.todo[position + 1..].to_vec(),
+                ..meta.clone()
+            };
+            stopped.save()?;
+            return Err(anyhow!("rebase conflict: resolve the unmerged files"));
         }
         let tree = outcome.tree.write()?.detach();
         let message = commit.message_raw()?.to_string();
@@ -312,32 +468,82 @@ pub fn rebase(root: &Path, onto: &str) -> Result<String> {
             .id()
             .detach();
     }
+    if let Some(name) = &meta.head_name {
+        move_reference(repo, name, current)?;
+        attach_head(repo, name)?;
+    }
     reset(root, &current.to_string(), ResetMode::Hard)?;
+    meta.clear();
     Ok("rebased".to_string())
 }
 
 pub fn rebase_continue(root: &Path) -> Result<String> {
-    let output = builder(root, &["rebase", "--continue"])
-        .env("GIT_EDITOR", "true")
-        .env("GIT_SEQUENCE_EDITOR", "true")
-        .output()
-        .map_err(|err| anyhow!("git spawn failed: {err}"))?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
+    let repo = discover(root)?;
+    let Some(mut meta) = RebaseMeta::load(&repo)? else {
+        // Interactive rebase state is owned by the git porcelain.
+        return run(root, &["rebase", "--continue"]).map(|_| "rebase continuing".to_string());
+    };
+    let stopped = meta
+        .stopped
+        .ok_or_else(|| anyhow!("rebase has no stopped commit to continue"))?;
+    let file = open_conflicted_index(&repo)?;
+    let (state, _) = file.into_parts();
+    if state
+        .entries()
+        .iter()
+        .any(|entry| entry.stage() != Stage::Unconflicted)
+    {
+        anyhow::bail!("rebase still has unresolved conflicts; resolve them first");
     }
-    Ok("rebase continuing".to_string())
+    if state
+        .entries()
+        .iter()
+        .any(|entry| entry.mode == Mode::COMMIT)
+    {
+        anyhow::bail!("cannot continue rebase: the index contains submodules");
+    }
+    let tree = write_tree_from_index(&repo, &state)?;
+
+    let stopped_commit = repo.find_commit(stopped)?;
+    let message = stopped_commit.message_raw()?.to_string();
+    let author = stopped_commit.author()?;
+    let committer = repo
+        .committer()
+        .ok_or_else(|| anyhow!("Committer identity is not configured"))??;
+    let current = repo.head_id()?.detach();
+    let new_id = repo
+        .new_commit_as(committer, author, message, tree, [current])?
+        .id()
+        .detach();
+    detach_head(&repo, new_id)?;
+    meta.stopped = None;
+    meta.current = new_id;
+    meta.save()?;
+    rebase_replay(root, &repo, &meta)
 }
 
 pub fn rebase_abort(root: &Path) -> Result<String> {
-    run(root, &["rebase", "--abort"]).map(|_| "rebase aborted".to_string())
+    let repo = discover(root)?;
+    let Some(meta) = RebaseMeta::load(&repo)? else {
+        return run(root, &["rebase", "--abort"]).map(|_| "rebase aborted".to_string());
+    };
+    reset(root, &meta.orig_head.to_string(), ResetMode::Hard)?;
+    if let Some(name) = &meta.head_name {
+        attach_head(&repo, name)?;
+    }
+    meta.clear();
+    Ok("rebase aborted".to_string())
 }
 
 pub fn rebase_skip(root: &Path) -> Result<String> {
-    run(root, &["rebase", "--skip"]).map(|_| "rebase skipped".to_string())
+    let repo = discover(root)?;
+    let Some(meta) = RebaseMeta::load(&repo)? else {
+        return run(root, &["rebase", "--skip"]).map(|_| "rebase skipped".to_string());
+    };
+    // Discard the stopped commit: restore the tree of the last replayed commit
+    // so the conflict markers and stages are gone, then continue with the todo.
+    reset(root, &meta.current.to_string(), ResetMode::Hard)?;
+    rebase_replay(root, &repo, &meta)
 }
 
 /// 交互式变基的一条 todo（action ∈ pick/reword/edit/squash/fixup/drop）。
@@ -401,41 +607,301 @@ pub fn rebase_interactive(root: &Path, onto: &str, steps: &[RebaseStep]) -> Resu
     Ok(stdout.trim().to_string())
 }
 
-// ---------------- cherry-pick ----------------
+// ---------------- sequencer helpers ----------------
+
+fn git_file(repo: &gix::Repository, name: &str) -> std::path::PathBuf {
+    repo.git_dir().join(name)
+}
+
+fn write_git_file(repo: &gix::Repository, name: &str, content: &str) -> Result<()> {
+    lazecode_fs::file::write_atomic(&git_file(repo, name), content.as_bytes())
+        .map_err(|error| anyhow!("cannot write {}: {error}", git_file(repo, name).display()))
+}
+
+fn read_git_file(repo: &gix::Repository, name: &str) -> Option<String> {
+    std::fs::read_to_string(git_file(repo, name)).ok()
+}
+
+fn remove_git_file(repo: &gix::Repository, name: &str) {
+    let _ = std::fs::remove_file(git_file(repo, name));
+}
+
+fn resolve_committish(repo: &gix::Repository, name: &str) -> Result<ObjectId> {
+    repo.rev_parse_single(gix::bstr::BStr::new(name))
+        .map(|id| id.detach())
+        .map_err(|error| anyhow!("cannot resolve '{name}': {error}"))
+}
+
+fn tree_of(repo: &gix::Repository, commit: ObjectId) -> Result<ObjectId> {
+    Ok(repo.find_commit(commit)?.tree_id()?.detach())
+}
+
+fn parent_tree_of(repo: &gix::Repository, commit: &gix::Commit<'_>) -> Result<ObjectId> {
+    match commit.parent_ids().next() {
+        Some(parent) => tree_of(repo, parent.detach()),
+        None => Ok(repo.empty_tree().id),
+    }
+}
+
+/// Write a merged, conflicted tree into the worktree and index: conflict
+/// markers land in the files and stages 1/2/3 land in the index. `base_map` is
+/// the tree that was checked out before the operation, used to delete paths the
+/// merge drops. Everything is rolled back when any step fails.
+fn write_conflict_state(
+    repo: &gix::Repository,
+    base_map: &TreeMap,
+    merged_tree: ObjectId,
+    conflicts: &[gix::merge::tree::Conflict],
+) -> Result<()> {
+    let workdir = workdir(repo)?;
+    let merged = tree_map(repo, merged_tree)?;
+    // A conflicted rebase can stop before the worktree was moved to the last
+    // replayed commit, so consider both the base tree and the current index
+    // when deciding which paths to delete.
+    let index = open_conflicted_index(repo)?;
+    let mut old_paths: BTreeSet<String> = base_map.keys().cloned().collect();
+    for entry in index.entries() {
+        old_paths.insert(entry.path(&index).to_string());
+    }
+    for path in merged.keys().chain(old_paths.iter()) {
+        safe_worktree_join(&workdir, path)?;
+    }
+    let backup = CheckoutBackup::capture(repo, &workdir, old_paths.iter().chain(merged.keys()))?;
+    let old_index = std::fs::read(repo.index_path()).ok();
+    let result = (|| -> Result<()> {
+        for path in &old_paths {
+            if merged.contains_key(path) {
+                continue;
+            }
+            let relative = crate::ops::validate_repo_path(path)?;
+            let absolute = workdir.join(&relative);
+            match std::fs::symlink_metadata(&absolute) {
+                Ok(metadata) if metadata.is_dir() => {
+                    anyhow::bail!("refusing to remove directory {}", absolute.display());
+                }
+                Ok(_) => {
+                    std::fs::remove_file(&absolute)?;
+                    remove_empty_parents(&workdir, &relative);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        materialize_tree(repo, &merged)?;
+        let mut state = index_state_from_tree(repo, &merged);
+        gix::merge::tree::apply_index_entries(
+            conflicts,
+            gix::merge::tree::TreatAsUnresolved::git(),
+            &mut state,
+            gix::merge::tree::apply_index_entries::RemovalMode::Prune,
+        );
+        write_index(gix::index::File::from_state(state, repo.index_path()))?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if let Err(restore_error) = backup.restore() {
+            log::error!("conflict checkout rollback failed: {restore_error}");
+        }
+        restore_index(repo, old_index);
+        return Err(error);
+    }
+    backup.discard();
+    Ok(())
+}
+
+/// Commit whatever the user staged after resolving a cherry-pick/revert
+/// conflict, preserving the original author for cherry-picks.
+fn finish_sequencer(root: &Path, marker: &str, op: &str, preserve_author: bool) -> Result<String> {
+    let repo = discover(root)?;
+    // A multi-commit cherry-pick/revert sequence started by the git CLI keeps
+    // its remaining todo in `.git/sequencer`; let the porcelain finish it.
+    if repo.git_dir().join("sequencer").exists() {
+        return run(root, &[op, "--continue"]).map(|_| format!("{op} continuing"));
+    }
+    let picked_text = read_git_file(&repo, marker).ok_or_else(|| anyhow!("no {op} in progress"))?;
+    let picked = ObjectId::from_hex(picked_text.trim().as_bytes())
+        .map_err(|_| anyhow!("{op} state is corrupt: {marker} is not a commit id"))?;
+    let file = open_conflicted_index(&repo)?;
+    let (state, _) = file.into_parts();
+    if state
+        .entries()
+        .iter()
+        .any(|entry| entry.stage() != Stage::Unconflicted)
+    {
+        anyhow::bail!("{op} still has unresolved conflicts; resolve them first");
+    }
+    if state
+        .entries()
+        .iter()
+        .any(|entry| entry.mode == Mode::COMMIT)
+    {
+        anyhow::bail!("cannot continue {op}: the index contains submodules");
+    }
+    let tree = write_tree_from_index(&repo, &state)?;
+
+    let picked_commit = repo.find_commit(picked)?;
+    let message = read_git_file(&repo, "MERGE_MSG")
+        .map(|text| text.trim_end().to_string())
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| picked_commit.message_raw().unwrap_or_default().to_string());
+    let head = repo.head_id()?.detach();
+    let commit = if preserve_author {
+        let committer = repo
+            .committer()
+            .ok_or_else(|| anyhow!("Committer identity is not configured"))??;
+        repo.new_commit_as(committer, picked_commit.author()?, message, tree, [head])?
+    } else {
+        repo.new_commit(message, tree, [head])?
+    };
+    update_head(&repo, commit.id().detach(), op)?;
+    remove_git_file(&repo, marker);
+    remove_git_file(&repo, "MERGE_MSG");
+    Ok(format!("{op} finished"))
+}
+
+fn abort_sequencer(root: &Path, marker: &str, op: &str) -> Result<String> {
+    let repo = discover(root)?;
+    if repo.git_dir().join("sequencer").exists() {
+        return run(root, &[op, "--abort"]).map(|_| format!("{op} aborted"));
+    }
+    if !git_file(&repo, marker).exists() {
+        anyhow::bail!("no {op} in progress");
+    }
+    let orig = read_git_file(&repo, "ORIG_HEAD")
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .ok_or_else(|| anyhow!("cannot abort {op}: ORIG_HEAD is missing"))?;
+    reset(root, &orig, ResetMode::Hard)?;
+    remove_git_file(&repo, marker);
+    remove_git_file(&repo, "MERGE_MSG");
+    Ok(format!("{op} aborted"))
+}
+
+// ---------------- cherry-pick / revert ----------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplayKind {
+    Pick,
+    Revert,
+}
+
+impl ReplayKind {
+    fn op(self) -> &'static str {
+        match self {
+            ReplayKind::Pick => "cherry-pick",
+            ReplayKind::Revert => "revert",
+        }
+    }
+
+    fn marker(self) -> &'static str {
+        match self {
+            ReplayKind::Pick => "CHERRY_PICK_HEAD",
+            ReplayKind::Revert => "REVERT_HEAD",
+        }
+    }
+}
 
 pub fn cherry_pick(root: &Path, hash: &str) -> Result<String> {
     require_clean(root)?;
     let hash = validated_hash(hash)?;
-    run(root, &["cherry-pick", hash]).map(|_| "picked".to_string())
+    replay_commit(root, hash, ReplayKind::Pick)
 }
 
 pub fn cherry_pick_continue(root: &Path) -> Result<String> {
-    let output = builder(root, &["cherry-pick", "--continue"])
-        .output()
-        .map_err(|err| anyhow!("git spawn failed: {err}"))?;
-    if !output.status.success() {
-        // Do not silently `--skip`: that would discard a pick that failed
-        // because of hooks, unmerged paths or a missing message. The user can
-        // still abort or resolve in the terminal/conflict bar.
-        return Err(anyhow!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok("cherry-pick finishing".to_string())
+    finish_sequencer(root, "CHERRY_PICK_HEAD", "cherry-pick", true)
 }
 
 pub fn cherry_pick_abort(root: &Path) -> Result<String> {
-    run(root, &["cherry-pick", "--abort"]).map(|_| "cherry-pick aborted".to_string())
+    abort_sequencer(root, "CHERRY_PICK_HEAD", "cherry-pick")
 }
-
-// ---------------- revert / reset ----------------
 
 pub fn revert(root: &Path, hash: &str) -> Result<String> {
     require_clean(root)?;
     let hash = validated_hash(hash)?;
-    run(root, &["revert", "--no-edit", hash]).map(|_| "reverted".to_string())
+    replay_commit(root, hash, ReplayKind::Revert)
+}
+
+pub fn revert_continue(root: &Path) -> Result<String> {
+    finish_sequencer(root, "REVERT_HEAD", "revert", false)
+}
+
+pub fn revert_abort(root: &Path) -> Result<String> {
+    abort_sequencer(root, "REVERT_HEAD", "revert")
+}
+
+fn replay_commit(root: &Path, hash: &str, kind: ReplayKind) -> Result<String> {
+    let repo = discover(root)?;
+    let picked = resolve_committish(&repo, hash)?;
+    let commit = repo.find_commit(picked)?;
+    if commit.parent_ids().count() > 1 {
+        anyhow::bail!(
+            "cannot {} merge commit {hash}: a mainline parent is required",
+            kind.op()
+        );
+    }
+    let head = repo.head_id()?.detach();
+    let head_tree = tree_of(&repo, head)?;
+    let commit_tree = commit.tree_id()?.detach();
+    let parent_tree = parent_tree_of(&repo, &commit)?;
+    let (ancestor, theirs) = match kind {
+        ReplayKind::Pick => (parent_tree, commit_tree),
+        ReplayKind::Revert => (commit_tree, parent_tree),
+    };
+
+    let raw_message = commit.message_raw()?.to_string();
+    let message = match kind {
+        ReplayKind::Pick => raw_message.clone(),
+        ReplayKind::Revert => {
+            let subject = raw_message.lines().next().unwrap_or("").trim();
+            format!("Revert \"{subject}\"\n\nThis reverts commit {picked}.\n")
+        }
+    };
+
+    let labels = gix::merge::blob::builtin_driver::text::Labels {
+        ancestor: None,
+        current: Some(gix::bstr::BStr::new("HEAD")),
+        other: Some(gix::bstr::BStr::new(kind.op())),
+    };
+    let how = gix::merge::tree::TreatAsUnresolved::git();
+    let mut outcome = repo.merge_trees(
+        ancestor,
+        head_tree,
+        theirs,
+        labels,
+        repo.tree_merge_options()?,
+    )?;
+    let unresolved = outcome.has_unresolved_conflicts(how);
+    let tree_id = outcome.tree.write()?.detach();
+
+    // Git records the pre-operation tip for both `--abort` and reflog clarity.
+    write_git_file(&repo, "ORIG_HEAD", &format!("{head}\n"))?;
+
+    if unresolved {
+        let base_map = tree_map(&repo, head_tree)?;
+        write_conflict_state(&repo, &base_map, tree_id, &outcome.conflicts)?;
+        write_git_file(&repo, kind.marker(), &format!("{picked}\n"))?;
+        write_git_file(&repo, "MERGE_MSG", &message)?;
+        return Err(anyhow!(
+            "{} conflict: resolve the unmerged files",
+            kind.op()
+        ));
+    }
+
+    let new_commit = match kind {
+        ReplayKind::Pick => {
+            let committer = repo
+                .committer()
+                .ok_or_else(|| anyhow!("Committer identity is not configured"))??;
+            repo.new_commit_as(committer, commit.author()?, message, tree_id, [head])?
+        }
+        ReplayKind::Revert => repo.new_commit(message, tree_id, [head])?,
+    };
+    let new_id = new_commit.id().detach();
+    reset(root, &new_id.to_string(), ResetMode::Hard)?;
+    Ok(match kind {
+        ReplayKind::Pick => "picked".to_string(),
+        ReplayKind::Revert => "reverted".to_string(),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -468,7 +934,10 @@ pub fn reset(root: &Path, target: &str, mode: ResetMode) -> Result<String> {
     if tree_has_gitlinks(&repo, target_tree)? {
         anyhow::bail!("reset target contains submodules; submodule support is not implemented");
     }
-    let index = open_index(&repo)?;
+    // `reset` is also how an aborted cherry-pick/rebase restores the pre-
+    // operation state, so unmerged stages must be accepted here: they are
+    // discarded along with the rest of the old index.
+    let index = open_conflicted_index(&repo)?;
     if index
         .entries()
         .iter()
@@ -476,7 +945,10 @@ pub fn reset(root: &Path, target: &str, mode: ResetMode) -> Result<String> {
     {
         anyhow::bail!("cannot reset while the index contains submodules");
     }
-    let old_map = index_map(&index);
+    let mut old_paths: BTreeSet<String> = BTreeSet::new();
+    for entry in index.entries() {
+        old_paths.insert(entry.path(&index).to_string());
+    }
     let workdir = workdir(&repo)?;
     match mode {
         ResetMode::Soft => unreachable!("handled above"),
@@ -489,14 +961,17 @@ pub fn reset(root: &Path, target: &str, mode: ResetMode) -> Result<String> {
             }
         }
         ResetMode::Hard => {
-            for path in target_map.keys().chain(old_map.keys()) {
+            for path in target_map.keys().chain(old_paths.iter()) {
                 safe_worktree_join(&workdir, path)?;
             }
-            let backup =
-                CheckoutBackup::capture(&repo, &workdir, old_map.keys().chain(target_map.keys()))?;
+            let backup = CheckoutBackup::capture(
+                &repo,
+                &workdir,
+                old_paths.iter().chain(target_map.keys()),
+            )?;
             let old_index = std::fs::read(repo.index_path()).ok();
             let result = (|| -> Result<()> {
-                for path in old_map.keys() {
+                for path in &old_paths {
                     if target_map.contains_key(path) {
                         continue;
                     }
@@ -721,66 +1196,121 @@ pub fn sequencer_state(root: &Path) -> Result<SequencerState> {
 
 // ---------------- conflicts ----------------
 
-/// One conflicted path from `git diff --name-only --diff-filter=U`.
+/// One conflicted path, reconstructed from the index's unmerged stages.
 #[derive(Clone, Debug)]
 pub struct ConflictEntry {
     pub path: String,
-    /// None = pure content conflict; Some(kind) = delete/modify conflict.
+    /// Git's two-letter status: `UU`, `AA`, `UD`, `DU` or `DD`.
     pub kind: Option<String>,
 }
 
+fn conflict_kind(stages: [bool; 3]) -> &'static str {
+    match stages {
+        [_, true, true] if stages[0] => "UU",
+        [_, true, true] => "AA",
+        [true, true, false] => "UD",
+        [true, false, true] => "DU",
+        [true, false, false] => "DD",
+        _ => "UU",
+    }
+}
+
+fn index_conflicts(index: &gix::index::State) -> BTreeMap<String, [bool; 3]> {
+    let mut conflicts: BTreeMap<String, [bool; 3]> = BTreeMap::new();
+    for entry in index.entries() {
+        let slot = match entry.stage() {
+            Stage::Base => 0,
+            Stage::Ours => 1,
+            Stage::Theirs => 2,
+            Stage::Unconflicted => continue,
+        };
+        conflicts
+            .entry(entry.path(index).to_string())
+            .or_insert([false; 3])[slot] = true;
+    }
+    conflicts
+}
+
 pub fn conflict_list(root: &Path) -> Result<Vec<ConflictEntry>> {
-    let output = builder(root, &["status", "--porcelain=v1", "-z"])
-        .output()
-        .map_err(|err| anyhow!("git spawn failed: {err}"))?;
-    if !output.status.success() {
-        return Err(anyhow!(
-            "{}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let mut out = Vec::new();
-    for entry in output.stdout.split(|byte| *byte == 0) {
-        if entry.len() < 4 {
-            continue;
-        }
-        let code = String::from_utf8_lossy(&entry[..2]);
-        let conflicted = code.contains('U') || code == "AA" || code == "DD";
-        if !conflicted {
-            continue;
-        }
-        let path = String::from_utf8_lossy(&entry[3..]).to_string();
-        if path.is_empty() {
-            continue;
-        }
-        out.push(ConflictEntry {
+    let repo = discover(root)?;
+    let index = repo.index_or_empty()?;
+    Ok(index_conflicts(&index)
+        .into_iter()
+        .map(|(path, stages)| ConflictEntry {
             path,
-            kind: Some(code.to_string()),
-        });
-    }
-    Ok(out)
+            kind: Some(conflict_kind(stages).to_string()),
+        })
+        .collect())
 }
 
 /// Resolve a conflicted path by taking one side wholesale. For delete/modify
-/// conflicts the requested side has no index stage, so the correct operation
-/// is `git rm`, not an empty checkout.
+/// conflicts the requested side has no index stage, so the file must be
+/// removed from the worktree and index instead of checked out empty.
 pub fn resolve_take(root: &Path, path: &str, ours: bool) -> Result<()> {
+    let repo = discover(root)?;
+    let workdir = workdir(&repo)?;
     let relative = crate::ops::validate_repo_path(path)?;
-    let path = relative.to_string_lossy();
-    let stage = if ours { "2" } else { "3" };
-    let output = builder(root, &["ls-files", "-u", "--", path.as_ref()])
-        .output()
-        .map_err(|err| anyhow!("git spawn failed: {err}"))?;
-    let has_stage = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .any(|line| line.split_whitespace().nth(2) == Some(stage));
-    if has_stage {
-        let side = if ours { "--ours" } else { "--theirs" };
-        run(root, &["checkout", side, "--", path.as_ref()])?;
-        run(root, &["add", "--", path.as_ref()]).map(drop)
-    } else {
-        run(root, &["rm", "-f", "--", path.as_ref()]).map(drop)
+    let path = relative.to_string_lossy().into_owned();
+    let stage = if ours { Stage::Ours } else { Stage::Theirs };
+
+    let file = open_conflicted_index(&repo)?;
+    let index_path = file.path().to_path_buf();
+    let (mut state, _) = file.into_parts();
+    let conflicted = state.entries().iter().any(|entry| {
+        entry.stage() != Stage::Unconflicted
+            && entry.path(&state).to_str().ok() == Some(path.as_str())
+    });
+    if !conflicted {
+        anyhow::bail!("{path} is not conflicted");
     }
+    let side = state
+        .entry_by_path_and_stage(path.as_str().into(), stage)
+        .map(|entry| (entry.id, entry.mode, entry.stat));
+    if let Some((_, mode, _)) = side {
+        if mode == Mode::COMMIT {
+            anyhow::bail!("cannot resolve {path}: submodule entries are not supported");
+        }
+    }
+    state.remove_entries(|_, candidate, _| candidate.to_str().ok() == Some(path.as_str()));
+
+    match side {
+        Some((id, mode, _)) => {
+            let mut map = TreeMap::new();
+            map.insert(
+                path.clone(),
+                TreeEntry {
+                    oid: id,
+                    mode: mode.bits(),
+                },
+            );
+            materialize_tree(&repo, &map)?;
+            let absolute = safe_worktree_join(&workdir, &path)?;
+            let stat = gix::index::fs::Metadata::from_path_no_follow(&absolute)
+                .ok()
+                .and_then(|metadata| Stat::from_fs(&metadata).ok())
+                .unwrap_or_default();
+            state.dangerously_push_entry(stat, id, Flags::empty(), mode, path.as_str().into());
+        }
+        None => {
+            let absolute = safe_worktree_join(&workdir, &path)?;
+            match std::fs::symlink_metadata(&absolute) {
+                Ok(metadata) if metadata.is_dir() => {
+                    anyhow::bail!("refusing to remove directory {}", absolute.display());
+                }
+                Ok(_) => {
+                    std::fs::remove_file(&absolute)?;
+                    remove_empty_parents(&workdir, &relative);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    state.remove_tree();
+    state.sort_entries();
+    write_index(gix::index::File::from_state(state, index_path))?;
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -793,19 +1323,28 @@ pub struct MergeFile3Way {
 }
 
 pub fn merge_file_content(root: &Path, path: &str) -> Result<MergeFile3Way> {
-    let relative = crate::ops::validate_repo_path(path)?;
-    let path = relative.to_string_lossy();
     let repo = discover(root)?;
-    let workdir = crate::workdir(&repo)?;
-    let full = crate::ops::safe_worktree_join(&workdir, &path)?;
-    let ours = run(root, &["show", &format!(":2:{path}")]).unwrap_or_default();
-    let theirs = run(root, &["show", &format!(":3:{path}")]).unwrap_or_default();
-    let base = run(root, &["show", &format!(":1:{path}")]).ok();
+    let workdir = workdir(&repo)?;
+    let relative = crate::ops::validate_repo_path(path)?;
+    let path = relative.to_string_lossy().into_owned();
+    let index = repo.index_or_empty()?;
+    let read_stage = |stage: Stage| -> Result<Option<String>> {
+        match index.entry_by_path_and_stage(path.as_str().into(), stage) {
+            Some(entry) => Ok(Some(
+                String::from_utf8_lossy(&blob_bytes(&repo, entry.id)?).into_owned(),
+            )),
+            None => Ok(None),
+        }
+    };
+    let ours = read_stage(Stage::Ours)?.unwrap_or_default();
+    let theirs = read_stage(Stage::Theirs)?.unwrap_or_default();
+    let base = read_stage(Stage::Base)?;
+    let full = safe_worktree_join(&workdir, &path)?;
     let worktree = std::fs::read(&full)
         .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
         .unwrap_or_default();
     Ok(MergeFile3Way {
-        path: path.to_string(),
+        path,
         ours,
         theirs,
         base,
@@ -815,14 +1354,22 @@ pub fn merge_file_content(root: &Path, path: &str) -> Result<MergeFile3Way> {
 
 pub fn mark_conflict_resolved(root: &Path, path: &str, content: Option<&str>) -> Result<()> {
     let relative = crate::ops::validate_repo_path(path)?;
-    let path = relative.to_string_lossy();
+    let path = relative.to_string_lossy().into_owned();
     if let Some(content) = content {
         let repo = discover(root)?;
-        let workdir = crate::workdir(&repo)?;
-        let full = crate::ops::safe_worktree_join(&workdir, &path)?;
-        std::fs::write(full, content.as_bytes())?;
+        let workdir = workdir(&repo)?;
+        let full = safe_worktree_join(&workdir, &path)?;
+        if let Ok(metadata) = std::fs::symlink_metadata(&full) {
+            if !metadata.is_file() {
+                std::fs::remove_file(&full)?;
+            }
+        }
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&full, content.as_bytes())?;
     }
-    run(root, &["add", "--", path.as_ref()]).map(drop)
+    crate::ops::stage_resolving_conflicts(root, &[path])
 }
 
 /// Checkout a detached revision/commit.

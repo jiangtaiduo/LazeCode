@@ -13,6 +13,18 @@ use crate::tree::{
 use crate::{discover, workdir, Result};
 
 pub(crate) fn open_index(repo: &gix::Repository) -> Result<gix::index::File> {
+    open_index_impl(repo, false)
+}
+
+/// Like [`open_index`], but also accepts unmerged stages. Conflict resolution
+/// needs to read and rewrite exactly the index that a merge/rebase/cherry-pick
+/// left behind, so the unresolved-stage guard is skipped while the checks for
+/// on-disk formats we cannot round-trip still apply.
+pub(crate) fn open_conflicted_index(repo: &gix::Repository) -> Result<gix::index::File> {
+    open_index_impl(repo, true)
+}
+
+fn open_index_impl(repo: &gix::Repository, allow_unmerged: bool) -> Result<gix::index::File> {
     let file = if repo.index_path().exists() {
         repo.open_index()?
     } else {
@@ -39,10 +51,11 @@ pub(crate) fn open_index(repo: &gix::Repository) -> Result<gix::index::File> {
     if file.resolve_undo().is_some() {
         anyhow::bail!("resolve-undo extension is present; refusing to rewrite .git/index");
     }
-    if file
-        .entries()
-        .iter()
-        .any(|entry| entry.stage() != Stage::Unconflicted)
+    if !allow_unmerged
+        && file
+            .entries()
+            .iter()
+            .any(|entry| entry.stage() != Stage::Unconflicted)
     {
         anyhow::bail!(
             "the index has unresolved conflicts; resolve them before using LazeCode's Git write \
@@ -160,9 +173,23 @@ pub(crate) fn write_index(mut file: gix::index::File) -> Result<()> {
 
 /// Stage the given worktree-relative paths.
 pub fn stage(root: &Path, paths: &[String]) -> Result<()> {
+    stage_impl(root, paths, false)
+}
+
+/// Stage paths even when the index still has unmerged stages, which is how a
+/// conflict is resolved: the stages are replaced by a single stage-0 entry.
+pub(crate) fn stage_resolving_conflicts(root: &Path, paths: &[String]) -> Result<()> {
+    stage_impl(root, paths, true)
+}
+
+fn stage_impl(root: &Path, paths: &[String], allow_unmerged: bool) -> Result<()> {
     let repo = discover(root)?;
     let workdir = workdir(&repo)?;
-    let file = open_index(&repo)?;
+    let file = if allow_unmerged {
+        open_conflicted_index(&repo)?
+    } else {
+        open_index(&repo)?
+    };
     let index_path = file.path().to_path_buf();
     let (mut state, _) = file.into_parts();
     let mut filters = crate::filter::FilterContext::new(&repo)?;
@@ -174,7 +201,11 @@ pub fn stage(root: &Path, paths: &[String]) -> Result<()> {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 // Staging a deletion is only valid for a path that is actually
                 // tracked. A missing untracked path must not silently succeed.
-                if state.entry_by_path(path.as_str().into()).is_none() {
+                let tracked = state
+                    .entries()
+                    .iter()
+                    .any(|entry| entry.path(&state).to_str().ok() == Some(path.as_str()));
+                if !tracked {
                     anyhow::bail!("cannot stage {path}: no such file and it is not tracked");
                 }
                 state.remove_entries(|_, candidate, _| {

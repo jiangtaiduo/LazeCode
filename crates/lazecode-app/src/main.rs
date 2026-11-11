@@ -170,6 +170,17 @@ impl LazeApp {
                 }
                 "quit" => self.request_quit(event_loop),
                 "open-project" => self.model.queue(lazecode_core::Command::OpenProjectDialog),
+                "new-window" => {
+                    let exe = std::env::current_exe();
+                    let spawned =
+                        exe.and_then(|exe| std::process::Command::new(exe).spawn().map(|_| ()));
+                    if let Err(error) = spawned {
+                        self.model.toast(
+                            format!("Cannot open a new window: {error}"),
+                            lazecode_core::ToastKind::Error,
+                        );
+                    }
+                }
                 "new-file" => {
                     if let Some(project) = self.model.active_project() {
                         self.runtime.dialog = lazecode_ui::runtime::DialogState::NewFile {
@@ -780,6 +791,12 @@ fn build_menu(zh: bool) -> Option<Menu> {
         pick(zh, "File", "文件"),
         true,
         &[
+            &MenuItem::with_id(
+                "new-window",
+                pick(zh, "New Window", "新建窗口"),
+                true,
+                accel_shift(Code::KeyN),
+            ),
             &MenuItem::with_id(
                 "open-project",
                 pick(zh, "Open Project…", "打开项目…"),

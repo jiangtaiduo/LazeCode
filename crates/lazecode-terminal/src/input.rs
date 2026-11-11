@@ -1,4 +1,4 @@
-use crate::session::Modes;
+use crate::session::{KittyKeyboard, Modes};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerminalKey {
@@ -21,12 +21,23 @@ pub enum TerminalKey {
     F(u8),
 }
 
+/// Key event kind. Terminals could only report presses until the kitty
+/// keyboard protocol (and win32-input-mode) added repeat/release reporting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeyEvent {
+    #[default]
+    Press,
+    Repeat,
+    Release,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct KeyStroke {
     pub key: TerminalKey,
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
+    pub event: KeyEvent,
 }
 
 impl KeyStroke {
@@ -36,7 +47,13 @@ impl KeyStroke {
             ctrl: false,
             alt: false,
             shift: false,
+            event: KeyEvent::Press,
         }
+    }
+
+    pub fn with_event(mut self, event: KeyEvent) -> Self {
+        self.event = event;
+        self
     }
 }
 
@@ -73,9 +90,177 @@ fn function_seq(final_byte: char, stroke: KeyStroke) -> String {
     }
 }
 
+/// Kitty functional key codes (the spec's `57344` private-use block).
+fn kitty_key_code(key: TerminalKey) -> Option<u32> {
+    Some(match key {
+        TerminalKey::Char(ch) => ch as u32,
+        TerminalKey::Enter => 13,
+        TerminalKey::Tab | TerminalKey::BackTab => 9,
+        TerminalKey::Backspace => 127,
+        TerminalKey::Escape => 27,
+        TerminalKey::Insert => 57348,
+        TerminalKey::Delete => 57349,
+        TerminalKey::Left => 57350,
+        TerminalKey::Right => 57351,
+        TerminalKey::Up => 57352,
+        TerminalKey::Down => 57353,
+        TerminalKey::PageUp => 57354,
+        TerminalKey::PageDown => 57355,
+        TerminalKey::Home => 57356,
+        TerminalKey::End => 57357,
+        TerminalKey::F(number) if (1..=35).contains(&number) => 57363 + u32::from(number),
+        TerminalKey::F(_) => return None,
+    })
+}
+
+/// Does this stroke need the kitty `CSI … u` form instead of the legacy bytes?
+fn uses_kitty(stroke: KeyStroke, flags: KittyKeyboard) -> bool {
+    if !flags.is_active() {
+        return false;
+    }
+    if flags.contains(KittyKeyboard::REPORT_ALL_KEYS_AS_ESC) {
+        return true;
+    }
+    if stroke.event != KeyEvent::Press && flags.contains(KittyKeyboard::REPORT_EVENT_TYPES) {
+        return true;
+    }
+    if stroke.ctrl || stroke.alt {
+        return true;
+    }
+    // Shift makes the legacy encoding of the control keys ambiguous
+    // (`\r` for Enter is the same with and without shift).
+    stroke.shift
+        && matches!(
+            stroke.key,
+            TerminalKey::Enter
+                | TerminalKey::Tab
+                | TerminalKey::BackTab
+                | TerminalKey::Backspace
+                | TerminalKey::Escape
+        )
+}
+
+fn kitty_event_code(event: KeyEvent) -> char {
+    match event {
+        KeyEvent::Press => '1',
+        KeyEvent::Repeat => '2',
+        KeyEvent::Release => '3',
+    }
+}
+
+/// Text produced by the key, as kitty's `REPORT_ASSOCIATED_TEXT` codepoints.
+fn associated_text(stroke: KeyStroke) -> Option<u32> {
+    let TerminalKey::Char(ch) = stroke.key else {
+        return None;
+    };
+    if stroke.ctrl || stroke.alt {
+        return None;
+    }
+    let ch = if stroke.shift && ch.is_ascii_alphabetic() {
+        ch.to_ascii_uppercase()
+    } else {
+        ch
+    };
+    Some(ch as u32)
+}
+
+fn kitty_sequence(stroke: KeyStroke, flags: KittyKeyboard) -> Option<String> {
+    let code = kitty_key_code(stroke.key)?;
+    let modifiers = modifier_code(stroke);
+    let event = flags
+        .contains(KittyKeyboard::REPORT_EVENT_TYPES)
+        .then_some(kitty_event_code(stroke.event));
+    let text = if stroke.event == KeyEvent::Release {
+        None
+    } else if flags.contains(KittyKeyboard::REPORT_ASSOCIATED_TEXT) {
+        associated_text(stroke)
+    } else {
+        None
+    };
+    let mut out = format!("\x1b[{code}");
+    if modifiers != 1 || event.is_some() || text.is_some() {
+        out.push(';');
+        out.push_str(&modifiers.to_string());
+        if let Some(event) = event {
+            out.push(':');
+            out.push(event);
+        }
+    }
+    if let Some(text) = text {
+        out.push(';');
+        out.push_str(&text.to_string());
+    }
+    out.push('u');
+    Some(out)
+}
+
+/// Does this key already have an unambiguous legacy control byte?
+fn legacy_control_code(ch: char) -> bool {
+    matches!(
+        ch.to_ascii_lowercase(),
+        'a'..='z' | '[' | '\\' | ']' | '^' | '_' | '@' | ' ' | '?'
+    )
+}
+
+fn modify_other_keys_code(key: TerminalKey) -> Option<u32> {
+    Some(match key {
+        TerminalKey::Char(ch) => ch as u32,
+        TerminalKey::Enter => 13,
+        TerminalKey::Tab | TerminalKey::BackTab => 9,
+        TerminalKey::Backspace => 127,
+        TerminalKey::Escape => 27,
+        _ => return None,
+    })
+}
+
+/// xterm `modifyOtherKeys` encoding: `CSI 27 ; modifier ; key ~`.
+fn modify_keys_sequence(stroke: KeyStroke, level: u8) -> Option<String> {
+    if level == 0 || stroke.event != KeyEvent::Press {
+        return None;
+    }
+    let modified = stroke.ctrl || stroke.alt || stroke.shift;
+    if !modified {
+        return None;
+    }
+    let apply = match level {
+        // Level 1 only disambiguates keys whose legacy encoding would lose
+        // information: the control keys, and ctrl+keys with no control byte.
+        1 => match stroke.key {
+            TerminalKey::Enter
+            | TerminalKey::Tab
+            | TerminalKey::BackTab
+            | TerminalKey::Backspace
+            | TerminalKey::Escape => true,
+            TerminalKey::Char(ch) => stroke.ctrl && !legacy_control_code(ch),
+            _ => false,
+        },
+        // Level 2 reports every modified key.
+        _ => true,
+    };
+    if !apply {
+        return None;
+    }
+    let code = modify_other_keys_code(stroke.key)?;
+    Some(format!("\x1b[27;{};{code}~", modifier_code(stroke)))
+}
+
 /// Encode a key press for the PTY. Command (meta) combinations are handled by
 /// the application shell and never reach the terminal.
+///
+/// When the program enabled the kitty keyboard protocol (or xterm's
+/// `modifyOtherKeys`) the modified/released keys are reported in that
+/// protocol's form; otherwise the legacy xterm bytes are used unchanged.
 pub fn encode_key(stroke: KeyStroke, modes: &Modes) -> Option<Vec<u8>> {
+    if uses_kitty(stroke, modes.kitty) {
+        return kitty_sequence(stroke, modes.kitty).map(String::into_bytes);
+    }
+    // A legacy terminal cannot report key releases or repeats.
+    if stroke.event != KeyEvent::Press {
+        return None;
+    }
+    if let Some(sequence) = modify_keys_sequence(stroke, modes.modify_other_keys) {
+        return Some(sequence.into_bytes());
+    }
     let mut out = String::new();
     match stroke.key {
         TerminalKey::Char(ch) => {
@@ -206,18 +391,32 @@ mod tests {
         Modes::default()
     }
 
+    fn kitty(flags: KittyKeyboard) -> Modes {
+        Modes {
+            kitty: flags,
+            kitty_keyboard: flags.is_active(),
+            ..Modes::default()
+        }
+    }
+
+    fn stroke(key: TerminalKey, ctrl: bool, alt: bool, shift: bool) -> KeyStroke {
+        KeyStroke {
+            key,
+            ctrl,
+            alt,
+            shift,
+            event: KeyEvent::Press,
+        }
+    }
+
+    fn encoded(stroke: KeyStroke, modes: &Modes) -> String {
+        String::from_utf8(encode_key(stroke, modes).expect("encoded")).expect("utf8")
+    }
+
     #[test]
     fn ctrl_c_is_etx() {
-        let bytes = encode_key(
-            KeyStroke {
-                key: TerminalKey::Char('c'),
-                ctrl: true,
-                alt: false,
-                shift: false,
-            },
-            &modes(),
-        )
-        .unwrap();
+        let bytes =
+            encode_key(stroke(TerminalKey::Char('c'), true, false, false), &modes()).unwrap();
         assert_eq!(bytes, vec![3]);
     }
 
@@ -237,20 +436,14 @@ mod tests {
 
     #[test]
     fn navigation_keys_carry_xterm_modifiers() {
-        let stroke = KeyStroke {
-            key: TerminalKey::Left,
-            ctrl: true,
-            alt: false,
-            shift: false,
-        };
-        assert_eq!(encode_key(stroke, &modes()).unwrap(), b"\x1b[1;5D".to_vec());
-        let stroke = KeyStroke {
-            key: TerminalKey::Up,
-            ctrl: false,
-            alt: false,
-            shift: true,
-        };
-        assert_eq!(encode_key(stroke, &modes()).unwrap(), b"\x1b[1;2A".to_vec());
+        assert_eq!(
+            encode_key(stroke(TerminalKey::Left, true, false, false), &modes()).unwrap(),
+            b"\x1b[1;5D".to_vec()
+        );
+        assert_eq!(
+            encode_key(stroke(TerminalKey::Up, false, false, true), &modes()).unwrap(),
+            b"\x1b[1;2A".to_vec()
+        );
     }
 
     #[test]
@@ -275,12 +468,184 @@ mod tests {
 
     #[test]
     fn ctrl_alt_letter_keeps_the_meta_prefix() {
-        let stroke = KeyStroke {
-            key: TerminalKey::Char('a'),
-            ctrl: true,
-            alt: true,
-            shift: false,
-        };
-        assert_eq!(encode_key(stroke, &modes()).unwrap(), vec![0x1b, 0x01]);
+        assert_eq!(
+            encode_key(stroke(TerminalKey::Char('a'), true, true, false), &modes()).unwrap(),
+            vec![0x1b, 0x01]
+        );
+    }
+
+    #[test]
+    fn kitty_disambiguates_modified_keys_only() {
+        let modes = kitty(KittyKeyboard::DISAMBIGUATE_ESC_CODES);
+        // Plain text keeps the legacy encoding.
+        assert_eq!(
+            encoded(stroke(TerminalKey::Char('a'), false, false, false), &modes),
+            "a"
+        );
+        assert_eq!(
+            encoded(stroke(TerminalKey::Char('a'), true, false, false), &modes),
+            "\x1b[97;5u"
+        );
+        assert_eq!(
+            encoded(stroke(TerminalKey::Char('a'), false, true, false), &modes),
+            "\x1b[97;3u"
+        );
+        assert_eq!(
+            encoded(stroke(TerminalKey::Char('a'), true, true, true), &modes),
+            "\x1b[97;8u"
+        );
+        // Shift+Enter is ambiguous in legacy mode.
+        assert_eq!(
+            encoded(stroke(TerminalKey::Enter, false, false, true), &modes),
+            "\x1b[13;2u"
+        );
+        // Plain Enter still uses the control byte.
+        assert_eq!(
+            encoded(stroke(TerminalKey::Enter, false, false, false), &modes),
+            "\r"
+        );
+        // Arrows with control become functional codepoints.
+        assert_eq!(
+            encoded(stroke(TerminalKey::Up, true, false, false), &modes),
+            "\x1b[57352;5u"
+        );
+        assert_eq!(
+            encoded(stroke(TerminalKey::F(1), false, false, false), &modes),
+            "\x1bOP"
+        );
+    }
+
+    #[test]
+    fn kitty_reports_events_and_releases() {
+        let flags = KittyKeyboard::DISAMBIGUATE_ESC_CODES | KittyKeyboard::REPORT_EVENT_TYPES;
+        let modes = kitty(flags);
+        let press = stroke(TerminalKey::Char('c'), true, false, false);
+        assert_eq!(encoded(press, &modes), "\x1b[99;5:1u");
+        assert_eq!(
+            encoded(press.with_event(KeyEvent::Repeat), &modes),
+            "\x1b[99;5:2u"
+        );
+        assert_eq!(
+            encoded(press.with_event(KeyEvent::Release), &modes),
+            "\x1b[99;5:3u"
+        );
+        // A released unmodified key is still reported (that is the point of
+        // the event-types flag), with the default modifier parameter.
+        assert_eq!(
+            encoded(
+                stroke(TerminalKey::Char('a'), false, false, false).with_event(KeyEvent::Release),
+                &modes
+            ),
+            "\x1b[97;1:3u"
+        );
+    }
+
+    #[test]
+    fn kitty_release_without_event_flag_stays_legacy_silent() {
+        let modes = kitty(KittyKeyboard::DISAMBIGUATE_ESC_CODES);
+        assert!(encode_key(
+            stroke(TerminalKey::Char('a'), false, false, false).with_event(KeyEvent::Release),
+            &modes
+        )
+        .is_none());
+        assert!(encode_key(
+            stroke(TerminalKey::Up, false, false, false).with_event(KeyEvent::Release),
+            &modes
+        )
+        .is_none());
+        // A ctrl-modified release is disambiguated even without flag 2.
+        assert_eq!(
+            encoded(
+                stroke(TerminalKey::Char('a'), true, false, false).with_event(KeyEvent::Release),
+                &modes
+            ),
+            "\x1b[97;5u"
+        );
+    }
+
+    #[test]
+    fn kitty_all_keys_and_associated_text() {
+        let modes =
+            kitty(KittyKeyboard::REPORT_ALL_KEYS_AS_ESC | KittyKeyboard::REPORT_ASSOCIATED_TEXT);
+        assert_eq!(
+            encoded(stroke(TerminalKey::Char('a'), false, false, false), &modes),
+            "\x1b[97;1;97u"
+        );
+        assert_eq!(
+            encoded(stroke(TerminalKey::Char('a'), false, false, true), &modes),
+            "\x1b[97;2;65u"
+        );
+        assert_eq!(
+            encoded(stroke(TerminalKey::F(5), false, false, false), &modes),
+            "\x1b[57368u"
+        );
+    }
+
+    #[test]
+    fn modify_other_keys_level_two_reports_every_modified_key() {
+        let mut modes = modes();
+        modes.modify_other_keys = 2;
+        assert_eq!(
+            encoded(stroke(TerminalKey::Enter, true, false, false), &modes),
+            "\x1b[27;5;13~"
+        );
+        assert_eq!(
+            encoded(stroke(TerminalKey::Tab, false, false, true), &modes),
+            "\x1b[27;2;9~"
+        );
+        assert_eq!(
+            encoded(stroke(TerminalKey::Char('a'), true, false, false), &modes),
+            "\x1b[27;5;97~"
+        );
+        // Unmodified keys are untouched.
+        assert_eq!(
+            encoded(stroke(TerminalKey::Char('a'), false, false, false), &modes),
+            "a"
+        );
+    }
+
+    #[test]
+    fn modify_other_keys_level_one_only_disambiguates() {
+        let mut modes = modes();
+        modes.modify_other_keys = 1;
+        // ctrl+a already has a control byte: leave it alone.
+        assert_eq!(
+            encode_key(stroke(TerminalKey::Char('a'), true, false, false), &modes).unwrap(),
+            vec![1]
+        );
+        // ctrl+enter has no legacy byte.
+        assert_eq!(
+            encoded(stroke(TerminalKey::Enter, true, false, false), &modes),
+            "\x1b[27;5;13~"
+        );
+        // Plain alt+letter keeps its ESC prefix.
+        assert_eq!(
+            encode_key(stroke(TerminalKey::Char('b'), false, true, false), &modes).unwrap(),
+            b"\x1bb".to_vec()
+        );
+    }
+
+    #[test]
+    fn kitty_protocol_wins_over_modify_other_keys() {
+        let mut modes = kitty(KittyKeyboard::DISAMBIGUATE_ESC_CODES);
+        modes.modify_other_keys = 2;
+        assert_eq!(
+            encoded(stroke(TerminalKey::Enter, true, false, false), &modes),
+            "\x1b[13;5u"
+        );
+    }
+
+    #[test]
+    fn disabling_the_protocol_restores_legacy_bytes() {
+        let mut modes = kitty(KittyKeyboard::DISAMBIGUATE_ESC_CODES);
+        modes.kitty = KittyKeyboard::default();
+        assert_eq!(
+            encode_key(stroke(TerminalKey::Char('c'), true, false, false), &modes).unwrap(),
+            vec![3]
+        );
+        assert_eq!(
+            encode_key(KeyStroke::plain(TerminalKey::Up), &modes).unwrap(),
+            b"\x1b[A"
+        );
     }
 }

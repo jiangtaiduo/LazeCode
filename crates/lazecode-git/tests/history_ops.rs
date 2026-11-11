@@ -1,6 +1,7 @@
 use lazecode_git::{
-    cherry_pick, conflict_list, drop_commit, merge, rebase, reset, resolve_take, revert,
-    sequencer_state, squash_commits, ResetMode, SequencerState,
+    cherry_pick, conflict_list, drop_commit, merge, rebase, rebase_abort, rebase_continue,
+    rebase_skip, reset, resolve_take, revert, revert_abort, revert_continue, sequencer_state,
+    squash_commits, ResetMode, SequencerState,
 };
 use std::path::Path;
 use std::process::Command;
@@ -477,4 +478,335 @@ fn reset_soft_mixed_hard_and_detached_head_are_native() {
     reset(root, "HEAD~1", ResetMode::Soft).unwrap();
     assert_eq!(git(root, true, &["rev-parse", "HEAD"]), base);
     assert_eq!(git(root, true, &["rev-parse", "main"]), base);
+}
+
+#[test]
+fn cherry_pick_clean_preserves_author_and_abort_restores() {
+    let dir = repo();
+    let root = dir.path();
+    commit(root, "base.txt", "base\n", "base");
+
+    git(root, true, &["checkout", "-qb", "other"]);
+    std::fs::write(root.join("picked.txt"), "picked\n").unwrap();
+    git(root, true, &["add", "picked.txt"]);
+    git(
+        root,
+        true,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "picked work",
+            "--author",
+            "Alice <alice@example.com>",
+        ],
+    );
+    let picked = git(root, true, &["rev-parse", "HEAD"]);
+
+    git(root, true, &["checkout", "-q", "main"]);
+    let before = git(root, true, &["rev-parse", "HEAD"]);
+    cherry_pick(root, &picked).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("picked.txt")).unwrap(),
+        "picked\n"
+    );
+    assert_eq!(
+        git(root, true, &["log", "-1", "--format=%s"]),
+        "picked work"
+    );
+    assert_eq!(
+        git(root, true, &["log", "-1", "--format=%an <%ae>"]),
+        "Alice <alice@example.com>",
+        "cherry-pick must keep the original author"
+    );
+    assert_eq!(git(root, true, &["rev-parse", "HEAD~1"]), before);
+    assert_eq!(sequencer_state(root).unwrap(), SequencerState::None);
+
+    // Conflicting pick, then native abort restores HEAD/worktree/index.
+    git(root, true, &["checkout", "-q", "other"]);
+    commit(root, "base.txt", "other\n", "other base");
+    let conflicting = git(root, true, &["rev-parse", "HEAD"]);
+    git(root, true, &["checkout", "-q", "main"]);
+    commit(root, "base.txt", "main\n", "main base");
+    let tip = git(root, true, &["rev-parse", "HEAD"]);
+
+    let error = cherry_pick(root, &conflicting).unwrap_err().to_string();
+    assert!(error.contains("conflict"), "{error}");
+    assert!(matches!(
+        sequencer_state(root).unwrap(),
+        SequencerState::CherryPick { .. }
+    ));
+    assert!(root.join("base.txt").exists());
+    assert!(git(root, true, &["ls-files", "-u"]).contains("base.txt"));
+
+    lazecode_git::cherry_pick_abort(root).unwrap();
+    assert_eq!(git(root, true, &["rev-parse", "HEAD"]), tip);
+    assert_eq!(
+        std::fs::read_to_string(root.join("base.txt")).unwrap(),
+        "main\n"
+    );
+    assert!(conflict_list(root).unwrap().is_empty());
+    assert_eq!(sequencer_state(root).unwrap(), SequencerState::None);
+}
+
+#[test]
+fn revert_clean_and_conflicted_continue_abort() {
+    let dir = repo();
+    let root = dir.path();
+    commit(root, "f.txt", "base\n", "base");
+    let target = commit(root, "f.txt", "x\n", "change to x");
+    commit(root, "g.txt", "g\n", "add g");
+
+    revert(root, &target).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "base\n"
+    );
+    let subject = git(root, true, &["log", "-1", "--format=%s"]);
+    assert!(subject.contains("Revert"), "{subject}");
+    assert_eq!(sequencer_state(root).unwrap(), SequencerState::None);
+
+    // Reverting the same change on top of a divergent edit conflicts.
+    commit(root, "f.txt", "y\n", "change to y");
+    let error = revert(root, &target).unwrap_err().to_string();
+    assert!(error.contains("conflict"), "{error}");
+    assert!(matches!(
+        sequencer_state(root).unwrap(),
+        SequencerState::Revert { .. }
+    ));
+    let conflicts = conflict_list(root).unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].path, "f.txt");
+    assert_eq!(conflicts[0].kind.as_deref(), Some("UU"));
+
+    resolve_take(root, "f.txt", false).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "base\n"
+    );
+    revert_continue(root).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("f.txt")).unwrap(),
+        "base\n"
+    );
+    let subject = git(root, true, &["log", "-1", "--format=%s"]);
+    assert!(subject.contains("Revert"), "{subject}");
+    assert_eq!(sequencer_state(root).unwrap(), SequencerState::None);
+
+    // Abort a fresh conflicting revert.
+    commit(root, "f.txt", "z\n", "change to z");
+    let tip = git(root, true, &["rev-parse", "HEAD"]);
+    let error = revert(root, &target).unwrap_err().to_string();
+    assert!(error.contains("conflict"), "{error}");
+    revert_abort(root).unwrap();
+    assert_eq!(git(root, true, &["rev-parse", "HEAD"]), tip);
+    assert_eq!(std::fs::read_to_string(root.join("f.txt")).unwrap(), "z\n");
+    assert!(conflict_list(root).unwrap().is_empty());
+    assert_eq!(sequencer_state(root).unwrap(), SequencerState::None);
+}
+
+fn feature_with_conflicting_replay(root: &Path) -> String {
+    commit(root, "shared.txt", "base\n", "base");
+    git(root, true, &["checkout", "-qb", "feature"]);
+    std::fs::write(root.join("one.txt"), "one\n").unwrap();
+    git(root, true, &["add", "one.txt"]);
+    git(
+        root,
+        true,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "one",
+            "--author",
+            "Bob <bob@example.com>",
+        ],
+    );
+    std::fs::write(root.join("shared.txt"), "feature\n").unwrap();
+    git(root, true, &["add", "shared.txt"]);
+    git(
+        root,
+        true,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "feature shared",
+            "--author",
+            "Bob <bob@example.com>",
+        ],
+    );
+    let original = git(root, true, &["rev-parse", "HEAD"]);
+    git(root, true, &["checkout", "-q", "main"]);
+    commit(root, "shared.txt", "main\n", "main shared");
+    git(root, true, &["checkout", "-q", "feature"]);
+    original
+}
+
+#[test]
+fn conflicted_rebase_continue_preserves_author_and_abort_restores() {
+    let dir = repo();
+    let root = dir.path();
+    let original = feature_with_conflicting_replay(root);
+
+    let error = rebase(root, "main").unwrap_err().to_string();
+    assert!(error.contains("conflict"), "{error}");
+    assert_eq!(sequencer_state(root).unwrap(), SequencerState::Rebase);
+    assert!(root.join("shared.txt").exists());
+    let merged = lazecode_git::merge_file_content(root, "shared.txt").unwrap();
+    assert!(merged.ours.contains("main"), "{merged:?}");
+    assert!(merged.theirs.contains("feature"), "{merged:?}");
+    assert!(merged.worktree.contains("<<<<<<<"), "{merged:?}");
+    let conflicts = conflict_list(root).unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].path, "shared.txt");
+    assert_eq!(conflicts[0].kind.as_deref(), Some("UU"));
+
+    rebase_abort(root).unwrap();
+    assert_eq!(sequencer_state(root).unwrap(), SequencerState::None);
+    assert_eq!(git(root, true, &["rev-parse", "feature"]), original);
+    assert_eq!(
+        git(root, true, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feature"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("shared.txt")).unwrap(),
+        "feature\n"
+    );
+    assert!(root.join("one.txt").exists());
+
+    // Re-run and continue with the alpha-resolution (take theirs).
+    let error = rebase(root, "main").unwrap_err().to_string();
+    assert!(error.contains("conflict"), "{error}");
+    resolve_take(root, "shared.txt", false).unwrap();
+    rebase_continue(root).unwrap();
+    assert_eq!(sequencer_state(root).unwrap(), SequencerState::None);
+    assert_eq!(
+        git(root, true, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feature"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("shared.txt")).unwrap(),
+        "feature\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("one.txt")).unwrap(),
+        "one\n"
+    );
+    assert_eq!(
+        git(root, true, &["rev-list", "--count", "main..feature"]),
+        "2"
+    );
+    let authors = git(root, true, &["log", "--format=%an <%ae>", "main..feature"]);
+    assert!(
+        authors.lines().all(|line| line == "Bob <bob@example.com>"),
+        "{authors}"
+    );
+}
+
+#[test]
+fn conflicted_rebase_skip_drops_the_conflicting_commit() {
+    let dir = repo();
+    let root = dir.path();
+    feature_with_conflicting_replay(root);
+
+    let error = rebase(root, "main").unwrap_err().to_string();
+    assert!(error.contains("conflict"), "{error}");
+    rebase_skip(root).unwrap();
+
+    assert_eq!(sequencer_state(root).unwrap(), SequencerState::None);
+    assert_eq!(
+        git(root, true, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "feature"
+    );
+    assert_eq!(
+        git(root, true, &["rev-list", "--count", "main..feature"]),
+        "1"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("shared.txt")).unwrap(),
+        "main\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("one.txt")).unwrap(),
+        "one\n"
+    );
+    assert_eq!(
+        git(root, true, &["log", "--format=%s", "main..feature"]),
+        "one"
+    );
+}
+
+#[test]
+fn native_conflict_list_resolve_take_and_file_content() {
+    let dir = repo();
+    let root = dir.path();
+    commit(root, "content.txt", "base\n", "base");
+    commit(root, "deleted.txt", "base\n", "base deleted");
+
+    git(root, true, &["checkout", "-qb", "feature"]);
+    git(root, true, &["rm", "-q", "deleted.txt"]);
+    git(root, true, &["commit", "-q", "-m", "delete"]);
+    std::fs::write(root.join("content.txt"), "feature\n").unwrap();
+    git(root, true, &["add", "content.txt"]);
+    git(root, true, &["commit", "-q", "-m", "feature"]);
+
+    git(root, true, &["checkout", "-q", "main"]);
+    std::fs::write(root.join("content.txt"), "main\n").unwrap();
+    git(root, true, &["add", "content.txt"]);
+    git(root, true, &["commit", "-q", "-m", "main"]);
+    std::fs::write(root.join("deleted.txt"), "main edit\n").unwrap();
+    git(root, true, &["add", "deleted.txt"]);
+    git(root, true, &["commit", "-q", "-m", "modify"]);
+
+    // Native merge, so conflict_list/merge_file_content read our own index.
+    merge(root, "feature").unwrap_err();
+    let mut conflicts = conflict_list(root).unwrap();
+    conflicts.sort_by(|a, b| a.path.cmp(&b.path));
+    assert_eq!(conflicts.len(), 2);
+    assert_eq!(conflicts[0].path, "content.txt");
+    assert_eq!(conflicts[0].kind.as_deref(), Some("UU"));
+    assert_eq!(conflicts[1].path, "deleted.txt");
+    assert_eq!(conflicts[1].kind.as_deref(), Some("UD"));
+
+    let three_way = lazecode_git::merge_file_content(root, "content.txt").unwrap();
+    assert_eq!(three_way.base.as_deref(), Some("base\n"));
+    assert_eq!(three_way.ours, "main\n");
+    assert_eq!(three_way.theirs, "feature\n");
+    assert!(three_way.worktree.contains("<<<<<<<"));
+
+    resolve_take(root, "content.txt", true).unwrap();
+    resolve_take(root, "deleted.txt", false).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("content.txt")).unwrap(),
+        "main\n"
+    );
+    assert!(!root.join("deleted.txt").exists());
+    assert!(git(root, true, &["ls-files", "deleted.txt"]).is_empty());
+    assert!(conflict_list(root).unwrap().is_empty());
+}
+
+#[test]
+fn native_delete_by_us_conflict_takes_the_deletion() {
+    let dir = repo();
+    let root = dir.path();
+    commit(root, "gone.txt", "base\n", "base");
+
+    git(root, true, &["checkout", "-qb", "feature"]);
+    commit(root, "gone.txt", "feature edit\n", "feature edit");
+    git(root, true, &["checkout", "-q", "main"]);
+    git(root, true, &["rm", "-q", "gone.txt"]);
+    git(root, true, &["commit", "-q", "-m", "delete"]);
+
+    merge(root, "feature").unwrap_err();
+    let conflicts = conflict_list(root).unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].path, "gone.txt");
+    assert_eq!(conflicts[0].kind.as_deref(), Some("DU"));
+
+    // Taking "ours" means accepting our deletion.
+    resolve_take(root, "gone.txt", true).unwrap();
+    assert!(!root.join("gone.txt").exists());
+    assert!(git(root, true, &["ls-files", "gone.txt"]).is_empty());
+    assert!(conflict_list(root).unwrap().is_empty());
 }

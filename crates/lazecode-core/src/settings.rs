@@ -91,6 +91,15 @@ pub struct Settings {
     /// useCommitMessageHistory：提交成功后入史、历史项可回填可清除）。
     pub commit_history: Vec<String>,
     pub ignored_patterns: Vec<String>,
+    /// Update manifest endpoint (HTTPS URL, `file://` URL or local path).
+    /// Empty disables the updater; `crate::updater` never runs implicitly.
+    pub update_endpoint: String,
+    /// Pinned Ed25519 public key for the update manifest, base64 or hex.
+    /// Empty disables the updater together with `update_endpoint`.
+    pub update_public_key: String,
+    /// Check the endpoint once shortly after startup (only when manually
+    /// triggering the download/install from the update dialog).
+    pub auto_check_updates: bool,
 }
 
 impl Default for Settings {
@@ -116,6 +125,9 @@ impl Default for Settings {
                 "__pycache__".into(),
                 "target".into(),
             ],
+            update_endpoint: String::new(),
+            update_public_key: String::new(),
+            auto_check_updates: false,
         }
     }
 }
@@ -130,6 +142,12 @@ impl Settings {
         self.commit_history.retain(|existing| existing != trimmed);
         self.commit_history.insert(0, trimmed.to_string());
         self.commit_history.truncate(10);
+    }
+
+    /// `true` when both the endpoint and the pinned signing key are set.
+    /// The UI disables every updater control while this is `false`.
+    pub fn updates_configured(&self) -> bool {
+        !self.update_endpoint.trim().is_empty() && !self.update_public_key.trim().is_empty()
     }
 
     pub fn config_dir() -> PathBuf {
@@ -185,6 +203,8 @@ impl Settings {
         self.panel_height = self.panel_height.clamp(120.0, 900.0);
         self.compare_split = self.compare_split.clamp(20.0, 80.0);
         self.compare_details_width = self.compare_details_width.clamp(24.0, 62.0);
+        self.update_endpoint = self.update_endpoint.trim().to_string();
+        self.update_public_key = self.update_public_key.trim().to_string();
     }
 }
 
@@ -255,6 +275,36 @@ pub fn canonical(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn updater_settings_default_off_and_round_trip() {
+        let settings = Settings::default();
+        assert!(settings.update_endpoint.is_empty());
+        assert!(settings.update_public_key.is_empty());
+        assert!(!settings.auto_check_updates);
+        assert!(!settings.updates_configured());
+
+        let settings = Settings {
+            update_endpoint: "https://updates.example.test/manifest.json".into(),
+            update_public_key: "Zm9vYmFy".into(),
+            auto_check_updates: true,
+            ..Settings::default()
+        };
+        let text = toml::to_string_pretty(&settings).unwrap();
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(back.update_endpoint, settings.update_endpoint);
+        assert_eq!(back.update_public_key, settings.update_public_key);
+        assert!(back.auto_check_updates);
+        assert!(back.updates_configured());
+    }
+
+    #[test]
+    fn missing_updater_fields_fall_back_to_defaults() {
+        let back: Settings = toml::from_str("theme = \"light\"\n").unwrap();
+        assert!(back.update_endpoint.is_empty());
+        assert!(!back.auto_check_updates);
+        assert!(!back.updates_configured());
+    }
 
     #[test]
     fn round_trips_settings() {

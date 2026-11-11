@@ -22,6 +22,9 @@ lazecode-git.workspace = true
 lazecode-text.workspace = true
 lazecode-terminal.workspace = true
 libc.workspace = true
+ring.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls"] }
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

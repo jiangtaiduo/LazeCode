@@ -3918,6 +3918,7 @@ name = "lazecode-core"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "crossbeam-channel",
  "dirs",
  "lazecode-fs",
@@ -3927,6 +3928,8 @@ dependencies = [
  "libc",
  "log",
  "parking_lot",
+ "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",
@@ -3984,6 +3987,7 @@ dependencies = [
  "log",
  "parking_lot",
  "portable-pty",
+ "rio-graphics",
  "rio-vt",
  "tempfile",
  "thiserror 2.0.21",

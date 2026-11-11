@@ -16,6 +16,7 @@ pub mod log;
 pub mod model;
 pub mod ops;
 pub mod patch;
+pub mod push;
 pub mod shelf;
 pub mod status;
 pub mod sync;

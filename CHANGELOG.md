@@ -53,9 +53,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   events (with a 2s safety TTL), avoiding a directory walk on every snapshot.
 - Ahead/behind/pending counts use gix's revision walk (commit-graph aware)
   instead of a hand-written parent traversal.
-- Native remote fetch, clone and fast-forward-only pull using gix's
-  blocking transport (reqwest + rustls). Push and merge/rebase pull remain
-  porcelain until gix exposes send-pack and merge sequencing.
+- Native remote push, fetch (including prune), clone and fast-forward-only
+  pull. Push speaks receive-pack directly with a self-built zlib pack,
+  report-status parsing, remote-tracking/upstream updates and
+  force-with-lease semantics. Merge/rebase pull remains porcelain until the
+  merge sequencer lands.
 - Text three-way stash apply with conflict markers; large LFS objects stream
   from the native object store; ignored status is cached per worktree and
   invalidated by watcher events; ahead/behind and pending counts use the

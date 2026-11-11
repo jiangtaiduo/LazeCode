@@ -59,6 +59,7 @@ portable-pty = "0.9"
 libc = "0.2"
 ring = "0.17"
 imara-diff = { package = "gix-imara-diff", version = "0.3" }
+flate2 = "1"
 
 [profile.release]
 lto = "thin"

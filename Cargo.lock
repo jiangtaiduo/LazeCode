@@ -3957,6 +3957,7 @@ name = "lazecode-git"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "flate2",
  "gix",
  "gix-imara-diff",
  "ignore",

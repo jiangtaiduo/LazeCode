@@ -81,6 +81,11 @@
 
 ### 修复
 
+- 图片标签改用有上限的独立解码缓存，不再使用只增不减的 `egui_extras`
+  loader 缓存。纹理按当前视口缩小，常驻像素上限 64 MiB，标签关闭后立即
+  释放；关闭项目时同时清理 Markdown 图片 loader 与 `CommonMarkCache`。
+  动画 GIF 仍使用逐帧 loader，并在 GIF 标签集合变化时清理缓存。此前浏览
+  图片后关闭项目仍残留的约 100 MB 内存已消除。
 - 固定 UI 字体改为 mmap，不再整份复制进堆。此前 Apple Color Emoji、宋体、
   黑体、冬青黑体、SF Pro、Menlo、Monaco、SF Mono 八个 fallback 文件会占用
   约 335 MiB 的 `Malloc Large`；现在保持文件映射。实测启动 footprint 从

@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use lazecode_core::AppModel;
@@ -507,6 +508,13 @@ pub struct UiRuntime {
     pub applied_theme: Option<lazecode_core::ThemeMode>,
     pub last_frame: Instant,
     pub md_cache: egui_commonmark::CommonMarkCache,
+    /// Bounded decoded-image cache for image tabs (not `egui_extras`' global
+    /// loader cache, which never evicts).
+    pub image_cache: crate::image_cache::ImageCache,
+    /// Open image paths, used to drop textures as soon as a tab closes.
+    pub media_project_roots: Vec<PathBuf>,
+    pub media_markdown_paths: HashSet<PathBuf>,
+    pub media_gif_paths: HashSet<PathBuf>,
     pub image_zoom: HashMap<u64, f32>,
     pub cursor_epoch: f64,
     pub agent_menu: Option<egui::Rect>,
@@ -603,6 +611,10 @@ impl Default for UiRuntime {
             last_frame: Instant::now(),
             cursor_epoch: 0.0,
             md_cache: egui_commonmark::CommonMarkCache::default(),
+            image_cache: crate::image_cache::ImageCache::default(),
+            media_project_roots: Vec::new(),
+            media_markdown_paths: HashSet::new(),
+            media_gif_paths: HashSet::new(),
             image_zoom: HashMap::new(),
             agent_menu: None,
             agent_menu_frame: 0,
@@ -746,6 +758,66 @@ impl UiRuntime {
         self.search.open = false;
         self.settings_open = false;
         self.about_open = false;
+    }
+
+    /// Drop decoded images for closed image tabs and flush `egui_extras`
+    /// caches for Markdown previews when their project/tab set changes.
+    pub fn prune_media_caches(&mut self, ctx: &egui::Context, model: &AppModel) {
+        use lazecode_core::TabKind;
+
+        let mut open_images = HashSet::new();
+        let mut gifs = HashSet::new();
+        let mut markdown = HashSet::new();
+        let mut roots = Vec::with_capacity(model.projects.len());
+        for project in &model.projects {
+            roots.push(project.root.clone());
+            for tab in &project.tabs {
+                match &tab.kind {
+                    TabKind::Image(image) => {
+                        open_images.insert(image.path.clone());
+                        if image
+                            .path
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("gif"))
+                        {
+                            gifs.insert(image.path.clone());
+                        }
+                    }
+                    TabKind::File(file)
+                        if file
+                            .doc
+                            .path
+                            .extension()
+                            .and_then(|ext| ext.to_str())
+                            .is_some_and(|ext| {
+                                ext.eq_ignore_ascii_case("md")
+                                    || ext.eq_ignore_ascii_case("markdown")
+                            }) =>
+                    {
+                        markdown.insert(file.doc.path.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        self.image_cache.retain_paths(&open_images);
+
+        if roots != self.media_project_roots
+            || markdown != self.media_markdown_paths
+            || gifs != self.media_gif_paths
+        {
+            // `CommonMarkCache` and the image loaders both retain decoded
+            // pixels/textures. Project or Markdown-tab changes are the only
+            // times they need to be flushed; doing it per-frame would reload
+            // visible images continuously.
+            ctx.forget_all_images();
+            self.md_cache = egui_commonmark::CommonMarkCache::default();
+            self.media_project_roots = roots;
+            self.media_markdown_paths = markdown;
+            self.media_gif_paths = gifs;
+        }
     }
 
     pub fn clear_terminal_cache(&mut self) {

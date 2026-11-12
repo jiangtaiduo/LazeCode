@@ -98,7 +98,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 draw_crumbs(ui, model, theme, crumbs, index, active);
                 let body =
                     Rect::from_min_max(Pos2::new(content.left(), crumbs.bottom()), content.max);
-                draw_image_tab(ui, rt, p, theme, body, &img, active);
+                draw_image_tab(ui, model, rt, p, theme, body, &img, active);
             }
             ActiveKind::Diff => {
                 draw_diff(ui, model, rt, theme, content, index, active);
@@ -671,9 +671,11 @@ fn draw_markdown_view(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_image_tab(
     ui: &mut Ui,
-    _rt: &mut UiRuntime,
+    model: &AppModel,
+    rt: &mut UiRuntime,
     p: crate::theme::Palette,
     _theme: &Theme,
     rect: Rect,
@@ -695,15 +697,57 @@ fn draw_image_tab(
         })
         .unwrap_or_default();
 
-    let dims = image::image_dimensions(&img.path).ok();
-    let dims_str = dims
-        .map(|(w, h)| format!("{} × {} px", w, h))
-        .unwrap_or_default();
-
     let bottom_h = 26.0;
     let canvas_rect =
         Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.bottom() - bottom_h));
     let bar_rect = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - bottom_h), rect.max);
+    let max_side = ((canvas_rect.width().max(canvas_rect.height()) * ui.ctx().pixels_per_point())
+        .ceil() as usize)
+        .clamp(256, 4096);
+
+    let is_gif = img
+        .path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gif"));
+    let (dims_str, texture, uri, image_error) = if is_gif {
+        // The GIF loader animates frames, which the static decoder below
+        // cannot reproduce. Its cache is flushed whenever the set of GIF tabs
+        // changes (see `UiRuntime::prune_media_caches`).
+        let dims = image::image_dimensions(&img.path)
+            .ok()
+            .map(|(w, h)| format!("{} × {} px", w, h))
+            .unwrap_or_default();
+        (
+            dims,
+            None,
+            Some(format!("file://{}", img.path.display())),
+            None,
+        )
+    } else {
+        let loaded = rt
+            .image_cache
+            .get_or_load(ui.ctx(), &img.path, max_side, rt.frame_count);
+        match loaded {
+            Ok(cached) => {
+                let dims = cached.original_size;
+                let tex_size = cached.texture.size_vec2();
+                (
+                    format!("{} × {} px", dims[0], dims[1]),
+                    Some((cached.texture.id(), tex_size)),
+                    None,
+                    None,
+                )
+            }
+            Err(err) => {
+                let dims = image::image_dimensions(&img.path)
+                    .ok()
+                    .map(|(w, h)| format!("{} × {} px", w, h))
+                    .unwrap_or_default();
+                (dims, None, None, Some(err))
+            }
+        }
+    };
 
     ui.painter().hline(
         bar_rect.x_range(),
@@ -728,7 +772,6 @@ fn draw_image_tab(
         p.text3,
     );
 
-    let uri = format!("file://{}", img.path.display());
     super::app_ui::region(ui, canvas_rect, "image-viewer", |ui| {
         egui::ScrollArea::both()
             .id_salt(ui.scope_id().with(("img-scroll", tab_id)))
@@ -736,11 +779,33 @@ fn draw_image_tab(
             .show(ui, |ui| {
                 ui.centered_and_justified(|ui| {
                     let max_size = (canvas_rect.size() - Vec2::splat(32.0)).max(Vec2::splat(10.0));
-                    ui.add(
-                        egui::Image::new(&uri)
-                            .max_size(max_size)
-                            .maintain_aspect_ratio(true),
-                    );
+                    if let Some((texture_id, tex_size)) = texture {
+                        let ppp = ui.ctx().pixels_per_point().max(0.5);
+                        let natural = tex_size / ppp;
+                        let scale = (max_size.x / natural.x.max(1.0))
+                            .min(max_size.y / natural.y.max(1.0))
+                            .min(1.0);
+                        let display = (natural * scale).max(Vec2::splat(1.0));
+                        ui.add(
+                            egui::Image::new(egui::load::SizedTexture::new(texture_id, display))
+                                .maintain_aspect_ratio(true),
+                        );
+                    } else if let Some(uri) = uri.as_deref() {
+                        ui.add(
+                            egui::Image::new(uri)
+                                .max_size(max_size)
+                                .maintain_aspect_ratio(true),
+                        );
+                    } else if let Some(err) = image_error.as_deref() {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{}: {err}",
+                                crate::tr!(model, "Could not load image", "无法加载图片")
+                            ))
+                            .color(p.rose)
+                            .font(FontId::proportional(12.5)),
+                        );
+                    }
                 });
             });
     });

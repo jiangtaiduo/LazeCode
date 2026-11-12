@@ -350,6 +350,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     crate::overlays::draw(ui, model, rt, &theme);
     crate::toast::draw(ui, model, rt, &theme, layout.status);
     crate::shortcuts::handle(ui, model, rt);
+    rt.prune_media_caches(ui.ctx(), model);
     rt.last_frame = std::time::Instant::now();
 }
 

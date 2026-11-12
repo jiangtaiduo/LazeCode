@@ -8,6 +8,7 @@ pub mod fonts;
 pub mod i18n;
 pub mod icons;
 pub mod icons_svg;
+pub mod image_cache;
 pub mod lsp_ui;
 pub mod overlays;
 pub mod palette;

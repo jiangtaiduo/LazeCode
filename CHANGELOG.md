@@ -100,6 +100,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Image tabs now use a bounded, per-tab decoded-image cache instead of the
+  unbounded `egui_extras` loader cache. Textures are downscaled to the visible
+  viewport, retained pixels are capped at 64 MiB, and entries are dropped as
+  soon as their tab closes. Closing a project also flushes Markdown image
+  loaders and `CommonMarkCache`; animated GIFs keep using the frame loader and
+  its cache is flushed when GIF tabs change. This removes the ~100 MB that
+  previously survived after closing projects whose images had been viewed.
 - Fixed UI fonts are memory-mapped instead of copied whole into the heap.
   The eight fallback files (Apple Color Emoji, Songti, Heiti, Hiragino,
   SF Pro, Menlo, Monaco, SF Mono) previously added ~335 MiB of dirty

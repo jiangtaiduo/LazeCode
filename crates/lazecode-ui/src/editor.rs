@@ -3297,13 +3297,13 @@ fn draw_welcome(
         if model.settings.language.is_zh() {
             format!(
                 "{} 个运行中 · {} 个项目",
-                model.total_running(),
+                rt.busy_count(),
                 model.projects.len()
             )
         } else {
             format!(
                 "{} running across {} projects",
-                model.total_running(),
+                rt.busy_count(),
                 model.projects.len()
             )
         },

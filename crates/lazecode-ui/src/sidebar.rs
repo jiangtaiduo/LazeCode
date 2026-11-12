@@ -2266,7 +2266,7 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         }
     }
     let list = Rect::from_min_max(Pos2::new(rect.left(), head.bottom()), rect.max);
-    let total = model.total_running();
+    let total = rt.busy_count();
 
     #[derive(Clone)]
     struct Row {
@@ -2288,7 +2288,11 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 .terminals
                 .iter()
                 .flat_map(|tab| tab.panes.iter())
-                .filter(|pane| pane.session.is_running())
+                .filter(|pane| {
+                    rt.terminal_busy
+                        .get(&pane.id)
+                        .is_some_and(|state| state.busy)
+                })
                 .count();
             let label = if worktree.is_main {
                 project.name.clone()
@@ -2311,7 +2315,10 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                         } else {
                             crate::tr!(model, "default shell", "默认 shell").to_string()
                         },
-                        running: terminal.session.is_running(),
+                        running: rt
+                            .terminal_busy
+                            .get(&terminal.id)
+                            .is_some_and(|state| state.busy),
                         elapsed: format_elapsed(secs),
                         group: label.clone(),
                         group_start: pane_index == 0,

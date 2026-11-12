@@ -10,6 +10,9 @@ use crossbeam_channel::Sender;
 use parking_lot::{FairMutex, Mutex};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize};
 use rio_vt::ansi::graphics::UpdateQueues;
+use rio_vt::ansi::kitty_virtual::{
+    compute_run_geometry, resolve_virtual_placement, IncompletePlacement, PLACEHOLDER,
+};
 use rio_vt::ansi::CursorShape as RioCursorShape;
 use rio_vt::ansi::KeyboardModes as RioKeyboardModes;
 use rio_vt::config::colors::{AnsiColor, NamedColor};
@@ -220,6 +223,19 @@ pub struct ImagePlacement {
     pub z_index: i32,
 }
 
+/// One visible Unicode-placeholder run of a Kitty virtual image.
+#[derive(Clone, Debug)]
+pub struct VirtualImageRun {
+    pub image_id: u32,
+    /// Screen position/size in cells, including sub-cell offsets.
+    pub col: f32,
+    pub row: f32,
+    pub columns: f32,
+    pub rows: f32,
+    /// Normalised texture rectangle `[u0, v0, u1, v1]`.
+    pub source_uv: [f32; 4],
+}
+
 /// A decoded kitty graphics image ready for texture upload.
 #[derive(Clone, Debug)]
 pub struct KittyImage {
@@ -250,6 +266,8 @@ pub struct Snapshot {
     pub bell: u32,
     /// Kitty image placements, sorted by z-index (back to front).
     pub graphics: Vec<ImagePlacement>,
+    /// Visible rows of Unicode virtual placements (omp image chips).
+    pub virtual_graphics: Vec<VirtualImageRun>,
     /// Ids of images currently cached by the terminal, for texture pruning.
     pub graphics_images: Vec<u32>,
 }
@@ -577,6 +595,87 @@ fn style_of(
     style_spec(&style)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn virtual_runs_into(
+    row: &Row<Square>,
+    styles: &[Style],
+    extras: &ExtrasTable,
+    graphics: &rio_vt::ansi::graphics::Graphics,
+    screen_line: usize,
+    cell_w: f32,
+    cell_h: f32,
+    out: &mut Vec<VirtualImageRun>,
+) {
+    let mut current: Option<(IncompletePlacement, usize)> = None;
+    let finish = |current: &mut Option<(IncompletePlacement, usize)>,
+                  out: &mut Vec<VirtualImageRun>| {
+        let Some((incomplete, start_col)) = current.take() else {
+            return;
+        };
+        let run = incomplete.complete();
+        let Some(placement) = resolve_virtual_placement(
+            &graphics.kitty_virtual_placements,
+            run.image_id,
+            run.placement_id,
+        ) else {
+            return;
+        };
+        let Some(image) = graphics.kitty_images.get(&run.image_id) else {
+            return;
+        };
+        let Some(geometry) = compute_run_geometry(
+            &run,
+            placement.columns,
+            placement.rows,
+            image.data.width as u32,
+            image.data.height as u32,
+            (placement.x, placement.y, placement.width, placement.height),
+            cell_w,
+            cell_h,
+            0.0,
+            0.0,
+            screen_line,
+            start_col,
+        ) else {
+            return;
+        };
+        out.push(VirtualImageRun {
+            image_id: run.image_id,
+            col: geometry.x / cell_w,
+            row: geometry.y / cell_h,
+            columns: geometry.width / cell_w,
+            rows: geometry.height / cell_h,
+            source_uv: geometry.source_rect,
+        });
+    };
+
+    for col in 0..row.len() {
+        let cell = row[Column(col)];
+        if cell.c() != PLACEHOLDER {
+            finish(&mut current, out);
+            continue;
+        }
+        let Some(style) = styles.get(cell.style_id() as usize) else {
+            finish(&mut current, out);
+            continue;
+        };
+        let combining = cell
+            .extras_id()
+            .and_then(|id| extras.get(id))
+            .map_or(&[][..], |extras| extras.zerowidth.as_slice());
+        let incomplete = IncompletePlacement::from_cell(style.fg, style.underline_color, combining);
+        if let Some((run, _)) = current.as_mut() {
+            if run.can_append(&incomplete) {
+                run.append();
+                continue;
+            }
+            finish(&mut current, out);
+        }
+        current = Some((incomplete, col));
+    }
+    finish(&mut current, out);
+}
+
 /// Copy one grid row into `out`, expanding graphemes and wide-cell markers.
 fn fill_row(row: &Row<Square>, styles: &[Style], extras: &ExtrasTable, out: &mut [CellData]) {
     for (col, slot) in out.iter_mut().enumerate() {
@@ -705,6 +804,8 @@ pub struct Session {
     reader_cancel: Arc<AtomicBool>,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
     killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    shell_pid: Option<u32>,
+    tty_name: Option<PathBuf>,
     pgid: Option<i32>,
     /// Applied grid geometry: columns, rows, cell width, cell height.
     geom: Mutex<(u16, u16, u32, u32)>,
@@ -724,6 +825,88 @@ pub struct HistoryStats {
     pub cold_file_bytes: u64,
     /// Addressable scrollback lines (hot + cold).
     pub total_lines: usize,
+}
+
+/// Processes other than the shell that are attached to a terminal's tty.
+/// Empty `commands` with `busy == false` is the normal idle prompt.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BusyInfo {
+    pub busy: bool,
+    pub commands: Vec<String>,
+}
+
+/// The immutable slice of a session needed to probe it from a worker thread.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BusyTarget {
+    pub tty: Option<PathBuf>,
+    pub shell_pid: Option<u32>,
+}
+
+/// Probe a tty with `ps -t`. A command is anything on the tty other than the
+/// shell itself; this covers foreground programs and background jobs, exactly
+/// what closing the console would kill.
+pub fn probe_busy(target: &BusyTarget) -> BusyInfo {
+    #[cfg(unix)]
+    {
+        let Some(tty) = target.tty.as_deref() else {
+            return BusyInfo::default();
+        };
+        let output = match std::process::Command::new("ps")
+            .arg("-o")
+            .arg("pid=,comm=")
+            .arg("-t")
+            .arg(tty)
+            .output()
+        {
+            Ok(output) if output.status.success() => output,
+            Ok(output) => {
+                log::warn!(
+                    "ps probe for {} failed: {}",
+                    tty.display(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+                return BusyInfo::default();
+            }
+            Err(err) => {
+                log::warn!("ps probe for {} failed: {err}", tty.display());
+                return BusyInfo::default();
+            }
+        };
+        parse_busy_output(&String::from_utf8_lossy(&output.stdout), target.shell_pid)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = target;
+        BusyInfo::default()
+    }
+}
+
+fn parse_busy_output(stdout: &str, shell_pid: Option<u32>) -> BusyInfo {
+    let mut commands = Vec::new();
+    for line in stdout.lines() {
+        let mut parts = line.trim().splitn(2, char::is_whitespace);
+        let Some(pid) = parts.next().and_then(|pid| pid.trim().parse::<u32>().ok()) else {
+            continue;
+        };
+        if Some(pid) == shell_pid {
+            continue;
+        }
+        let name = parts.next().unwrap_or("").trim();
+        if name.is_empty() {
+            continue;
+        }
+        let short = name.rsplit('/').next().unwrap_or(name).to_string();
+        if !commands.iter().any(|command| command == &short) {
+            commands.push(short);
+        }
+        if commands.len() >= 3 {
+            break;
+        }
+    }
+    BusyInfo {
+        busy: !commands.is_empty(),
+        commands,
+    }
 }
 
 fn modes_from(term: &Crosswords<Proxy>) -> Modes {
@@ -777,6 +960,20 @@ fn graphics_placements_into(term: &Crosswords<Proxy>, out: &mut Vec<ImagePlaceme
 impl Session {
     pub fn is_running(&self) -> bool {
         self.shared.running.load(Ordering::Relaxed)
+    }
+
+    /// Snapshot the immutable probe inputs for a background busy poll.
+    pub fn busy_target(&self) -> BusyTarget {
+        BusyTarget {
+            tty: self.tty_name.clone(),
+            shell_pid: self.shell_pid,
+        }
+    }
+
+    /// Run a one-off probe on the caller's thread (used by close confirmation
+    /// when the periodic snapshot may be stale).
+    pub fn busy_info(&self) -> BusyInfo {
+        probe_busy(&self.busy_target())
     }
 
     pub fn exit_code(&self) -> Option<i32> {
@@ -943,6 +1140,26 @@ impl Session {
 
         let styles = grid.styles();
         let extras = &grid.extras_table;
+        snap.virtual_graphics.clear();
+        let (cell_w, cell_h) = {
+            let geom = self.geom.lock();
+            (geom.2.max(1) as f32, geom.3.max(1) as f32)
+        };
+        for row in 0..rows {
+            let abs = row as i64 - offset as i64;
+            if abs >= -(hot as i64) {
+                virtual_runs_into(
+                    &grid[Line(abs as i32)],
+                    styles,
+                    extras,
+                    &term.graphics,
+                    row,
+                    cell_w,
+                    cell_h,
+                    &mut snap.virtual_graphics,
+                );
+            }
+        }
         for row in 0..rows {
             let abs = row as i64 - offset as i64;
             let target = &mut snap.cells[row * cols..(row + 1) * cols];
@@ -1362,6 +1579,13 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
     command.env("TERM_PROGRAM", "LazeCode");
     command.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
     command.env("LAZECODE", "1");
+    // omp decides its inline-image protocol and Unicode-placeholder use from
+    // environment whitelists. It does not know LazeCode, so without these it
+    // falls back to a text `img` chip. The terminal now composites both direct
+    // Kitty placements and virtual Unicode placeholder runs (see
+    // `virtual_runs_into`).
+    command.env("PI_FORCE_IMAGE_PROTOCOL", "kitty");
+    command.env("PI_KITTY_PLACEHOLDERS", "1");
     command.env("SHELL", &shell);
     // Do not hand the IDE's own credentials to a spawned shell/agent.
     for key in [
@@ -1384,6 +1608,8 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
 
     let mut child = pair.slave.spawn_command(command)?;
     drop(pair.slave);
+    let shell_pid = child.process_id();
+    let tty_name = pair.master.tty_name();
     let killer = child.clone_killer();
     let pgid = pair.master.process_group_leader();
 
@@ -1611,6 +1837,8 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
         reader_cancel,
         master: Mutex::new(Some(master)),
         killer: Mutex::new(killer),
+        shell_pid,
+        tty_name,
         pgid,
         geom: Mutex::new((cols, rows, 0, 0)),
         spool,
@@ -1796,6 +2024,17 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         panic!("marker not found");
+    }
+
+    #[test]
+    fn busy_parser_ignores_shell_and_dedupes_commands() {
+        let info = parse_busy_output(
+            "  100 /bin/zsh\n 101 /usr/local/bin/vite\n 102 vite\n 103 node\n",
+            Some(100),
+        );
+        assert!(info.busy);
+        assert_eq!(info.commands, ["vite", "node"]);
+        assert!(!parse_busy_output("  100 /bin/zsh\n", Some(100)).busy);
     }
 
     #[test]
@@ -2091,6 +2330,87 @@ mod tests {
             "a scrolled viewport must stay pinned to its content"
         );
         assert!(session.history_stats().cold_lines > 0);
+    }
+
+    #[test]
+    fn kitty_png_payload_decodes() {
+        let session = echo_session(4);
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, 2, 2);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("png header");
+            writer
+                .write_image_data(&[
+                    255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+                ])
+                .expect("png data");
+        }
+        let mut sequence = format!("\x1b_Ga=t,f=100,q=2,i=9;{}\x1b\\", base64(&png)).into_bytes();
+        sequence.extend_from_slice(b"\x1b_Ga=p,U=1,i=9,p=1,c=2,r=1,q=2\x1b\\");
+        sequence.extend_from_slice(b"\x1b[38;2;0;0;9m\x1b[58;2;0;0;1m");
+        sequence.extend_from_slice(
+            rio_vt::ansi::kitty_virtual::encode_placeholder(0, 0, None).as_bytes(),
+        );
+        sequence.extend_from_slice(
+            rio_vt::ansi::kitty_virtual::encode_placeholder(0, 1, None).as_bytes(),
+        );
+        sequence.extend_from_slice(b"\x1b[0m");
+        session.write(&sequence);
+        let mut updates = Vec::new();
+        let mut snap = Snapshot::default();
+        let received = wait_until(
+            || {
+                updates.extend(session.take_graphics_updates());
+                session.snapshot_into(&mut snap);
+                updates.iter().any(|image| image.id == 9) && !snap.virtual_graphics.is_empty()
+            },
+            std::time::Duration::from_secs(6),
+        );
+        assert!(
+            received,
+            "png image / virtual run missing: images={:?} runs={} text={:?}",
+            snap.graphics_images,
+            snap.virtual_graphics.len(),
+            snapshot_text(&snap)
+        );
+    }
+
+    #[test]
+    fn kitty_virtual_placeholders_resolve_to_runs() {
+        let session = echo_session(4);
+        session.set_cell_size(8.0, 16.0);
+        let pixels = vec![0xffu8; 16];
+        let mut seq = kitty_apc("t", 7, 2, 2, &pixels);
+        seq.extend_from_slice(b"\x1b_Ga=p,U=1,i=7,p=1,c=2,r=1,q=2\x1b\\");
+        seq.extend_from_slice(b"\x1b[38;2;0;0;7m\x1b[58;2;0;0;1m");
+        seq.extend_from_slice(
+            rio_vt::ansi::kitty_virtual::encode_placeholder(0, 0, None).as_bytes(),
+        );
+        seq.extend_from_slice(
+            rio_vt::ansi::kitty_virtual::encode_placeholder(0, 1, None).as_bytes(),
+        );
+        seq.extend_from_slice(b"\x1b[0m");
+        session.write(&seq);
+        let mut snap = Snapshot::default();
+        let found = wait_until(
+            || {
+                session.snapshot_into(&mut snap);
+                !snap.virtual_graphics.is_empty()
+            },
+            std::time::Duration::from_secs(6),
+        );
+        assert!(
+            found,
+            "no virtual runs: images={:?} text={:?}",
+            snap.graphics_images,
+            snapshot_text(&snap)
+        );
+        let run = &snap.virtual_graphics[0];
+        assert_eq!(run.image_id, 7);
+        assert!(run.columns > 0.0 && run.rows > 0.0);
+        assert_eq!(run.source_uv, [0.0, 0.0, 1.0, 1.0]);
     }
 
     #[test]

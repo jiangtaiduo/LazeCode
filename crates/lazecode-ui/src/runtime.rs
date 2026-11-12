@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use lazecode_core::AppModel;
+use lazecode_core::{AppModel, ProjectState};
 use lazecode_fs::SearchHit;
 use lazecode_terminal::Snapshot;
 use lazecode_text::Cursor;
@@ -25,6 +25,25 @@ impl TermSelection {
             (self.end, self.start)
         }
     }
+}
+
+/// Periodic `ps -t` result for one terminal pane.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TerminalBusyState {
+    pub busy: bool,
+    pub outputting: bool,
+    pub commands: Vec<String>,
+    pub last_output_ms: Option<u64>,
+}
+
+/// Action closed by the terminal confirmation modal.
+#[derive(Clone, Debug)]
+pub enum TerminalCloseAction {
+    Pane(u64),
+    Tab(u64),
+    Others(u64),
+    All,
+    Project(usize),
 }
 
 #[derive(Default)]
@@ -207,6 +226,12 @@ pub enum DialogState {
         tab_id: u64,
         name: String,
     },
+    /// A terminal tab/pane/project still has commands running; confirm before
+    /// killing them.
+    ConfirmTerminalClose {
+        action: TerminalCloseAction,
+        commands: Vec<String>,
+    },
     NewFile {
         dir: std::path::PathBuf,
         value: String,
@@ -353,7 +378,9 @@ pub enum DialogState {
         /// 首帧已加载过（空列表≠未加载，避免每帧重复 spawn git）。
         loaded: bool,
     },
-    Quit,
+    Quit {
+        commands: Vec<String>,
+    },
 }
 
 #[derive(Default)]
@@ -477,8 +504,14 @@ pub struct UiRuntime {
     pub terminal_wake: HashMap<u64, u64>,
     /// egui textures for each pane's kitty graphics images.
     pub terminal_graphics: HashMap<u64, crate::terminal::GraphicsCache>,
+    /// Per-pane process activity from the 2s background probe.
+    pub terminal_busy: HashMap<u64, TerminalBusyState>,
     pub editor_focus: Option<u64>,
     pub editor_drag: bool,
+    /// Vertical scroll offset of the project rail (0 = newest/top).
+    pub project_rail_scroll: f32,
+    /// Lazily uploaded titlebar copy of the packaged application icon.
+    pub app_icon: Option<egui::TextureHandle>,
     pub sidebar_drag: bool,
     pub panel_drag: bool,
     /// 分支比较页：pane 高度分隔条拖拽中（松手时落盘 settings）。
@@ -587,11 +620,14 @@ impl Default for UiRuntime {
             terminal_wheel: HashMap::new(),
             terminal_wake: HashMap::new(),
             terminal_graphics: HashMap::new(),
+            terminal_busy: HashMap::new(),
             new_ignore_pattern: String::new(),
             commit_view_menu_frame: 0,
             cmp_view_menu_frame: 0,
             editor_focus: None,
             editor_drag: false,
+            project_rail_scroll: 0.0,
+            app_icon: None,
             sidebar_drag: false,
             panel_drag: false,
             diff_balloon: None,
@@ -820,6 +856,278 @@ impl UiRuntime {
         }
     }
 
+    /// Aggregate live process activity for one project.
+    pub fn project_busy(&self, project: &ProjectState) -> TerminalBusyState {
+        let mut out = TerminalBusyState::default();
+        for pane in project
+            .worktrees
+            .iter()
+            .flat_map(|worktree| worktree.terminals.iter())
+            .flat_map(|tab| tab.panes.iter())
+        {
+            let Some(state) = self.terminal_busy.get(&pane.id) else {
+                continue;
+            };
+            if !state.busy {
+                continue;
+            }
+            out.busy = true;
+            out.outputting |= state.outputting;
+            for command in &state.commands {
+                if !out.commands.iter().any(|existing| existing == command) {
+                    out.commands.push(command.clone());
+                }
+            }
+        }
+        out
+    }
+
+    pub fn busy_count(&self) -> usize {
+        self.terminal_busy
+            .values()
+            .filter(|state| state.busy)
+            .count()
+    }
+
+    pub fn busy_commands_for(&self, pane_ids: &[u64]) -> Vec<String> {
+        let mut commands = Vec::new();
+        for id in pane_ids {
+            let Some(state) = self.terminal_busy.get(id) else {
+                continue;
+            };
+            if !state.busy {
+                continue;
+            }
+            for command in &state.commands {
+                if !commands.iter().any(|existing| existing == command) {
+                    commands.push(command.clone());
+                }
+            }
+        }
+        commands
+    }
+
+    /// Probe the requested panes now, bypassing the 2s cache. Used when the
+    /// user closes a console so a just-started command is still detected.
+    pub fn probe_busy_for(&mut self, model: &AppModel, pane_ids: &[u64]) -> Vec<String> {
+        for project in &model.projects {
+            for pane in project
+                .worktrees
+                .iter()
+                .flat_map(|worktree| worktree.terminals.iter())
+                .flat_map(|tab| tab.panes.iter())
+            {
+                if !pane_ids.contains(&pane.id) {
+                    continue;
+                }
+                let info = pane.session.busy_info();
+                let age = pane.session.last_output_ms();
+                self.terminal_busy.insert(
+                    pane.id,
+                    TerminalBusyState {
+                        busy: info.busy,
+                        outputting: info.busy && age.is_some_and(|age| age < 2000),
+                        commands: info.commands,
+                        last_output_ms: age,
+                    },
+                );
+            }
+        }
+        self.busy_commands_for(pane_ids)
+    }
+
+    /// Ask before killing panes when the one-off `ps` probe finds a command.
+    /// The action is applied immediately when idle.
+    pub fn request_terminal_close(&mut self, model: &mut AppModel, action: TerminalCloseAction) {
+        let pane_ids = self.terminal_close_panes(model, &action);
+        let commands = self.probe_busy_for(model, &pane_ids);
+        if commands.is_empty() {
+            self.apply_terminal_close(model, action);
+        } else {
+            self.dialog = DialogState::ConfirmTerminalClose { action, commands };
+        }
+    }
+
+    pub fn apply_terminal_close(&mut self, model: &mut AppModel, action: TerminalCloseAction) {
+        match action {
+            TerminalCloseAction::Pane(pane_id) => {
+                let Some((project_index, _, _)) =
+                    model
+                        .projects
+                        .iter()
+                        .enumerate()
+                        .find_map(|(index, project)| {
+                            project
+                                .pane_owner(pane_id)
+                                .map(|owner| (index, owner.0, owner.1))
+                        })
+                else {
+                    return;
+                };
+                let project = &mut model.projects[project_index];
+                project.close_terminal(pane_id);
+                self.forget_terminal(pane_id);
+                if model.active_project == Some(project_index) {
+                    match project.active_worktree().active_terminal {
+                        Some(next) => self.set_terminal_focus(next),
+                        None => self.terminal_focus = None,
+                    }
+                }
+            }
+            TerminalCloseAction::Tab(tab_id) => {
+                let Some(project_index) = model.projects.iter().position(|project| {
+                    project
+                        .worktrees
+                        .iter()
+                        .any(|worktree| worktree.tab_by_id(tab_id).is_some())
+                }) else {
+                    return;
+                };
+                let panes: Vec<u64> = model.projects[project_index]
+                    .worktrees
+                    .iter()
+                    .find_map(|worktree| worktree.tab_by_id(tab_id))
+                    .map(|tab| tab.panes.iter().map(|pane| pane.id).collect())
+                    .unwrap_or_default();
+                let project = &mut model.projects[project_index];
+                project.close_terminal_tab(tab_id);
+                for id in panes {
+                    self.forget_terminal(id);
+                }
+                if model.active_project == Some(project_index) {
+                    match project.active_worktree().active_terminal {
+                        Some(next) => self.set_terminal_focus(next),
+                        None => self.terminal_focus = None,
+                    }
+                }
+            }
+            TerminalCloseAction::Others(keep_pane) => {
+                let Some(project_index) = model
+                    .projects
+                    .iter()
+                    .position(|project| project.term_by_id(keep_pane).is_some())
+                else {
+                    return;
+                };
+                let project = &mut model.projects[project_index];
+                let keep_tab = project
+                    .active_worktree()
+                    .tab_of_pane(keep_pane)
+                    .map(|tab| tab.id);
+                let doomed: Vec<u64> = project
+                    .active_worktree()
+                    .terminals
+                    .iter()
+                    .filter(|tab| Some(tab.id) != keep_tab)
+                    .flat_map(|tab| tab.panes.iter().map(|pane| pane.id))
+                    .collect();
+                project.close_other_terminals(keep_pane);
+                for id in doomed {
+                    self.forget_terminal(id);
+                }
+                self.set_terminal_focus(keep_pane);
+            }
+            TerminalCloseAction::All => {
+                let Some(project_index) = model.active_project else {
+                    return;
+                };
+                let project = &mut model.projects[project_index];
+                let doomed: Vec<u64> = project
+                    .active_worktree()
+                    .terminals
+                    .iter()
+                    .flat_map(|tab| tab.panes.iter().map(|pane| pane.id))
+                    .collect();
+                project.close_all_terminals();
+                for id in doomed {
+                    self.forget_terminal(id);
+                }
+                self.terminal_focus = None;
+            }
+            TerminalCloseAction::Project(index) => {
+                if index >= model.projects.len() {
+                    return;
+                }
+                let active = model.active_project == Some(index);
+                model.close_project(index);
+                model.save_workspace();
+                self.clear_terminal_cache();
+                if active {
+                    self.terminal_focus = None;
+                }
+            }
+        }
+    }
+
+    fn terminal_close_panes(&self, model: &AppModel, action: &TerminalCloseAction) -> Vec<u64> {
+        match action {
+            TerminalCloseAction::Pane(id) => vec![*id],
+            TerminalCloseAction::Tab(tab_id) => model
+                .projects
+                .iter()
+                .flat_map(|project| project.worktrees.iter())
+                .find_map(|worktree| worktree.tab_by_id(*tab_id))
+                .map(|tab| tab.panes.iter().map(|pane| pane.id).collect())
+                .unwrap_or_default(),
+            TerminalCloseAction::Others(keep) => model
+                .projects
+                .iter()
+                .find(|project| project.term_by_id(*keep).is_some())
+                .and_then(|project| {
+                    project
+                        .active_worktree()
+                        .tab_of_pane(*keep)
+                        .map(|tab| tab.id)
+                })
+                .map(|keep_tab| {
+                    model
+                        .projects
+                        .iter()
+                        .find(|project| project.term_by_id(*keep).is_some())
+                        .into_iter()
+                        .flat_map(|project| project.active_worktree().terminals.iter())
+                        .filter(|tab| tab.id != keep_tab)
+                        .flat_map(|tab| tab.panes.iter().map(|pane| pane.id))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            TerminalCloseAction::All => model
+                .active_project()
+                .map(|project| {
+                    project
+                        .active_worktree()
+                        .terminals
+                        .iter()
+                        .flat_map(|tab| tab.panes.iter().map(|pane| pane.id))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            TerminalCloseAction::Project(index) => model
+                .projects
+                .get(*index)
+                .map(|project| {
+                    project
+                        .worktrees
+                        .iter()
+                        .flat_map(|worktree| worktree.terminals.iter())
+                        .flat_map(|tab| tab.panes.iter().map(|pane| pane.id))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    pub fn probe_all_terminal_busy(&mut self, model: &AppModel) -> Vec<String> {
+        let ids: Vec<u64> = model
+            .projects
+            .iter()
+            .flat_map(|project| project.worktrees.iter())
+            .flat_map(|worktree| worktree.terminals.iter())
+            .flat_map(|tab| tab.panes.iter().map(|pane| pane.id))
+            .collect();
+        self.probe_busy_for(model, &ids)
+    }
+
     pub fn clear_terminal_cache(&mut self) {
         // Cache entries are keyed by globally unique session ids. Keeping a
         // stale focus id from another project makes the new project's active
@@ -831,6 +1139,7 @@ impl UiRuntime {
         self.terminal_preedit.clear();
         self.terminal_wheel.clear();
         self.terminal_graphics.clear();
+        self.terminal_busy.clear();
         self.terminal_focus = None;
     }
 
@@ -843,6 +1152,7 @@ impl UiRuntime {
         self.terminal_wheel.remove(&id);
         self.terminal_wake.remove(&id);
         self.terminal_graphics.remove(&id);
+        self.terminal_busy.remove(&id);
         self.terminal_scroll_fraction.remove(&id);
         if self.terminal_focus == Some(id) {
             self.terminal_focus = None;

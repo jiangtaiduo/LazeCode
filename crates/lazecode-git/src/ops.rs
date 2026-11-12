@@ -25,7 +25,7 @@ pub(crate) fn open_conflicted_index(repo: &gix::Repository) -> Result<gix::index
 }
 
 fn open_index_impl(repo: &gix::Repository, allow_unmerged: bool) -> Result<gix::index::File> {
-    let file = if repo.index_path().exists() {
+    let mut file = if repo.index_path().exists() {
         repo.open_index()?
     } else {
         gix::index::File::from_state(
@@ -48,8 +48,14 @@ fn open_index_impl(repo: &gix::Repository, allow_unmerged: bool) -> Result<gix::
     if file.fs_monitor().is_some() {
         anyhow::bail!("FSMonitor extension is present; refusing to rewrite .git/index");
     }
+    // `REUC` (resolve-undo) is an optional optimization Git keeps for
+    // `git checkout --merge`; it is not part of the committed tree. gix has
+    // no serializer for it, so writing the index would otherwise drop it
+    // silently. Drop it explicitly here: staging/committing remains correct,
+    // while split-index / untracked-cache / FSMonitor are still refused
+    // because losing those changes index semantics or correctness.
     if file.resolve_undo().is_some() {
-        anyhow::bail!("resolve-undo extension is present; refusing to rewrite .git/index");
+        file.remove_resolve_undo();
     }
     if !allow_unmerged
         && file

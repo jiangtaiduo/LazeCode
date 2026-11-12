@@ -254,8 +254,9 @@ pub fn encode_key(stroke: KeyStroke, modes: &Modes) -> Option<Vec<u8>> {
     if uses_kitty(stroke, modes.kitty) {
         return kitty_sequence(stroke, modes.kitty).map(String::into_bytes);
     }
-    // A legacy terminal cannot report key releases or repeats.
-    if stroke.event != KeyEvent::Press {
+    // A legacy terminal cannot report *releases*; a repeat is still just
+    // another press, so holding Backspace/arrows must keep producing input.
+    if stroke.event == KeyEvent::Release {
         return None;
     }
     if let Some(sequence) = modify_keys_sequence(stroke, modes.modify_other_keys) {
@@ -513,6 +514,17 @@ mod tests {
             encoded(stroke(TerminalKey::F(1), false, false, false), &modes),
             "\x1bOP"
         );
+    }
+
+    #[test]
+    fn legacy_repeat_keeps_producing_bytes() {
+        let modes = modes();
+        let press = KeyStroke::plain(TerminalKey::Backspace);
+        assert_eq!(
+            encode_key(press.with_event(KeyEvent::Repeat), &modes).unwrap(),
+            b"\x7f"
+        );
+        assert!(encode_key(press.with_event(KeyEvent::Release), &modes).is_none());
     }
 
     #[test]

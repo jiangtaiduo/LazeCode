@@ -17,9 +17,9 @@ JavaScript, and no bundled runtime.
 - **Native shell** — `winit` + `egui-wgpu`/`wgpu` on Metal, custom titlebar,
   native traffic lights, native menu bar and accelerators, light/dark palettes
   derived from the LazeCode design tokens, English/Chinese chrome.
-- **Workspace** — project rail, project tabs, explorer with `.gitignore`
-  awareness, file watcher, source-control sidebar, command palette (`⌘K`),
-  find in files, workspace/session persistence.
+- **Workspace** — project rail with console-activity indicators, explorer
+  with `.gitignore` awareness, file watcher, source-control sidebar, command
+  palette (`⌘K`), find in files, workspace/session persistence.
 - **Editor** — rope buffer, incremental syntax highlighting, tabs, undo/redo,
   multi-line indent, find/replace, diff view, IME, atomic saves, encoding and
   EOL preservation.

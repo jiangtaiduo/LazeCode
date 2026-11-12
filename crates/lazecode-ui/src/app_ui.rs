@@ -5,10 +5,10 @@ use lazecode_core::{AppModel, PanelTab, SidebarView};
 use crate::runtime::UiRuntime;
 use crate::theme::Theme;
 
-/// Stable window skeleton: a full-width 40px titlebar, a 40px LeftStrip,
+/// Stable window skeleton: a full-width 40px titlebar, a 50px project rail,
 /// one exclusive full-height drawer, and the center workspace grid
 /// (main / bottom panel / status).
-pub const STRIP_W: f32 = 40.0;
+pub const STRIP_W: f32 = 50.0;
 pub const TITLEBAR_H: f32 = 40.0;
 pub const STATUS_H: f32 = 26.0;
 pub const TABBAR_H: f32 = 30.0;

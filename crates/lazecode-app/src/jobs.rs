@@ -479,9 +479,28 @@ impl JobQueue {
                         ToastKind::Warning,
                     );
                 } else {
-                    model.close_project(index);
-                    model.save_workspace();
-                    runtime.clear_terminal_cache();
+                    let panes: Vec<u64> = model
+                        .project_at(index)
+                        .map(|project| {
+                            project
+                                .worktrees
+                                .iter()
+                                .flat_map(|worktree| worktree.terminals.iter())
+                                .flat_map(|tab| tab.panes.iter().map(|pane| pane.id))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let commands = runtime.probe_busy_for(model, &panes);
+                    if commands.is_empty() {
+                        model.close_project(index);
+                        model.save_workspace();
+                        runtime.clear_terminal_cache();
+                    } else {
+                        runtime.dialog = lazecode_ui::runtime::DialogState::ConfirmTerminalClose {
+                            action: lazecode_ui::runtime::TerminalCloseAction::Project(index),
+                            commands,
+                        };
+                    }
                 }
             }
             Command::ReloadGit => {
@@ -2782,10 +2801,10 @@ impl JobQueue {
                 }
             }
             Command::CloseTerminal(id) => {
-                if let Some(project) = model.active_project_mut() {
-                    project.close_terminal(id);
-                }
-                runtime.forget_terminal(id);
+                runtime.request_terminal_close(
+                    model,
+                    lazecode_ui::runtime::TerminalCloseAction::Pane(id),
+                );
             }
             Command::CreateWorktree {
                 name,

@@ -61,7 +61,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             diagnostic_counts,
         )
     };
-    let running = model.total_running();
+    let running = rt.busy_count();
     let has_project = model.active_project().is_some();
 
     if !has_project {

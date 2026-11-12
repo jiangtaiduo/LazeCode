@@ -17,8 +17,9 @@ portable-pty.workspace = true
 parking_lot.workspace = true
 crossbeam-channel.workspace = true
 libc.workspace = true
-rio-vt = { version = "0.5.29", default-features = false }
+rio-vt = { version = "0.5.29", default-features = false, features = ["graphics"] }
 rio-graphics = { version = "0.5.29", default-features = false }
 
 [dev-dependencies]
+png = "0.17"
 tempfile = "3"

@@ -843,8 +843,9 @@ fn execute(action: PaletteAction, model: &mut AppModel, rt: &mut UiRuntime) {
                 .projects
                 .iter()
                 .any(|project| project.tabs.iter().any(|tab| tab.is_dirty()));
-            if dirty {
-                rt.dialog = crate::runtime::DialogState::Quit;
+            let commands = rt.probe_all_terminal_busy(model);
+            if dirty || !commands.is_empty() {
+                rt.dialog = crate::runtime::DialogState::Quit { commands };
             } else {
                 model.should_quit = true;
             }

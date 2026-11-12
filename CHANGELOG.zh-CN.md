@@ -10,6 +10,11 @@
 
 ### 新增
 
+- 外壳布局：已打开项目改到加宽的左侧竖形项目栏，底部固定“打开项目”
+  按钮，项目图标显示各自控制台的运行状态环；Project、Commit、Compare、
+  Git Log、Terminal 操作移到顶栏。顶栏改用应用自带图标，工具按钮放大；
+  项目栏宽度改为 50px、项目图标缩小。顶栏项目下拉菜单保持纯切换，不显示
+  控制台状态；设置按钮位于顶栏最右侧、放大镜之后。
 - 设置中新增界面字体、编辑器字体与终端字体选择，基于系统已安装字体目录
   （`fontdb`，包含 macOS `AssetsV2` 字体）。编辑器与终端使用独立的等宽
   字体族；终端默认跟随编辑器。
@@ -81,6 +86,35 @@
 
 ### 修复
 
+- 修复 `.git/index` 含可选 resolve-undo（`REUC`）扩展时提交报错的问题。
+  `gix` 无法原样写回该扩展，因此在写索引前显式丢弃；split-index、
+  untracked-cache 与 FSMonitor 扩展仍会拒绝重写，因为丢弃它们会改变索引
+  语义。
+
+- 启用 `rio-vt` 的 `graphics` feature，Kitty PNG/JPEG payload 会被解码而不
+  是被拒绝；配合 omp 的显式图片能力声明，并新增 rio-vt Unicode 虚拟占位格
+  run 的合成，omp 的 placeholder 图片 chip 会绘制真实缩略图，而不是 `img`
+  文本框。
+- 终端子进程现在会收到 omp 的显式图片能力声明
+  （`PI_FORCE_IMAGE_PROTOCOL=kitty`、`PI_KITTY_PLACEHOLDERS=1`）。否则 omp
+  会把 LazeCode 当成普通 truecolor 终端，把 `img #N` 画成绿色占位网格而
+  不是真实缩略图。
+- 终端补齐稳定版行为：长按 Backspace/方向键在 legacy 终端下会持续产生按键
+  （此前 Repeat 被当作不可上报事件丢弃，只有 Release 应丢弃）；聚焦控制台时
+  Cmd+V 读取原生 NSPasteboard 文件/图片 flavor，截图落地为临时 PNG/TIFF，
+  路径含空格或 shell 元字符时加单引号，并按 bracketed paste 模式写入 PTY，
+  供 omp 自己渲染图片 chip。
+- 控制台进程状态改用与稳定版一致的 `ps -t <tty>` 探测，每 2 秒后台分批
+  轮询。项目胶囊/项目头像显示绿色 busy 边框或红色 outputting 跑马灯；左侧
+  Terminal、Consoles 和状态栏不再把停在提示符的 shell 计为运行中。
+- 关闭分屏/标签、Close Others/All、关闭项目或退出应用前都会探测控制台命令
+  并要求确认；确认框长命令列表自动换行。
+- 终端划选改为在主键按下时建立锚点，而不是等到 `Response::clicked`（松开）
+  才创建；此前必须先点一下、再拖动才能扩展选区。复制改为处理
+  egui-winit 的 `Event::Copy`（Cmd+C 不会产生 `Key::C`）；同时移除 macOS
+  原生 Copy/Paste 菜单项，因为它们的 AppKit 快捷键会在 egui 收到事件前
+  吞掉 `Cmd+C`/`Cmd+V`。现在拖选提示符会高亮，`pbpaste` 能取到文本，
+  粘贴 `echo PASTE_OK_123` 可正常执行。
 - 图片标签改用有上限的独立解码缓存，不再使用只增不减的 `egui_extras`
   loader 缓存。纹理按当前视口缩小，常驻像素上限 64 MiB，标签关闭后立即
   释放；关闭项目时同时清理 Markdown 图片 loader 与 `CommonMarkCache`。

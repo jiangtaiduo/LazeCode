@@ -1,7 +1,7 @@
 use egui::{
     Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, ViewportCommand,
 };
-use lazecode_core::{AppModel, Command};
+use lazecode_core::{AppModel, Command, PanelTab, SidebarView};
 
 use crate::icons::{paint as paint_icon, Icon};
 use crate::runtime::{MenuKind, UiRuntime};
@@ -38,21 +38,36 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
 
     // App logo → command palette. (The stable logo opens its project menu;
     // that lands with the titlebar replication batch.)
-    let logo_rect = Rect::from_center_size(Pos2::new(x + 14.0, top + 20.0), Vec2::splat(28.0));
+    let logo_rect = Rect::from_center_size(Pos2::new(x + 15.0, top + 20.0), Vec2::splat(30.0));
     let logo_response = ui.interact(logo_rect, ui.scope_id().with("title-logo"), Sense::click());
-    let logo_fill = if logo_response.hovered() {
-        p.accent.gamma_multiply(1.06)
-    } else {
-        p.accent
-    };
-    painter.rect_filled(logo_rect, egui::CornerRadius::same(8), logo_fill);
-    painter.text(
-        logo_rect.center(),
-        Align2::CENTER_CENTER,
-        ">_",
-        FontId::monospace(12.0),
-        p.accent_on_fill,
+    // Use the packaged application icon rather than a synthetic `>_` tile.
+    // Decode once into a small texture: the image-loader path is asynchronous
+    // and would flash a placeholder on the first frame.
+    let icon_texture = rt.app_icon.get_or_insert_with(|| {
+        let bytes = include_bytes!("../../../packaging/macos/icon-1024.png");
+        let decoded = image::load_from_memory(bytes)
+            .expect("embedded LazeCode application icon must be a valid PNG")
+            .to_rgba8();
+        let resized =
+            image::imageops::resize(&decoded, 64, 64, image::imageops::FilterType::Lanczos3);
+        let pixels = egui::ColorImage::from_rgba_unmultiplied([64, 64], resized.as_raw());
+        ui.ctx()
+            .load_texture("lazecode-app-icon", pixels, egui::TextureOptions::LINEAR)
+    });
+    painter.image(
+        icon_texture.id(),
+        logo_rect,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
     );
+    if logo_response.hovered() {
+        painter.rect_stroke(
+            logo_rect.expand(1.0),
+            egui::CornerRadius::same(8),
+            Stroke::new(1.0, p.accent.gamma_multiply(0.7)),
+            StrokeKind::Outside,
+        );
+    }
     if logo_response.clicked() {
         rt.open_palette();
         model.ui.command_palette_open = true;
@@ -60,70 +75,137 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     logo_response.on_hover_text(crate::tr!(model, "Command palette · ⌘⇧A", "命令面板 · ⌘⇧A"));
     x = logo_rect.right() + 10.0;
 
-    // 多项目模式下展示其它项目的切换头像；单项目时直接展示项目胶囊，避免重复绘制双重头像。
-    if model.projects.len() > 1 {
-        for index in 0..model.projects.len() {
-            let (tone, active, running, initials, project_name, project_branch) = {
-                let project = &model.projects[index];
-                (
-                    Color32::from_rgb(project.tone.0, project.tone.1, project.tone.2),
-                    model.active_project == Some(index),
-                    project
-                        .worktrees
-                        .iter()
-                        .flat_map(|worktree| worktree.terminals.iter())
-                        .flat_map(|tab| tab.panes.iter())
-                        .filter(|pane| pane.session.is_running())
-                        .count(),
-                    project.initials.clone(),
-                    project.name.clone(),
-                    project.branch(),
-                )
-            };
-            let tile = Rect::from_center_size(Pos2::new(x + 12.0, top + 20.0), Vec2::splat(24.0));
-            let response = ui.interact(
-                tile,
-                ui.scope_id().with(("title-project", index)),
-                Sense::click(),
-            );
-            if active {
-                painter.rect_filled(tile, egui::CornerRadius::same(7), tone);
-            } else {
-                painter.rect_filled(
-                    tile,
-                    egui::CornerRadius::same(7),
-                    tone.gamma_multiply(if response.hovered() { 0.24 } else { 0.15 }),
-                );
-                painter.rect_stroke(
-                    tile,
-                    egui::CornerRadius::same(7),
-                    Stroke::new(1.0, tone.gamma_multiply(0.35)),
-                    StrokeKind::Inside,
-                );
-            }
-            painter.text(
-                tile.center(),
-                Align2::CENTER_CENTER,
-                &initials,
-                FontId::proportional(10.0),
-                if active { p.accent_on_fill } else { tone },
-            );
-            if running > 0 {
-                painter.circle_filled(
-                    Pos2::new(tile.right() - 1.0, tile.top() + 1.0),
-                    4.0,
-                    p.running,
-                );
-            }
-            if response.clicked() {
-                model.switch_project(index);
-                rt.clear_terminal_cache();
-            }
-            response.on_hover_text(format!("{project_name} · {project_branch}"));
-            x += 28.0;
+    // Tool buttons used to live in the LeftStrip. They now form the titlebar
+    // action group; the project list itself is the vertical rail.
+    let changes = model
+        .active_project()
+        .map(|project| project.changes().len())
+        .unwrap_or(0);
+    let project_active = model.ui.sidebar_visible && model.ui.sidebar_view == SidebarView::Files;
+    let commit_active = model.ui.sidebar_visible && model.ui.sidebar_view == SidebarView::Git;
+    let compare_active = model.ui.sidebar_visible && model.ui.sidebar_view == SidebarView::Compare;
+    let log_active = model.ui.panel_visible && model.ui.panel_tab == PanelTab::Git;
+    let terminal_active = model.ui.terminal_visible;
+    let has_compare = model
+        .active_project()
+        .is_some_and(|project| project.compare_session.is_some());
+
+    let mut tool_x = x + 14.0;
+    let tool_y = top + 20.0;
+    let response = toolbar_button(
+        ui,
+        theme,
+        Pos2::new(tool_x, tool_y),
+        "title-project",
+        Icon::Files,
+        project_active,
+        None,
+        crate::tr!(model, "Project", "项目").to_string(),
+    );
+    if response.clicked() {
+        if project_active {
+            model.ui.sidebar_visible = false;
+        } else {
+            model.ui.sidebar_view = SidebarView::Files;
+            model.ui.sidebar_visible = true;
         }
-        x += 6.0;
     }
+    tool_x += 34.0;
+
+    let response = toolbar_button(
+        ui,
+        theme,
+        Pos2::new(tool_x, tool_y),
+        "title-commit",
+        Icon::Changes,
+        commit_active,
+        (changes > 0).then_some(p.rose),
+        crate::tr!(model, "Commit", "提交").to_string(),
+    );
+    if response.clicked() {
+        if commit_active {
+            model.ui.sidebar_visible = false;
+        } else {
+            model.ui.sidebar_view = SidebarView::Git;
+            model.ui.sidebar_visible = true;
+        }
+    }
+    tool_x += 34.0;
+
+    if has_compare {
+        let response = toolbar_button(
+            ui,
+            theme,
+            Pos2::new(tool_x, tool_y),
+            "title-compare",
+            Icon::Compare,
+            compare_active,
+            None,
+            crate::tr!(model, "Compare", "比较").to_string(),
+        );
+        if response.clicked() {
+            if compare_active {
+                model.ui.sidebar_view = SidebarView::Git;
+            } else {
+                model.ui.sidebar_view = SidebarView::Compare;
+                model.ui.sidebar_visible = true;
+                if let Some(project) = model.active_project_mut() {
+                    if let Some(session) = project.compare_session.as_mut() {
+                        session.minimized = false;
+                    }
+                }
+            }
+        }
+        tool_x += 34.0;
+    }
+
+    let response = toolbar_button(
+        ui,
+        theme,
+        Pos2::new(tool_x, tool_y),
+        "title-gitlog",
+        Icon::GitLog,
+        log_active,
+        None,
+        crate::tr!(model, "Git Log · ⌘9", "Git 日志 · ⌘9").to_string(),
+    );
+    if response.clicked() {
+        if log_active {
+            model.ui.panel_visible = false;
+        } else {
+            model.ui.panel_visible = true;
+            model.ui.panel_tab = PanelTab::Git;
+            if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
+                model.ui.terminal_visible = false;
+            }
+            model.queue(Command::RefreshLog);
+        }
+    }
+    tool_x += 34.0;
+
+    let response = toolbar_button(
+        ui,
+        theme,
+        Pos2::new(tool_x, tool_y),
+        "title-terminal",
+        Icon::Terminal,
+        terminal_active,
+        None,
+        crate::tr!(model, "Terminal", "终端").to_string(),
+    );
+    if response.clicked() {
+        if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
+            if terminal_active {
+                model.ui.terminal_visible = false;
+            } else {
+                model.ui.terminal_visible = true;
+                model.ui.panel_visible = false;
+            }
+        } else {
+            model.ui.terminal_visible = !terminal_active;
+        }
+    }
+    x = tool_x + 20.0;
 
     let project = model.active_project();
     let has_project = project.is_some();
@@ -139,8 +221,10 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     let tone = project
         .map(|project| Color32::from_rgb(project.tone.0, project.tone.1, project.tone.2))
         .unwrap_or(p.accent);
-
-    let project_rect = Rect::from_min_size(Pos2::new(x, top + 6.0), Vec2::new(238.0, 28.0));
+    // Keep the branch/right controls viable on narrow windows; the full
+    // project card only pays for itself when there is horizontal room.
+    let project_width = if rect.width() < 900.0 { 180.0 } else { 238.0 };
+    let project_rect = Rect::from_min_size(Pos2::new(x, top + 6.0), Vec2::new(project_width, 28.0));
     let response = ui.interact(
         project_rect,
         ui.scope_id().with("project-id"),
@@ -173,7 +257,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         ui.painter(),
         Rect::from_min_max(
             Pos2::new(x + 32.0, top + 7.0),
-            Pos2::new(x + 150.0, top + 22.0),
+            Pos2::new(project_rect.right() - 88.0, top + 22.0),
         ),
         &project_name,
         FontId::proportional(13.5),
@@ -184,7 +268,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         ui.painter(),
         Rect::from_min_max(
             Pos2::new(x + 32.0, top + 21.0),
-            Pos2::new(x + 198.0, top + 34.0),
+            Pos2::new(project_rect.right() - 40.0, top + 34.0),
         ),
         &project_path,
         FontId::proportional(11.0),
@@ -207,19 +291,10 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             open_project_dialog = true;
         }
     }
+    if has_project {
+        response.on_hover_text(format!("{project_name} · {project_path}"));
+    }
     x = project_rect.right() + 6.0;
-
-    let add_rect = Rect::from_center_size(Pos2::new(x + 11.0, top + 20.0), Vec2::splat(22.0));
-    let add_response = ui.interact(add_rect, ui.scope_id().with("title-add"), Sense::click());
-    if add_response.hovered() {
-        painter.rect_filled(add_rect, egui::CornerRadius::same(6), p.hover);
-    }
-    paint_icon(ui.painter(), add_rect.shrink(5.0), Icon::Plus, p.text3);
-    if add_response.clicked() {
-        open_project_dialog = true;
-    }
-    add_response.on_hover_text(crate::tr!(model, "Open another project", "打开其他项目"));
-    x = add_rect.right() + 7.0;
 
     painter.vline(
         x - 3.5,
@@ -576,11 +651,32 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         let _ = after_branch_x;
     }
 
-    // Right cluster: 稳定版顶栏最右侧仅放置放大镜搜索按钮（28x28，无 running 指示与开关窗口图标）。
+    // Right cluster: search then settings. Settings deliberately sits at the
+    // far right edge, after the magnifier.
     let rx = rect.right() - 8.0;
-    let search_rect =
-        Rect::from_center_size(Pos2::new(rx - 14.0, rect.center().y), Vec2::splat(28.0));
-    let search_resp = icon_button(ui, search_rect, Icon::Search, false, theme);
+    let settings_resp = toolbar_button_sized(
+        ui,
+        theme,
+        Pos2::new(rx - 14.0, rect.center().y),
+        "title-settings",
+        28.0,
+        15.0,
+        Icon::Settings,
+        rt.settings_open,
+        None,
+        crate::tr!(model, "Settings · ⌘,", "设置 · ⌘,").to_string(),
+    );
+    if settings_resp.clicked() {
+        rt.settings_open = !rt.settings_open;
+        rt.about_open = false;
+    }
+    let search_resp = icon_button(
+        ui,
+        Rect::from_center_size(Pos2::new(rx - 44.0, rect.center().y), Vec2::splat(28.0)),
+        Icon::Search,
+        false,
+        theme,
+    );
     if search_resp.clicked() {
         rt.open_palette();
         model.ui.command_palette_open = true;
@@ -589,4 +685,57 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     if open_project_dialog {
         model.queue(Command::OpenProjectDialog);
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn toolbar_button(
+    ui: &mut Ui,
+    theme: &Theme,
+    center: Pos2,
+    id: &'static str,
+    icon: Icon,
+    active: bool,
+    dot: Option<Color32>,
+    tooltip: String,
+) -> egui::Response {
+    toolbar_button_sized(
+        ui, theme, center, id, 32.0, 18.0, icon, active, dot, tooltip,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn toolbar_button_sized(
+    ui: &mut Ui,
+    theme: &Theme,
+    center: Pos2,
+    id: &'static str,
+    size: f32,
+    icon_size: f32,
+    icon: Icon,
+    active: bool,
+    dot: Option<Color32>,
+    tooltip: String,
+) -> egui::Response {
+    let p = theme.palette;
+    let rect = Rect::from_center_size(center, Vec2::splat(size));
+    let response = ui.interact(rect, ui.scope_id().with(id), Sense::click());
+    if active || response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(7),
+            if active { p.active } else { p.hover },
+        );
+    }
+    paint_icon(
+        ui.painter(),
+        Rect::from_center_size(center, Vec2::splat(icon_size)),
+        icon,
+        if active { p.text } else { p.text2 },
+    );
+    if let Some(color) = dot {
+        let c = Pos2::new(rect.right() - 4.0, rect.top() + 4.0);
+        ui.painter().circle_filled(c, 3.0, p.titlebar);
+        ui.painter().circle_filled(c, 2.0, color);
+    }
+    response.on_hover_text(tooltip)
 }

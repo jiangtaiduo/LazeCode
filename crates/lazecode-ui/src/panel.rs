@@ -461,19 +461,7 @@ pub fn draw_terminal_dock(
         model.save_workspace();
     }
     if let Some(tab_id) = close_tab {
-        let panes: Vec<u64> = model.projects[index]
-            .active_worktree()
-            .tab_by_id(tab_id)
-            .map(|tab| tab.panes.iter().map(|pane| pane.id).collect())
-            .unwrap_or_default();
-        model.projects[index].close_terminal_tab(tab_id);
-        for id in panes {
-            rt.forget_terminal(id);
-        }
-        match model.projects[index].active_worktree().active_terminal {
-            Some(next) => rt.set_terminal_focus(next),
-            None => rt.terminal_focus = None,
-        }
+        rt.request_terminal_close(model, crate::runtime::TerminalCloseAction::Tab(tab_id));
     }
 
     // 终端画布：稳定版 `.terminal-canvas-host`（12px 14px 内边距，--term-bg）。
@@ -627,12 +615,7 @@ pub fn draw_terminal_dock(
         }
     }
     if let Some(pane_id) = close_pane {
-        project.close_terminal(pane_id);
-        rt.forget_terminal(pane_id);
-        match project.active_worktree().active_terminal {
-            Some(next) => rt.set_terminal_focus(next),
-            None => rt.terminal_focus = None,
-        }
+        rt.request_terminal_close(model, crate::runtime::TerminalCloseAction::Pane(pane_id));
     } else if let Some(pane_id) = activate {
         let worktree = project.active_worktree_mut();
         if let Some(tab) = worktree

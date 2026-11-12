@@ -108,7 +108,7 @@ impl GraphicsCache {
         line_h: f32,
         rows: usize,
     ) {
-        if snapshot.graphics.is_empty() {
+        if snapshot.graphics.is_empty() && snapshot.virtual_graphics.is_empty() {
             return;
         }
         for placement in &snapshot.graphics {
@@ -131,6 +131,27 @@ impl GraphicsCache {
             );
             let size = cached.texture.size_vec2();
             let uv = source_uv(placement, size);
+            painter.image(cached.texture.id(), rect, uv, Color32::WHITE);
+        }
+        // Kitty Unicode placeholders (omp's image chips). Each run carries
+        // the exact sub-cell rect and normalised source slice computed by
+        // rio-vt; painting it here replaces the placeholder glyphs with the
+        // actual image.
+        for run in &snapshot.virtual_graphics {
+            let Some(cached) = self.images.get(&run.image_id) else {
+                continue;
+            };
+            let rect = Rect::from_min_size(
+                Pos2::new(
+                    inner.left() + run.col * char_w,
+                    inner.top() + run.row * line_h,
+                ),
+                Vec2::new(run.columns * char_w, run.rows * line_h),
+            );
+            let uv = Rect::from_min_max(
+                Pos2::new(run.source_uv[0], run.source_uv[1]),
+                Pos2::new(run.source_uv[2], run.source_uv[3]),
+            );
             painter.image(cached.texture.id(), rect, uv, Color32::WHITE);
         }
     }
@@ -300,29 +321,36 @@ pub fn draw(
             if snapshot.modes.mouse_drag && response.dragged() {
                 send_mouse(session, snapshot, pos, inner, line_h, char_w, 32, true, sgr);
             }
-        } else if response.clicked() {
+        } else if response.is_pointer_button_down_on()
+            && ui.input(|input| input.pointer.primary_down())
+        {
+            // Start on press, not on click: `Response::clicked` only fires on
+            // release, so a fresh press-and-drag previously never created an
+            // anchor and the drag branch had nothing to extend.  `dragged`
+            // also waits for the click-vs-drag threshold, which made short
+            // selections feel dead.
             let point = selection_end(pos);
-            *selection = Some(TermSelection {
-                start: point,
-                end: point,
-            });
-        } else if response.dragged() {
-            if let Some(sel) = selection.as_mut() {
-                sel.end = selection_end(pos);
+            let pressed = ui.input(|input| input.pointer.primary_pressed());
+            if pressed || selection.is_none() {
+                *selection = Some(TermSelection {
+                    start: point,
+                    end: point,
+                });
+            } else if let Some(sel) = selection.as_mut() {
+                sel.end = point;
             }
         }
     }
 
     if focus && !search.open && !ui.ctx().egui_wants_keyboard_input() {
-        handle_input(ui, session, snapshot, preedit, session_id);
-        if let Some(sel) = selection.as_ref() {
-            if ui.input(|input| input.modifiers.command && input.key_pressed(Key::C)) {
-                let text = selection_text(snapshot, sel);
-                if !text.is_empty() {
-                    ui.ctx().copy_text(text);
-                }
-            }
-        }
+        handle_input(
+            ui,
+            session,
+            snapshot,
+            preedit,
+            session_id,
+            selection.as_ref(),
+        );
         if ui.input(|input| input.modifiers.command && input.key_pressed(Key::F)) {
             search.open = true;
             search.focus_requested = true;
@@ -381,7 +409,10 @@ pub fn draw(
         // background run.
         for col in 0..cols {
             let cell = snapshot.cell(row, col);
-            if cell.attrs & ATTR_SPACER != 0 || cell.attrs & ATTR_LEADING_SPACER != 0 {
+            if cell.attrs & ATTR_SPACER != 0
+                || cell.attrs & ATTR_LEADING_SPACER != 0
+                || cell.ch == '\u{10EEEE}'
+            {
                 continue;
             }
             let (mut fg, mut bg) = (resolve(cell.fg, &p), resolve(cell.bg, &p));
@@ -452,6 +483,29 @@ pub fn draw(
             let cell = snapshot.cell(row, col);
             let attrs = cell.attrs;
             if attrs & ATTR_SPACER != 0 || attrs & ATTR_LEADING_SPACER != 0 {
+                continue;
+            }
+            // Kitty virtual-placeholder cells carry combining diacritics in
+            // `text`. They must never reach the font: the image overlay paints
+            // that rectangle. Flush any preceding run and resume after the
+            // placeholder cell.
+            if cell.ch == '\u{10EEEE}' {
+                flush_run(
+                    &painter,
+                    &mut run_text,
+                    run_start,
+                    col,
+                    run_color,
+                    run_attrs,
+                    y,
+                    line_h,
+                    inner,
+                    char_w,
+                    font_size,
+                    &mut run_color,
+                );
+                run_start = col + 1;
+                run_attrs = attrs;
                 continue;
             }
             let (mut fg, mut bg) = (resolve(cell.fg, &p), resolve(cell.bg, &p));
@@ -769,6 +823,7 @@ fn handle_input(
     snapshot: &Snapshot,
     preedit: &mut String,
     _id: u64,
+    selection: Option<&TermSelection>,
 ) {
     let events = ui.input(|input| input.events.clone());
     let alt_down = ui.input(|input| input.modifiers.alt);
@@ -814,7 +869,14 @@ fn handle_input(
                 }
             }
             Event::Copy => {
-                // Copy handled by the caller, which owns the selection.
+                // egui-winit maps Cmd+C to `Event::Copy` instead of a
+                // `Key::C` event, so copying must happen here.
+                if let Some(sel) = selection {
+                    let text = selection_text(snapshot, sel);
+                    if !text.is_empty() {
+                        ui.ctx().copy_text(text);
+                    }
+                }
             }
             _ => {}
         }
@@ -1388,6 +1450,56 @@ mod tests {
         // Eviction in the terminal drops the texture here too.
         cache.apply(&ctx, Vec::new(), &[]);
         assert!(cache.images.is_empty());
+    }
+
+    #[test]
+    fn graphics_cache_paints_virtual_only_snapshots() {
+        use egui::ColorImage;
+
+        let ctx = egui::Context::default();
+        let texture = ctx.load_texture(
+            "virtual-test",
+            ColorImage::new([1, 1], vec![Color32::WHITE]),
+            egui::TextureOptions::NEAREST,
+        );
+        let mut cache = GraphicsCache::default();
+        cache.images.insert(
+            9,
+            CachedImage {
+                generation: 1,
+                texture,
+            },
+        );
+        let mut snapshot = Snapshot::default();
+        snapshot
+            .virtual_graphics
+            .push(lazecode_terminal::VirtualImageRun {
+                image_id: 9,
+                col: 1.0,
+                row: 1.0,
+                columns: 2.0,
+                rows: 1.0,
+                source_uv: [0.0, 0.0, 1.0, 1.0],
+            });
+
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            cache.paint(
+                ui.painter(),
+                &snapshot,
+                Rect::from_min_size(Pos2::ZERO, Vec2::new(80.0, 80.0)),
+                8.0,
+                16.0,
+                4,
+            );
+        });
+        output.textures_delta.clear();
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|clipped| matches!(clipped.shape, egui::Shape::Mesh(_))),
+            "virtual-only graphics must emit an image mesh"
+        );
     }
 
     #[test]

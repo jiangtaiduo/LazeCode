@@ -538,3 +538,43 @@ fn ignored_snapshot_cache_invalidates_explicitly() {
     let fresh = lazecode_git::snapshot(dir.path()).unwrap();
     assert!(fresh.ignored_files.iter().any(|path| path == "b.tmp"));
 }
+
+#[test]
+fn commit_checked_accepts_resolve_undo_index() {
+    let dir = init();
+    std::fs::write(dir.path().join("a.txt"), "base\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "base", false).unwrap();
+
+    git(dir.path(), &["checkout", "-q", "-b", "topic"]);
+    std::fs::write(dir.path().join("a.txt"), "topic\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "topic"]);
+
+    git(dir.path(), &["checkout", "-q", "main"]);
+    std::fs::write(dir.path().join("a.txt"), "main\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "main"]);
+
+    let merge = Command::new("git")
+        .current_dir(dir.path())
+        .args(["merge", "topic"])
+        .output()
+        .unwrap();
+    assert!(!merge.status.success(), "merge should conflict");
+
+    std::fs::write(dir.path().join("a.txt"), "resolved\n").unwrap();
+    git(dir.path(), &["add", "a.txt"]);
+    let index = std::fs::read(dir.path().join(".git/index")).unwrap();
+    assert!(
+        index.windows(4).any(|window| window == b"REUC"),
+        "the fixture must carry the resolve-undo extension"
+    );
+    // The merge has been resolved by hand; remove the remaining sequencer
+    // marker so LazeCode's normal commit path (not merge continue) runs.
+    let _ = std::fs::remove_file(dir.path().join(".git/MERGE_HEAD"));
+    let _ = std::fs::remove_file(dir.path().join(".git/MERGE_MSG"));
+    let _ = std::fs::remove_file(dir.path().join(".git/MERGE_MODE"));
+
+    lazecode_git::commit_checked(dir.path(), &["a.txt".into()], &[], "resolved", false)
+        .expect("commit must tolerate REUC instead of refusing the index");
+    assert_eq!(git(dir.path(), &["status", "--porcelain"]), "");
+}

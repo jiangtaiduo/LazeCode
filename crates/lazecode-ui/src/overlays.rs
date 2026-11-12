@@ -12,7 +12,7 @@ use crate::icons::{paint as paint_icon, Icon};
 use crate::runtime::{DialogState, MenuKind, MenuState, UiRuntime};
 use crate::theme::Theme;
 use crate::widgets::{
-    checkbox, live_dot, primary_button, secondary_button, secondary_button_enabled, text_clipped,
+    checkbox, primary_button, secondary_button, secondary_button_enabled, text_clipped,
 };
 
 /// Phase of the background update task.
@@ -1050,36 +1050,8 @@ fn draw_project_menu(
             p.text3,
             Align2::LEFT_CENTER,
         );
-        let running = project
-            .worktrees
-            .iter()
-            .flat_map(|worktree| worktree.terminals.iter())
-            .flat_map(|tab| tab.panes.iter())
-            .filter(|pane| pane.session.is_running())
-            .count();
-        if running > 0 {
-            live_dot(
-                ui.painter(),
-                Pos2::new(row.right() - 46.0, row.center().y),
-                true,
-                p.running,
-            );
-            ui.painter().text(
-                Pos2::new(row.right() - 38.0, row.center().y),
-                Align2::LEFT_CENTER,
-                running.to_string(),
-                FontId::monospace(9.0),
-                p.running,
-            );
-        } else {
-            ui.painter().text(
-                Pos2::new(row.right() - 18.0, row.center().y),
-                Align2::RIGHT_CENTER,
-                crate::tr!(model, "idle", "空闲"),
-                FontId::monospace(8.5),
-                p.text3,
-            );
-        }
+        // Console activity is intentionally shown only on the project rail;
+        // this dropdown stays a quiet switcher.
         if model.active_project == Some(index) {
             paint_icon(
                 ui.painter(),
@@ -1140,9 +1112,10 @@ fn draw_project_menu(
                     lazecode_core::ToastKind::Warning,
                 );
             } else {
-                model.close_project(active);
-                model.save_workspace();
-                rt.clear_terminal_cache();
+                rt.request_terminal_close(
+                    model,
+                    crate::runtime::TerminalCloseAction::Project(active),
+                );
             }
         }
         close = true;
@@ -2874,11 +2847,11 @@ fn draw_terminal_tab_context_menu(
     if let Some(code) = action {
         // Collect the panes a close operation tears down so their cached
         // render state can be dropped afterwards.
-        let mut doomed: Vec<u64> = Vec::new();
         let settings = model.settings.clone();
         let notifier = model.notifier.clone();
         let mut notice: Option<String> = None;
         let mut focus: Option<u64> = None;
+        let mut terminal_action: Option<crate::runtime::TerminalCloseAction> = None;
         if let Some(project) = model.projects.get_mut(project_idx) {
             match code {
                 0 => {
@@ -2900,41 +2873,17 @@ fn draw_terminal_tab_context_menu(
                     }
                 }
                 3 => {
-                    doomed.push(terminal_id);
-                    project.close_terminal(terminal_id);
+                    terminal_action = Some(crate::runtime::TerminalCloseAction::Pane(terminal_id));
                 }
                 4 => {
-                    if let Some(tab) = project
-                        .worktrees
-                        .iter()
-                        .find_map(|worktree| worktree.tab_by_id(tab_id))
-                    {
-                        doomed.extend(tab.panes.iter().map(|pane| pane.id));
-                    }
-                    project.close_terminal_tab(tab_id);
+                    terminal_action = Some(crate::runtime::TerminalCloseAction::Tab(tab_id));
                 }
                 5 => {
-                    let worktree = project.active_worktree();
-                    if let Some(keep) = worktree.tab_of_pane(terminal_id).map(|tab| tab.id) {
-                        doomed.extend(
-                            worktree
-                                .terminals
-                                .iter()
-                                .filter(|tab| tab.id != keep)
-                                .flat_map(|tab| tab.panes.iter().map(|pane| pane.id)),
-                        );
-                    }
-                    project.close_other_terminals(terminal_id);
+                    terminal_action =
+                        Some(crate::runtime::TerminalCloseAction::Others(terminal_id));
                 }
                 6 => {
-                    doomed.extend(
-                        project
-                            .active_worktree()
-                            .terminals
-                            .iter()
-                            .flat_map(|tab| tab.panes.iter().map(|pane| pane.id)),
-                    );
-                    project.close_all_terminals();
+                    terminal_action = Some(crate::runtime::TerminalCloseAction::All);
                 }
                 7 => {
                     rt.dialog = DialogState::RenameTerminal {
@@ -2946,8 +2895,8 @@ fn draw_terminal_tab_context_menu(
                 _ => {}
             }
         }
-        for id in doomed {
-            rt.forget_terminal(id);
+        if let Some(action) = terminal_action {
+            rt.request_terminal_close(model, action);
         }
         if let Some(id) = focus {
             rt.set_terminal_focus(id);
@@ -7828,11 +7777,25 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             440.0,
             210.0,
         ),
-        DialogState::Quit => (
+        DialogState::ConfirmTerminalClose { action, .. } => (
+            if matches!(action, crate::runtime::TerminalCloseAction::Project(_)) {
+                crate::tr!(model, "Close project", "关闭项目")
+            } else {
+                crate::tr!(model, "Close terminal", "关闭控制台")
+            },
+            crate::tr!(
+                model,
+                "Commands are still running in this console. Closing it will terminate them.",
+                "控制台里还有命令在运行，关闭会终止这些进程。"
+            ),
+            520.0,
+            230.0,
+        ),
+        DialogState::Quit { .. } => (
             crate::tr!(model, "Quit LazeCode?", "退出 LazeCode？"),
             crate::tr!(model, "Tabs with unsaved changes will lose their edits unless you cancel and save them first.", "未保存的标签页将丢失更改，请取消并先保存。"),
-            440.0,
-            210.0,
+            460.0,
+            240.0,
         ),
         DialogState::NewFile { .. } => (
             crate::tr!(model, "New file", "新建文件"),
@@ -7995,6 +7958,65 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         ),
         _ => return,
     };
+    let subtitle = match &dialog {
+        DialogState::ConfirmTerminalClose {
+            action, commands, ..
+        } => {
+            let names = commands.join(if model.settings.language.is_zh() {
+                "、"
+            } else {
+                ", "
+            });
+            let project = matches!(action, crate::runtime::TerminalCloseAction::Project(_));
+            if model.settings.language.is_zh() {
+                if project {
+                    format!(
+                        "项目控制台里还有命令在运行（{names}），关闭项目会终止这些进程。确定关闭？"
+                    )
+                } else {
+                    format!("控制台里还有命令在运行（{names}），关闭会终止这些进程。确定关闭？")
+                }
+            } else if project {
+                format!(
+                    "Commands are still running in this project's consoles ({names}). Closing the project will terminate them. Close anyway?"
+                )
+            } else {
+                format!(
+                    "Commands are still running in the terminal ({names}). Closing it will terminate them. Close anyway?"
+                )
+            }
+        }
+        DialogState::Quit { commands } => {
+            let mut lines = Vec::new();
+            if model
+                .projects
+                .iter()
+                .any(|project| project.tabs.iter().any(|tab| tab.is_dirty()))
+            {
+                lines.push(if model.settings.language.is_zh() {
+                    "未保存的标签页将丢失更改。".to_string()
+                } else {
+                    "Tabs with unsaved changes will lose their edits.".to_string()
+                });
+            }
+            if !commands.is_empty() {
+                let names = commands.join(if model.settings.language.is_zh() {
+                    "、"
+                } else {
+                    ", "
+                });
+                lines.push(if model.settings.language.is_zh() {
+                    format!("控制台里仍有命令在运行（{names}），退出会终止它们。")
+                } else {
+                    format!(
+                        "Console commands are still running ({names}); quitting will terminate them."
+                    )
+                });
+            }
+            lines.join("\n")
+        }
+        _ => subtitle.to_string(),
+    };
     ui.painter()
         .rect_filled(screen, 0.0, Color32::from_black_alpha(140));
     let rect = Rect::from_center_size(screen.center(), Vec2::new(width, height));
@@ -8006,16 +8028,15 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         FontId::proportional(15.0),
         p.text,
     );
-    text_clipped(
-        ui.painter(),
+    paint_wrapped_text(
+        ui,
         Rect::from_min_max(
             Pos2::new(rect.left() + 22.0, rect.top() + 46.0),
             Pos2::new(rect.right() - 22.0, rect.top() + 86.0),
         ),
-        subtitle,
+        &subtitle,
         FontId::proportional(10.5),
         p.text3,
-        Align2::LEFT_CENTER,
     );
     let mut close = false;
     let mut confirm = false;
@@ -9114,7 +9135,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 );
             }
         }
-        DialogState::Quit => {}
+        DialogState::Quit { .. } | DialogState::ConfirmTerminalClose { .. } => {}
         _ => {}
     }
     let cancel = Rect::from_min_size(
@@ -9140,8 +9161,11 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         DialogState::Remotes { .. } => crate::tr!(model, "Done", "完成"),
         DialogState::Reset { .. } => crate::tr!(model, "Reset", "重置"),
         DialogState::NewTag { .. } => crate::tr!(model, "Create", "创建"),
-        DialogState::Quit => crate::tr!(model, "Quit", "退出"),
+        DialogState::Quit { .. } => crate::tr!(model, "Quit", "退出"),
         DialogState::CloseDirtyTab { .. } => crate::tr!(model, "Discard", "放弃修改"),
+        DialogState::ConfirmTerminalClose { .. } => {
+            crate::tr!(model, "Close anyway", "确定关闭")
+        }
         DialogState::NewFile { .. } | DialogState::NewDirectory { .. } => {
             crate::tr!(model, "Create", "创建")
         }
@@ -9327,7 +9351,12 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 }
                 close = true;
             }
-            DialogState::Quit => {
+            DialogState::ConfirmTerminalClose { action, .. } => {
+                let action = action.clone();
+                rt.apply_terminal_close(model, action);
+                close = true;
+            }
+            DialogState::Quit { .. } => {
                 model.should_quit = true;
                 close = true;
             }
@@ -9826,4 +9855,20 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         rt.branch_create_error = None;
     }
     let _ = (model, ToastKind::Info);
+}
+
+fn paint_wrapped_text(ui: &Ui, rect: Rect, text: &str, font: FontId, color: Color32) {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = rect.width();
+    job.append(
+        text,
+        0.0,
+        egui::TextFormat {
+            font_id: font,
+            color,
+            ..Default::default()
+        },
+    );
+    let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
+    ui.painter().galley(rect.left_top(), galley, color);
 }

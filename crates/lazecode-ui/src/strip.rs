@@ -1,245 +1,226 @@
-//! Stable LeftStrip (`.tool-sidebar-strip`): one 40px activity strip below
-//! the titlebar. Top group: Project / Commit / Compare drawers; bottom
-//! group: Git Log / Terminal dock / Settings. Active state = 3px accent
-//! bar on the strip edge + `strip_active` fill + bright icon (stable
-//! `.strip-btn.active`).
+//! Stable project rail: the narrow column under the titlebar lists every open
+//! project. The tool buttons that used to live here now live in the titlebar;
+//! the rail keeps its only footer action (open another project) plus the
+//! per-project console-activity ring.
+//!
+//! The rail is intentionally independent from the file/commit drawer: it is
+//! the fast project switcher, while the top-bar project card remains the
+//! affordance for the active project's menu (worktrees, close, open).
 
-use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Ui, Vec2};
-use lazecode_core::{AppModel, Command, PanelTab, SidebarView};
+use egui::{pos2, vec2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
+use lazecode_core::{AppModel, Command};
 
 use crate::icons::{paint as paint_icon, Icon};
 use crate::runtime::UiRuntime;
 use crate::theme::Theme;
 
-const BTN: f32 = 32.0;
-const GAP: f32 = 8.0;
-
-#[allow(clippy::too_many_arguments)]
-fn button(
-    ui: &mut Ui,
-    theme: &Theme,
-    strip: Rect,
-    center: Pos2,
-    id: &'static str,
-    icon: Icon,
-    active: bool,
-    dot: Option<Color32>,
-    tooltip: String,
-) -> egui::Response {
-    let p = theme.palette;
-    let btn = Rect::from_center_size(center, Vec2::splat(BTN));
-    let response = ui.interact(btn, ui.scope_id().with(id), Sense::click());
-    if active || response.hovered() {
-        ui.painter().rect_filled(
-            btn,
-            CornerRadius::same(6),
-            if active { p.strip_active } else { p.hover },
-        );
-    }
-    if active {
-        // Stable `.strip-btn.active::before`: 3px accent bar hugging the
-        // strip's left edge, rounded on its right corners only.
-        ui.painter().rect_filled(
-            Rect::from_min_size(
-                Pos2::new(strip.left() + 1.0, btn.center().y - 9.0),
-                Vec2::new(3.0, 18.0),
-            ),
-            CornerRadius {
-                nw: 0,
-                ne: 2,
-                se: 2,
-                sw: 0,
-            },
-            p.accent,
-        );
-    }
-    paint_icon(
-        ui.painter(),
-        btn.shrink(7.0),
-        icon,
-        if active {
-            p.text_bright
-        } else if response.hovered() {
-            p.text
-        } else {
-            p.text2
-        },
-    );
-    if let Some(color) = dot {
-        let c = Pos2::new(btn.right() - 3.0, btn.top() + 3.0);
-        ui.painter().circle_filled(c, 3.5, p.rail);
-        ui.painter().circle_filled(c, 2.5, color);
-    }
-    response.on_hover_text(tooltip)
-}
-
-#[allow(dead_code)]
-fn compare_tab_open(model: &AppModel) -> bool {
-    model.active_project().is_some_and(|project| {
-        project
-            .tabs
-            .iter()
-            .any(|tab| matches!(tab.kind, lazecode_core::TabKind::Compare(_)))
-    })
-}
+const TILE: f32 = 34.0;
+const GAP: f32 = 6.0;
+const PAD: f32 = 8.0;
+const PLUS: f32 = 32.0;
 
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, rect: Rect) {
     let p = theme.palette;
-    let cx = rect.left() + rect.width() * 0.5;
-    let changes = model
-        .active_project()
-        .map(|project| project.changes().len())
-        .unwrap_or(0);
+    let painter = ui.painter().with_clip_rect(rect);
+    let cx = rect.center().x;
 
-    // --- top group: Project / Commit / Compare -------------------------
-    let mut y = rect.top() + GAP;
-
-    let project_active = model.ui.sidebar_visible && model.ui.sidebar_view == SidebarView::Files;
-    let response = button(
-        ui,
-        theme,
-        rect,
-        Pos2::new(cx, y + BTN * 0.5),
-        "strip-project",
-        Icon::Files,
-        project_active,
-        None,
-        crate::tr!(model, "Project", "项目").to_string(),
+    // Footer action stays fixed while the project list can scroll.
+    let plus_center = Pos2::new(cx, rect.bottom() - PAD - PLUS * 0.5);
+    let plus_rect = Rect::from_center_size(plus_center, Vec2::splat(PLUS));
+    let viewport = Rect::from_min_max(
+        pos2(rect.left() + 2.0, rect.top() + GAP),
+        pos2(rect.right() - 2.0, plus_rect.top() - GAP),
     );
-    y += BTN + GAP;
-    if response.clicked() {
-        if project_active {
-            model.ui.sidebar_visible = false;
-        } else {
-            model.ui.sidebar_view = SidebarView::Files;
-            model.ui.sidebar_visible = true;
+
+    let count = model.projects.len();
+    let content_height = if count == 0 {
+        0.0
+    } else {
+        count as f32 * TILE + count.saturating_sub(1) as f32 * GAP
+    };
+    let max_scroll = (content_height - viewport.height()).max(0.0);
+
+    // Trackpad/wheel scrolling is scoped to the rail so the editor and
+    // console keep their own scroll behaviour.
+    if max_scroll > 0.0
+        && ui
+            .ctx()
+            .pointer_hover_pos()
+            .is_some_and(|pos| viewport.contains(pos))
+    {
+        let dy = ui.ctx().input(|input| input.smooth_scroll_delta.y);
+        if dy != 0.0 {
+            rt.project_rail_scroll -= dy;
         }
     }
+    rt.project_rail_scroll = rt.project_rail_scroll.clamp(0.0, max_scroll);
+    let scroll = rt.project_rail_scroll;
 
-    let commit_active = model.ui.sidebar_visible && model.ui.sidebar_view == SidebarView::Git;
-    let response = button(
-        ui,
-        theme,
-        rect,
-        Pos2::new(cx, y + BTN * 0.5),
-        "strip-commit",
-        Icon::Changes,
-        commit_active,
-        (changes > 0).then_some(p.rose),
-        crate::tr!(model, "Commit", "提交").to_string(),
-    );
-    y += BTN + GAP;
-    if response.clicked() {
-        if commit_active {
-            model.ui.sidebar_visible = false;
-        } else {
-            model.ui.sidebar_view = SidebarView::Git;
-            model.ui.sidebar_visible = true;
+    for index in 0..count {
+        let y = viewport.top() + index as f32 * (TILE + GAP) - scroll;
+        let tile = Rect::from_min_size(Pos2::new(cx - TILE * 0.5, y), Vec2::splat(TILE));
+        if !tile.intersects(viewport) {
+            continue;
         }
-    }
-
-    // 稳定版：Compare 条目仅在有 Compare Versions 会话时出现（LeftStrip
-    // hasCompareSession），点击在显示/隐藏抽屉间切换。
-    let has_session = model
-        .active_project()
-        .is_some_and(|project| project.compare_session.is_some());
-    if has_session {
-        let compare_active =
-            model.ui.sidebar_visible && model.ui.sidebar_view == SidebarView::Compare;
-        let response = button(
-            ui,
-            theme,
-            rect,
-            Pos2::new(cx, y + BTN * 0.5),
-            "strip-compare",
-            Icon::Compare,
-            compare_active,
-            None,
-            crate::tr!(model, "Compare", "比较").to_string(),
+        let (tone, active, activity, initials, name, branch) = {
+            let project = &model.projects[index];
+            (
+                Color32::from_rgb(project.tone.0, project.tone.1, project.tone.2),
+                model.active_project == Some(index),
+                rt.project_busy(project),
+                project.initials.clone(),
+                project.name.clone(),
+                project.branch(),
+            )
+        };
+        let hit = tile.intersect(viewport);
+        let response = ui.interact(
+            hit,
+            ui.scope_id().with(("rail-project", index)),
+            Sense::click(),
         );
-        let _ = y;
-        if response.clicked() {
-            if compare_active {
-                model.ui.sidebar_view = SidebarView::Git;
-            } else {
-                model.ui.sidebar_view = SidebarView::Compare;
-                model.ui.sidebar_visible = true;
-                if let Some(project) = model.active_project_mut() {
-                    if let Some(session) = project.compare_session.as_mut() {
-                        session.minimized = false;
-                    }
-                }
-            }
-        }
-    }
-
-    // --- bottom group: Git Log / Terminal / Settings -------------------
-    let by = rect.bottom() - GAP - BTN * 0.5;
-
-    let settings_active = rt.settings_open;
-    let response = button(
-        ui,
-        theme,
-        rect,
-        Pos2::new(cx, by),
-        "strip-settings",
-        Icon::Settings,
-        settings_active,
-        None,
-        crate::tr!(model, "Settings · ⌘,", "设置 · ⌘,").to_string(),
-    );
-    if response.clicked() {
-        rt.settings_open = !rt.settings_open;
-        rt.about_open = false;
-    }
-
-    let terminal_active = model.ui.terminal_visible;
-    let response = button(
-        ui,
-        theme,
-        rect,
-        Pos2::new(cx, by - (BTN + GAP)),
-        "strip-terminal",
-        Icon::Terminal,
-        terminal_active,
-        (model.total_running() > 0).then_some(p.running),
-        crate::tr!(model, "Terminal", "终端").to_string(),
-    );
-    if response.clicked() {
-        if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
-            if terminal_active {
-                model.ui.terminal_visible = false;
-            } else {
-                model.ui.terminal_visible = true;
-                model.ui.panel_visible = false;
-            }
+        if active {
+            painter.rect_filled(tile, CornerRadius::same(8), tone);
         } else {
-            model.ui.terminal_visible = !terminal_active;
+            painter.rect_filled(
+                tile,
+                CornerRadius::same(8),
+                tone.gamma_multiply(if response.hovered() { 0.24 } else { 0.15 }),
+            );
+            painter.rect_stroke(
+                tile,
+                CornerRadius::same(8),
+                Stroke::new(1.0, tone.gamma_multiply(0.35)),
+                StrokeKind::Inside,
+            );
+        }
+        painter.text(
+            tile.center(),
+            egui::Align2::CENTER_CENTER,
+            &initials,
+            egui::FontId::proportional(12.0),
+            if active { p.accent_on_fill } else { tone },
+        );
+        paint_activity_border(ui, &painter, tile, 8, &activity, p);
+        if active {
+            painter.rect_filled(
+                Rect::from_min_size(
+                    Pos2::new(rect.left() + 2.0, tile.center().y - 8.0),
+                    Vec2::new(3.0, 16.0),
+                ),
+                CornerRadius {
+                    nw: 0,
+                    ne: 2,
+                    se: 2,
+                    sw: 0,
+                },
+                p.accent,
+            );
+        }
+
+        let mut tooltip = format!("{name} · {branch}");
+        if activity.busy {
+            tooltip.push('\n');
+            tooltip.push_str(&format!(
+                "{} {}",
+                crate::tr!(model, "Console:", "控制台:"),
+                activity.commands.join(", ")
+            ));
+        }
+        let clicked = response.clicked();
+        response.on_hover_text(tooltip);
+        if clicked {
+            model.switch_project(index);
+            rt.clear_terminal_cache();
         }
     }
 
-    let log_active = model.ui.panel_visible && model.ui.panel_tab == PanelTab::Git;
-    let response = button(
-        ui,
-        theme,
-        rect,
-        Pos2::new(cx, by - 2.0 * (BTN + GAP)),
-        "strip-gitlog",
-        Icon::GitLog,
-        log_active,
-        None,
-        crate::tr!(model, "Git Log · ⌘9", "Git 日志 · ⌘9").to_string(),
-    );
-    if response.clicked() {
-        if log_active {
-            model.ui.panel_visible = false;
-        } else {
-            model.ui.panel_visible = true;
-            model.ui.panel_tab = PanelTab::Git;
-            if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
-                model.ui.terminal_visible = false;
-            }
-            model.queue(Command::RefreshLog);
-        }
+    // A thin scrollbar is enough to signal that more projects exist; the
+    // plus button remains fixed at the bottom.
+    if max_scroll > 0.0 {
+        let track = Rect::from_min_size(
+            pos2(rect.right() - 4.0, viewport.top()),
+            vec2(2.0, viewport.height()),
+        );
+        let thumb_h =
+            (viewport.height() / content_height * track.height()).clamp(20.0, track.height());
+        let t = (scroll / max_scroll).clamp(0.0, 1.0);
+        let thumb = Rect::from_min_size(
+            pos2(track.left(), track.top() + (track.height() - thumb_h) * t),
+            vec2(track.width(), thumb_h),
+        );
+        painter.rect_filled(track, 1.0, p.border_soft);
+        painter.rect_filled(thumb, 1.0, p.text3);
     }
+
+    let plus = ui.interact(
+        plus_rect,
+        ui.scope_id().with("rail-open-project"),
+        Sense::click(),
+    );
+    if plus.hovered() {
+        painter.rect_filled(plus_rect, CornerRadius::same(8), p.hover);
+    }
+    paint_icon(
+        &painter,
+        plus_rect.shrink(8.0),
+        Icon::Plus,
+        if plus.hovered() { p.text } else { p.text3 },
+    );
+    if plus.clicked() {
+        model.queue(Command::OpenProjectDialog);
+    }
+    plus.on_hover_text(crate::tr!(model, "Open another project", "打开其他项目"));
+}
+
+fn paint_activity_border(
+    ui: &Ui,
+    painter: &egui::Painter,
+    rect: Rect,
+    radius: u8,
+    activity: &crate::runtime::TerminalBusyState,
+    p: crate::theme::Palette,
+) {
+    if !activity.busy {
+        return;
+    }
+    let color = if activity.outputting {
+        p.rose
+    } else {
+        p.running
+    };
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(radius),
+        Stroke::new(1.25, color),
+        StrokeKind::Inside,
+    );
+    if !activity.outputting {
+        return;
+    }
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(16));
+    let time = ui.ctx().input(|input| input.time) as f32;
+    let w = (rect.width() - 2.0).max(1.0);
+    let h = (rect.height() - 2.0).max(1.0);
+    let perimeter = 2.0 * (w + h);
+    let at = |distance: f32| {
+        let mut d = distance % perimeter;
+        if d < w {
+            return Pos2::new(rect.left() + 1.0 + d, rect.top() + 1.0);
+        }
+        d -= w;
+        if d < h {
+            return Pos2::new(rect.right() - 1.0, rect.top() + 1.0 + d);
+        }
+        d -= h;
+        if d < w {
+            return Pos2::new(rect.right() - 1.0 - d, rect.bottom() - 1.0);
+        }
+        d -= w;
+        Pos2::new(rect.left() + 1.0, rect.bottom() - 1.0 - d)
+    };
+    let start = (time * 70.0) % perimeter;
+    let len = 12.0f32.min(perimeter * 0.35);
+    painter.line_segment([at(start), at(start + len)], Stroke::new(2.0, p.rose));
 }

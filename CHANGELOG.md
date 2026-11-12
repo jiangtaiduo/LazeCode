@@ -10,6 +10,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Shell layout: open projects now live in a wider vertical project rail with
+  a fixed “open project” button and per-project console activity rings; the
+  Project, Commit, Compare, Git Log and Terminal actions moved to the
+  titlebar. The titlebar now uses the packaged application icon, its tool
+  icons are larger, and the rail is 50px wide with compact project tiles.
+  The active-project dropdown is a quiet switcher, and Settings sits at the
+  far right after search.
 - Interface, editor and terminal font pickers in Settings, backed by the
   installed-font catalog (`fontdb`, including macOS `AssetsV2` fonts).
   Editor and terminal monospace families are independent; the terminal
@@ -100,6 +107,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Committing no longer fails when `.git/index` carries Git's optional
+  resolve-undo (`REUC`) extension. `gix` cannot round-trip that extension, so
+  it is dropped explicitly before writing; split-index, untracked-cache and
+  FSMonitor extensions remain refused because dropping them changes index
+  semantics.
+
+- `rio-vt`'s `graphics` feature is now enabled, so Kitty PNG/JPEG payloads
+  are decoded instead of rejected. Together with the explicit omp image
+  environment, attached image chips can receive their texture. Unicode
+  virtual placeholder runs are composited from rio-vt geometry, so omp's
+  placeholder-based chips draw the actual thumbnail instead of an `img`
+  text box.
+- Terminal children now receive omp's explicit image-capability env
+  (`PI_FORCE_IMAGE_PROTOCOL=kitty`, `PI_KITTY_PLACEHOLDERS=1`). Without it
+  omp classifies LazeCode as a generic truecolor terminal and renders `img #N`
+  as its green fallback grid instead of the actual thumbnail.
+- Terminal parity: holding Backspace/arrows now repeats in legacy terminals
+  (repeat was encoded as `KeyEvent::Repeat` and dropped; only releases must be
+  dropped). Cmd+V in a focused console reads native NSPasteboard file/image
+  flavors, materializes screenshots as temporary PNG/TIFF files, quotes paths
+  with spaces/metacharacters, and writes the absolute path(s) through the
+  current bracketed-paste mode so omp can render its own image chips.
+- Console process state now comes from the same `ps -t <tty>` probe as the
+  stable app, polled every 2 s in background batches. The project capsule and
+  project avatars show a green busy ring or red outputting marquee, and the
+  left strip, sidebar Consoles and status bar no longer count a shell that is
+  merely sitting at its prompt as "running".
+- Closing a pane/tab, Close Others/All, closing a project, or quitting now
+  probes for live console commands and asks for confirmation before killing
+  them; the modal text wraps long command lists.
+- Terminal drag-selection now anchors on primary-button press instead of
+  `Response::clicked` (release), which previously required a prior click
+  before a drag could extend anything. `Cmd+C` is handled from egui-winit's
+  `Event::Copy` (it never emits `Key::C` for the shortcut), and the macOS
+  predefined Copy/Paste menu items were removed because their AppKit key
+  equivalents swallowed `Cmd+C`/`Cmd+V` before egui saw them. Dragging the
+  prompt now highlights it and `pbpaste` returns the selected text; pasting
+  `echo PASTE_OK_123` into the shell executes normally.
 - Image tabs now use a bounded, per-tab decoded-image cache instead of the
   unbounded `egui_extras` loader cache. Textures are downscaled to the visible
   viewport, retained pixels are capped at 64 MiB, and entries are dropped as

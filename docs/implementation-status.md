@@ -17,9 +17,10 @@
   mixed-script metrics, English keeps SF Pro first, and SF Pro uses the
   17pt Text optical size instead of the 28pt Display default. Editor and
   terminal families are independent (terminal "Match editor" by default).
-- Project rail, project tab strip in the titlebar, activity bar, resizable
-  explorer/source-control/consoles sidebar, editor stage, resizable bottom
-  panel, status bar, toasts.
+- Project rail (one tile per open project, console-activity rings, fixed
+  open-project action), titlebar tool group and active-project switcher,
+  resizable explorer/source-control/consoles sidebar, editor stage,
+  resizable bottom panel, status bar, toasts.
 - Command palette (`⌘K`), find-in-files overlay, settings overlay, project and
   branch popovers, create/delete-branch dialogs, dirty-tab and quit guards.
 - English/Chinese chrome for the primary surfaces; language is persisted.
@@ -252,9 +253,10 @@ Not implemented (explicit):
   deleted on session close. Hot memory plateaus at the configured history.
 - Kitty graphics: rio-vt parses APC transmit/place/delete with chunking,
   base64 payloads, ids, z/columns/rows/source rects; decoded RGBA images are
-  byte-capped and rendered as egui textures above the cell grid. PNG/JPEG
-  payloads need rio-vt's `graphics` feature and are currently rejected;
-  virtual placements/animations are not composited.
+  byte-capped and rendered as egui textures above the cell grid. The
+  `rio-vt/graphics` is enabled for PNG/JPEG payload decoding and Unicode
+  virtual placeholder runs are composited above the grid; strip/frame
+  animations remain out of scope.
 - Kitty keyboard and modifyOtherKeys: protocol flag stack, key codes, event
   types (release/repeat), associated text, and xterm `CSI 27;…~` are encoded
   in `input.rs`; legacy bytes remain when disabled.
@@ -267,8 +269,7 @@ Not implemented (explicit):
 
 Not implemented (explicit):
 
-- kitty PNG/JPEG payload decoding, virtual placements and strip/frame
-  animations;
+- kitty strip/frame animations;
 - OSC 133 prompt marks, OSC 7/9;9 cwd tracking and OSC 52;
 - rio-vt's hyperlink/vi-mode surfaces;
 - same-process multi-window model sharing (New Window is process-isolated);

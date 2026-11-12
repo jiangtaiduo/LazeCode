@@ -1,19 +1,22 @@
+mod clipboard;
 mod jobs;
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
+use crossbeam_channel::{Receiver, Sender};
 use egui_wgpu::winit::Painter;
 use egui_wgpu::{RendererOptions, WgpuConfiguration};
 use lazecode_core::{AppModel, Settings, TabKind};
-use lazecode_terminal::Notifier;
+use lazecode_terminal::{probe_busy, BusyTarget, Notifier};
 use lazecode_ui::UiRuntime;
 use parking_lot::Mutex;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
-use winit::keyboard::ModifiersState;
+use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS};
 use winit::window::{Window, WindowId};
 
@@ -37,6 +40,14 @@ impl Notifier for ProxyNotifier {
     }
 }
 
+struct TerminalBusyRow {
+    session_id: u64,
+    busy: bool,
+    outputting: bool,
+    commands: Vec<String>,
+    last_output_ms: Option<u64>,
+}
+
 struct Gfx {
     window: Arc<Window>,
     painter: Painter,
@@ -50,6 +61,10 @@ struct LazeApp {
     gfx: Option<Gfx>,
     jobs: JobQueue,
     last_watch_poll: std::time::Instant,
+    last_busy_poll: std::time::Instant,
+    busy_tx: Sender<Vec<TerminalBusyRow>>,
+    busy_rx: Receiver<Vec<TerminalBusyRow>>,
+    busy_in_flight: bool,
     started: std::time::Instant,
     modifiers: ModifiersState,
     last_workspace_save: std::time::Instant,
@@ -64,12 +79,19 @@ struct LazeApp {
 
 impl LazeApp {
     fn new(model: AppModel, jobs: JobQueue) -> Self {
+        let (busy_tx, busy_rx) = crossbeam_channel::unbounded();
         Self {
             model,
             runtime: UiRuntime::default(),
             gfx: None,
             jobs,
             last_watch_poll: std::time::Instant::now(),
+            last_busy_poll: std::time::Instant::now()
+                .checked_sub(Duration::from_secs(3))
+                .unwrap_or_else(std::time::Instant::now),
+            busy_tx,
+            busy_rx,
+            busy_in_flight: false,
             started: std::time::Instant::now(),
             modifiers: ModifiersState::empty(),
             last_workspace_save: std::time::Instant::now(),
@@ -508,9 +530,122 @@ impl LazeApp {
             .any(|project| project.tabs.iter().any(|tab| tab.is_dirty()))
     }
 
+    /// Finder files and screenshot/image clipboards have no usable text
+    /// event. Intercept Cmd+V before egui-winit consumes it when the terminal
+    /// owns focus, then hand absolute paths to the PTY as a bracketed paste.
+    fn try_terminal_attachment_paste(&mut self) -> bool {
+        if !self.model.ui.terminal_visible
+            || self.runtime.editor_focus.is_some()
+            || self.runtime.blocks_input(&self.model)
+        {
+            return false;
+        }
+        let Some(pane_id) = self.runtime.terminal_focus else {
+            return false;
+        };
+        let Some(project) = self.model.active_project() else {
+            return false;
+        };
+        let Some(pane) = project.active_worktree().pane(pane_id) else {
+            return false;
+        };
+        let paths = clipboard::file_paths();
+        let Some(text) = clipboard::attachment_text(&paths) else {
+            return false;
+        };
+        pane.session.send_text(&text);
+        true
+    }
+
+    fn poll_terminal_busy(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(rows) = self.busy_rx.try_recv() {
+            self.busy_in_flight = false;
+            self.runtime.terminal_busy = rows
+                .into_iter()
+                .map(|row| {
+                    (
+                        row.session_id,
+                        lazecode_ui::runtime::TerminalBusyState {
+                            busy: row.busy,
+                            outputting: row.outputting,
+                            commands: row.commands,
+                            last_output_ms: row.last_output_ms,
+                        },
+                    )
+                })
+                .collect();
+            changed = true;
+        }
+        changed
+    }
+
+    fn start_terminal_busy_poll(&mut self) {
+        if self.busy_in_flight || self.last_busy_poll.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.last_busy_poll = std::time::Instant::now();
+
+        let mut targets: Vec<(u64, BusyTarget, Option<u64>)> = Vec::new();
+        for project in &self.model.projects {
+            for pane in project
+                .worktrees
+                .iter()
+                .flat_map(|worktree| worktree.terminals.iter())
+                .flat_map(|tab| tab.panes.iter())
+            {
+                targets.push((
+                    pane.id,
+                    pane.session.busy_target(),
+                    pane.session.last_output_ms(),
+                ));
+            }
+        }
+        if targets.is_empty() {
+            self.runtime.terminal_busy.clear();
+            return;
+        }
+
+        self.busy_in_flight = true;
+        let tx = self.busy_tx.clone();
+        std::thread::spawn(move || {
+            let mut rows = Vec::with_capacity(targets.len());
+            // Match the stable batch policy: at most eight `ps` probes at once,
+            // then serial batches, so many panes don't stampede at once.
+            for chunk in targets.chunks(8) {
+                let batch: Vec<TerminalBusyRow> = std::thread::scope(|scope| {
+                    let handles: Vec<_> = chunk
+                        .iter()
+                        .cloned()
+                        .map(|(session_id, target, last_output_ms)| {
+                            scope.spawn(move || {
+                                let info = probe_busy(&target);
+                                TerminalBusyRow {
+                                    session_id,
+                                    busy: info.busy,
+                                    outputting: info.busy
+                                        && last_output_ms.is_some_and(|age| age < 2000),
+                                    commands: info.commands,
+                                    last_output_ms,
+                                }
+                            })
+                        })
+                        .collect();
+                    handles
+                        .into_iter()
+                        .filter_map(|handle| handle.join().ok())
+                        .collect()
+                });
+                rows.extend(batch);
+            }
+            let _ = tx.send(rows);
+        });
+    }
+
     fn request_quit(&mut self, event_loop: &ActiveEventLoop) {
-        if self.has_unsaved() {
-            self.runtime.dialog = lazecode_ui::runtime::DialogState::Quit;
+        let commands = self.runtime.probe_all_terminal_busy(&self.model);
+        if self.has_unsaved() || !commands.is_empty() {
+            self.runtime.dialog = lazecode_ui::runtime::DialogState::Quit { commands };
             if let Some(gfx) = &self.gfx {
                 gfx.window.request_redraw();
             }
@@ -604,9 +739,29 @@ impl ApplicationHandler<AppEvent> for LazeApp {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(gfx) = self.gfx.as_mut() else {
+        if self.gfx.is_none() {
             return;
-        };
+        }
+        if let WindowEvent::KeyboardInput { event, .. } = &event {
+            let plain_command = self.modifiers.super_key()
+                && !self.modifiers.control_key()
+                && !self.modifiers.alt_key();
+            let paste_key = event.logical_key == winit::keyboard::Key::Character("v".into())
+                || event.physical_key == PhysicalKey::Code(KeyCode::KeyV);
+            if event.state == ElementState::Pressed
+                && !event.repeat
+                && plain_command
+                && paste_key
+                && self.try_terminal_attachment_paste()
+            {
+                if let Some(gfx) = &self.gfx {
+                    gfx.window.request_redraw();
+                }
+                return;
+            }
+        }
+        let gfx = self.gfx.as_mut().expect("gfx checked above");
+        let window = Arc::clone(&gfx.window);
         let response = gfx.egui_state.on_window_event(&gfx.window, &event);
         if response.repaint {
             gfx.window.request_redraw();
@@ -684,6 +839,11 @@ impl ApplicationHandler<AppEvent> for LazeApp {
             WindowEvent::RedrawRequested => {
                 self.poll_jobs();
                 self.poll_watchers();
+                let had_busy = self.poll_terminal_busy();
+                self.start_terminal_busy_poll();
+                if had_busy {
+                    window.request_redraw();
+                }
                 self.model.tick();
                 self.autosave();
                 self.render();
@@ -696,9 +856,7 @@ impl ApplicationHandler<AppEvent> for LazeApp {
                     event_loop.exit();
                 }
                 if had_commands || self.repaint_after.is_zero() {
-                    if let Some(gfx) = &self.gfx {
-                        gfx.window.request_redraw();
-                    }
+                    window.request_redraw();
                 }
             }
             _ => {}
@@ -715,6 +873,8 @@ impl ApplicationHandler<AppEvent> for LazeApp {
         self.poll_menu(event_loop);
         let had_jobs = self.poll_jobs();
         let had_watcher_changes = self.poll_watchers();
+        let had_busy = self.poll_terminal_busy();
+        self.start_terminal_busy_poll();
         if self.last_workspace_save.elapsed() > std::time::Duration::from_secs(30) {
             self.last_workspace_save = std::time::Instant::now();
             self.model.save_workspace();
@@ -723,13 +883,14 @@ impl ApplicationHandler<AppEvent> for LazeApp {
         let now = std::time::Instant::now();
         let mut deadline = now + self.repaint_after.min(std::time::Duration::from_secs(1));
         deadline = deadline.min(self.last_watch_poll + std::time::Duration::from_millis(600));
+        deadline = deadline.min(self.last_busy_poll + std::time::Duration::from_secs(2));
         deadline = deadline.min(self.last_workspace_save + std::time::Duration::from_secs(30));
         if self.model.settings.editor.auto_save {
             deadline = deadline.min(self.last_autosave + std::time::Duration::from_secs(2));
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
 
-        if had_jobs || had_watcher_changes || self.repaint_after.is_zero() {
+        if had_jobs || had_watcher_changes || had_busy || self.repaint_after.is_zero() {
             if let Some(gfx) = &self.gfx {
                 gfx.window.request_redraw();
             }
@@ -883,11 +1044,10 @@ fn build_menu(zh: bool) -> Option<Menu> {
                 true,
                 accel_shift(Code::KeyZ),
             ),
-            &PredefinedMenuItem::separator(),
-            &PredefinedMenuItem::cut(Some(pick(zh, "Cut", "剪切"))),
-            &PredefinedMenuItem::copy(Some(pick(zh, "Copy", "复制"))),
-            &PredefinedMenuItem::paste(Some(pick(zh, "Paste", "粘贴"))),
-            &PredefinedMenuItem::select_all(Some(pick(zh, "Select All", "全选"))),
+            // Clipboard is handled by egui-winit's `Event::Copy`/`Paste`.
+            // Predefined AppKit clipboard items install Cmd+C/V equivalents
+            // that consume the key event before the terminal/editor sees it,
+            // so they must not live in the native menu.
         ],
     )
     .ok()?;

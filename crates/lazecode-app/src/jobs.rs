@@ -3239,7 +3239,32 @@ impl JobQueue {
             }
             JobResult::GitRefreshed { root, result } => {
                 if let Some(project) = model.project_mut_for_git_root(&root) {
+                    let worktree_index = project
+                        .worktrees
+                        .iter()
+                        .position(|worktree| worktree.path == root);
+                    let old_head = worktree_index.and_then(|index| {
+                        project.worktrees[index].git.as_ref().map(|git| {
+                            (
+                                git.head.as_ref().map(|head| head.id.clone()),
+                                git.branch.clone(),
+                            )
+                        })
+                    });
+                    let query = project.log_query.clone();
                     project.apply_git_snapshot(&root, result);
+                    let new_head = worktree_index.and_then(|index| {
+                        project.worktrees[index].git.as_ref().map(|git| {
+                            (
+                                git.head.as_ref().map(|head| head.id.clone()),
+                                git.branch.clone(),
+                            )
+                        })
+                    });
+                    if old_head != new_head {
+                        self.refresh_log(root.clone(), query, 0);
+                        self.refresh_branches(root.clone());
+                    }
                 }
                 if self.pending_git.remove(&root) {
                     self.refresh_git(root, None);

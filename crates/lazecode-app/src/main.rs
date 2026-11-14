@@ -310,6 +310,7 @@ struct LazeApp {
     gfx: Option<Gfx>,
     jobs: JobQueue,
     last_watch_poll: std::time::Instant,
+    last_vcs_poll: std::time::Instant,
     last_busy_poll: std::time::Instant,
     busy_tx: Sender<Vec<TerminalBusyRow>>,
     busy_rx: Receiver<Vec<TerminalBusyRow>>,
@@ -335,6 +336,11 @@ impl LazeApp {
             gfx: None,
             jobs,
             last_watch_poll: std::time::Instant::now(),
+            // The first VCS poll runs on the first idle turn; native file
+            // watchers are best effort and can miss .git ref/index rewrites.
+            last_vcs_poll: std::time::Instant::now()
+                .checked_sub(Duration::from_secs(3))
+                .unwrap_or_else(std::time::Instant::now),
             last_busy_poll: std::time::Instant::now()
                 .checked_sub(Duration::from_secs(3))
                 .unwrap_or_else(std::time::Instant::now),
@@ -805,6 +811,25 @@ impl LazeApp {
         had_changes
     }
 
+    /// PyCharm-style VCS refresh fallback. Watchers are best effort; polling
+    /// the active checkout keeps the changelist and commit graph correct after
+    /// another Git tool rewrites `.git` atomically.
+    fn poll_vcs(&mut self) -> bool {
+        if self.last_vcs_poll.elapsed() < std::time::Duration::from_secs(2) {
+            return false;
+        }
+        let Some(project) = self.model.active_project() else {
+            return false;
+        };
+        if project.is_single_file {
+            return false;
+        }
+        let root = project.active_root().to_path_buf();
+        self.last_vcs_poll = std::time::Instant::now();
+        self.jobs.refresh_git(root, self.model.notifier.clone());
+        true
+    }
+
     fn autosave(&mut self) {
         if !self.model.settings.editor.auto_save
             || self.last_autosave.elapsed() < std::time::Duration::from_secs(2)
@@ -1148,6 +1173,7 @@ impl ApplicationHandler<AppEvent> for LazeApp {
             WindowEvent::RedrawRequested => {
                 self.poll_jobs();
                 self.poll_watchers();
+                self.poll_vcs();
                 let had_busy = self.poll_terminal_busy();
                 self.start_terminal_busy_poll();
                 if had_busy {
@@ -1184,6 +1210,7 @@ impl ApplicationHandler<AppEvent> for LazeApp {
         self.poll_menu(event_loop);
         let had_jobs = self.poll_jobs();
         let had_watcher_changes = self.poll_watchers();
+        let had_vcs_poll = self.poll_vcs();
         let had_busy = self.poll_terminal_busy();
         self.start_terminal_busy_poll();
         if self.last_workspace_save.elapsed() > std::time::Duration::from_secs(30) {
@@ -1194,6 +1221,7 @@ impl ApplicationHandler<AppEvent> for LazeApp {
         let now = std::time::Instant::now();
         let mut deadline = now + self.repaint_after.min(std::time::Duration::from_secs(1));
         deadline = deadline.min(self.last_watch_poll + std::time::Duration::from_millis(600));
+        deadline = deadline.min(self.last_vcs_poll + std::time::Duration::from_secs(2));
         deadline = deadline.min(self.last_busy_poll + std::time::Duration::from_secs(2));
         deadline = deadline.min(self.last_workspace_save + std::time::Duration::from_secs(30));
         if self.model.settings.editor.auto_save {
@@ -1201,7 +1229,12 @@ impl ApplicationHandler<AppEvent> for LazeApp {
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
 
-        if had_jobs || had_watcher_changes || had_busy || self.repaint_after.is_zero() {
+        if had_jobs
+            || had_watcher_changes
+            || had_vcs_poll
+            || had_busy
+            || self.repaint_after.is_zero()
+        {
             if let Some(gfx) = &self.gfx {
                 gfx.window.request_redraw();
             }

@@ -144,6 +144,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   refresh the source-control snapshot even when no working-tree file changed.
   Open text buffers also poll their disk metadata and reload external edits
   (or warn when dirty), covering watcher coalescing and atomic replacements.
+  The active checkout additionally runs a two-second VCS refresh fallback;
+  when HEAD or the branch moves, the commit graph, log and branch inventory
+  are refreshed as well.
 - Agent console admission is now global (`terminal.max_agent_consoles`,
   default 20) and the per-worktree allowance is 12, so the initial login shell
   does not consume one of ten agent slots. Agent terminals use smaller

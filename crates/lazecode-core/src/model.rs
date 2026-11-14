@@ -266,12 +266,48 @@ pub enum MarkdownViewMode {
     Split,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DiskStamp {
+    pub modified: Option<std::time::SystemTime>,
+    pub len: u64,
+}
+
+impl DiskStamp {
+    pub fn read(path: &Path) -> Option<Self> {
+        let metadata = std::fs::metadata(path).ok()?;
+        Some(Self {
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+        })
+    }
+}
+
 pub struct FileTab {
     pub doc: Document,
     pub external: bool,
     pub md_mode: MarkdownViewMode,
     pub annotate: bool,
     pub blame: Option<Vec<lazecode_git::BlameLine>>,
+    /// Last observed disk metadata. A periodic fallback checks this so an
+    /// external editor cannot leave a stale buffer behind even if a native
+    /// watcher event is missed.
+    pub disk_stamp: Option<DiskStamp>,
+}
+
+impl FileTab {
+    pub fn stamp_disk(&mut self) {
+        self.disk_stamp = DiskStamp::read(&self.doc.path);
+    }
+
+    pub fn disk_changed(&self) -> bool {
+        match DiskStamp::read(&self.doc.path) {
+            Some(stamp) => self.disk_stamp != Some(stamp),
+            // A file removed by another tool is also an external change; the
+            // reload attempt will surface the error instead of silently
+            // keeping the old buffer.
+            None => self.disk_stamp.is_some(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1450,6 +1486,7 @@ impl ProjectState {
                 },
                 annotate: false,
                 blame: None,
+                disk_stamp: DiskStamp::read(&path),
             }),
         });
         self.active_tab = Some(id);

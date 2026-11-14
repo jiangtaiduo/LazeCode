@@ -139,6 +139,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- External Git operations are visible without reopening the project: watcher
+  events under `.git` (index, HEAD, refs and linked-worktree metadata) now
+  refresh the source-control snapshot even when no working-tree file changed.
+  Open text buffers also poll their disk metadata and reload external edits
+  (or warn when dirty), covering watcher coalescing and atomic replacements.
 - Agent console admission is now global (`terminal.max_agent_consoles`,
   default 20) and the per-worktree allowance is 12, so the initial login shell
   does not consume one of ten agent slots. Agent terminals use smaller

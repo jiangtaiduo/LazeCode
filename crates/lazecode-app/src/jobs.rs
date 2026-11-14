@@ -3582,25 +3582,33 @@ impl JobQueue {
                 revision,
                 result,
             } => {
+                let mut save_error = None;
                 if let Some(project) = model.project_mut_for_git_root(&root) {
                     if let Some(tab) = project.tabs.iter_mut().find(
                         |tab| matches!(&tab.kind, TabKind::File(file) if file.doc.path == path),
                     ) {
                         if let TabKind::File(file) = &mut tab.kind {
-                            if let Err(err) = result {
-                                model.toast(
-                                    if model.settings.language.is_zh() {
-                                        format!("保存失败：{err}")
-                                    } else {
-                                        format!("Save failed: {err}")
-                                    },
-                                    ToastKind::Error,
-                                );
-                            } else if file.doc.revision == revision {
-                                file.doc.dirty = false;
+                            match result {
+                                Err(err) => save_error = Some(err),
+                                Ok(()) => {
+                                    if file.doc.revision == revision {
+                                        file.doc.dirty = false;
+                                    }
+                                    file.stamp_disk();
+                                }
                             }
                         }
                     }
+                }
+                if let Some(err) = save_error {
+                    model.toast(
+                        if model.settings.language.is_zh() {
+                            format!("保存失败：{err}")
+                        } else {
+                            format!("Save failed: {err}")
+                        },
+                        ToastKind::Error,
+                    );
                 }
             }
             JobResult::WorktreeAdded {

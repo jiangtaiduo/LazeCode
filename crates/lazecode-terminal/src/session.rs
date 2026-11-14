@@ -918,7 +918,7 @@ fn is_shell_name(name: &str, shell: &str) -> bool {
 
 fn busy_from_entries(entries: &[(u32, String)], _shell_pid: Option<u32>, shell: &str) -> BusyInfo {
     let mut commands = Vec::new();
-    for (pid, name) in entries {
+    for (_pid, name) in entries {
         let name = name.trim();
         if name.is_empty() {
             continue;

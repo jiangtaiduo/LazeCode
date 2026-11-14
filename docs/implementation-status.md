@@ -341,17 +341,29 @@ test against real `rust-analyzer`
 - HTTP/file/local-path check with semver comparison;
 - bounded streaming download (512 MiB), SHA-256 and Ed25519 verification
   against the pinned `update_public_key`;
-- atomic executable replacement with backup and rollback on failure;
+- two install shapes announced by `kind`: `executable` replaces a single
+  binary in place; `app-bundle` extracts a gzipped tar of one `*.app` under a
+  strict extraction policy, then swaps the whole bundle (Info.plist,
+  resources and the ad-hoc signature stay consistent), keeping the previous
+  bundle as a `.bak-<nanos>` sibling and rolling back on failure;
+- `relaunch` starts the installed bundle with `open -n` so the update takes
+  effect immediately after "Restart now";
 - settings: `update_endpoint`, `update_public_key`, `auto_check_updates`
-  (defaults empty/false); Settings → Updates and a progress dialog.
-- macOS limitation: only `Contents/MacOS/<binary>` is replaced; full `.app`
-  bundle/resource/signature swapping still needs an installer/notarised
-  archive.
+  default to the repository's signed channel (raw `main/latest.json` plus the
+  pinned release public key) with startup checking on; pre-updater settings
+  with empty strings are migrated to those defaults. Settings → Updates and
+  the progress dialog expose the manual check.
+- `scripts/release-update.sh` builds, packs, hashes and signs a release
+  (`releases/*.app.tar.gz` + root `latest.json`); the signing key stays
+  outside the repository. Tag releases mirror the committed artifact and a
+  `latest-native.json` copy on the release page, while the legacy Tauri
+  `latest.json` asset on older releases is left untouched.
 
 ### Packaging
 
-- `scripts/build-app.sh` builds `dist/LazeCode.app` (Info.plist, ad-hoc
-  signature). No notarization or crash reporting yet.
+- `scripts/build-app.sh` builds `dist/LazeCode.app` (Info.plist stamped with
+  the workspace version, ad-hoc signature). No notarization or crash
+  reporting yet, and only `aarch64` artifacts are published.
 
 ## 2. Crate map
 

@@ -6,7 +6,7 @@
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
-## [Unreleased]
+## [0.4.2] - 2026-11-14
 
 ### 新增
 
@@ -117,6 +117,9 @@
   server 生命周期测试。
 
 ### 修复
+
+- 文件树回归测试不再硬编码开发者本地路径，改为在临时目录构造合成仓库，
+  CI 与任意克隆位置都能稳定执行。
 
 - 外部 Git 操作无需重新打开项目即可反映到变更列表：`.git` 下的 index、
   HEAD、refs 和 linked worktree 元数据变化现在会刷新源代码管理快照，

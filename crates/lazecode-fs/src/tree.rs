@@ -247,8 +247,21 @@ mod tests {
     }
     #[test]
     fn loads_all_root_entries_without_target_truncation() {
-        let repo = Path::new("/Users/qinxl/work/jiangtaiduo/LazeCode");
-        let tree = load_tree_with_expanded(repo, Some(&HashSet::new()), 20_000, None);
+        // Build a synthetic repository: the real one lives at an arbitrary
+        // path (and a CI checkout has no `target/` before the build), so the
+        // test must not depend on the developer's working copy layout.
+        let repo = tempfile::tempdir().unwrap();
+        let root = repo.path();
+        for name in ["Cargo.lock", "README.md", ".gitignore"] {
+            std::fs::write(root.join(name), "").unwrap();
+        }
+        std::fs::create_dir(root.join(".github")).unwrap();
+        // A `target/` directory is what used to truncate the scan on big
+        // real trees; it must be listed like any other folder.
+        std::fs::create_dir(root.join("target")).unwrap();
+        std::fs::write(root.join("target/artifact.bin"), "").unwrap();
+
+        let tree = load_tree_with_expanded(root, Some(&HashSet::new()), 20_000, None);
         assert!(!tree.truncated);
         let names: Vec<&str> = tree.nodes.iter().map(|n| n.name.as_str()).collect();
         assert!(names.contains(&".gitignore"));

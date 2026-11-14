@@ -120,10 +120,15 @@ them atomically.
 
 ## Status
 
-This is a working native release, not yet feature-complete. Notably absent in
-this pass: LSP, push/pull/fetch,
-merge/rebase/stash, worktrees/submodules/LFS, cold terminal history and kitty
-graphics. See the status document before relying on a Git or terminal workflow.
+This is a working native release. The editor, terminal, Git read/write
+surface (including branch compare, worktrees, stash and native push/pull),
+LSP client and signed updater are implemented as described above. Known gaps
+are tracked in [`docs/implementation-status.md`](docs/implementation-status.md):
+the app is ad-hoc signed (distribution still needs Developer ID + notarisation),
+only an Apple-silicon build is published, TS/JS/JSON/CSS/HTML stay
+highlight-only (no language servers), remote LFS and interactive rebase remain
+porcelain, and the terminal still paints cell runs through egui instead of a
+custom GPU grid.
 
 ## License
 

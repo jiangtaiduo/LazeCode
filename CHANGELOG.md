@@ -6,7 +6,7 @@ All notable changes to LazeCode are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.2] - 2026-11-14
 
 ### Added
 
@@ -151,6 +151,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mock-server lifecycle test.
 
 ### Fixed
+
+- The filesystem tree regression test no longer hardcodes a developer
+  checkout path: it builds a synthetic repository in a tempdir, so CI and
+  any clone location exercise the same scan path.
 
 - External Git operations are visible without reopening the project: watcher
   events under `.git` (index, HEAD, refs and linked-worktree metadata) now

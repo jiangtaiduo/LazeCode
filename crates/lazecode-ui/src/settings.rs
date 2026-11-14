@@ -1183,8 +1183,8 @@ fn updates(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme,
     } else {
         let note = crate::tr!(
             model,
-            "Updates stay disabled until both fields are filled in. Only HTTPS, file:// URLs and local paths are accepted; artifacts are SHA-256 checked and Ed25519 verified.",
-            "两项都填写后才会启用更新。仅接受 HTTPS、file:// 或本地路径；下载后会校验 SHA-256 与 Ed25519 签名。"
+            "Updates stay disabled until both fields are filled in. Only HTTPS/HTTP, file:// URLs and local paths are accepted; artifacts are SHA-256 checked and Ed25519 verified.",
+            "两项都填写后才会启用更新。仅接受 HTTPS/HTTP、file:// 或本地路径；下载后会校验 SHA-256 与 Ed25519 签名。"
         );
         let galley = ui.painter().layout(
             note.to_string(),

@@ -94,9 +94,12 @@ cargo clippy --workspace --all-targets
 
 ## 当前状态
 
-这是可工作的原生版本，但还不是功能完整的替代品。本轮明确
-未实现：LSP、push/pull/fetch、merge/rebase/stash、worktree/submodule/LFS、
-终端冷历史与 kitty 图形协议。依赖 Git 或终端工作流前请先阅读状态文档。
+这是可工作的原生版本。编辑器、终端、Git 读写（含分支比较、worktree、
+stash 与原生 push/pull）、LSP 客户端和签名更新器均已实现，详见
+[`docs/implementation-status.md`](docs/implementation-status.md)。已知缺口：
+仅 ad-hoc 签名（正式分发仍需 Developer ID 公证）、只发布 Apple Silicon
+构建、TS/JS/JSON/CSS/HTML 仅语法高亮（不启动语言服务器）、远程 LFS 与
+交互式 rebase 仍走 porcelain、终端仍通过 egui 绘制单元格而非自研 GPU 网格。
 
 ## 许可证
 

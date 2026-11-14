@@ -346,9 +346,19 @@ pub fn clone(url: &str, destination: &Path) -> Result<PathBuf> {
             anyhow::bail!("{} already exists and is not empty", destination.display());
         }
     }
-    let mut prepare = gix::prepare_clone(url, destination)?
-        .fetch_then_checkout(gix::progress::Discard, &AtomicBool::new(false))?
-        .0;
+    // Same committer fallback as `discover()`; the fresh clone is reopened by
+    // the fetch, so it must travel in the open options as well.
+    let mut open_opts = crate::open_options();
+    open_opts.permissions.config.git_binary = true;
+    let mut prepare = gix::clone::PrepareFetch::new(
+        url,
+        destination,
+        gix::create::Kind::WithWorktree,
+        gix::create::Options::default(),
+        open_opts,
+    )?
+    .fetch_then_checkout(gix::progress::Discard, &AtomicBool::new(false))?
+    .0;
     let _repo = prepare.main_worktree(gix::progress::Discard, &AtomicBool::new(false))?;
     Ok(destination.to_path_buf())
 }

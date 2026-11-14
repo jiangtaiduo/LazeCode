@@ -6,6 +6,14 @@
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [0.4.4] - 2026-11-14
+
+### 修复
+
+- 没有配置 Git 身份时也能克隆与快进拉取：打开仓库时注入
+  `gitoxide.committer.*Fallback`，新机器或 CI 环境即使没有
+  `user.name`/`user.email` 也能像 `git` 一样更新引用。
+
 ## [0.4.3] - 2026-11-14
 
 ### 修复

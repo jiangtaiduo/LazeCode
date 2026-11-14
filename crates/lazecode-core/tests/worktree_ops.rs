@@ -174,3 +174,31 @@ fn ensure_worktree_attaches_only_git_registered_checkouts() {
     entry.ensure_worktree("wt").unwrap();
     assert_eq!(entry.active_worktree, entry.worktree_index("wt").unwrap());
 }
+
+#[test]
+fn external_commit_refreshes_source_changes() {
+    let dir = repo();
+    let settings = Settings::default();
+    let mut project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
+    assert!(project.changes().is_empty());
+    std::fs::write(
+        dir.path().join("main.rs"),
+        "fn main() { println!(\"x\"); }\n",
+    )
+    .unwrap();
+    project.refresh_git_for(&project.root.clone());
+    assert!(!project.changes().is_empty(), "working-tree edit missing");
+
+    git(dir.path(), &["add", "main.rs"]);
+    git(dir.path(), &["commit", "-q", "-m", "external"]);
+    project.refresh_git_for(&project.root.clone());
+    assert!(
+        project.changes().is_empty(),
+        "external commit leaves stale changes: {:?}",
+        project
+            .changes()
+            .iter()
+            .map(|change| change.path.clone())
+            .collect::<Vec<_>>()
+    );
+}

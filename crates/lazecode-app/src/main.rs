@@ -686,28 +686,28 @@ impl LazeApp {
             return false;
         }
         self.last_watch_poll = std::time::Instant::now();
-        let mut changed: Vec<(std::path::PathBuf, Vec<std::path::PathBuf>)> = Vec::new();
+        let mut changed: Vec<(std::path::PathBuf, Vec<std::path::PathBuf>, bool)> = Vec::new();
         for project in &mut self.model.projects {
             // The main worktree watcher lives on the project itself; linked
             // worktrees carry their own.
             if let Some(watcher) = project.watcher.as_ref() {
                 if let Some(batch) = watcher.poll() {
                     lazecode_git::invalidate_ignored_cache(&project.root);
-                    changed.push((project.root.clone(), batch.changed));
+                    changed.push((project.root.clone(), batch.changed, batch.git_changed));
                 }
             }
             for worktree in project.worktrees.iter().skip(1) {
                 if let Some(watcher) = worktree.watcher.as_ref() {
                     if let Some(batch) = watcher.poll() {
                         lazecode_git::invalidate_ignored_cache(&worktree.path);
-                        changed.push((worktree.path.clone(), batch.changed));
+                        changed.push((worktree.path.clone(), batch.changed, batch.git_changed));
                     }
                 }
             }
         }
-        let had_changes = !changed.is_empty();
+        let mut had_changes = !changed.is_empty();
         let mut warnings = Vec::new();
-        for (root, paths) in changed {
+        for (root, paths, git_changed) in changed {
             // Find the worktree (its path) whose watcher fired.
             let Some((position, wt_index)) =
                 self.model
@@ -735,11 +735,14 @@ impl LazeApp {
                 continue;
             };
             let project = &mut self.model.projects[position];
-            let tree = lazecode_fs::tree::load_tree(&project.worktrees[wt_index].path);
-            if wt_index == 0 {
-                project.tree = tree.clone();
+            let had_paths = !paths.is_empty();
+            if had_paths {
+                let tree = lazecode_fs::tree::load_tree(&project.worktrees[wt_index].path);
+                if wt_index == 0 {
+                    project.tree = tree.clone();
+                }
+                project.worktrees[wt_index].tree = tree;
             }
-            project.worktrees[wt_index].tree = tree;
             for path in paths {
                 let canonical = path.canonicalize().unwrap_or(path);
                 let Some(tab) = project.tabs.iter_mut().find(|tab| {
@@ -750,19 +753,51 @@ impl LazeApp {
                 if let lazecode_core::TabKind::File(file) = &mut tab.kind {
                     if file.doc.dirty {
                         // Our own atomic save also produces a watcher event.
-                        // Do not report it as a foreign modification.
+                        // Do not report it as a foreign modification. Stamp the
+                        // new metadata either way so the fallback poll does
+                        // not report the same event again.
                         if !self.jobs.is_saving(&canonical) {
                             warnings.push(format!(
                                 "{} changed on disk; save or reload it",
                                 file.doc.title()
                             ));
                         }
+                        file.stamp_disk();
                     } else if let Err(err) = file.doc.reload() {
                         warnings.push(format!("Cannot reload {}: {err}", file.doc.title()));
+                    } else {
+                        file.stamp_disk();
                     }
                 }
             }
-            self.jobs.refresh_git(root, self.model.notifier.clone());
+            if git_changed || had_paths {
+                self.jobs.refresh_git(root, self.model.notifier.clone());
+            }
+        }
+        // Watcher events are best effort (FSEvents can coalesce or miss an
+        // atomic replace). A cheap metadata poll guarantees that an open file
+        // edited by another tool is reloaded even when no event arrived.
+        for project in &mut self.model.projects {
+            for tab in &mut project.tabs {
+                let lazecode_core::TabKind::File(file) = &mut tab.kind else {
+                    continue;
+                };
+                if !file.disk_changed() {
+                    continue;
+                }
+                file.stamp_disk();
+                had_changes = true;
+                if file.doc.dirty {
+                    if !self.jobs.is_saving(&file.doc.path) {
+                        warnings.push(format!(
+                            "{} changed on disk; save or reload it",
+                            file.doc.title()
+                        ));
+                    }
+                } else if let Err(err) = file.doc.reload() {
+                    warnings.push(format!("Cannot reload {}: {err}", file.doc.title()));
+                }
+            }
         }
         for warning in warnings {
             self.model.toast(warning, lazecode_core::ToastKind::Warning);

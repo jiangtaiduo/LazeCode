@@ -785,3 +785,24 @@ fn agent_console_cap_is_global_and_ignores_initial_shell() {
     assert!(err.contains("10"), "{err}");
     assert_eq!(model.projects[index].active_worktree().pane_count(), 11);
 }
+
+#[test]
+fn external_file_edit_is_visible_to_disk_stamp_and_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("external.txt");
+    std::fs::write(&path, "before\n").unwrap();
+    let settings = Settings::default();
+    let mut project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
+    let tab = project.open_file(path.clone(), &settings).unwrap();
+    let TabKind::File(file) = &mut project.tab_mut_by_id(tab).unwrap().kind else {
+        panic!("expected file tab");
+    };
+    assert!(!file.disk_changed());
+    std::fs::write(&path, "after external edit\n").unwrap();
+    assert!(file.disk_changed());
+    assert_ne!(file.doc.text(), "after external edit\n");
+    file.doc.reload().unwrap();
+    file.stamp_disk();
+    assert_eq!(file.doc.text(), "after external edit\n");
+    assert!(!file.disk_changed());
+}

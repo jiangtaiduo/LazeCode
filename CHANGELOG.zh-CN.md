@@ -6,6 +6,17 @@
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [0.4.3] - 2026-11-14
+
+### 修复
+
+- 发布包构建时禁用 macOS AppleDouble 附加文件（`COPYFILE_DISABLE=1`），
+  解包时忽略 `._*` 与 `.DS_Store`，避免 macOS 打出的 tar 里附加文件被当作
+  额外的 `.app` 根目录而安装失败。发布工作流现在会拒绝包含多余根目录或
+  附加文件的归档。
+- 文件树回归测试改为在临时目录构造合成仓库，不再硬编码开发者本地路径，
+  CI 与任意克隆位置都能通过。
+
 ## [0.4.2] - 2026-11-14
 
 ### 新增

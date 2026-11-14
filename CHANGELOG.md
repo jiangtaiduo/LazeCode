@@ -6,6 +6,18 @@ All notable changes to LazeCode are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-11-14
+
+### Fixed
+
+- Release archives are created with macOS AppleDouble sidecars suppressed
+  (`COPYFILE_DISABLE=1`), and bundle extraction ignores any `._*` or
+  `.DS_Store` entries, so a tar built on macOS can no longer present a
+  sidecar as an extra `.app` root and fail installation. The release
+  workflow now rejects archives with extra roots or metadata.
+- The filesystem tree regression test builds a synthetic repository instead
+  of hardcoding the developer checkout, so CI passes at any clone path.
+
 ## [0.4.2] - 2026-11-14
 
 ### Added

@@ -616,6 +616,17 @@ fn extract_app_bundle(archive: &Path) -> Result<ExtractedBundle, UpdateError> {
                     path.display()
                 )));
             }
+            // macOS tar/zip writers emit AppleDouble sidecars (`._*`) and
+            // `.DS_Store` for extended attributes and Finder state. They are
+            // not part of the bundle and must not be treated as extra `.app`
+            // roots; every real path still goes through the checks below.
+            let metadata = path.components().any(|component| {
+                let name = component.as_os_str().to_string_lossy();
+                name == ".DS_Store" || name.starts_with("._")
+            });
+            if metadata {
+                continue;
+            }
             match entry.header().entry_type() {
                 EntryType::Regular | EntryType::Directory => {}
                 // Links inside an application bundle are never needed by this
@@ -1558,6 +1569,60 @@ mod tests {
             std::fs::read_to_string(backup.join("Contents/MacOS/LazeCode")).unwrap(),
             "old binary"
         );
+        let _ = std::fs::remove_dir_all(&tmp.0);
+    }
+
+    #[test]
+    fn bundle_install_ignores_apple_double_metadata() {
+        let tmp = TempDir(
+            std::env::temp_dir().join(format!("laze-updater-metadata-{}", std::process::id())),
+        );
+        std::fs::create_dir_all(&tmp.0).unwrap();
+        let bundle = tmp.0.join("LazeCode.app");
+        std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+        std::fs::write(bundle.join("Contents/Info.plist"), "<plist/>").unwrap();
+        std::fs::write(bundle.join("Contents/MacOS/LazeCode"), "new binary").unwrap();
+        let archive = tmp.0.join("bundle.tar.gz");
+        let file = std::fs::File::create(&archive).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        // macOS tar prepends an AppleDouble sidecar for the bundle directory;
+        // it must not count as a second `.app` root.
+        let mut header = tar::Header::new_gnu();
+        header.set_size(0);
+        header.set_mode(0o644);
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_cksum();
+        tar.append_data(&mut header, "._LazeCode.app", std::io::empty())
+            .unwrap();
+        tar.append_dir_all("LazeCode.app", &bundle).unwrap();
+        let mut inner = tar::Header::new_gnu();
+        inner.set_size(0);
+        inner.set_mode(0o644);
+        inner.set_entry_type(tar::EntryType::Regular);
+        inner.set_cksum();
+        tar.append_data(
+            &mut inner,
+            "LazeCode.app/Contents/._Info.plist",
+            std::io::empty(),
+        )
+        .unwrap();
+        tar.into_inner().unwrap().finish().unwrap();
+
+        let target = tmp.0.join("Applications").join("LazeCode.app");
+        std::fs::create_dir_all(target.join("Contents/MacOS")).unwrap();
+        std::fs::write(target.join("Contents/MacOS/LazeCode"), "old binary").unwrap();
+
+        let report = install_app_bundle(&archive, &target).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(target.join("Contents/MacOS/LazeCode")).unwrap(),
+            "new binary"
+        );
+        assert!(
+            !target.join("Contents/._Info.plist").exists(),
+            "metadata sidecars must not be installed"
+        );
+        assert!(report.backup.is_some());
         let _ = std::fs::remove_dir_all(&tmp.0);
     }
 

@@ -39,7 +39,7 @@ jobs:
           TARBALL="releases/LazeCode-${VERSION}-macos-aarch64.app.tar.gz"
           export VERSION TARBALL
           python3 - <<'PY'
-          import base64, hashlib, json, os, re, subprocess, sys
+          import base64, hashlib, json, os, re, subprocess, sys, tarfile
 
           version = os.environ["VERSION"]
           tarball = os.environ["TARBALL"]
@@ -51,6 +51,19 @@ jobs:
           digest = hashlib.sha256(open(tarball, "rb").read()).hexdigest()
           assert manifest["sha256"] == digest, "manifest sha256 != artifact"
           assert manifest["url"].endswith("/" + os.path.basename(tarball)), manifest["url"]
+
+          # The extractor accepts exactly one `.app` root; macOS tar adds
+          # AppleDouble sidecars unless the release script suppresses them.
+          with tarfile.open(tarball) as archive:
+              names = archive.getnames()
+          roots = {name.split("/", 1)[0] for name in names if name.strip()}
+          metadata = [
+              name
+              for name in names
+              if any(part.startswith("._") or part == ".DS_Store" for part in name.split("/"))
+          ]
+          assert roots == {"LazeCode.app"}, f"unexpected archive roots: {sorted(roots)}"
+          assert not metadata, f"archive carries AppleDouble metadata: {metadata[:3]}"
 
           settings = open("crates/lazecode-core/src/settings.rs", encoding="utf-8").read()
           key = re.search(r'update_public_key: "([^"]+)"', settings).group(1)

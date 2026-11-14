@@ -61,7 +61,20 @@ RELEASE_DIR="$ROOT/releases"
 mkdir -p "$RELEASE_DIR"
 ARTIFACT="$RELEASE_DIR/LazeCode-$VERSION-macos-$UPDATER_ARCH.app.tar.gz"
 rm -f "$ARTIFACT"
-tar -czf "$ARTIFACT" -C dist LazeCode.app
+# COPYFILE_DISABLE=1 stops macOS tar from adding `._*` AppleDouble sidecars
+# for extended attributes; they would appear as extra `.app` roots to the
+# updater's extractor.
+COPYFILE_DISABLE=1 tar -czf "$ARTIFACT" -C dist LazeCode.app
+# Fail closed if the archive still carries metadata or another `.app` root.
+python3 - "$ARTIFACT" <<'PY'
+import sys, tarfile
+with tarfile.open(sys.argv[1]) as archive:
+    names = archive.getnames()
+roots = {name.split("/", 1)[0] for name in names if name.strip()}
+metadata = [name for name in names if any(part.startswith("._") or part == ".DS_Store" for part in name.split("/"))]
+if roots != {"LazeCode.app"} or metadata:
+    sys.exit(f"bad bundle archive: roots={sorted(roots)} metadata={metadata[:3]}")
+PY
 
 # 3. Hash and sign the canonical manifest payload. The updater's
 #    Manifest::signing_payload() is compact JSON in exactly this field

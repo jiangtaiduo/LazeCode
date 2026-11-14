@@ -123,7 +123,7 @@ fn checkout_remote_branch_creates_local_tracking_branch() {
     let dir = repo();
     let root = dir.path();
     let remote = tempfile::tempdir().unwrap();
-    git(remote.path(), &["init", "-q", "--bare"]);
+    git(remote.path(), &["init", "-q", "--bare", "-b", "main"]);
     git(
         root,
         &["remote", "add", "origin", remote.path().to_str().unwrap()],

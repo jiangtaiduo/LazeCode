@@ -3948,7 +3948,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let remote = root.with_extension("remote.git");
         std::process::Command::new("git")
-            .args(["init", "-q", "--bare", remote.to_str().unwrap()])
+            .args(["init", "-q", "--bare", "-b", "main", remote.to_str().unwrap()])
             .status()
             .unwrap();
         (root, remote)

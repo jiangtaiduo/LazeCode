@@ -40,14 +40,15 @@ jobs:
             # need repository admin access, annotations are public.
             clean=$(mktemp)
             sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' /tmp/cargo-test.log > "$clean"
+            # GitHub caps annotations per step; panic context must come first.
             {
-              grep -E "^(test .* FAILED|error: test failed|failures:)" "$clean"
-              awk '/panicked at/{count=8} count-->0' "$clean"
-            } | head -60 | while IFS= read -r line; do
+              echo "openssl: $(which openssl || true) $(openssl version 2>&1 || true)"
+              echo "git: $(git --version 2>&1 || true) HOME=$HOME"
+              awk '/panicked at/{count=10} count-->0' "$clean"
+              grep -E "^(test .* FAILED|error: test failed)" "$clean"
+            } | head -40 | while IFS= read -r line; do
               echo "::error title=Cargo test failure::$line"
             done
-            echo "::error title=Test environment::openssl=$(which openssl || true) $(openssl version 2>&1 || true)"
-            echo "::error title=Test environment::git=$(git --version 2>&1 || true) HOME=$HOME"
             exit "$status"
           fi
       - run: ./scripts/build-app.sh --debug

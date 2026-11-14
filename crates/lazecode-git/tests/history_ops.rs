@@ -125,7 +125,7 @@ fn drop_rejects_merge_published_and_foreign_commits() {
     // merge guard).
     commit(root, "c.txt", "c\n", "after merge");
     let bare = tempfile::tempdir().unwrap();
-    git(bare.path(), true, &["init", "-q", "--bare"]);
+    git(bare.path(), true, &["init", "-q", "--bare", "-b", "main"]);
     git(
         root,
         true,

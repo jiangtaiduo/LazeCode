@@ -10,6 +10,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The updater installs real releases: manifests announce an artifact shape
+  (`kind: "app-bundle"` ships a gzipped tar of the whole `.app`), and the
+  installation swaps the entire bundle atomically — Info.plist, resources
+  and signature stay consistent, with the previous build kept as a backup
+  and restored on any failure. Extraction rejects absolute paths, `..`
+  components and link entries, and enforces unpacked-size/entry caps. A
+  "Restart now" button relaunches the installed build immediately. Updates
+  work out of the box: the default endpoint points at the repository's
+  signed `latest.json`, the release signing key's public half is pinned as
+  the default, and startup checking is enabled by default. Publishing is
+  scripted (`scripts/release-update.sh`: build → pack → hash → sign), and
+  an integration test pins the openssl/ring Ed25519 cross-compatibility.
+
 - The home "Open" action and titlebar "Open…" now use one native picker that
   accepts a folder or several files. Folders keep the normal project
   workspace; files open in a single virtual "Single files" checkout that has

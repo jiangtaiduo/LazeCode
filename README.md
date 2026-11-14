@@ -24,8 +24,12 @@ JavaScript, and no bundled runtime.
   multi-line indent, find/replace, diff view, IME, atomic saves, encoding and
   EOL preservation.
 - **Git** — status (staged/unstaged/untracked, line counts, ahead/behind),
-  branch/tag lists, commit log with lane graph, commit details, stage/unstage,
-  commit/amend, branch create/delete/switch, and a read-only diff view.
+  branch/tag/worktree lists, commit log with lane graph, commit details,
+  stage/unstage, commit/amend, merge, rebase, cherry-pick, stash, push/pull
+  (native transport), reset, hunk-level staging and discard.
+- **Signed auto-update** — the app checks a signed release manifest at
+  startup and verifies the artifact's SHA-256 before installing; the whole
+  `.app` bundle is swapped atomically with a rollback backup.
 - **Terminal** — real PTY sessions, 10k-line scrollback by default, multiple
   consoles per project, scrollback search, selection/copy, bracketed paste,
   SGR mouse clicks and wheel, IME.
@@ -56,6 +60,22 @@ Build a launchable app bundle:
 
 The bundle is ad-hoc signed. For distribution it still needs a Developer ID
 signature and notarisation.
+
+## Updates
+
+The app polls a signed release manifest (`latest.json` at the repository
+root) once at startup and can then download, verify (Ed25519 signature +
+SHA-256) and install the update by swapping the whole `.app` bundle; the
+previous build is kept as a backup. Publish a release like this:
+
+```sh
+scripts/release-update.sh          # build, pack, hash, sign → releases/ + latest.json
+git add releases/ latest.json && git commit && git push
+```
+
+The signing key lives outside the repository (default
+`~/.config/lazecode-release/update-signing.key`); only its public half is
+pinned in the app. See `scripts/release-update.sh` for the exact steps.
 
 ## Keyboard shortcuts
 

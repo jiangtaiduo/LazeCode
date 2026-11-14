@@ -155,13 +155,17 @@ pub struct Settings {
     pub commit_history: Vec<String>,
     pub ignored_patterns: Vec<String>,
     /// Update manifest endpoint (HTTPS URL, `file://` URL or local path).
-    /// Empty disables the updater; `crate::updater` never runs implicitly.
+    /// Defaults to the signed `latest.json` published on the repository's
+    /// main branch; the manifest is signature-verified before anything is
+    /// downloaded.
     pub update_endpoint: String,
     /// Pinned Ed25519 public key for the update manifest, base64 or hex.
-    /// Empty disables the updater together with `update_endpoint`.
+    /// Shipped with the release signing key's public half so updates verify
+    /// out of the box; operators can repin their own key.
     pub update_public_key: String,
-    /// Check the endpoint once shortly after startup (only when manually
-    /// triggering the download/install from the update dialog).
+    /// Check the endpoint once shortly after startup (the check is one small
+    /// manifest fetch; download and install always need the user's click in
+    /// the update dialog).
     pub auto_check_updates: bool,
 }
 
@@ -191,9 +195,11 @@ impl Default for Settings {
                 "__pycache__".into(),
                 "target".into(),
             ],
-            update_endpoint: String::new(),
-            update_public_key: String::new(),
-            auto_check_updates: false,
+            update_endpoint:
+                "https://raw.githubusercontent.com/jiangtaiduo/LazeCode/main/latest.json"
+                    .to_string(),
+            update_public_key: "QpmhblRgWl9yUHzvNbbRcffNYA/qKNO4g1aBSVU18b0=".to_string(),
+            auto_check_updates: true,
         }
     }
 }
@@ -363,24 +369,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn updater_settings_default_off_and_round_trip() {
+    fn updater_settings_default_on_and_round_trip() {
         let settings = Settings::default();
-        assert!(settings.update_endpoint.is_empty());
-        assert!(settings.update_public_key.is_empty());
-        assert!(!settings.auto_check_updates);
-        assert!(!settings.updates_configured());
+        // Updates ship configured: the signed manifest lives next to the
+        // repository and the release signing key's public half is pinned, so
+        // the updater works out of the box.
+        assert!(settings.update_endpoint.starts_with("https://"));
+        assert!(!settings.update_public_key.is_empty());
+        assert!(settings.auto_check_updates);
+        assert!(settings.updates_configured());
+        // The pinned key must parse as an Ed25519 public key.
+        assert!(crate::updater::public_key_is_valid(
+            &settings.update_public_key
+        ));
 
         let settings = Settings {
             update_endpoint: "https://updates.example.test/manifest.json".into(),
             update_public_key: "Zm9vYmFy".into(),
-            auto_check_updates: true,
+            auto_check_updates: false,
             ..Settings::default()
         };
         let text = toml::to_string_pretty(&settings).unwrap();
         let back: Settings = toml::from_str(&text).unwrap();
         assert_eq!(back.update_endpoint, settings.update_endpoint);
         assert_eq!(back.update_public_key, settings.update_public_key);
-        assert!(back.auto_check_updates);
+        assert!(!back.auto_check_updates);
         assert!(back.updates_configured());
     }
 
@@ -391,9 +404,9 @@ mod tests {
         assert!(back.editor.font_family.is_empty());
         assert!(back.terminal.font_family.is_empty());
         assert_eq!(back.terminal.max_agent_consoles, 20);
-        assert!(back.update_endpoint.is_empty());
-        assert!(!back.auto_check_updates);
-        assert!(!back.updates_configured());
+        assert!(back.update_endpoint.starts_with("https://"));
+        assert!(back.auto_check_updates);
+        assert!(back.updates_configured());
     }
 
     #[test]

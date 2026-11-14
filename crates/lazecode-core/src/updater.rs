@@ -24,13 +24,22 @@
 //! which keeps updates testable offline and lets an administrator ship a
 //! manifest from a local share.
 //!
-//! Installation replaces the running executable in place: the current
-//! binary is renamed to a `.bak` sibling, the staged binary is moved into
-//! place, and any failure restores the backup. Full macOS `.app` *bundle*
-//! replacement (resources, Info.plist, code signature) is intentionally
-//! out of scope — replacing `Contents/MacOS/<binary>` alone leaves the
-//! bundle's resources at the old version, so bundle updates must be
-//! shipped through a signed installer or a notarised archive instead.
+//! Installation comes in two shapes, selected by the manifest's `kind`
+//! field: `executable` (the default) replaces the running binary in place —
+//! the current file is renamed to a `.bak` sibling, the staged binary is
+//! moved into place, and any failure restores the backup. `app-bundle`
+//! artifacts are gzipped tar archives of a `*.app` directory: the archive is
+//! extracted into the staging area under a strict safety policy (no
+//! absolute paths, no `..` components, no link entries, unpacked-size and
+//! entry caps), sanity-checked, and then swapped over the running bundle
+//! with the same backup-and-rollback discipline. Swapping the whole bundle
+//! keeps `Info.plist`, resources and the ad-hoc signature consistent with
+//! the new binary, which a bare executable replacement inside a signed
+//! bundle cannot do.
+//!
+//! [`relaunch`] starts the freshly installed build: on macOS a bundle is
+//! started through `open -n <bundle>`, anything else spawns the binary
+//! directly with the original command-line arguments.
 
 use std::cmp::Ordering;
 use std::io::{Read, Write};
@@ -49,6 +58,10 @@ pub const ARTIFACT_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 const DOWNLOAD_CHUNK: usize = 64 * 1024;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound for the unpacked `.app` bundle (1 GiB).
+pub const BUNDLE_MAX_UNPACKED_BYTES: u64 = 1024 * 1024 * 1024;
+/// Upper bound for entries inside a bundle archive.
+pub const BUNDLE_MAX_ENTRIES: usize = 20_000;
 
 /// A release announcement, fetched from `Settings::update_endpoint`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,6 +84,20 @@ pub struct Manifest {
     /// Required CPU architecture (`aarch64`/`arm64`, `x86_64`/`x64`, …).
     #[serde(default)]
     pub arch: Option<String>,
+    /// Artifact shape: `""`/`"executable"` (default) is a single binary,
+    /// `"app-bundle"` is a gzipped tar archive of a `*.app` directory.
+    #[serde(default)]
+    pub kind: String,
+}
+
+/// What shape of artifact the manifest points at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArtifactKind {
+    /// A single executable file, installed by replacing it in place.
+    Executable,
+    /// A gzipped tar archive of one `*.app` bundle, installed by swapping
+    /// the whole bundle (macOS).
+    AppBundle,
 }
 
 /// The exact bytes an Ed25519 signer must sign for this manifest.
@@ -82,6 +109,7 @@ struct SignedManifest<'a> {
     notes: &'a str,
     min_os: &'a str,
     arch: &'a str,
+    kind: &'a str,
 }
 
 impl Manifest {
@@ -95,8 +123,17 @@ impl Manifest {
             notes: self.notes.as_str(),
             min_os: self.min_os.as_deref().unwrap_or(""),
             arch: self.arch.as_deref().unwrap_or(""),
+            kind: self.kind.trim(),
         })
         .expect("manifest fields are always serialisable")
+    }
+
+    /// Artifact shape announced by this manifest.
+    pub fn artifact_kind(&self) -> ArtifactKind {
+        match self.kind.trim().to_ascii_lowercase().as_str() {
+            "app-bundle" | "app_bundle" | "bundle" => ArtifactKind::AppBundle,
+            _ => ArtifactKind::Executable,
+        }
     }
 
     /// Release notes, or a placeholder when the publisher left them out.
@@ -190,6 +227,12 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest, UpdateError> {
     }
     Version::parse(&manifest.version)?;
     Ok(manifest)
+}
+
+/// Whether `key` parses as an Ed25519 public key (base64 or hex). Lets the
+/// settings UI validate a pinned key without signing anything.
+pub fn public_key_is_valid(key: &str) -> bool {
+    decode_key(key).is_ok()
 }
 
 /// Verify the manifest's Ed25519 signature against a pinned public key.
@@ -432,6 +475,273 @@ where
         target: target.to_path_buf(),
         backup,
     })
+}
+
+/// Install a verified artifact according to the manifest's announced kind.
+pub fn install_artifact(
+    staged: &Path,
+    target: &Path,
+    kind: ArtifactKind,
+) -> Result<InstallReport, UpdateError> {
+    match kind {
+        ArtifactKind::Executable => install(staged, target),
+        ArtifactKind::AppBundle => install_app_bundle(staged, target),
+    }
+}
+
+/// Swap the running `.app` bundle with the bundle packaged in `staged`
+/// (a gzipped tar archive containing one `*.app` directory).
+///
+/// The archive is extracted into the staging area under a strict policy
+/// (single `*.app` root, regular files only, no absolute or `..` paths,
+/// unpacked-size and entry caps), sanity-checked, moved onto the target
+/// volume, and then swapped: the current bundle is renamed to a hidden
+/// `.bak-<nanos>` sibling first and restored if anything fails. Swapping the
+/// whole bundle keeps `Info.plist`, resources and the ad-hoc signature
+/// consistent — replacing only `Contents/MacOS/<binary>` would invalidate
+/// the bundle seal.
+pub fn install_app_bundle(staged: &Path, target: &Path) -> Result<InstallReport, UpdateError> {
+    let target_bundle = bundle_root(target).ok_or_else(|| {
+        UpdateError::Install(format!(
+            "{} is not inside a `.app` bundle",
+            target.display()
+        ))
+    })?;
+    let extracted = extract_app_bundle(staged)?;
+    let staged_bundle = extracted.bundle_path;
+    let staged_binary = staged_bundle.join("Contents/MacOS");
+    if !staged_binary.is_dir() {
+        return Err(UpdateError::Install(
+            "staged bundle has no Contents/MacOS directory".into(),
+        ));
+    }
+
+    // The final rename must happen on one volume. Stage a copy next to the
+    // target first so both renames below are same-directory and atomic.
+    let local = staging_dir().join(format!(
+        "bundle-apply-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&local).map_err(io_error)?;
+    let local_bundle = local.join(
+        target_bundle
+            .file_name()
+            .ok_or_else(|| UpdateError::Install("target bundle has no file name".into()))?,
+    );
+    if let Err(_err) = std::fs::rename(&staged_bundle, &local_bundle) {
+        // Different volumes: fall back to a recursive copy next to the
+        // target (the running app keeps its inode, so copying it is safe).
+        copy_dir_recursive(&staged_bundle, &local_bundle).map_err(|err| {
+            let _ = std::fs::remove_dir_all(&local);
+            UpdateError::Install(format!("cannot stage bundle on target volume: {err}"))
+        })?;
+        let _ = std::fs::remove_dir_all(&extracted.root);
+    } else {
+        let _ = std::fs::remove_dir_all(&extracted.root);
+    }
+
+    let backup = unique_bundle_backup_path(&target_bundle);
+    std::fs::rename(&target_bundle, &backup).map_err(|err| {
+        let _ = std::fs::remove_dir_all(&local);
+        UpdateError::Install(format!(
+            "cannot back up the current bundle {}: {err}",
+            target_bundle.display()
+        ))
+    })?;
+    let swap = std::fs::rename(&local_bundle, &target_bundle);
+    if let Err(err) = swap {
+        if let Err(restore_error) = std::fs::rename(&backup, &target_bundle) {
+            log::error!(
+                "bundle rollback also failed: {restore_error}; the previous bundle remains at {}",
+                backup.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&local);
+        return Err(UpdateError::Install(format!(
+            "cannot move the new bundle into place: {err}"
+        )));
+    }
+    let _ = std::fs::remove_dir_all(&local);
+    Ok(InstallReport {
+        target: target_bundle,
+        backup: Some(backup),
+    })
+}
+
+struct ExtractedBundle {
+    root: PathBuf,
+    bundle_path: PathBuf,
+}
+
+/// Extract a gzipped tar archive containing exactly one `*.app` directory
+/// into a fresh staging directory, rejecting anything that could escape it.
+fn extract_app_bundle(archive: &Path) -> Result<ExtractedBundle, UpdateError> {
+    use tar::EntryType;
+    let file = std::fs::File::open(archive).map_err(io_error)?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    archive.set_preserve_permissions(true);
+    let root = staging_dir().join(format!(
+        "bundle-extract-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&root).map_err(io_error)?;
+
+    let result = (|| -> Result<PathBuf, UpdateError> {
+        let mut bundle_root: Option<PathBuf> = None;
+        let mut entries = 0usize;
+        let mut unpacked = 0u64;
+        for entry in archive.entries().map_err(io_error)? {
+            let mut entry = entry.map_err(io_error)?;
+            entries += 1;
+            if entries > BUNDLE_MAX_ENTRIES {
+                return Err(UpdateError::Install(
+                    "bundle archive exceeds the entry limit".into(),
+                ));
+            }
+            let path = entry.path().map_err(io_error)?.to_path_buf();
+            if path.is_absolute()
+                || path
+                    .components()
+                    .any(|component| component == std::path::Component::ParentDir)
+            {
+                return Err(UpdateError::Install(format!(
+                    "bundle archive contains an unsafe path {}",
+                    path.display()
+                )));
+            }
+            match entry.header().entry_type() {
+                EntryType::Regular | EntryType::Directory => {}
+                // Links inside an application bundle are never needed by this
+                // updater and are the classic escape hatch, so refuse them.
+                other => {
+                    return Err(UpdateError::Install(format!(
+                        "bundle archive contains a non-regular entry ({other:?}): {}",
+                        path.display()
+                    )))
+                }
+            }
+            let mut components = path.components();
+            let top = components
+                .next()
+                .ok_or_else(|| UpdateError::Install("bundle archive has an empty path".into()))?;
+            let top_name = top.as_os_str().to_string_lossy().into_owned();
+            if !top_name.ends_with(".app") {
+                return Err(UpdateError::Install(format!(
+                    "bundle archive entry {} is outside the `.app` root",
+                    path.display()
+                )));
+            }
+            let root_name = match &bundle_root {
+                Some(existing) => existing
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                None => {
+                    bundle_root = Some(root.join(&top_name));
+                    top_name.clone()
+                }
+            };
+            if top_name != root_name {
+                return Err(UpdateError::Install(
+                    "bundle archive contains more than one `.app` root".into(),
+                ));
+            }
+            unpacked += entry.size();
+            if unpacked > BUNDLE_MAX_UNPACKED_BYTES {
+                return Err(UpdateError::Install(
+                    "bundle archive exceeds the unpacked size limit".into(),
+                ));
+            }
+            let dest = root.join(&path);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(io_error)?;
+            }
+            entry.unpack(&dest).map_err(io_error)?;
+        }
+        bundle_root.ok_or_else(|| UpdateError::Install("bundle archive is empty".into()))
+    })();
+
+    match result {
+        Ok(bundle_path) => Ok(ExtractedBundle { root, bundle_path }),
+        Err(err) => {
+            let _ = std::fs::remove_dir_all(&root);
+            Err(err)
+        }
+    }
+}
+
+/// Resolve the enclosing `*.app` bundle: accepts either the bundle path
+/// itself or any path inside it (such as `Contents/MacOS/<binary>`).
+fn bundle_root(exe: &Path) -> Option<PathBuf> {
+    let mut current = Some(exe);
+    while let Some(path) = current {
+        if path.extension().is_some_and(|ext| ext == "app") {
+            return Some(path.to_path_buf());
+        }
+        current = path.parent();
+    }
+    None
+}
+
+fn unique_bundle_backup_path(bundle: &Path) -> PathBuf {
+    let parent = bundle.parent().unwrap_or_else(|| Path::new("."));
+    let name = bundle
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "LazeCode.app".to_string());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    // Dot-prefixed and without an `.app` suffix so Finder/Launchpad do not
+    // show the backup as an installed application.
+    parent.join(format!(".{name}.bak-{nanos}"))
+}
+
+/// Recursively copy a directory tree, preserving file permissions.
+fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), &dest)?;
+        }
+    }
+    Ok(())
+}
+
+/// Start the freshly installed build. On macOS a bundle is started through
+/// `open -n <bundle>`; a bare binary is spawned directly with the original
+/// command-line arguments. The caller exits afterwards.
+pub fn relaunch(target: &Path) -> Result<(), UpdateError> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(bundle) = bundle_root(target) {
+            std::process::Command::new("/usr/bin/open")
+                .arg("-n")
+                .arg(&bundle)
+                .spawn()
+                .map_err(|err| UpdateError::Install(format!("cannot relaunch: {err}")))?;
+            return Ok(());
+        }
+    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    std::process::Command::new(target)
+        .args(&args)
+        .spawn()
+        .map_err(|err| UpdateError::Install(format!("cannot relaunch: {err}")))?;
+    Ok(())
 }
 
 fn rollback(target: &Path, backup: Option<&Path>) -> Result<(), UpdateError> {
@@ -830,6 +1140,7 @@ mod tests {
             notes: "Fixed the updater".into(),
             min_os: None,
             arch: None,
+            kind: String::new(),
         };
         let signature = keypair().sign(&manifest.signing_payload());
         manifest.signature = base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
@@ -904,9 +1215,10 @@ mod tests {
             notes: "line one\nline two".into(),
             min_os: None,
             arch: Some("arm64".into()),
+            kind: String::new(),
         };
         let expected = format!(
-            r#"{{"version":"1.2.3","url":"https://updates.example.test/LazeCode","sha256":"{}","notes":"line one\nline two","min_os":"","arch":"arm64"}}"#,
+            r#"{{"version":"1.2.3","url":"https://updates.example.test/LazeCode","sha256":"{}","notes":"line one\nline two","min_os":"","arch":"arm64","kind":""}}"#,
             "aa".repeat(32)
         );
         let payload = manifest.signing_payload();
@@ -1197,6 +1509,200 @@ mod tests {
             decode_key("too-short"),
             Err(UpdateError::InvalidKey(_))
         ));
+    }
+
+    // ---- app-bundle installation ----
+
+    /// Build a minimal `*.app` tree and pack it as a gzipped tar archive.
+    fn pack_bundle(root: &Path, archive: &Path, app_name: &str, body: &str) {
+        let bundle = root.join(app_name);
+        std::fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+        std::fs::write(bundle.join("Contents/Info.plist"), "<plist/>").unwrap();
+        std::fs::write(bundle.join("Contents/MacOS/LazeCode"), body).unwrap();
+        let file = std::fs::File::create(archive).unwrap();
+        let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        tar.append_dir_all(app_name, &bundle).unwrap();
+        tar.into_inner().unwrap().finish().unwrap();
+    }
+
+    #[test]
+    fn bundle_install_swaps_the_whole_bundle_and_keeps_a_backup() {
+        let tmp = TempDir(
+            std::env::temp_dir().join(format!("laze-updater-bundle-{}", std::process::id())),
+        );
+        std::fs::create_dir_all(&tmp.0).unwrap();
+        let archive = tmp.0.join("bundle.tar.gz");
+        pack_bundle(&tmp.0, &archive, "LazeCode.app", "new binary bytes");
+
+        // Existing installation with an older resource that must not survive.
+        let target = tmp.0.join("Applications").join("LazeCode.app");
+        std::fs::create_dir_all(target.join("Contents/MacOS")).unwrap();
+        std::fs::write(target.join("Contents/Info.plist"), "<old plist/>").unwrap();
+        std::fs::write(target.join("Contents/MacOS/LazeCode"), "old binary").unwrap();
+
+        let report = install_app_bundle(&archive, &target).unwrap();
+        assert_eq!(report.target, target);
+        assert!(report.backup.is_some());
+        assert_eq!(
+            std::fs::read_to_string(target.join("Contents/MacOS/LazeCode")).unwrap(),
+            "new binary bytes"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("Contents/Info.plist")).unwrap(),
+            "<plist/>",
+            "resources must come from the new bundle"
+        );
+        let backup = report.backup.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(backup.join("Contents/MacOS/LazeCode")).unwrap(),
+            "old binary"
+        );
+        let _ = std::fs::remove_dir_all(&tmp.0);
+    }
+
+    #[test]
+    fn bundle_install_rejects_paths_outside_the_app_root() {
+        let tmp = TempDir(
+            std::env::temp_dir().join(format!("laze-updater-traversal-{}", std::process::id())),
+        );
+        std::fs::create_dir_all(&tmp.0).unwrap();
+        // Craft the malicious entry by hand: the tar crate's writer refuses
+        // `..` paths, but a real archive from an attacker does not have to
+        // play by writer-side rules.
+        let archive = tmp.0.join("evil.tar.gz");
+        let file = std::fs::File::create(&archive).unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut raw_header = vec![0u8; 512];
+        let name = b"LazeCode.app/../../escaped.txt";
+        raw_header[..name.len()].copy_from_slice(name);
+        raw_header[100..108].copy_from_slice(b"0000644\0");
+        raw_header[108..116].copy_from_slice(b"0000000\0");
+        raw_header[116..124].copy_from_slice(b"0000000\0");
+        raw_header[124..136].copy_from_slice(b"00000000004\0");
+        raw_header[136..148].copy_from_slice(b"00000000000\0");
+        raw_header[156] = b'0'; // regular file
+        raw_header[257..263].copy_from_slice(b"ustar\0");
+        raw_header[263..265].copy_from_slice(b"00");
+        let checksum: u32 =
+            raw_header.iter().map(|byte| u32::from(*byte)).sum::<u32>() + 8 * u32::from(b' '); // the checksum field itself is read as spaces
+        let octal = format!("{checksum:06o}\0 ");
+        raw_header[148..156].copy_from_slice(octal.as_bytes());
+        encoder.write_all(&raw_header).unwrap();
+        encoder.write_all(b"evil").unwrap();
+        // The record is 4 bytes; pad the final 512-byte block to full length.
+        let padding = 512 - 4;
+        encoder.write_all(&vec![0u8; padding]).unwrap();
+        encoder.finish().unwrap();
+
+        let target = tmp.0.join("Applications").join("LazeCode.app");
+        std::fs::create_dir_all(target.join("Contents/MacOS")).unwrap();
+        assert!(install_app_bundle(&archive, &target).is_err());
+        assert!(
+            !tmp.0.join("escaped.txt").exists(),
+            "nothing may escape staging"
+        );
+        let _ = std::fs::remove_dir_all(&tmp.0);
+    }
+
+    #[test]
+    fn bundle_install_rolls_back_when_the_archive_is_not_a_bundle() {
+        let tmp = TempDir(
+            std::env::temp_dir().join(format!("laze-updater-rollback-{}", std::process::id())),
+        );
+        std::fs::create_dir_all(&tmp.0).unwrap();
+        let target = tmp.0.join("Applications").join("LazeCode.app");
+        std::fs::create_dir_all(target.join("Contents/MacOS")).unwrap();
+        std::fs::write(target.join("Contents/MacOS/LazeCode"), "old binary").unwrap();
+
+        // A gzip bomb whose payload is not a tar file at all.
+        let archive = tmp.0.join("garbage.tar.gz");
+        let encoder = flate2::write::GzEncoder::new(
+            std::fs::File::create(&archive).unwrap(),
+            flate2::Compression::default(),
+        );
+        encoder.finish().unwrap();
+        assert!(matches!(
+            install_app_bundle(&archive, &target),
+            Err(UpdateError::Install(_))
+        ));
+        assert_eq!(
+            std::fs::read_to_string(target.join("Contents/MacOS/LazeCode")).unwrap(),
+            "old binary",
+            "the previous bundle must survive a failed install"
+        );
+        let _ = std::fs::remove_dir_all(&tmp.0);
+    }
+
+    /// OpenSSL and ring implement the same standard Ed25519; the release
+    /// script signs with the system `openssl`, so verify cross-compatibility
+    /// once (skipped where the local `openssl` cannot do Ed25519).
+    #[test]
+    fn openssl_signed_manifest_verifies_with_ring() {
+        use std::process::Command;
+        let tmp = TempDir(
+            std::env::temp_dir().join(format!("laze-updater-openssl-{}", std::process::id())),
+        );
+        std::fs::create_dir_all(&tmp.0).unwrap();
+        let dir = &tmp.0;
+        let ok = Command::new("openssl")
+            .args(["genpkey", "-algorithm", "ed25519", "-out", "signing.key"])
+            .current_dir(dir)
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("skipping: local openssl cannot generate ed25519 keys");
+            let _ = std::fs::remove_dir_all(&tmp.0);
+            return;
+        }
+        let manifest = Manifest {
+            version: "9.9.9".into(),
+            url: "https://updates.example.test/LazeCode-9.9.9.app.tar.gz".into(),
+            sha256: "bb".repeat(32),
+            signature: String::new(),
+            notes: "openssl cross-sign".into(),
+            min_os: None,
+            arch: None,
+            kind: "app-bundle".into(),
+        };
+        std::fs::write(dir.join("payload.bin"), manifest.signing_payload()).unwrap();
+        let signed = Command::new("openssl")
+            .args([
+                "pkeyutl",
+                "-sign",
+                "-inkey",
+                "signing.key",
+                "-rawin",
+                "-in",
+                "payload.bin",
+                "-out",
+                "payload.sig",
+            ])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            signed.status.success(),
+            "openssl sign failed: {:?}",
+            signed.stderr
+        );
+        let signature = base64::engine::general_purpose::STANDARD
+            .encode(std::fs::read(dir.join("payload.sig")).unwrap());
+        let pub_der = Command::new("openssl")
+            .args(["pkey", "-in", "signing.key", "-pubout", "-outform", "DER"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(pub_der.status.success());
+        // SPKI DER ends with the raw 32-byte public key.
+        let public = base64::engine::general_purpose::STANDARD
+            .encode(&pub_der.stdout[pub_der.stdout.len() - 32..]);
+        let mut manifest = manifest;
+        manifest.signature = signature;
+        assert_eq!(manifest.artifact_kind(), ArtifactKind::AppBundle);
+        verify_manifest_signature(&manifest, &public).unwrap();
+        let _ = std::fs::remove_dir_all(&tmp.0);
     }
 
     // Keep the random source referenced so the seed helper stays honest if the

@@ -418,9 +418,11 @@ mod tests {
         // Pre-updater installs saved explicit empty strings; loading must
         // promote them to the shipped defaults so the update channel works
         // without a hand edit.
-        let mut settings: Settings =
-            toml::from_str("update_endpoint = \"\"
-update_public_key = \"\"\n").unwrap();
+        let mut settings: Settings = toml::from_str(
+            "update_endpoint = \"\"
+update_public_key = \"\"\n",
+        )
+        .unwrap();
         settings.migrate_updater_defaults();
         assert!(settings.updates_configured());
         assert!(settings.update_endpoint.starts_with("https://"));

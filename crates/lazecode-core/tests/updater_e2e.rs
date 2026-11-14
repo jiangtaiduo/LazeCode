@@ -15,9 +15,7 @@ use std::path::Path;
 use std::process::Command;
 
 use base64::Engine as _;
-use lazecode_core::updater::{
-    self, ArtifactKind, Manifest, UpdateError, ARTIFACT_MAX_BYTES,
-};
+use lazecode_core::updater::{self, ArtifactKind, Manifest, UpdateError, ARTIFACT_MAX_BYTES};
 
 /// One-shot local HTTP server: answers every request from `files` (URL path
 /// → bytes) and records the paths it was asked for.
@@ -28,23 +26,13 @@ struct LocalServer {
 }
 
 impl LocalServer {
-    fn start(files: Vec<(String, Vec<u8>)>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind localhost");
-        Self::start_on(listener, files)
-    }
-
-    fn start_on(
-        listener: TcpListener,
-        files: Vec<(String, Vec<u8>)>,
-    ) -> Self {
+    fn start_on(listener: TcpListener, files: Vec<(String, Vec<u8>)>) -> Self {
         let port = listener.local_addr().unwrap().port();
         let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
         let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let log_handle = log.clone();
         std::thread::spawn(move || {
-            listener
-                .set_nonblocking(true)
-                .expect("set_nonblocking");
+            listener.set_nonblocking(true).expect("set_nonblocking");
             loop {
                 if shutdown_rx.try_recv().is_ok() {
                     return;
@@ -63,21 +51,14 @@ impl LocalServer {
                                 Ok(0) | Err(_) => break,
                                 Ok(n) => {
                                     buf.extend_from_slice(&chunk[..n]);
-                                    if buf
-                                        .windows(4)
-                                        .any(|window| window == b"\r\n\r\n")
-                                    {
+                                    if buf.windows(4).any(|window| window == b"\r\n\r\n") {
                                         break;
                                     }
                                 }
                             }
                         }
                         let request = String::from_utf8_lossy(&buf).into_owned();
-                        let path = request
-                            .split_whitespace()
-                            .nth(1)
-                            .unwrap_or("/")
-                            .to_string();
+                        let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
                         log_handle.lock().unwrap().push(path.clone());
                         let body = files
                             .iter()
@@ -150,22 +131,19 @@ fn sign(manifest: &mut Manifest, dir: &Path) -> String {
             .output()
             .unwrap();
         assert!(der.status.success());
-        public = base64::engine::general_purpose::STANDARD
-            .encode(&der.stdout[der.stdout.len() - 32..]);
+        public =
+            base64::engine::general_purpose::STANDARD.encode(&der.stdout[der.stdout.len() - 32..]);
         manifest.signature =
             base64::engine::general_purpose::STANDARD.encode(std::fs::read(&sig_path).unwrap());
     } else {
         eprintln!("openssl unavailable; signing with an in-process ring key");
-        let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(
-            &ring::rand::SystemRandom::new(),
-        )
-        .unwrap();
-        let pair =
-            ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+        let pkcs8 =
+            ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+                .unwrap();
+        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
         public = base64::engine::general_purpose::STANDARD.encode(pair.public_key().as_ref());
         let signature = pair.sign(&manifest.signing_payload());
-        manifest.signature =
-            base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
+        manifest.signature = base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
     }
     public
 }
@@ -179,7 +157,8 @@ fn pack_bundle(dir: &Path, artifact: &Path, body: &str) {
     let file = std::fs::File::create(artifact).unwrap();
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut tar = tar::Builder::new(encoder);
-    tar.append_dir_all("LazeCode.app", stage.join("LazeCode.app")).unwrap();
+    tar.append_dir_all("LazeCode.app", stage.join("LazeCode.app"))
+        .unwrap();
     tar.into_inner().unwrap().finish().unwrap();
     let _ = std::fs::remove_dir_all(&stage);
 }
@@ -234,12 +213,8 @@ fn full_update_flow_over_real_http_installs_the_bundle() {
     let server = &server;
 
     // 1. check(): fetch + verify signature + platform gate + version compare.
-    let outcome = updater::check(
-        &format!("{}/latest.json", server.url),
-        "0.4.0",
-        &public,
-    )
-    .expect("check must succeed");
+    let outcome = updater::check(&format!("{}/latest.json", server.url), "0.4.0", &public)
+        .expect("check must succeed");
     assert!(outcome.update_available);
     assert_eq!(outcome.available_version(), "9.9.9");
     assert_eq!(outcome.manifest.artifact_kind(), ArtifactKind::AppBundle);
@@ -259,9 +234,8 @@ fn full_update_flow_over_real_http_installs_the_bundle() {
     let target_bundle = dir.join("Applications/LazeCode.app");
     std::fs::create_dir_all(target_bundle.join("Contents/MacOS")).unwrap();
     std::fs::write(target_bundle.join("Contents/MacOS/LazeCode"), "old binary").unwrap();
-    let report =
-        updater::install_artifact(&staged, &target_bundle, ArtifactKind::AppBundle)
-            .expect("install must succeed");
+    let report = updater::install_artifact(&staged, &target_bundle, ArtifactKind::AppBundle)
+        .expect("install must succeed");
     assert_eq!(
         std::fs::read_to_string(target_bundle.join("Contents/MacOS/LazeCode")).unwrap(),
         "updated binary bytes"
@@ -306,10 +280,7 @@ fn full_update_flow_over_real_http_installs_the_bundle() {
         &mut |_, _| {},
     )
     .expect_err("checksum mismatch must fail");
-    assert!(matches!(
-        mismatch_err,
-        UpdateError::ChecksumMismatch { .. }
-    ));
+    assert!(matches!(mismatch_err, UpdateError::ChecksumMismatch { .. }));
 }
 
 /// Talks to the live update endpoint (`Settings::update_endpoint` default).
@@ -320,9 +291,8 @@ fn real_published_manifest_check() {
     let endpoint = std::env::var("LAZE_UPDATE_ENDPOINT").unwrap_or_else(|_| {
         "https://raw.githubusercontent.com/jiangtaiduo/LazeCode/main/latest.json".into()
     });
-    let public = std::env::var("LAZE_UPDATE_PUBKEY").unwrap_or_else(|_| {
-        Settings_defaults_public_key()
-    });
+    let public =
+        std::env::var("LAZE_UPDATE_PUBKEY").unwrap_or_else(|_| default_pinned_public_key());
     let outcome = updater::check(&endpoint, "0.0.1", &public)
         .expect("published manifest must fetch, verify and platform-check");
     println!(
@@ -346,7 +316,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn Settings_defaults_public_key() -> String {
+fn default_pinned_public_key() -> String {
     // Avoid a cyclic import of settings internals: the pinned key is also
     // asserted by the settings tests; here it is read from a fresh default.
     lazecode_core::Settings::default().update_public_key

@@ -53,6 +53,11 @@
 - IME preedit/commit overlay; Cmd+Z/Shift+Z, Cmd+A, Cmd+C/X, Cmd+V, Cmd+S,
   Cmd+F, page/word/line movement.
 - Git diff tab (`HEAD → worktree`) with hunk/line rendering and binary guard.
+- Image tabs: GIF animates through the egui loader (cache flushed when the
+  GIF tab set changes); other formats decode on a worker thread into a
+  bounded cache (`crates/lazecode-ui/src/image_cache.rs`) — pixels are
+  downscaled to the viewport, retained bytes capped at 64 MiB, failed
+  decodes negatively cached for 2 s, entries dropped with their tab.
 
 ### Git (`gix` + porcelain)
 
@@ -63,7 +68,18 @@ Read path:
   unstaged states, untracked files, per-file added/deleted line counts and
   binary detection. Ignored files/directories come from a native `gix-dir`
   walk (no `git status` subprocess), cached per worktree and invalidated by
-  watcher events.
+  watcher events (events under default-ignored directories invalidate the
+  cache without triggering a full refresh).
+- Refresh architecture: watcher batches refresh the snapshot (`.git`
+  metadata events are scoped to the top-level repository); watcher tree
+  reloads run as background jobs carrying the project's custom ignore
+  patterns and coalesce bursts. The active checkout additionally polls every
+  two seconds, cheaply — it fingerprints `.git` metadata (index, HEAD, refs,
+  sequencer files) and only runs the full snapshot when that fingerprint
+  moved; a 30-second unconditional backstop covers what the fingerprint
+  cannot see (linked-worktree gitdirs, a dead watcher). Fetch carries a
+  ten-minute watchdog; checkout/reset/merge index rollbacks go through
+  `index.lock`.
 - Branch list (local/remote), tags, ahead/behind against the configured upstream (falling back to
   `origin/<branch>`) via merge-base.
 - Log with parent lists, refs, lane graph layout (lanes/edges computed from
@@ -249,8 +265,17 @@ Not implemented (explicit):
 - Bottom-dock height and right-dock width/placement persist across launches.
 - Cold/disk scrollback (`lazecode-terminal/src/cold.rs`): evicted rows are
   spooled to a bounded append-only file with stable absolute row ids,
-  rehydrated for scroll/search, compacted when dead bytes dominate, and
-  deleted on session close. Hot memory plateaus at the configured history.
+  rehydrated for scroll/search, compacted when dead bytes dominate (the new
+  layout commits only after the rewrite succeeds), and deleted on session
+  close; spool files of dead processes are swept at startup. Row ids are
+  ordered but not contiguous — id gaps from resize/reflow self-eviction and
+  zero-length placeholders for oversized rows keep `get_by_id` exact via a
+  binary search. Hot memory plateaus at the configured history.
+- Kitty graphics: rio-vt parses APC transmit/place/delete with chunking,
+  base64 payloads, ids, z/columns/rows/source rects; decoded RGBA images are
+  byte-capped (parser cache and the pending-upload queue are bounded by the
+  session graphics budget) and rendered as egui textures above the cell
+  grid. The
 - Kitty graphics: rio-vt parses APC transmit/place/delete with chunking,
   base64 payloads, ids, z/columns/rows/source rects; decoded RGBA images are
   byte-capped and rendered as egui textures above the cell grid. The
@@ -349,7 +374,7 @@ workspace under `crates/`.
 ## 3. Verification performed
 
 ```sh
-cargo test --workspace          # 237 tests, all passing
+cargo test --workspace          # 296 tests, all passing
 cargo clippy --workspace --all-targets   # clean
 cargo test -p lazecode-core --test lsp_e2e -- --ignored  # real rust-analyzer
 cargo build --release -p lazecode-app    # native binary

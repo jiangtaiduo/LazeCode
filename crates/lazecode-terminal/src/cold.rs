@@ -119,7 +119,9 @@ impl ColdStore {
     ///
     /// Ids must increase: the index is ordered by id so a visible row can be
     /// resolved with a binary search. A stale or replayed batch is dropped
-    /// instead of corrupting that order.
+    /// instead of corrupting that order. Rows exceeding the byte budget are
+    /// recorded as zero-length placeholders so the id of every later row keeps
+    /// matching the grid's stable absolute row ids.
     pub fn append_rows(&mut self, first_id: u64, rows: &[Vec<u8>]) {
         if rows.is_empty() {
             return;
@@ -130,38 +132,42 @@ impl ColdStore {
             }
         }
         let mut buffer = Vec::new();
-        let mut offsets = Vec::with_capacity(rows.len());
+        let mut appended: Vec<Entry> = Vec::with_capacity(rows.len());
         let mut offset = self.file_len;
-        for row in rows {
+        let mut live_added = 0usize;
+        for (index, row) in rows.iter().enumerate() {
+            let id = first_id + index as u64;
             if row.len() as u64 > self.byte_budget as u64 {
+                appended.push(Entry {
+                    id,
+                    offset: 0,
+                    len: 0,
+                });
                 continue;
             }
-            offsets.push((offset, row.len() as u32));
+            appended.push(Entry {
+                id,
+                offset,
+                len: row.len() as u32,
+            });
             offset += row.len() as u64;
+            live_added += row.len();
             buffer.extend_from_slice(row);
         }
-        if buffer.is_empty() {
-            return;
-        }
-        if self
-            .file
-            .seek(SeekFrom::Start(self.file_len))
-            .and_then(|_| self.file.write_all(&buffer))
-            .is_err()
+        if !buffer.is_empty()
+            && self
+                .file
+                .seek(SeekFrom::Start(self.file_len))
+                .and_then(|_| self.file.write_all(&buffer))
+                .is_err()
         {
             log::warn!("cold scrollback spool: write failed, dropping rows");
             return;
         }
-        if self.entries.is_empty() {
-            self.first_id = first_id;
-        }
-        for (index, (offset, len)) in offsets.into_iter().enumerate() {
-            self.entries.push_back(Entry {
-                id: first_id + index as u64,
-                offset,
-                len,
-            });
-            self.live_bytes += len as usize;
+        self.entries.extend(appended);
+        self.live_bytes += live_added;
+        if let Some(front) = self.entries.front() {
+            self.first_id = front.id;
         }
         self.file_len = offset;
         self.evict();
@@ -181,12 +187,20 @@ impl ColdStore {
         if self.dead_bytes > COMPACT_MIN_BYTES && self.dead_bytes > self.live_bytes as u64 {
             if let Err(err) = self.compact() {
                 log::warn!("cold scrollback spool compaction failed: {err}");
-                self.dead_bytes = 0;
+                // The store stays consistent (compact commits its new layout
+                // only on success), so retrying is safe. Halving instead of
+                // zeroing keeps the retry from firing on every eviction while
+                // still re-attempting after more evictions accumulate.
+                self.dead_bytes /= 2;
             }
         }
     }
 
     /// Rewrite the live rows into a fresh file so evicted payload is released.
+    ///
+    /// The layout (`entry.offset`) is committed only after the new file is in
+    /// place: a failure mid-copy must leave every entry pointing at the old,
+    /// still-valid file rather than half at the temp file.
     fn compact(&mut self) -> std::io::Result<()> {
         let tmp_path = self.path.with_extension("compact");
         let mut tmp = OpenOptions::new()
@@ -196,10 +210,11 @@ impl ColdStore {
             .open(&tmp_path)?;
         let mut buffer = vec![0u8; 64 * 1024];
         let mut written = 0u64;
-        for entry in self.entries.iter_mut() {
+        let mut new_offsets = Vec::with_capacity(self.entries.len());
+        for entry in self.entries.iter() {
             self.file.seek(SeekFrom::Start(entry.offset))?;
             let mut remaining = entry.len as usize;
-            entry.offset = written;
+            new_offsets.push(written);
             while remaining > 0 {
                 let take = remaining.min(buffer.len());
                 self.file.read_exact(&mut buffer[..take])?;
@@ -211,17 +226,38 @@ impl ColdStore {
         tmp.flush()?;
         tmp.sync_all()?;
         drop(tmp);
-        self.file = OpenOptions::new().read(true).write(true).open(&tmp_path)?;
         std::fs::remove_file(&self.path)?;
         std::fs::rename(&tmp_path, &self.path)?;
-        self.file_len = written;
-        self.dead_bytes = 0;
-        Ok(())
+        let reopened = OpenOptions::new().read(true).write(true).open(&self.path);
+        match reopened {
+            Ok(file) => {
+                self.file = file;
+                self.file_len = written;
+                self.dead_bytes = 0;
+                for (entry, offset) in self.entries.iter_mut().zip(new_offsets) {
+                    entry.offset = offset;
+                }
+                Ok(())
+            }
+            Err(err) => {
+                // The rename already happened; without a valid handle into the
+                // new file the store cannot serve its rows. Reset to an empty
+                // (consistent) store rather than risking misaligned reads.
+                log::warn!("cold scrollback spool: reopen after compaction failed: {err}");
+                self.clear();
+                let _ = std::fs::remove_file(&tmp_path);
+                Err(err)
+            }
+        }
     }
 
     /// Decode the row at `index` (0 = oldest retained).
     pub fn get(&mut self, index: usize) -> Option<Vec<CellData>> {
         let entry = *self.entries.get(index)?;
+        if entry.len == 0 {
+            // Oversized-row placeholder: the row existed but was never spooled.
+            return None;
+        }
         let mut buffer = vec![0u8; entry.len as usize];
         self.file.seek(SeekFrom::Start(entry.offset)).ok()?;
         self.file.read_exact(&mut buffer).ok()?;
@@ -235,12 +271,14 @@ impl ColdStore {
     }
 
     fn index_of(&self, id: u64) -> Option<usize> {
-        let first = self.entries.front()?.id;
-        if id < first {
-            return None;
-        }
-        let index = (id - first) as usize;
-        (index < self.entries.len()).then_some(index)
+        // Ids are ordered but not necessarily contiguous: resize/reflow
+        // self-eviction jumps the spool cursor forward and oversized rows
+        // leave placeholders, so a `id - first` subtraction would resolve
+        // into the wrong row after any gap. Binary search keeps the mapping
+        // exact; gaps resolve to "not found" instead of a shifted row.
+        self.entries
+            .binary_search_by_key(&id, |entry| entry.id)
+            .ok()
     }
 
     /// Case-insensitive scan over every retained row.
@@ -262,6 +300,9 @@ impl ColdStore {
         for entry in self.entries.iter() {
             if hits >= limit {
                 break;
+            }
+            if entry.len == 0 {
+                continue;
             }
             if row_buffer.len() < entry.len as usize {
                 row_buffer.resize(entry.len as usize, 0);
@@ -575,6 +616,53 @@ mod tests {
         assert_eq!(text(store.get_by_id(8).expect("row 8")), "two");
         assert!(store.get_by_id(6).is_none());
         assert!(store.get(3).is_none());
+    }
+
+    #[test]
+    fn ids_with_gaps_resolve_exactly_instead_of_shifting() {
+        // A resize/reflow burst makes the session jump the spool cursor
+        // forward (session.rs), leaving a hole in the id range. `get_by_id`
+        // must binary-search rather than subtract, or rows after the hole
+        // would decode as their pre-hole neighbours and later ids would hit
+        // shifted rows.
+        let mut store = ColdStore::create(100, 1 << 20).expect("create");
+        let before = vec![
+            encode_row(&row("before-gap")),
+            encode_row(&row("also-before")),
+        ];
+        store.append_rows(0, &before);
+        let after = vec![encode_row(&row("after-gap"))];
+        store.append_rows(50, &after);
+        let text = |cells: Vec<CellData>| row_text(&cells).0.trim_end().to_string();
+        assert_eq!(text(store.get_by_id(0).expect("id 0")), "before-gap");
+        assert_eq!(text(store.get_by_id(1).expect("id 1")), "also-before");
+        assert_eq!(text(store.get_by_id(50).expect("id 50")), "after-gap");
+        // In-hole ids resolve to nothing, never to a shifted row.
+        assert!(store.get_by_id(2).is_none());
+        assert!(store.get_by_id(25).is_none());
+        assert!(store.get_by_id(49).is_none());
+    }
+
+    #[test]
+    fn oversized_rows_keep_later_ids_aligned() {
+        let mut store = ColdStore::create(100, 4096).expect("create");
+        let rows = vec![
+            encode_row(&row("kept")),
+            vec![0u8; 8192], // larger than the byte budget: not spooled
+            encode_row(&row("kept-after-oversize")),
+        ];
+        store.append_rows(10, &rows);
+        let text = |cells: Vec<CellData>| row_text(&cells).0.trim_end().to_string();
+        assert_eq!(text(store.get_by_id(10).expect("id 10")), "kept");
+        assert!(
+            store.get_by_id(11).is_none(),
+            "oversized row is a placeholder"
+        );
+        assert_eq!(
+            text(store.get_by_id(12).expect("id 12")),
+            "kept-after-oversize",
+            "the id after a skipped row must not shift"
+        );
     }
 
     #[test]

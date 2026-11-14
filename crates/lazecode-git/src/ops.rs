@@ -248,7 +248,7 @@ fn stage_impl(root: &Path, paths: &[String], allow_unmerged: bool) -> Result<()>
             } else {
                 Mode::FILE
             };
-            (filters.clean_file(root, path, &abs)?, mode)
+            (filters.clean_file(path, &abs)?, mode)
         };
         let id = repo.write_blob(&data)?.detach();
         let stat = gix::index::fs::Metadata::from_path_no_follow(&abs)
@@ -400,7 +400,7 @@ fn commit_checked_inner(
             } else {
                 0o100644
             };
-            (filters.clean_file(root, path, &abs)?, mode)
+            (filters.clean_file(path, &abs)?, mode)
         };
         let oid = repo.write_blob(&data)?.detach();
         tree_map.insert(path.clone(), TreeEntry { oid, mode });
@@ -1026,7 +1026,7 @@ pub fn checkout_branch(root: &Path, name: &str) -> Result<()> {
         match old_index_bytes {
             Some(bytes) => {
                 if let Err(restore_error) =
-                    lazecode_fs::file::write_atomic(&repo.index_path(), &bytes)
+                    lazecode_fs::file::write_atomic_locked(&repo.index_path(), &bytes)
                 {
                     log::error!("checkout index rollback failed: {restore_error}");
                 }

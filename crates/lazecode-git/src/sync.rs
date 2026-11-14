@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use anyhow::anyhow;
 use gix::refs::transaction::{PreviousValue, RefEdit};
@@ -194,6 +195,11 @@ pub fn fetch_all(root: &Path) -> Result<String> {
         .join("\n"))
 }
 
+/// Upper bound on one blocking fetch. gix's transport can hang on a dropped
+/// connection that never sends FIN; the watchdog then flips the interrupt
+/// flag so the job thread (and the UI toast waiting on it) is released.
+const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
 fn prune_remote_tracking(
     repo: &gix::Repository,
     remote: &str,
@@ -231,7 +237,24 @@ fn fetch_remote(repo: &gix::Repository, name: &str) -> Result<()> {
         gix::progress::Discard,
         gix::remote::ref_map::Options::default(),
     )?;
-    let outcome = prepare.receive(gix::progress::Discard, &AtomicBool::new(false))?;
+    let interrupt = Arc::new(AtomicBool::new(false));
+    // The watchdog flips the interrupt flag when the fetch exceeds the
+    // timeout; `done_tx` releases it as soon as receive returns so the
+    // sleeping watchdog never accumulates.
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    {
+        let interrupt = Arc::clone(&interrupt);
+        std::thread::Builder::new()
+            .name("lazecode-fetch-watchdog".to_string())
+            .spawn(move || {
+                if done_rx.recv_timeout(FETCH_TIMEOUT).is_err() {
+                    interrupt.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            })?;
+    }
+    let outcome = prepare.receive(gix::progress::Discard, &interrupt);
+    let _ = done_tx.send(());
+    let outcome = outcome.map_err(|err| anyhow!("fetch failed: {err}"))?;
     let keep: HashSet<String> = outcome
         .ref_map
         .mappings

@@ -860,16 +860,10 @@ fn execute(action: PaletteAction, model: &mut AppModel, rt: &mut UiRuntime) {
             rt.clear_terminal_cache();
         }
         PaletteAction::Quit => {
-            let dirty = model
-                .projects
-                .iter()
-                .any(|project| project.tabs.iter().any(|tab| tab.is_dirty()));
-            let commands = rt.probe_all_terminal_busy(model);
-            if dirty || !commands.is_empty() {
-                rt.dialog = crate::runtime::DialogState::Quit { commands };
-            } else {
-                model.should_quit = true;
-            }
+            // The busy probe runs off-thread; poll_quit_probe shows the Quit
+            // dialog or sets should_quit on a later frame.
+            rt.request_quit_probe(model);
+            model.ui.command_palette_open = false;
         }
     }
 }

@@ -168,8 +168,11 @@ fn head_info(repo: &gix::Repository, id: ObjectId) -> Result<HeadInfo> {
     })
 }
 
-pub(crate) fn collect_changes(repo: &gix::Repository, workdir: &Path) -> Result<Vec<Change>> {
-    let head_map = head_tree_map(repo)?;
+pub(crate) fn collect_changes(
+    repo: &gix::Repository,
+    workdir: &Path,
+    head_map: &TreeMap,
+) -> Result<Vec<Change>> {
     let index = repo.index_or_empty()?;
     let index_entries = index.entries();
     let mut index_map: BTreeMap<String, (ObjectId, u32, Stat)> = BTreeMap::new();
@@ -294,12 +297,13 @@ pub(crate) fn collect_changes(repo: &gix::Repository, workdir: &Path) -> Result<
 pub fn changed_paths(root: &Path) -> Result<Vec<Change>> {
     let repo = discover(root)?;
     let workdir = workdir(&repo)?;
-    collect_changes(&repo, &workdir)
+    let head_map = head_tree_map(&repo)?;
+    collect_changes(&repo, &workdir, &head_map)
 }
 
 pub(crate) fn changes(repo: &gix::Repository, workdir: &Path) -> Result<Vec<Change>> {
     let head_map = head_tree_map(repo)?;
-    let mut changes = collect_changes(repo, workdir)?;
+    let mut changes = collect_changes(repo, workdir, &head_map)?;
     let mut filters = crate::filter::FilterContext::new(repo)?;
     for change in &mut changes {
         let (old, new) = file_sides(repo, workdir, &change.path, &head_map, &mut filters)?;
@@ -429,13 +433,13 @@ fn file_sides(
             if data == old {
                 data
             } else {
-                filters.clean(workdir, path, data)?
+                filters.clean(path, data)?
             }
         }
         Ok(metadata)
             if metadata.is_file() && filters.filter_driver(path)?.as_deref() == Some("lfs") =>
         {
-            filters.clean_file(workdir, path, &worktree)?
+            filters.clean_file(path, &worktree)?
         }
         _ => Vec::new(),
     };

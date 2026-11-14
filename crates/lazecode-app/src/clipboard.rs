@@ -50,6 +50,7 @@ fn path_from_nsurl(url: &NSURL) -> Option<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn image_temp_path(ext: &str) -> Option<PathBuf> {
+    cleanup_stale_paste_files();
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
@@ -57,6 +58,34 @@ fn image_temp_path(ext: &str) -> Option<PathBuf> {
     let mut path = std::env::temp_dir();
     path.push(format!("lazecode-paste-{nanos}.{ext}"));
     Some(path)
+}
+
+/// Best-effort cleanup of paste artifacts older than an hour. A pasted
+/// screenshot is consumed by the receiving program right away, so anything
+/// still lying around after an hour is debris from a closed session.
+#[cfg(target_os = "macos")]
+fn cleanup_stale_paste_files() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("lazecode-paste-") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.modified().ok().is_some_and(|modified| {
+            now.duration_since(modified)
+                .map(|age| age > std::time::Duration::from_secs(3600))
+                .unwrap_or(false)
+        }) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Absolute paths represented by the current system clipboard.

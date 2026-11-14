@@ -88,13 +88,16 @@ fn is_text(repo: &gix::Repository, attributes: &Attributes, data: &[u8]) -> bool
     )
 }
 
-fn run_filter(root: &Path, command: &str, path: &str, data: &[u8]) -> Result<Vec<u8>> {
+/// `cwd` must be the repository workdir: git runs filter drivers from the
+/// worktree top level, so `%f`-relative resolution and driver-relative
+/// reads expect that directory, not wherever the UI opened the repo.
+fn run_filter(cwd: &Path, command: &str, path: &str, data: &[u8]) -> Result<Vec<u8>> {
     let quoted = format!("'{}'", path.replace('\'', "'\\''"));
     let command = command.replace("%f", &quoted);
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(&command)
-        .current_dir(root)
+        .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -121,7 +124,7 @@ fn run_filter(root: &Path, command: &str, path: &str, data: &[u8]) -> Result<Vec
 
 fn run_driver_filter(
     repo: &gix::Repository,
-    root: &Path,
+    cwd: &Path,
     driver: &str,
     direction: &str,
     path: &str,
@@ -132,7 +135,7 @@ fn run_driver_filter(
         return Ok(None);
     };
     let required = config_bool(repo, &format!("filter.{driver}.required")).unwrap_or(false);
-    match run_filter(root, &command, path, data) {
+    match run_filter(cwd, &command, path, data) {
         Ok(output) => Ok(Some(output)),
         Err(error) if required => Err(error),
         Err(error) => {
@@ -340,29 +343,27 @@ fn lfs_smudge(repo: &gix::Repository, data: &[u8]) -> Result<Vec<u8>> {
 /// the caller can fall back to the normal smudge path.
 pub fn smudge_lfs_to_file(root: &Path, path: &str, data: &[u8], target: &Path) -> Result<bool> {
     let repo = discover(root)?;
-    smudge_lfs_to_file_in(&repo, root, path, data, target)
+    smudge_lfs_to_file_in(&repo, path, data, target)
 }
 
 pub fn smudge_lfs_to_file_in(
     repo: &gix::Repository,
-    root: &Path,
     path: &str,
     data: &[u8],
     target: &Path,
 ) -> Result<bool> {
     let attributes = attributes(repo, path)?;
-    smudge_lfs_to_file_with(repo, root, path, &attributes, data, target)
+    smudge_lfs_to_file_with(repo, path, &attributes, data, target)
 }
 
 fn smudge_lfs_to_file_with(
     repo: &gix::Repository,
-    root: &Path,
     path: &str,
     attributes: &Attributes,
     data: &[u8],
     target: &Path,
 ) -> Result<bool> {
-    let _ = (root, path);
+    let _ = path;
     if attributes.filter.as_deref() != Some("lfs") {
         return Ok(false);
     }
@@ -405,19 +406,22 @@ fn smudge_lfs_to_file_with(
 /// Canonical (repository) bytes for `data` staged from the worktree.
 pub fn clean(root: &Path, path: &str, data: Vec<u8>) -> Result<Vec<u8>> {
     let repo = discover(root)?;
-    clean_in(&repo, root, path, data)
+    clean_in(&repo, path, data)
 }
 
-pub fn clean_in(repo: &gix::Repository, root: &Path, path: &str, data: Vec<u8>) -> Result<Vec<u8>> {
+pub fn clean_in(repo: &gix::Repository, path: &str, data: Vec<u8>) -> Result<Vec<u8>> {
     let _ = workdir(repo)?;
     let attributes = attributes(repo, path)?;
-    clean_with(repo, root, path, &attributes, data)
+    clean_with(repo, path, &attributes, data)
 }
 
 /// Reusable attribute/filter session. Building the attributes stack once
 /// avoids re-reading the index and global attributes for every changed file.
 pub struct FilterContext<'repo> {
     stack: gix::AttributeStack<'repo>,
+    /// The repository workdir. Filter-driver subprocesses always run from
+    /// here, regardless of which path the caller used to open the repo.
+    workdir: std::path::PathBuf,
 }
 
 impl<'repo> FilterContext<'repo> {
@@ -427,7 +431,8 @@ impl<'repo> FilterContext<'repo> {
             &index,
             gix::worktree::stack::state::attributes::Source::WorktreeThenIdMapping,
         )?;
-        Ok(Self { stack })
+        let workdir = workdir(repo)?.to_path_buf();
+        Ok(Self { stack, workdir })
     }
 
     pub fn repo(&self) -> &gix::Repository {
@@ -471,29 +476,34 @@ impl<'repo> FilterContext<'repo> {
         Ok(self.attributes(path)?.filter)
     }
 
-    pub fn clean(&mut self, root: &Path, path: &str, data: Vec<u8>) -> Result<Vec<u8>> {
+    pub fn clean(&mut self, path: &str, data: Vec<u8>) -> Result<Vec<u8>> {
         let attributes = self.attributes(path)?;
-        clean_with(self.stack.repo, root, path, &attributes, data)
+        clean_with(self.stack.repo, path, &attributes, data)
     }
 
-    pub fn clean_file(&mut self, root: &Path, path: &str, source: &Path) -> Result<Vec<u8>> {
+    pub fn clean_file(&mut self, path: &str, source: &Path) -> Result<Vec<u8>> {
         let attributes = self.attributes(path)?;
         if attributes.filter.as_deref() == Some("lfs") {
             return lfs_clean_file(self.stack.repo, source);
         }
         let data = std::fs::read(source)?;
-        clean_with(self.stack.repo, root, path, &attributes, data)
+        clean_with(self.stack.repo, path, &attributes, data)
     }
 
-    pub fn smudge(&mut self, root: &Path, path: &str, oid: &str, data: Vec<u8>) -> Result<Vec<u8>> {
+    pub fn smudge(&mut self, path: &str, oid: &str, data: Vec<u8>) -> Result<Vec<u8>> {
         let attributes = self.attributes(path)?;
         let mut data = data;
         if let Some(driver) = attributes.filter.as_deref() {
             if driver == "lfs" {
                 data = lfs_smudge(self.stack.repo, &data)?;
-            } else if let Some(filtered) =
-                run_driver_filter(self.stack.repo, root, driver, "smudge", path, &data)?
-            {
+            } else if let Some(filtered) = run_driver_filter(
+                self.stack.repo,
+                &self.workdir.clone(),
+                driver,
+                "smudge",
+                path,
+                &data,
+            )? {
                 data = filtered;
             }
         }
@@ -519,15 +529,9 @@ impl<'repo> FilterContext<'repo> {
         lfs_object_path(self.stack.repo, oid)
     }
 
-    pub fn smudge_lfs_to_file(
-        &mut self,
-        root: &Path,
-        path: &str,
-        data: &[u8],
-        target: &Path,
-    ) -> Result<bool> {
+    pub fn smudge_lfs_to_file(&mut self, path: &str, data: &[u8], target: &Path) -> Result<bool> {
         let attributes = self.attributes(path)?;
-        smudge_lfs_to_file_with(self.stack.repo, root, path, &attributes, data, target)
+        smudge_lfs_to_file_with(self.stack.repo, path, &attributes, data, target)
     }
 }
 
@@ -546,27 +550,21 @@ pub fn filter_driver_in(repo: &gix::Repository, path: &str) -> Result<Option<Str
 /// loading the whole file into memory.
 pub fn clean_file(root: &Path, path: &str, source: &Path) -> Result<Vec<u8>> {
     let repo = discover(root)?;
-    clean_file_in(&repo, root, path, source)
+    clean_file_in(&repo, path, source)
 }
 
-pub fn clean_file_in(
-    repo: &gix::Repository,
-    root: &Path,
-    path: &str,
-    source: &Path,
-) -> Result<Vec<u8>> {
+pub fn clean_file_in(repo: &gix::Repository, path: &str, source: &Path) -> Result<Vec<u8>> {
     let _ = workdir(repo)?;
     let attributes = attributes(repo, path)?;
     if attributes.filter.as_deref() == Some("lfs") {
         return lfs_clean_file(repo, source);
     }
     let data = std::fs::read(source)?;
-    clean_with(repo, root, path, &attributes, data)
+    clean_with(repo, path, &attributes, data)
 }
 
 fn clean_with(
     repo: &gix::Repository,
-    root: &Path,
     path: &str,
     attributes: &Attributes,
     data: Vec<u8>,
@@ -575,7 +573,8 @@ fn clean_with(
     if let Some(driver) = attributes.filter.as_deref() {
         if driver == "lfs" {
             data = lfs_clean(repo, &data)?;
-        } else if let Some(filtered) = run_driver_filter(repo, root, driver, "clean", path, &data)?
+        } else if let Some(filtered) =
+            run_driver_filter(repo, &workdir(repo)?, driver, "clean", path, &data)?
         {
             data = filtered;
         }
@@ -592,23 +591,18 @@ fn clean_with(
 /// Worktree bytes for `data` stored in the repository (checkout direction).
 pub fn smudge(root: &Path, path: &str, oid: &str, data: Vec<u8>) -> Result<Vec<u8>> {
     let repo = discover(root)?;
-    smudge_in(&repo, root, path, oid, data)
+    smudge_in(&repo, path, oid, data)
 }
 
-pub fn smudge_in(
-    repo: &gix::Repository,
-    root: &Path,
-    path: &str,
-    oid: &str,
-    data: Vec<u8>,
-) -> Result<Vec<u8>> {
+pub fn smudge_in(repo: &gix::Repository, path: &str, oid: &str, data: Vec<u8>) -> Result<Vec<u8>> {
     let _ = workdir(repo)?;
     let attributes = attributes(repo, path)?;
     let mut data = data;
     if let Some(driver) = attributes.filter.as_deref() {
         if driver == "lfs" {
             data = lfs_smudge(repo, &data)?;
-        } else if let Some(filtered) = run_driver_filter(repo, root, driver, "smudge", path, &data)?
+        } else if let Some(filtered) =
+            run_driver_filter(repo, &workdir(repo)?, driver, "smudge", path, &data)?
         {
             data = filtered;
         }

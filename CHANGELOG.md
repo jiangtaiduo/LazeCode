@@ -351,6 +351,32 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   height persists.
 - Status bar shows the real encoding (UTF-16/Latin-1/…) instead of always
   “Latin-1”; the terminal search highlight clears when the bar closes.
+- A full audit pass over the November optimization batch fixed the issues it
+  surfaced: the two-second VCS fallback now fingerprints `.git` metadata
+  (index/HEAD/refs/sequencer files) and only runs a full snapshot when it
+  moved, with a 30-second unconditional backstop; the status snapshot walks
+  the HEAD tree once instead of twice; find-in-files revokes superseded
+  scans through the cancel flag instead of piling up one uncancellable
+  thread per keystroke; watcher tree reloads run as background jobs with
+  the project's custom ignore patterns (and burst-coalesce), watcher
+  `.git` detection is scoped to the top-level repository, events under
+  default-ignored directories invalidate the ignored-file cache without
+  triggering full refreshes; image tabs decode off-thread with a loading
+  state, negatively cache failed decodes (no more per-frame retry) and keep
+  exact byte accounting across viewport-growth reloads; terminal cold
+  history resolves row ids by binary search (resize/reflow id gaps no
+  longer shift rows out of place), oversized rows keep later ids aligned,
+  spool compaction commits its new layout only on success, leftover spool
+  files of dead processes are swept at startup; the pending kitty-image
+  queue is bounded by the session graphics budget; the trailing-timer wake
+  path cannot strand a final frame; busy detection treats only dash-form
+  login shells (and the configured shell) as idle, so `exec fish` is
+  reported busy; stash apply re-reads attributes after materialising a
+  `.gitattributes` from the stash; checkout/reset/merge index rollbacks go
+  through `index.lock` instead of blind overwrites; fetch carries a
+  ten-minute watchdog; closing a console, closing a project and quitting
+  fork their one-off busy probe off-thread instead of stalling the frame;
+  and stale clipboard paste artifacts are cleaned up.
 
 ### Changed
 

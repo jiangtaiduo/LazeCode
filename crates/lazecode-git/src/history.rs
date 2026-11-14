@@ -195,7 +195,7 @@ pub fn merge(root: &Path, ref_name: &str) -> Result<String> {
         }
         match old_index {
             Some(bytes) => {
-                let _ = lazecode_fs::file::write_atomic(&repo.index_path(), &bytes);
+                let _ = lazecode_fs::file::write_atomic_locked(&repo.index_path(), &bytes);
             }
             None => {
                 let _ = std::fs::remove_file(repo.index_path());
@@ -1021,7 +1021,9 @@ fn write_index_from_state(state: gix::index::State, repo: &gix::Repository) -> R
 fn restore_index(repo: &gix::Repository, old_index: Option<Vec<u8>>) {
     match old_index {
         Some(bytes) => {
-            if let Err(error) = lazecode_fs::file::write_atomic(&repo.index_path(), &bytes) {
+            // index.lock semantics: a concurrent stage/commit job must not be
+            // silently overwritten by this rollback.
+            if let Err(error) = lazecode_fs::file::write_atomic_locked(&repo.index_path(), &bytes) {
                 log::error!("reset index rollback failed: {error}");
             }
         }

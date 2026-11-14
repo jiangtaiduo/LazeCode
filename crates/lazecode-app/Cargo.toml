@@ -36,6 +36,7 @@ dirs.workspace = true
 rfd = "0.16"
 png = "0.17"
 encoding_rs.workspace = true
+libc.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.21"

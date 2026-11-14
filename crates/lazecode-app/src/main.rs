@@ -38,6 +38,106 @@ use std::sync::OnceLock;
 
 use jobs::JobQueue;
 
+/// Cheap signature of the `.git` metadata that determines source-control
+/// state: every top-level dot-git file (index, HEAD, packed-refs,
+/// MERGE_HEAD, FETCH_HEAD, ...), the whole `refs/` tree and the sequencer
+/// state dirs (`rebase-merge/`, `rebase-apply/`, `sequencer/`). `objects/`,
+/// `logs/` and `hooks/` are deliberately excluded — a status result is a
+/// function of index + refs + HEAD, reflogs mirror refs, and walking the
+/// object store would dominate the poll cost. Returns `None` when there is
+/// no cheap signature (`.git` missing, or a linked worktree whose `.git` is
+/// a pointer file); the caller then falls back to the slow full-refresh
+/// backstop.
+fn git_fingerprint(root: &std::path::Path) -> Option<Vec<(std::path::PathBuf, u64, u64)>> {
+    const BUDGET: usize = 800;
+    let dot_git = root.join(".git");
+    let meta = std::fs::symlink_metadata(&dot_git).ok()?;
+    if !meta.is_dir() {
+        return None;
+    }
+    let mut entries: Vec<(std::path::PathBuf, u64, u64)> = Vec::new();
+    fn push_file(
+        path: &std::path::Path,
+        rel: &std::path::Path,
+        entries: &mut Vec<(std::path::PathBuf, u64, u64)>,
+    ) {
+        let Ok(meta) = std::fs::symlink_metadata(path) else {
+            return;
+        };
+        if meta.is_dir() {
+            return;
+        }
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        entries.push((rel.to_path_buf(), mtime, meta.len()));
+    }
+    fn walk_dir(
+        dir: &std::path::Path,
+        rel: &std::path::Path,
+        entries: &mut Vec<(std::path::PathBuf, u64, u64)>,
+        budget: &mut usize,
+    ) {
+        if *budget == 0 {
+            return;
+        }
+        let Ok(read_dir) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in read_dir.flatten() {
+            if *budget == 0 {
+                return;
+            }
+            let child_rel = rel.join(entry.file_name());
+            let child = entry.path();
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                walk_dir(&child, &child_rel, entries, budget);
+            } else {
+                *budget -= 1;
+                push_file(&child, &child_rel, entries);
+            }
+        }
+    }
+    let mut budget = BUDGET;
+    // Top-level files only; directories (objects/, logs/, hooks/, ...) are
+    // walked below only when they carry state the status depends on.
+    if let Ok(read_dir) = std::fs::read_dir(&dot_git) {
+        for entry in read_dir.flatten() {
+            if budget == 0 {
+                break;
+            }
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                continue;
+            }
+            budget -= 1;
+            push_file(
+                &entry.path(),
+                &std::path::PathBuf::from(entry.file_name()),
+                &mut entries,
+            );
+        }
+    }
+    for tracked in ["refs", "rebase-merge", "rebase-apply", "sequencer"] {
+        walk_dir(
+            &dot_git.join(tracked),
+            std::path::Path::new(tracked),
+            &mut entries,
+            &mut budget,
+        );
+    }
+    entries.sort();
+    Some(entries)
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum AppEvent {
     Wake,
@@ -311,6 +411,8 @@ struct LazeApp {
     jobs: JobQueue,
     last_watch_poll: std::time::Instant,
     last_vcs_poll: std::time::Instant,
+    last_full_vcs_poll: std::time::Instant,
+    git_fingerprint: Option<Vec<(std::path::PathBuf, u64, u64)>>,
     last_busy_poll: std::time::Instant,
     busy_tx: Sender<Vec<TerminalBusyRow>>,
     busy_rx: Receiver<Vec<TerminalBusyRow>>,
@@ -330,9 +432,13 @@ struct LazeApp {
 impl LazeApp {
     fn new(model: AppModel, jobs: JobQueue) -> Self {
         let (busy_tx, busy_rx) = crossbeam_channel::unbounded();
+        let mut runtime = UiRuntime::default();
+        // Close/quit probes notify this when they finish so the confirmation
+        // dialog is not delayed until the next poll deadline.
+        runtime.wake_notifier = model.notifier.clone();
         Self {
             model,
-            runtime: UiRuntime::default(),
+            runtime,
             gfx: None,
             jobs,
             last_watch_poll: std::time::Instant::now(),
@@ -341,6 +447,10 @@ impl LazeApp {
             last_vcs_poll: std::time::Instant::now()
                 .checked_sub(Duration::from_secs(3))
                 .unwrap_or_else(std::time::Instant::now),
+            last_full_vcs_poll: std::time::Instant::now()
+                .checked_sub(Duration::from_secs(31))
+                .unwrap_or_else(std::time::Instant::now),
+            git_fingerprint: None,
             last_busy_poll: std::time::Instant::now()
                 .checked_sub(Duration::from_secs(3))
                 .unwrap_or_else(std::time::Instant::now),
@@ -740,15 +850,21 @@ impl LazeApp {
             else {
                 continue;
             };
-            let project = &mut self.model.projects[position];
             let had_paths = !paths.is_empty();
             if had_paths {
-                let tree = lazecode_fs::tree::load_tree(&project.worktrees[wt_index].path);
-                if wt_index == 0 {
-                    project.tree = tree.clone();
-                }
-                project.worktrees[wt_index].tree = tree;
+                // The tree scan runs as a background job: it walks the whole
+                // worktree and would stall the frame during a busy build.
+                // Custom ignore patterns must match the ones the tree was
+                // loaded with (ProjectState::open), not the walker defaults.
+                let worktree_path = self.model.projects[position].worktrees[wt_index]
+                    .path
+                    .clone();
+                self.jobs.refresh_tree(
+                    worktree_path,
+                    Arc::new(self.model.settings.ignored_patterns.clone()),
+                );
             }
+            let project = &mut self.model.projects[position];
             for path in paths {
                 let canonical = path.canonicalize().unwrap_or(path);
                 let Some(tab) = project.tabs.iter_mut().find(|tab| {
@@ -814,6 +930,14 @@ impl LazeApp {
     /// PyCharm-style VCS refresh fallback. Watchers are best effort; polling
     /// the active checkout keeps the changelist and commit graph correct after
     /// another Git tool rewrites `.git` atomically.
+    ///
+    /// A full `snapshot()` costs a HEAD-tree walk plus untracked/ignored
+    /// directory walks, so it must not run unconditionally every 2 s. The fast
+    /// path fingerprints the `.git` metadata that actually drives status
+    /// (index + HEAD + refs + sequencer files) and only refreshes when that
+    /// signature moved. A slow unconditional backstop covers everything the
+    /// fingerprint cannot see (linked worktree gitdirs, missed worktree
+    /// edits, watchers that died entirely).
     fn poll_vcs(&mut self) -> bool {
         if self.last_vcs_poll.elapsed() < std::time::Duration::from_secs(2) {
             return false;
@@ -826,8 +950,33 @@ impl LazeApp {
         }
         let root = project.active_root().to_path_buf();
         self.last_vcs_poll = std::time::Instant::now();
-        self.jobs.refresh_git(root, self.model.notifier.clone());
-        true
+        let slow_due = self.last_full_vcs_poll.elapsed() >= std::time::Duration::from_secs(30);
+        let fingerprint = git_fingerprint(&root);
+        match fingerprint {
+            // No cheap signature (linked worktree whose .git is a pointer
+            // file): rely on the slow backstop alone.
+            None => {
+                if slow_due {
+                    self.last_full_vcs_poll = std::time::Instant::now();
+                    self.jobs.refresh_git(root, self.model.notifier.clone());
+                    return true;
+                }
+                false
+            }
+            Some(signature) => {
+                let changed = self.git_fingerprint.as_ref() != Some(&signature);
+                self.git_fingerprint = Some(signature);
+                if changed || slow_due {
+                    if slow_due {
+                        self.last_full_vcs_poll = std::time::Instant::now();
+                    }
+                    self.jobs.refresh_git(root, self.model.notifier.clone());
+                    true
+                } else {
+                    false
+                }
+            }
+        }
     }
 
     fn autosave(&mut self) {
@@ -849,13 +998,6 @@ impl LazeApp {
                 }
             }
         }
-    }
-
-    fn has_unsaved(&self) -> bool {
-        self.model
-            .projects
-            .iter()
-            .any(|project| project.tabs.iter().any(|tab| tab.is_dirty()))
     }
 
     /// Finder files and screenshot/image clipboards have no usable text
@@ -947,42 +1089,47 @@ impl LazeApp {
         std::thread::spawn(move || {
             // One `ps` snapshot for every pane. Spawning a probe per pane made
             // a 200-console workspace fork 200 processes every two seconds.
-            let probes: Vec<BusyTarget> =
-                targets.iter().map(|target| target.target.clone()).collect();
-            let infos = probe_busy_many(&probes);
-            let rows: Vec<TerminalBusyRow> = targets
-                .into_iter()
-                .zip(infos)
-                .map(|(target, info)| TerminalBusyRow {
-                    session_id: target.session_id,
-                    busy: info.busy,
-                    outputting: lazecode_ui::runtime::console_outputting(
-                        info.busy,
-                        target.last_output_ms,
-                        target.last_input_ms,
-                        target.last_resize_ms,
-                        target.was_outputting,
-                    ),
-                    commands: info.commands,
-                    last_output_ms: target.last_output_ms,
-                })
-                .collect();
+            // The completion send must happen even if the probe panics: the
+            // in-flight gate is only cleared when a row batch arrives, and a
+            // dropped send would freeze console activity for the rest of the
+            // run (matching JobQueue::spawn's catch_unwind discipline).
+            let rows = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                let probes: Vec<BusyTarget> =
+                    targets.iter().map(|target| target.target.clone()).collect();
+                let infos = probe_busy_many(&probes);
+                let rows: Vec<TerminalBusyRow> = targets
+                    .into_iter()
+                    .zip(infos)
+                    .map(|(target, info)| TerminalBusyRow {
+                        session_id: target.session_id,
+                        busy: info.busy,
+                        outputting: lazecode_ui::runtime::console_outputting(
+                            info.busy,
+                            target.last_output_ms,
+                            target.last_input_ms,
+                            target.last_resize_ms,
+                            target.was_outputting,
+                        ),
+                        commands: info.commands,
+                        last_output_ms: target.last_output_ms,
+                    })
+                    .collect();
+                rows
+            }))
+            .unwrap_or_default();
             let _ = tx.send(rows);
         });
     }
 
-    fn request_quit(&mut self, event_loop: &ActiveEventLoop) {
-        let commands = self.runtime.probe_all_terminal_busy(&self.model);
-        if self.has_unsaved() || !commands.is_empty() {
-            self.runtime.dialog = lazecode_ui::runtime::DialogState::Quit { commands };
-            if let Some(gfx) = &self.gfx {
-                gfx.window.request_redraw();
-            }
-        } else {
-            self.model.save_workspace();
-            self.model.save_settings();
-            self.model.shutdown_lsp();
-            event_loop.exit();
+    fn request_quit(&mut self, _event_loop: &ActiveEventLoop) {
+        // The busy probe runs off-thread; `poll_quit_probe` decides between
+        // the Quit dialog and `should_quit` once it lands. The actual exit
+        // (workspace/settings save, LSP shutdown) happens where
+        // `model.should_quit` is consumed, which is the same path the Quit
+        // dialog's confirm button takes.
+        self.runtime.request_quit_probe(&self.model);
+        if let Some(gfx) = &self.gfx {
+            gfx.window.request_redraw();
         }
     }
 
@@ -1212,6 +1359,8 @@ impl ApplicationHandler<AppEvent> for LazeApp {
         let had_watcher_changes = self.poll_watchers();
         let had_vcs_poll = self.poll_vcs();
         let had_busy = self.poll_terminal_busy();
+        let had_close_probe = self.runtime.poll_pending_close_probe(&mut self.model);
+        let had_quit_probe = self.runtime.poll_quit_probe(&mut self.model);
         self.start_terminal_busy_poll();
         if self.last_workspace_save.elapsed() > std::time::Duration::from_secs(30) {
             self.last_workspace_save = std::time::Instant::now();
@@ -1233,6 +1382,8 @@ impl ApplicationHandler<AppEvent> for LazeApp {
             || had_watcher_changes
             || had_vcs_poll
             || had_busy
+            || had_close_probe
+            || had_quit_probe
             || self.repaint_after.is_zero()
         {
             if let Some(gfx) = &self.gfx {
@@ -1242,8 +1393,45 @@ impl ApplicationHandler<AppEvent> for LazeApp {
     }
 }
 
+/// Remove cold-scrollback spool files left behind by processes that died
+/// without running their `Drop` (crash, SIGKILL, power loss). Each spool file
+/// embeds the owning pid: files of live processes are kept (another LazeCode
+/// window is an independent process), everything else is debris.
+fn cleanup_stale_cold_spools() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix("lazecode-cold-") else {
+            continue;
+        };
+        let Some(pid_text) = rest.split('-').next() else {
+            continue;
+        };
+        let Ok(pid) = pid_text.parse::<i32>() else {
+            continue;
+        };
+        if process_alive(pid) {
+            continue;
+        }
+        let _ = std::fs::remove_file(entry.path());
+    }
+}
+
+/// Signal 0 probes existence without side effects.
+fn process_alive(pid: i32) -> bool {
+    // SAFETY: `kill` with signal 0 performs a permission/existence check only.
+    let result = unsafe { libc::kill(pid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    cleanup_stale_cold_spools();
     let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
@@ -1520,4 +1708,58 @@ fn build_menu(zh: bool) -> Option<Menu> {
     .ok()?;
     menu.append(&window).ok()?;
     Some(menu)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_dot_git(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "lazecode-fingerprint-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git/refs/heads")).unwrap();
+        std::fs::create_dir_all(root.join(".git/objects/ab")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(root.join(".git/index"), "index").unwrap();
+        std::fs::write(root.join(".git/refs/heads/main"), "aaa\n").unwrap();
+        std::fs::write(root.join(".git/objects/ab/cd"), "blob").unwrap();
+        root
+    }
+
+    #[test]
+    fn fingerprint_tracks_refs_and_index_but_not_objects() {
+        let root = fake_dot_git("track");
+        let before = git_fingerprint(&root).expect("dir .git has a signature");
+        assert_eq!(before.len(), 3, "HEAD + index + refs/heads/main");
+
+        // A ref update is detected.
+        std::fs::write(root.join(".git/refs/heads/main"), "bbb\n").unwrap();
+        let after = git_fingerprint(&root).unwrap();
+        assert_ne!(before, after);
+
+        // Object-store churn is invisible to the signature.
+        std::fs::write(root.join(".git/objects/ab/cd"), "blob2").unwrap();
+        std::fs::write(root.join(".git/objects/ab/ef"), "blob3").unwrap();
+        let objects_only = git_fingerprint(&root).unwrap();
+        assert_eq!(after, objects_only);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fingerprint_none_for_pointer_file_or_missing_git() {
+        let root = fake_dot_git("pointer");
+        std::fs::remove_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git"), "gitdir: /elsewhere/.git\n").unwrap();
+        assert_eq!(git_fingerprint(&root), None);
+
+        let plain =
+            std::env::temp_dir().join(format!("lazecode-fingerprint-{}-plain", std::process::id()));
+        let _ = std::fs::remove_dir_all(&plain);
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(git_fingerprint(&plain), None);
+        let _ = std::fs::remove_dir_all(&plain);
+    }
 }

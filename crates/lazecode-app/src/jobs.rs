@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -152,6 +153,10 @@ pub enum JobResult {
         path: PathBuf,
         result: Result<Box<ProjectState>, String>,
     },
+    TreeLoaded {
+        root: PathBuf,
+        tree: lazecode_fs::tree::FileTree,
+    },
     GitRefreshed {
         root: PathBuf,
         result: Result<RepoSnapshot, String>,
@@ -260,6 +265,15 @@ pub struct JobQueue {
     notifier: Arc<dyn Notifier>,
     in_flight: HashSet<String>,
     pending_git: HashSet<PathBuf>,
+    /// Worktrees whose tree reload was requested while a scan was already in
+    /// flight; re-queued when the running scan completes so bursts of watcher
+    /// events coalesce into one scan instead of queueing scans per batch.
+    pending_trees: HashSet<PathBuf>,
+    /// Cancel flags for the latest in-flight find-in-files per worktree,
+    /// paired with that search's request id. A newer search revokes the
+    /// older one so rapid typing cannot pile up a thread per keystroke,
+    /// each scanning the whole tree to completion.
+    search_cancels: HashMap<PathBuf, (u64, Arc<AtomicBool>)>,
 }
 
 impl JobQueue {
@@ -271,6 +285,8 @@ impl JobQueue {
             notifier,
             in_flight: HashSet::new(),
             pending_git: HashSet::new(),
+            pending_trees: HashSet::new(),
+            search_cancels: HashMap::new(),
         }
     }
 
@@ -341,6 +357,26 @@ impl JobQueue {
             JobResult::GitRefreshed {
                 root: job_root,
                 result,
+            }
+        });
+    }
+
+    /// Rescan one worktree's file tree off the UI thread. Watcher bursts ask
+    /// for the same tree repeatedly; `pending_trees` coalesces them into the
+    /// next scan after the in-flight one lands.
+    pub fn refresh_tree(&mut self, root: PathBuf, ignored_patterns: Arc<Vec<String>>) {
+        let key = format!("tree:{}", root.display());
+        if self.in_flight.contains(&key) {
+            self.pending_trees.insert(root);
+            return;
+        }
+        let job_root = root.clone();
+        self.spawn("tree", key, move || {
+            let tree =
+                lazecode_fs::tree::load_tree_filtered(&job_root, 20_000, Some(&ignored_patterns));
+            JobResult::TreeLoaded {
+                root: job_root,
+                tree,
             }
         });
     }
@@ -579,28 +615,13 @@ impl JobQueue {
                         ToastKind::Warning,
                     );
                 } else {
-                    let panes: Vec<u64> = model
-                        .project_at(index)
-                        .map(|project| {
-                            project
-                                .worktrees
-                                .iter()
-                                .flat_map(|worktree| worktree.terminals.iter())
-                                .flat_map(|tab| tab.panes.iter().map(|pane| pane.id))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let commands = runtime.probe_busy_for(model, &panes);
-                    if commands.is_empty() {
-                        model.close_project(index);
-                        model.save_workspace();
-                        runtime.clear_terminal_cache();
-                    } else {
-                        runtime.dialog = lazecode_ui::runtime::DialogState::ConfirmTerminalClose {
-                            action: lazecode_ui::runtime::TerminalCloseAction::Project(index),
-                            commands,
-                        };
-                    }
+                    // Same async close probe as the direct path: the panes'
+                    // busy state is checked off-thread and the project closes
+                    // (or the confirmation dialog opens) on a later frame.
+                    runtime.request_terminal_close(
+                        model,
+                        lazecode_ui::runtime::TerminalCloseAction::Project(index),
+                    );
                 }
             }
             Command::ReloadGit => {
@@ -2815,13 +2836,27 @@ impl JobQueue {
             } => {
                 if let Some(project) = model.active_project() {
                     let root = project.active_root().to_path_buf();
+                    // Revoke the previous scan for this worktree before
+                    // spawning the new one; `search_in_files` polls the flag
+                    // between files, so the superseded thread unwinds quickly
+                    // instead of finishing a full-tree scan per keystroke.
+                    if let Some((_, stale)) = self.search_cancels.remove(&root) {
+                        stale.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    self.search_cancels
+                        .insert(root.clone(), (request_id, cancel.clone()));
                     let key = format!("search:{}:{request_id}", root.display());
                     let job_root = root.clone();
                     let job_query = query.clone();
                     self.spawn("search", key, move || {
-                        let result =
-                            lazecode_fs::search_in_files(&job_root, &job_query, &options, None)
-                                .map_err(|err| err.to_string());
+                        let result = lazecode_fs::search_in_files(
+                            &job_root,
+                            &job_query,
+                            &options,
+                            Some(&cancel),
+                        )
+                        .map_err(|err| err.to_string());
                         JobResult::SearchDone {
                             root: job_root,
                             request_id,
@@ -3237,6 +3272,37 @@ impl JobQueue {
                     }
                 }
             }
+            JobResult::TreeLoaded { root, tree } => {
+                // Mirror poll_watchers' assignment: the main worktree also
+                // feeds the project-level tree. If more watcher events queued
+                // while this scan ran, re-queue once with the fresher disk
+                // state instead of leaving the tree stale.
+                let position =
+                    model
+                        .projects
+                        .iter()
+                        .enumerate()
+                        .find_map(|(project_index, project)| {
+                            if project.root == root {
+                                return Some((project_index, 0usize));
+                            }
+                            project
+                                .worktrees
+                                .iter()
+                                .position(|worktree| worktree.path == root)
+                                .map(|wt| (project_index, wt))
+                        });
+                if let Some((project_index, wt_index)) = position {
+                    let project = &mut model.projects[project_index];
+                    if wt_index == 0 {
+                        project.tree = tree.clone();
+                    }
+                    project.worktrees[wt_index].tree = tree;
+                }
+                if self.pending_trees.remove(&root) {
+                    self.refresh_tree(root, Arc::new(model.settings.ignored_patterns.clone()));
+                }
+            }
             JobResult::GitRefreshed { root, result } => {
                 if let Some(project) = model.project_mut_for_git_root(&root) {
                     let worktree_index = project
@@ -3378,6 +3444,16 @@ impl JobQueue {
                 query,
                 result,
             } => {
+                // Drop the registry entry only when the completed search is
+                // still the newest one for this worktree; a newer search has
+                // already replaced it and must keep its own flag.
+                if self
+                    .search_cancels
+                    .get(&root)
+                    .is_some_and(|(id, _)| *id == request_id)
+                {
+                    self.search_cancels.remove(&root);
+                }
                 if runtime.search.request_id == request_id
                     && runtime.search.query == query
                     && model

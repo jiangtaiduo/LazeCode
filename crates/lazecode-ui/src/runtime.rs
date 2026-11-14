@@ -36,6 +36,19 @@ pub struct TerminalBusyState {
     pub last_output_ms: Option<u64>,
 }
 
+/// In-flight one-off probe for a terminal-close confirmation.
+struct PendingCloseProbe {
+    action: TerminalCloseAction,
+    pane_ids: Vec<u64>,
+    rx: std::sync::mpsc::Receiver<Vec<(u64, TerminalBusyState)>>,
+}
+
+/// In-flight one-off probe for the quit guard.
+struct PendingQuitProbe {
+    pane_ids: Vec<u64>,
+    rx: std::sync::mpsc::Receiver<Vec<(u64, TerminalBusyState)>>,
+}
+
 /// Action closed by the terminal confirmation modal.
 #[derive(Clone, Debug)]
 pub enum TerminalCloseAction {
@@ -550,6 +563,12 @@ pub struct UiRuntime {
     pub find: FindState,
     pub menu: Option<MenuState>,
     pub dialog: DialogState,
+    /// One-off close/quit busy probes running off-thread; the event loop
+    /// drains them via `poll_pending_close_probe`/`poll_quit_probe`. They
+    /// replaced a synchronous `ps` fork in the draw path (visible hitch when
+    /// closing a console or quitting).
+    pending_close_probe: Option<PendingCloseProbe>,
+    pending_quit_probe: Option<PendingQuitProbe>,
     pub terminal_snapshots: HashMap<u64, Snapshot>,
     pub terminal_selections: HashMap<u64, Option<TermSelection>>,
     pub terminal_focus: Option<u64>,
@@ -565,6 +584,10 @@ pub struct UiRuntime {
     pub terminal_graphics: HashMap<u64, crate::terminal::GraphicsCache>,
     /// Per-pane process activity from the 2s background probe.
     pub terminal_busy: HashMap<u64, TerminalBusyState>,
+    /// Set by the app shell: wakes the event loop when an off-thread close/
+    /// quit probe finishes, so the confirmation dialog lands next frame
+    /// instead of waiting for the next poll deadline.
+    pub wake_notifier: Option<std::sync::Arc<dyn lazecode_terminal::Notifier>>,
     pub editor_focus: Option<u64>,
     pub editor_drag: bool,
     /// Vertical scroll offset of the project rail (0 = newest/top).
@@ -673,6 +696,8 @@ impl Default for UiRuntime {
             find: FindState::default(),
             menu: None,
             dialog: DialogState::None,
+            pending_close_probe: None,
+            pending_quit_probe: None,
             terminal_snapshots: HashMap::new(),
             terminal_selections: HashMap::new(),
             terminal_focus: None,
@@ -684,6 +709,7 @@ impl Default for UiRuntime {
             terminal_wake: HashMap::new(),
             terminal_graphics: HashMap::new(),
             terminal_busy: HashMap::new(),
+            wake_notifier: None,
             new_ignore_pattern: String::new(),
             commit_view_menu_frame: 0,
             cmp_view_menu_frame: 0,
@@ -995,9 +1021,16 @@ impl UiRuntime {
         commands
     }
 
-    /// Probe the requested panes now, bypassing the 2s cache. Used when the
-    /// user closes a console so a just-started command is still detected.
-    pub fn probe_busy_for(&mut self, model: &AppModel, pane_ids: &[u64]) -> Vec<String> {
+    /// Probe the requested panes off-thread, bypassing the 2s cache. Used
+    /// when the user closes a console or quits, so a just-started command is
+    /// still detected without forking `ps` synchronously in the draw path.
+    /// The result lands on the UI thread through `poll_pending_close_probe`
+    /// / `poll_quit_probe`.
+    fn spawn_busy_probe(
+        &self,
+        model: &AppModel,
+        pane_ids: &[u64],
+    ) -> std::sync::mpsc::Receiver<Vec<(u64, TerminalBusyState)>> {
         struct ProbeInput {
             id: u64,
             target: BusyTarget,
@@ -1031,38 +1064,88 @@ impl UiRuntime {
                 });
             }
         }
-        let targets: Vec<BusyTarget> = rows.iter().map(|row| row.target.clone()).collect();
-        let infos = probe_busy_many(&targets);
-        for (row, info) in rows.into_iter().zip(infos) {
-            self.terminal_busy.insert(
-                row.id,
-                TerminalBusyState {
-                    busy: info.busy,
-                    outputting: console_outputting(
-                        info.busy,
-                        row.output_ms,
-                        row.input_ms,
-                        row.resize_ms,
-                        row.was_outputting,
-                    ),
-                    commands: info.commands,
-                    last_output_ms: row.output_ms,
-                },
-            );
-        }
-        self.busy_commands_for(pane_ids)
+        let (tx, rx) = std::sync::mpsc::channel();
+        let wake = self.wake_notifier.clone();
+        std::thread::Builder::new()
+            .name("lazecode-close-probe".to_string())
+            .spawn(move || {
+                let targets: Vec<BusyTarget> = rows.iter().map(|row| row.target.clone()).collect();
+                let infos = probe_busy_many(&targets);
+                let results: Vec<(u64, TerminalBusyState)> = rows
+                    .into_iter()
+                    .zip(infos)
+                    .map(|(row, info)| {
+                        (
+                            row.id,
+                            TerminalBusyState {
+                                busy: info.busy,
+                                outputting: console_outputting(
+                                    info.busy,
+                                    row.output_ms,
+                                    row.input_ms,
+                                    row.resize_ms,
+                                    row.was_outputting,
+                                ),
+                                commands: info.commands,
+                                last_output_ms: row.output_ms,
+                            },
+                        )
+                    })
+                    .collect();
+                let _ = tx.send(results);
+                if let Some(notifier) = &wake {
+                    notifier.notify();
+                }
+            })
+            .ok();
+        rx
     }
 
-    /// Ask before killing panes when the one-off `ps` probe finds a command.
-    /// The action is applied immediately when idle.
+    fn apply_busy_results(&mut self, results: Vec<(u64, TerminalBusyState)>) {
+        for (id, state) in results {
+            self.terminal_busy.insert(id, state);
+        }
+    }
+
+    /// Ask before killing panes when a busy command is running. The probe
+    /// runs off-thread; `poll_pending_close_probe` applies the outcome.
     pub fn request_terminal_close(&mut self, model: &mut AppModel, action: TerminalCloseAction) {
         let pane_ids = self.terminal_close_panes(model, &action);
-        let commands = self.probe_busy_for(model, &pane_ids);
+        if pane_ids.is_empty() {
+            self.apply_terminal_close(model, action);
+            return;
+        }
+        let rx = self.spawn_busy_probe(model, &pane_ids);
+        self.pending_close_probe = Some(PendingCloseProbe {
+            action,
+            pane_ids,
+            rx,
+        });
+    }
+
+    /// Drain a finished close probe (if any) and apply its decision: close
+    /// the panes when idle, otherwise show the confirmation dialog. Returns
+    /// true when the UI should redraw.
+    pub fn poll_pending_close_probe(&mut self, model: &mut AppModel) -> bool {
+        let Some(pending) = self.pending_close_probe.as_mut() else {
+            return false;
+        };
+        let results = match pending.rx.try_recv() {
+            Ok(results) => results,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Vec::new(),
+        };
+        let pane_ids = pending.pane_ids.clone();
+        let action = pending.action.clone();
+        self.pending_close_probe = None;
+        self.apply_busy_results(results);
+        let commands = self.busy_commands_for(&pane_ids);
         if commands.is_empty() {
             self.apply_terminal_close(model, action);
         } else {
             self.dialog = DialogState::ConfirmTerminalClose { action, commands };
         }
+        true
     }
 
     pub fn apply_terminal_close(&mut self, model: &mut AppModel, action: TerminalCloseAction) {
@@ -1234,15 +1317,46 @@ impl UiRuntime {
         }
     }
 
-    pub fn probe_all_terminal_busy(&mut self, model: &AppModel) -> Vec<String> {
-        let ids: Vec<u64> = model
+    /// Begin the async quit guard: probe every console off-thread, then
+    /// `poll_quit_probe` either shows the Quit dialog (unsaved tabs, running
+    /// commands) or sets `should_quit`.
+    pub fn request_quit_probe(&mut self, model: &AppModel) {
+        let pane_ids: Vec<u64> = model
             .projects
             .iter()
             .flat_map(|project| project.worktrees.iter())
             .flat_map(|worktree| worktree.terminals.iter())
             .flat_map(|tab| tab.panes.iter().map(|pane| pane.id))
             .collect();
-        self.probe_busy_for(model, &ids)
+        let rx = self.spawn_busy_probe(model, &pane_ids);
+        self.pending_quit_probe = Some(PendingQuitProbe { pane_ids, rx });
+    }
+
+    /// Drain a finished quit probe and apply its decision. Returns true when
+    /// the UI should redraw.
+    pub fn poll_quit_probe(&mut self, model: &mut AppModel) -> bool {
+        let Some(pending) = self.pending_quit_probe.as_mut() else {
+            return false;
+        };
+        let results = match pending.rx.try_recv() {
+            Ok(results) => results,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Vec::new(),
+        };
+        let pane_ids = pending.pane_ids.clone();
+        self.pending_quit_probe = None;
+        self.apply_busy_results(results);
+        let commands = self.busy_commands_for(&pane_ids);
+        let unsaved = model
+            .projects
+            .iter()
+            .any(|project| project.tabs.iter().any(|tab| tab.is_dirty()));
+        if unsaved || !commands.is_empty() {
+            self.dialog = DialogState::Quit { commands };
+        } else {
+            model.should_quit = true;
+        }
+        true
     }
 
     pub fn clear_terminal_cache(&mut self) {

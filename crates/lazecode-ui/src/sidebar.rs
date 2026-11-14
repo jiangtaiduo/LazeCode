@@ -16,6 +16,23 @@ const HEAD_H: f32 = 36.0;
 const FOOT_H: f32 = 25.0;
 const ROW_H: f32 = 25.0;
 
+/// The sidebar is only drawn while a project is open (`compute_layout`
+/// gates on `has_project`), so `active_project` is an invariant rather than
+/// a per-frame branch. Route every access through these helpers so the
+/// assumption is stated (and its panic message meaningful) in exactly one
+/// place instead of 21 bare unwraps.
+fn active(model: &AppModel) -> &lazecode_core::ProjectState {
+    model
+        .active_project()
+        .expect("sidebar drawn without an active project")
+}
+
+fn active_mut(model: &mut AppModel) -> &mut lazecode_core::ProjectState {
+    model
+        .active_project_mut()
+        .expect("sidebar drawn without an active project")
+}
+
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, rect: Rect) {
     let p = theme.palette;
     ui.painter().rect_filled(rect, 0.0, p.sidebar);
@@ -171,7 +188,9 @@ fn explorer(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
 
 fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, rect: Rect) {
     let p = theme.palette;
-    let active_index = model.active_project.unwrap();
+    let active_index = model
+        .active_project
+        .expect("sidebar drawn without an active project");
     let filter = model.ui.tree_filter.to_lowercase();
     let (rows, changes): (Vec<VisibleRow>, HashMap<String, char>) = {
         let project = &model.projects[active_index];
@@ -886,7 +905,7 @@ fn source_control(
     if tab == CommitTab::Commit {
         let refresh = tool_btn(ui, 0, Icon::Refresh, true, theme);
         let rollback = tool_btn(ui, 1, Icon::Undo, true, theme);
-        let project_now = model.active_project().unwrap();
+        let project_now = active(model);
         let has_selection = !project_now.change_selection.is_empty();
         let shelve_enabled = tool_btn(ui, 2, Icon::ShelveIn, true, theme);
         let eye = tool_btn(ui, 3, Icon::ViewOptions, true, theme);
@@ -950,7 +969,7 @@ fn source_control(
             // ⌥⌘U：恢复到首个变更列表，不弹对话框（稳定版 Unshelve Silently）。
             if let Some(name) = rt.shelf_selected.clone() {
                 let default_list = {
-                    let project = model.active_project().unwrap();
+                    let project = active(model);
                     lazecode_git::Changelists::open(project.active_root())
                         .lists()
                         .first()
@@ -984,7 +1003,7 @@ fn source_control(
         Stroke::new(1.0, p.border_soft),
     );
 
-    let project = model.active_project().unwrap();
+    let project = active(model);
     let mut changes = project.changes().to_vec();
     let mut ignored_indices: Vec<usize> = Vec::new();
     if rt.commit_show_ignored {
@@ -1104,7 +1123,7 @@ fn source_control(
 
     // ----- 分组构建：Default（含冲突子组）→ 自定义列表 → Unversioned -----
     // 每帧从 JSON 重载归属（读取廉价；写入路径已统一走后台任务）。
-    let lists = lazecode_git::Changelists::open(&model.active_project().unwrap().root);
+    let lists = lazecode_git::Changelists::open(&active(model).root);
     let default_name = lists
         .lists()
         .first()
@@ -1304,7 +1323,7 @@ fn source_control(
             project.collapsed_lists = keys;
         }
     }
-    let collapsed_lists: HashSet<String> = model.active_project().unwrap().collapsed_lists.clone();
+    let collapsed_lists: HashSet<String> = active(model).collapsed_lists.clone();
 
     // ----- 扁平行模型（虚拟化 + Shift 范围选择基准顺序） -----
     #[derive(Clone, Copy)]
@@ -1586,7 +1605,7 @@ fn source_control(
                                 Sense::click(),
                             );
                             if chev_resp.clicked() {
-                                let project = model.active_project_mut().unwrap();
+                                let project = active_mut(model);
                                 if !project.collapsed_lists.remove(&group.key) {
                                     project.collapsed_lists.insert(group.key.clone());
                                 }
@@ -1609,12 +1628,12 @@ fn source_control(
                             );
                             if response.clicked() && !chk_resp.clicked() && !chev_resp.clicked() {
                                 if response.double_clicked() {
-                                    let project = model.active_project_mut().unwrap();
+                                    let project = active_mut(model);
                                     if !project.collapsed_lists.remove(&group.key) {
                                         project.collapsed_lists.insert(group.key.clone());
                                     }
                                 } else {
-                                    let project = model.active_project_mut().unwrap();
+                                    let project = active_mut(model);
                                     project.change_selection.clear();
                                     project.change_selection.insert(group.name.clone());
                                 }
@@ -1688,8 +1707,7 @@ fn source_control(
                             {
                                 if let Some(first) = group.conflicts.first() {
                                     let path = changes[*first].path.clone();
-                                    let root =
-                                        model.active_project().unwrap().active_root().to_path_buf();
+                                    let root = active(model).active_root().to_path_buf();
                                     if let Ok(content) =
                                         lazecode_git::merge_file_content(&root, &path)
                                     {
@@ -1710,7 +1728,7 @@ fn source_control(
                                 p.accent,
                             );
                             if response.clicked() && !chk_resp.clicked() {
-                                let project = model.active_project_mut().unwrap();
+                                let project = active_mut(model);
                                 if !project.collapsed_lists.remove(&conflict_key) {
                                     project.collapsed_lists.insert(conflict_key);
                                 }
@@ -1757,7 +1775,7 @@ fn source_control(
                                         Sense::click(),
                                     );
                                     if chev_resp.clicked() {
-                                        let project = model.active_project_mut().unwrap();
+                                        let project = active_mut(model);
                                         if !project.collapsed_lists.remove(key) {
                                             project.collapsed_lists.insert(key.clone());
                                         }
@@ -1828,7 +1846,7 @@ fn source_control(
                                     );
 
                                     if response.clicked() && !chk_clicked && !chev_resp.clicked() {
-                                        let project = model.active_project_mut().unwrap();
+                                        let project = active_mut(model);
                                         if !project.collapsed_lists.remove(key) {
                                             project.collapsed_lists.insert(key.clone());
                                         }
@@ -1906,7 +1924,7 @@ fn source_control(
                                     }
                                 } else {
                                     payload_paths.push(path.clone());
-                                    let project = model.active_project_mut().unwrap();
+                                    let project = active_mut(model);
                                     project.change_selection.clear();
                                     project.change_selection.insert(path.clone());
                                     project.change_anchor = Some(path.clone());
@@ -1930,7 +1948,7 @@ fn source_control(
                             } else if clicked {
                                 // 单击只选中行（对齐稳定版）：Cmd/Ctrl 增减，
                                 // Shift 自锚点范围选择，普通点击重置为单选。
-                                let project = model.active_project_mut().unwrap();
+                                let project = active_mut(model);
                                 if modifiers.shift {
                                     if let Some(anchor) = project.change_anchor.clone() {
                                         // lo/hi 是扁平行序中的位置，不是 change 索引
@@ -1979,7 +1997,7 @@ fn source_control(
     });
 
     if let Some((paths, target)) = group_toggle {
-        let project = model.active_project_mut().unwrap();
+        let project = active_mut(model);
         for path in paths {
             if target {
                 project.checked_paths.insert(path);
@@ -1989,7 +2007,7 @@ fn source_control(
         }
     }
     if let Some((path, is_checked)) = toggled {
-        let project = model.active_project_mut().unwrap();
+        let project = active_mut(model);
         if is_checked {
             project.checked_paths.insert(path);
         } else {
@@ -2215,7 +2233,7 @@ fn draw_commit_dock(
             .desired_width(editor_rect.width()),
     );
     if response.changed() {
-        model.active_project_mut().unwrap().commit_message = value;
+        active_mut(model).commit_message = value;
     }
     if response.lost_focus() {
         model.save_workspace();
@@ -2568,7 +2586,7 @@ fn shelf_date(seconds: u64) -> String {
 /// 稳定版 Shelf 页签：架藏列表（可展开文件）+ Recently Deleted + 右键。
 fn shelf_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, rect: Rect) {
     let p = theme.palette;
-    let root = model.active_project().unwrap().active_root().to_path_buf();
+    let root = active(model).active_root().to_path_buf();
     if rt.shelf_loaded.as_deref() != Some(root.as_path()) {
         rt.shelf_entries = lazecode_git::shelf_list(&root).unwrap_or_default();
         rt.shelf_deleted = lazecode_git::shelf_list_deleted(&root).unwrap_or_default();

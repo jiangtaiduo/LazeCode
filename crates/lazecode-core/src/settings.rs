@@ -216,6 +216,21 @@ impl Settings {
         self.commit_history.truncate(10);
     }
 
+    /// Ship the updater to existing installs: settings written before the
+    /// updater had a working default carry explicit empty strings for the
+    /// endpoint and key, which serde keeps as-is. Fill them from the current
+    /// defaults so the signed-update channel works without a hand edit. An
+    /// operator who wants the updater off clears `auto_check_updates`
+    /// instead (a check can always be triggered manually).
+    fn migrate_updater_defaults(&mut self) {
+        if self.update_endpoint.trim().is_empty() {
+            self.update_endpoint = Self::default().update_endpoint;
+        }
+        if self.update_public_key.trim().is_empty() {
+            self.update_public_key = Self::default().update_public_key;
+        }
+    }
+
     /// `true` when both the endpoint and the pinned signing key are set.
     /// The UI disables every updater control while this is `false`.
     pub fn updates_configured(&self) -> bool {
@@ -241,6 +256,7 @@ impl Settings {
             Ok(text) => match toml::from_str::<Settings>(&text) {
                 Ok(mut settings) => {
                     settings.normalise();
+                    settings.migrate_updater_defaults();
                     (settings, None)
                 }
                 Err(err) => (
@@ -395,6 +411,25 @@ mod tests {
         assert_eq!(back.update_public_key, settings.update_public_key);
         assert!(!back.auto_check_updates);
         assert!(back.updates_configured());
+    }
+
+    #[test]
+    fn empty_updater_fields_migrate_to_defaults() {
+        // Pre-updater installs saved explicit empty strings; loading must
+        // promote them to the shipped defaults so the update channel works
+        // without a hand edit.
+        let mut settings: Settings =
+            toml::from_str("update_endpoint = \"\"
+update_public_key = \"\"\n").unwrap();
+        settings.migrate_updater_defaults();
+        assert!(settings.updates_configured());
+        assert!(settings.update_endpoint.starts_with("https://"));
+        assert!(!settings.update_public_key.is_empty());
+        // An operator-set endpoint is left untouched.
+        let mut settings: Settings =
+            toml::from_str("update_endpoint = \"https://example.test/m.json\"\n").unwrap();
+        settings.migrate_updater_defaults();
+        assert_eq!(settings.update_endpoint, "https://example.test/m.json");
     }
 
     #[test]

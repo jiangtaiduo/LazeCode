@@ -68,7 +68,10 @@ tar -czf "$ARTIFACT" -C dist LazeCode.app
 #    order; sign those bytes verbatim.
 SHA256="$(shasum -a 256 "$ARTIFACT" | awk '{print $1}')"
 NOTES="LazeCode $VERSION"
-URL="https://raw.githubusercontent.com/jiangtaiduo/LazeCode/main/releases/$(basename "$ARTIFACT")"
+# UPDATE_BASE_URL overrides the publish root (local E2E tests point it at a
+# scratch HTTP server); MANIFEST_OUT redirects the manifest path.
+BASE_URL="${UPDATE_BASE_URL:-https://raw.githubusercontent.com/jiangtaiduo/LazeCode/main}"
+URL="${BASE_URL%/}/releases/$(basename "$ARTIFACT")"
 PAYLOAD="$(printf '{"version":"%s","url":"%s","sha256":"%s","notes":"%s","min_os":"","arch":"%s","kind":"app-bundle"}' \
   "$VERSION" "$URL" "$SHA256" "$NOTES" "$UPDATER_ARCH")"
 PAYLOAD_FILE="$(mktemp)"
@@ -77,7 +80,7 @@ SIGNATURE="$(openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$PAYLOAD_FILE" | ba
 rm -f "$PAYLOAD_FILE"
 
 # 4. Emit the manifest.
-cat > "$ROOT/latest.json" <<EOF
+cat > "${MANIFEST_OUT:-$ROOT/latest.json}" <<EOF
 {
   "version": "$VERSION",
   "url": "$URL",
@@ -92,7 +95,7 @@ EOF
 echo
 echo "Staged release $VERSION:"
 echo "  artifact : releases/$(basename "$ARTIFACT")"
-echo "  manifest : latest.json"
+echo "  manifest : ${MANIFEST_OUT:-$ROOT/latest.json}"
 echo
 echo "Publish: git add releases/$(basename "$ARTIFACT") latest.json && git commit && git push"
 echo "Verify locally before publishing:"

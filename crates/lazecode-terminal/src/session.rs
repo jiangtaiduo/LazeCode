@@ -916,14 +916,17 @@ fn is_shell_name(name: &str, shell: &str) -> bool {
         )
 }
 
-fn busy_from_entries(entries: &[(u32, String)], shell_pid: Option<u32>, shell: &str) -> BusyInfo {
+fn busy_from_entries(entries: &[(u32, String)], _shell_pid: Option<u32>, shell: &str) -> BusyInfo {
     let mut commands = Vec::new();
     for (pid, name) in entries {
         let name = name.trim();
         if name.is_empty() {
             continue;
         }
-        if Some(*pid) == shell_pid && is_shell_name(name, shell) {
+        // Match by name, not pid: macOS can report the shell under a
+        // parenthesised name or hand the tty to a re-exec'd shell, and the
+        // pid recorded at spawn then no longer identifies it.
+        if is_shell_name(name, shell) {
             continue;
         }
         let short = name.rsplit('/').next().unwrap_or(name).to_string();
@@ -2213,9 +2216,12 @@ mod tests {
         assert_eq!(exec_fish.commands, ["fish"]);
         // A plain configured-shell name stays idle (non-login spawn forms).
         assert!(!parse_busy_output("  100 /bin/zsh\n", Some(100), "/bin/zsh").busy);
-        // macOS 15 `ps` can report the shell as `(bash)`.
+        // macOS 15 `ps` can report the shell as `(bash)`, sometimes under a
+        // pid other than the one recorded at spawn.
         let paren = parse_busy_output("  100 (bash)\n", Some(100), "/bin/bash");
         assert!(!paren.busy, "parenthesised shell is idle: {paren:?}");
+        let reexec = parse_busy_output("  200 (bash)\n", Some(100), "/bin/bash");
+        assert!(!reexec.busy, "shell matches by name, not pid: {reexec:?}");
         // Documented residual: `exec zsh` over a zsh session is
         // indistinguishable from the idle prompt by `ps` alone.
         assert!(!parse_busy_output("  100 zsh\n", Some(100), "/bin/zsh").busy);

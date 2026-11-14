@@ -10,9 +10,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Console activity no longer reports an idle shell as busy when macOS
-  `ps` prints its executable as a parenthesised name such as `(bash)`,
-  which is how macOS 15 CI reports the spawned shell.
+- Console activity recognises the idle shell by name rather than the pid
+  recorded at spawn, and normalises parenthesised `ps` names such as
+  `(bash)` (macOS 15), so an idle console is no longer reported busy.
 
 ## [0.4.4] - 2026-11-14
 

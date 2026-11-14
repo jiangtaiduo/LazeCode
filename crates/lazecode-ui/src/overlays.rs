@@ -83,6 +83,9 @@ pub struct UpdateProgress {
     pub outcome: Option<CheckOutcome>,
     pub staged: Option<PathBuf>,
     pub installed: Option<String>,
+    /// Where the new build was installed (bundle or executable), so the
+    /// dialog can relaunch exactly what was replaced.
+    pub installed_target: Option<PathBuf>,
 }
 
 /// Shared handle a worker thread writes and the UI polls once per frame.
@@ -120,6 +123,8 @@ pub struct UpdateState {
     pub error: Option<String>,
     /// Version installed in this session (restart required).
     pub installed: Option<String>,
+    /// Install location of that version (bundle or executable).
+    pub installed_target: Option<PathBuf>,
     /// Auto-check already attempted for this session.
     pub auto_checked: bool,
     /// Version already announced in a toast, so it is not repeated.
@@ -161,6 +166,9 @@ impl UpdateState {
         if let Some(version) = progress.installed {
             self.installed = Some(version);
             self.staged = None;
+        }
+        if let Some(target) = progress.installed_target {
+            self.installed_target = Some(target);
         }
         self.job = None;
     }
@@ -228,7 +236,8 @@ impl UpdateState {
         });
     }
 
-    /// Replace the running executable with the verified staged artifact.
+    /// Replace the running build with the verified staged artifact, using
+    /// the manifest's announced shape (single executable or `.app` bundle).
     pub fn install_staged(&mut self) {
         if self.busy() {
             return;
@@ -236,22 +245,42 @@ impl UpdateState {
         let Some(staged) = self.staged.clone() else {
             return;
         };
+        let kind = self
+            .available
+            .as_ref()
+            .map(|outcome| outcome.manifest.artifact_kind())
+            .unwrap_or(updater::ArtifactKind::Executable);
         let version = self
             .available
             .as_ref()
             .map(|outcome| outcome.manifest.version.clone());
         self.start(UpdatePhase::Installing, move |job| {
             let target = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("LazeCode"));
-            match updater::install(&staged, &target) {
+            match updater::install_artifact(&staged, &target, kind) {
                 Ok(report) => {
-                    if let Some(backup) = report.backup {
-                        log::info!("previous executable kept at {}", backup.display());
+                    if let Some(backup) = &report.backup {
+                        log::info!("previous build kept at {}", backup.display());
                     }
-                    job.with(|progress| progress.installed = version.clone());
+                    job.with(|progress| {
+                        progress.installed = version.clone();
+                        progress.installed_target = Some(report.target.clone());
+                    });
                 }
                 Err(err) => job.with(|progress| progress.error = Some(err.to_string())),
             }
         });
+    }
+
+    /// Start the freshly installed build and quit so it takes over.
+    pub fn relaunch_installed(&mut self) -> Result<(), String> {
+        if self.busy() {
+            return Err("an update task is still running".into());
+        }
+        let target = self
+            .installed_target
+            .clone()
+            .ok_or_else(|| "nothing was installed yet".to_string())?;
+        updater::relaunch(&target).map_err(|err| err.to_string())
     }
 }
 
@@ -718,15 +747,32 @@ fn draw_update_window(
             ui,
             content,
             &if zh {
-                format!(
-                    "已安装 {installed}。重启 LazeCode 后生效；旧的可执行文件保留为 .bak 备份。"
-                )
+                format!("已安装 {installed}。旧版本保留为备份（.bak）。")
             } else {
-                format!("Installed {installed}. Restart LazeCode to run it; the previous executable is kept as a .bak backup.")
+                format!("Installed {installed}. The previous build is kept as a .bak backup.")
             },
             FontId::proportional(12.0),
             p.green,
         );
+        let restart_rect = Rect::from_min_size(
+            Pos2::new(content.left(), content.top() + 40.0),
+            Vec2::new(150.0, 30.0),
+        );
+        if primary_button(
+            ui,
+            restart_rect,
+            crate::tr!(model, "Restart now", "立即重启"),
+            None,
+            true,
+            theme,
+        )
+        .clicked()
+        {
+            match rt.update.relaunch_installed() {
+                Ok(()) => model.should_quit = true,
+                Err(err) => rt.update.error = Some(err),
+            }
+        }
     } else if let Some(outcome) = &rt.update.available {
         if outcome.update_available {
             ui.painter().text(

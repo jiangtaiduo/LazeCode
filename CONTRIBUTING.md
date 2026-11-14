@@ -52,3 +52,20 @@ cargo run -p lazecode-app --bin snapshot -- /tmp/laze.png "$PWD" editor zh
 - Add a regression test for every bug fix.
 - Keep English and Simplified Chinese user-facing docs in sync.
 - Do not include build output (`.app`, `target/`), signing keys or real user data.
+
+## Releases and updates
+
+The in-app updater fetches a signed `latest.json` from the repository's
+default branch and installs the announced artifact after verifying its
+Ed25519 signature and SHA-256. To publish a release:
+
+1. Bump the workspace version in `Cargo.toml`.
+2. Run `scripts/release-update.sh` (builds, packs the `.app` bundle,
+   hashes and signs the manifest). The signing key lives outside the
+   repository — see the script header for the expected path and format.
+3. `git add releases/ latest.json`, commit and push. No GitHub Release API
+   access is needed; the raw URLs are the update channel.
+
+The tag-triggered `release.yml` workflow additionally builds a CI artifact
+for the GitHub Releases page; its bytes differ from the locally signed
+artifact, so the updater channel remains the signed `releases/` artifact.

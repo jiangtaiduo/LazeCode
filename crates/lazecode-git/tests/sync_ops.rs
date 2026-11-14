@@ -57,7 +57,14 @@ fn push_fetch_pull_against_local_bare_remote() {
     let upstream_path = upstream.path().join("origin.git");
     git(
         upstream.path(),
-        &["init", "-q", "--bare", "-b", "main", upstream_path.to_str().unwrap()],
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            upstream_path.to_str().unwrap(),
+        ],
     );
 
     // work repo 1 (clone doesn't matter here; init then push -u)
@@ -108,7 +115,14 @@ fn fetch_prunes_stale_remote_tracking_refs() {
     let upstream_path = upstream.path().join("origin.git");
     git(
         upstream.path(),
-        &["init", "-q", "--bare", "-b", "main", upstream_path.to_str().unwrap()],
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            upstream_path.to_str().unwrap(),
+        ],
     );
     let work = tempfile::tempdir().unwrap();
     let root = work.path();
@@ -141,7 +155,14 @@ fn push_rejects_non_fast_forward_and_force_overwrites() {
     let upstream_path = upstream.path().join("origin.git");
     git(
         upstream.path(),
-        &["init", "-q", "--bare", "-b", "main", upstream_path.to_str().unwrap()],
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            upstream_path.to_str().unwrap(),
+        ],
     );
     let work = tempfile::tempdir().unwrap();
     let root = work.path();
@@ -178,7 +199,14 @@ fn remote_branch_delete_and_tag_push_against_bare_remote() {
     let upstream_path = upstream.path().join("origin.git");
     git(
         upstream.path(),
-        &["init", "-q", "--bare", "-b", "main", upstream_path.to_str().unwrap()],
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            upstream_path.to_str().unwrap(),
+        ],
     );
     let work = tempfile::tempdir().unwrap();
     let root = work.path();
@@ -211,7 +239,14 @@ fn pending_commits_are_limited_to_upstream_range() {
     let upstream_path = upstream.path().join("origin.git");
     git(
         upstream.path(),
-        &["init", "-q", "--bare", "-b", "main", upstream_path.to_str().unwrap()],
+        &[
+            "init",
+            "-q",
+            "--bare",
+            "-b",
+            "main",
+            upstream_path.to_str().unwrap(),
+        ],
     );
     let work = tempfile::tempdir().unwrap();
     let root = work.path();

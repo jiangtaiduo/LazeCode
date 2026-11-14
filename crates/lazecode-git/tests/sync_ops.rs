@@ -1,6 +1,6 @@
 use lazecode_git::{
-    clone, fetch_all, pending_count, pull, push, remote_add, remote_list, remote_remove,
-    remote_rename, remote_set_url, PullMode,
+    clone, delete_remote_branch, fetch_all, pending_commits, pending_count, pull, push, push_tag,
+    remote_add, remote_list, remote_remove, remote_rename, remote_set_url, PullMode,
 };
 use std::path::Path;
 use std::process::Command;
@@ -170,4 +170,68 @@ fn push_rejects_non_fast_forward_and_force_overwrites() {
         git(&upstream_path, &["rev-parse", "main"]),
         git(root, &["rev-parse", "HEAD"])
     );
+}
+
+#[test]
+fn remote_branch_delete_and_tag_push_against_bare_remote() {
+    let upstream = tempfile::tempdir().unwrap();
+    let upstream_path = upstream.path().join("origin.git");
+    git(
+        upstream.path(),
+        &["init", "-q", "--bare", upstream_path.to_str().unwrap()],
+    );
+    let work = tempfile::tempdir().unwrap();
+    let root = work.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "user.name", "T"]);
+    git(root, &["config", "user.email", "t@e"]);
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "one"]);
+    remote_add(root, "origin", upstream_path.to_str().unwrap()).unwrap();
+    push(root, "origin", "main", true, false).unwrap();
+
+    git(root, &["branch", "docs-only"]);
+    push(root, "origin", "docs-only", false, false).unwrap();
+    fetch_all(root).unwrap();
+    delete_remote_branch(root, "origin/docs-only").unwrap();
+    let heads = git(root, &["ls-remote", "--heads", "origin"]);
+    assert!(!heads.contains("docs-only"), "{heads}");
+    assert!(!git(root, &["for-each-ref", "refs/remotes/origin/docs-only"]).contains("docs-only"));
+
+    git(root, &["tag", "v9.9.9"]);
+    push_tag(root, "origin", "v9.9.9").unwrap();
+    let tags = git(root, &["ls-remote", "--tags", "origin"]);
+    assert!(tags.contains("refs/tags/v9.9.9"), "{tags}");
+}
+
+#[test]
+fn pending_commits_are_limited_to_upstream_range() {
+    let upstream = tempfile::tempdir().unwrap();
+    let upstream_path = upstream.path().join("origin.git");
+    git(
+        upstream.path(),
+        &["init", "-q", "--bare", upstream_path.to_str().unwrap()],
+    );
+    let work = tempfile::tempdir().unwrap();
+    let root = work.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "user.name", "T"]);
+    git(root, &["config", "user.email", "t@e"]);
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "one"]);
+    remote_add(root, "origin", upstream_path.to_str().unwrap()).unwrap();
+    push(root, "origin", "main", true, false).unwrap();
+
+    std::fs::write(root.join("b.txt"), "two\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "two"]);
+    let pending = pending_commits(root, Some("origin/main"), "main", 20).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].message, "two");
+    push(root, "origin", "main", false, false).unwrap();
+    assert!(pending_commits(root, Some("origin/main"), "main", 20)
+        .unwrap()
+        .is_empty());
 }

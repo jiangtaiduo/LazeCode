@@ -3,14 +3,14 @@ mod jobs;
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use crossbeam_channel::{Receiver, Sender};
 use egui_wgpu::winit::Painter;
 use egui_wgpu::{RendererOptions, WgpuConfiguration};
 use lazecode_core::{AppModel, Settings, TabKind};
-use lazecode_terminal::{probe_busy, BusyTarget, Notifier};
+use lazecode_terminal::{probe_busy_many, BusyTarget, Notifier};
 use lazecode_ui::UiRuntime;
 use parking_lot::Mutex;
 use winit::application::ApplicationHandler;
@@ -20,10 +20,21 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS};
 use winit::window::{Window, WindowId};
 
+use block2::RcBlock;
 #[cfg(target_os = "macos")]
 use muda::accelerator::{Accelerator, Code, Modifiers as MenuModifiers, CMD_OR_CTRL};
 #[cfg(target_os = "macos")]
 use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+#[cfg(target_os = "macos")]
+use objc2::runtime::{AnyClass, AnyObject, Sel};
+#[cfg(target_os = "macos")]
+use objc2::{class, msg_send};
+use objc2_app_kit::{NSEvent, NSEventMask};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSPoint, NSRect, NSString};
+use std::ptr::NonNull;
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
 
 use jobs::JobQueue;
 
@@ -48,11 +59,249 @@ struct TerminalBusyRow {
     last_output_ms: Option<u64>,
 }
 
+#[derive(Clone)]
+struct BusyProbeTarget {
+    session_id: u64,
+    target: BusyTarget,
+    last_output_ms: Option<u64>,
+    last_input_ms: Option<u64>,
+    last_resize_ms: Option<u64>,
+    was_outputting: bool,
+}
+
 struct Gfx {
     window: Arc<Window>,
     painter: Painter,
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
+}
+
+#[cfg(target_os = "macos")]
+type ZoomImp = unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject);
+
+/// AppKit calls `-[NSWindow zoom:]` for the system titlebar double-click
+/// gesture before the content view gets a chance to reject it. Keep the
+/// original implementation, but discard it when the gesture lands on one of
+/// the titlebar controls.
+#[cfg(target_os = "macos")]
+static ORIGINAL_ZOOM: OnceLock<ZoomImp> = OnceLock::new();
+#[cfg(target_os = "macos")]
+static ZOOM_GUARD_INSTALLED: OnceLock<()> = OnceLock::new();
+#[cfg(target_os = "macos")]
+static TITLEBAR_CONTROLS: std::sync::Mutex<Vec<(f32, f32, f32, f32)>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(target_os = "macos")]
+unsafe extern "C-unwind" fn titlebar_zoom_guard(
+    window: *mut AnyObject,
+    command: Sel,
+    sender: *mut AnyObject,
+) {
+    if suppress_control_zoom(window) {
+        return;
+    }
+    if let Some(original) = ORIGINAL_ZOOM.get() {
+        unsafe { original(window, command, sender) };
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn suppress_control_zoom(window: *mut AnyObject) -> bool {
+    if window.is_null() {
+        return false;
+    }
+    let Some(app_class) = AnyClass::get(c"NSApplication") else {
+        return false;
+    };
+    let app: *mut AnyObject = unsafe { msg_send![app_class, sharedApplication] };
+    if app.is_null() {
+        return false;
+    }
+    let event: *mut AnyObject = unsafe { msg_send![app, currentEvent] };
+    if event.is_null() {
+        return false;
+    }
+    let event_type: isize = unsafe { msg_send![event, type] };
+    // 1/2/6 = leftMouseDown/leftMouseUp/leftMouseDragged. Native zoom is
+    // driven by mouse gestures; menu/keyboard Zoom must keep working.
+    if !matches!(event_type, 1 | 2 | 6) {
+        return false;
+    }
+    let point: NSPoint = unsafe { msg_send![event, locationInWindow] };
+    let frame: NSRect = unsafe { msg_send![window, frame] };
+    // AppKit window coordinates have their origin at the bottom-left; the
+    // egui titlebar rects are top-left based.
+    let top_y = (frame.size.height - point.y) as f32;
+    // The window is a full-size content view with a custom 40px titlebar.
+    // AppKit would otherwise zoom when a double-click lands on any titlebar
+    // control (or before the control rects have been published); suppress the
+    // native gesture for the whole strip and let the egui titlebar decide.
+    // Checking every left-mouse event, not only `clickCount == 2`, also covers
+    // macOS's slower double-click gesture recognition.
+    // Allow for the native titlebar offset as well: full-size content views
+    // and the transparent titlebar can disagree by one bar height.
+    if top_y <= lazecode_ui::app_ui::TITLEBAR_H * 2.0 {
+        return true;
+    }
+    let x = point.x as f32;
+    let controls = match TITLEBAR_CONTROLS.lock() {
+        Ok(controls) => controls,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    controls.iter().any(|(left, top, right, bottom)| {
+        x >= *left && x <= *right && top_y >= *top && top_y <= *bottom
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn install_titlebar_zoom_guard(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    if ZOOM_GUARD_INSTALLED.set(()).is_err() {
+        return;
+    }
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = handle.ns_view.as_ptr() as *mut AnyObject;
+    let ns_window: *mut AnyObject = unsafe { msg_send![ns_view, window] };
+    if ns_window.is_null() {
+        return;
+    }
+    let class: *const AnyClass = unsafe { msg_send![ns_window, class] };
+    let Some(class) = (unsafe { class.as_ref() }) else {
+        return;
+    };
+    let selector = Sel::register(c"zoom:");
+    let Some(method) = class.instance_method(selector) else {
+        return;
+    };
+    let original: ZoomImp = unsafe { std::mem::transmute(method.implementation()) };
+    if ORIGINAL_ZOOM.set(original).is_err() {
+        return;
+    }
+    let guard: objc2::runtime::Imp = unsafe {
+        std::mem::transmute::<*const (), objc2::runtime::Imp>(titlebar_zoom_guard as *const ())
+    };
+    unsafe { method.set_implementation(guard) };
+}
+
+#[cfg(target_os = "macos")]
+static DOUBLE_CLICK_MONITOR_INSTALLED: OnceLock<()> = OnceLock::new();
+
+/// Native double-click action for the custom titlebar. AppKit's own titlebar
+/// gesture never reaches here because the window uses a full-size content
+/// view; a local monitor consumes the second click and runs the same action
+/// native apps run. This also prevents a second, AppKit-initiated `zoom:`
+/// from racing our call (the stretch-and-snap the old implementation had).
+#[cfg(target_os = "macos")]
+unsafe fn perform_standard_titlebar_double_click(ns_window: *mut AnyObject) {
+    let defaults: *mut AnyObject =
+        unsafe { msg_send![class!(NSUserDefaults), standardUserDefaults] };
+    let domain_name = NSString::from_str("NSGlobalDomain");
+    let domain: *mut AnyObject =
+        unsafe { msg_send![defaults, persistentDomainForName: &*domain_name] };
+    let key = NSString::from_str("AppleActionOnDoubleClick");
+    let mut action = "zoom";
+    if !domain.is_null() {
+        let value: *mut AnyObject = unsafe { msg_send![domain, objectForKey: &*key] };
+        let is_string: bool = unsafe { msg_send![value, isKindOfClass: class!(NSString)] };
+        if !value.is_null() && is_string {
+            let utf8: *const std::ffi::c_char = unsafe { msg_send![value, UTF8String] };
+            if !utf8.is_null() {
+                let text = unsafe { std::ffi::CStr::from_ptr(utf8) }
+                    .to_string_lossy()
+                    .to_ascii_lowercase();
+                match text.as_str() {
+                    "minimize" | "miniaturize" => action = "minimize",
+                    "none" | "no action" => action = "none",
+                    _ => {}
+                }
+            }
+        }
+    }
+    if action == "zoom" && !domain.is_null() {
+        let legacy_key = NSString::from_str("AppleMiniaturizeOnDoubleClick");
+        let legacy: bool = unsafe { msg_send![defaults, boolForKey: &*legacy_key] };
+        if legacy {
+            action = "minimize";
+        }
+    }
+    match action {
+        "minimize" => {
+            let _: () =
+                unsafe { msg_send![ns_window, miniaturize: std::ptr::null_mut::<AnyObject>()] };
+        }
+        "none" => {}
+        _ => {
+            if let Some(original) = ORIGINAL_ZOOM.get() {
+                unsafe { original(ns_window, Sel::register(c"zoom:"), std::ptr::null_mut()) };
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn titlebar_point_is_control(x: f32, y: f32) -> bool {
+    let controls = match TITLEBAR_CONTROLS.lock() {
+        Ok(controls) => controls,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    controls
+        .iter()
+        .any(|(left, top, right, bottom)| x >= *left && x <= *right && y >= *top && y <= *bottom)
+}
+
+#[cfg(target_os = "macos")]
+fn install_titlebar_double_click_monitor(window: &Window) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    if DOUBLE_CLICK_MONITOR_INSTALLED.set(()).is_err() {
+        return;
+    }
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    let ns_view = handle.ns_view.as_ptr() as *mut AnyObject;
+    let ns_window: *mut AnyObject = unsafe { msg_send![ns_view, window] };
+    if ns_window.is_null() {
+        return;
+    }
+    let handler = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        let event_ref = unsafe { event.as_ref() };
+        let event_ptr = event.as_ptr();
+        let event_window: *mut AnyObject = unsafe { msg_send![event_ref, window] };
+        if event_window.is_null() || event_window != ns_window {
+            return event_ptr;
+        }
+        if event_ref.clickCount() != 2 {
+            return event_ptr;
+        }
+        let point = event_ref.locationInWindow();
+        let frame: NSRect = unsafe { msg_send![ns_window, frame] };
+        let top_y = frame.size.height - point.y;
+        if point.x < 78.0
+            || top_y < 0.0
+            || top_y > lazecode_ui::app_ui::TITLEBAR_H as f64
+            || titlebar_point_is_control(point.x as f32, top_y as f32)
+        {
+            return event_ptr;
+        }
+        unsafe { perform_standard_titlebar_double_click(ns_window) };
+        std::ptr::null_mut()
+    });
+    let mask = NSEventMask::LeftMouseDown;
+    let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &handler) };
+    if monitor.is_some() {
+        // AppKit retains the monitor and its block for the app lifetime.
+        std::mem::forget(handler);
+    }
 }
 
 struct LazeApp {
@@ -70,7 +319,7 @@ struct LazeApp {
     last_workspace_save: std::time::Instant,
     last_autosave: std::time::Instant,
     repaint_after: std::time::Duration,
-    last_shift_press: Option<std::time::Instant>,
+    last_shift_press: Option<Instant>,
     #[cfg(target_os = "macos")]
     menu: Option<Menu>,
     #[cfg(target_os = "macos")]
@@ -123,6 +372,10 @@ impl LazeApp {
                 .context("create window")?,
         );
         window.set_visible(true);
+        #[cfg(target_os = "macos")]
+        install_titlebar_zoom_guard(window.as_ref());
+        #[cfg(target_os = "macos")]
+        install_titlebar_double_click_monitor(window.as_ref());
 
         let egui_ctx = egui::Context::default();
         lazecode_ui::install_fonts(&egui_ctx, &self.model.settings);
@@ -158,6 +411,21 @@ impl LazeApp {
             self.install_menu();
         }
         Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn publish_titlebar_controls(&self) {
+        let mut controls = match TITLEBAR_CONTROLS.lock() {
+            Ok(controls) => controls,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        controls.clear();
+        controls.extend(
+            self.runtime
+                .titlebar_controls
+                .iter()
+                .map(|rect| (rect.min.x, rect.min.y, rect.max.x, rect.max.y)),
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -279,16 +547,16 @@ impl LazeApp {
                     }
                     "git-push" => {
                         if let Some(project) = self.model.active_project() {
-                            self.runtime.dialog = lazecode_ui::runtime::DialogState::Push {
-                                remote: project
-                                    .remotes
-                                    .first()
-                                    .map(|r| r.name.clone())
-                                    .unwrap_or_else(|| "origin".into()),
-                                branch: project.branch(),
-                                set_upstream: false,
-                                status: None,
-                            };
+                            let remote = project
+                                .remotes
+                                .first()
+                                .map(|r| r.name.clone())
+                                .unwrap_or_else(|| "origin".into());
+                            self.runtime.dialog = lazecode_ui::overlays::push_dialog_state(
+                                project,
+                                remote,
+                                project.branch(),
+                            );
                         }
                     }
                     "git-pull" => {
@@ -310,6 +578,7 @@ impl LazeApp {
                             remotes,
                             new_name: String::new(),
                             new_url: String::new(),
+                            editing: None,
                             error: None,
                         };
                     }
@@ -351,9 +620,9 @@ impl LazeApp {
                         }
                     }
                     "close-tab" => {
-                        if let Some(project) = self.model.active_project_mut() {
-                            if let Some(id) = project.active_tab {
-                                if let Some(tab) = project.tab_by_id(id) {
+                        if let Some(index) = self.model.active_project {
+                            if let Some(id) = self.model.projects[index].active_tab {
+                                if let Some(tab) = self.model.projects[index].tab_by_id(id) {
                                     if tab.is_dirty() {
                                         self.runtime.dialog =
                                             lazecode_ui::runtime::DialogState::CloseDirtyTab {
@@ -361,7 +630,7 @@ impl LazeApp {
                                                 name: tab.title(),
                                             };
                                     } else {
-                                        project.close_tab(id);
+                                        self.model.close_tab(index, id);
                                         self.runtime.editor_focus = None;
                                     }
                                 }
@@ -466,12 +735,11 @@ impl LazeApp {
                 continue;
             };
             let project = &mut self.model.projects[position];
+            let tree = lazecode_fs::tree::load_tree(&project.worktrees[wt_index].path);
             if wt_index == 0 {
-                project.tree = lazecode_fs::tree::load_tree(&project.root);
-            } else {
-                project.worktrees[wt_index].tree =
-                    lazecode_fs::tree::load_tree(&project.worktrees[wt_index].path);
+                project.tree = tree.clone();
             }
+            project.worktrees[wt_index].tree = tree;
             for path in paths {
                 let canonical = path.canonicalize().unwrap_or(path);
                 let Some(tab) = project.tabs.iter_mut().find(|tab| {
@@ -586,7 +854,7 @@ impl LazeApp {
         }
         self.last_busy_poll = std::time::Instant::now();
 
-        let mut targets: Vec<(u64, BusyTarget, Option<u64>)> = Vec::new();
+        let mut targets: Vec<BusyProbeTarget> = Vec::new();
         for project in &self.model.projects {
             for pane in project
                 .worktrees
@@ -594,11 +862,19 @@ impl LazeApp {
                 .flat_map(|worktree| worktree.terminals.iter())
                 .flat_map(|tab| tab.panes.iter())
             {
-                targets.push((
-                    pane.id,
-                    pane.session.busy_target(),
-                    pane.session.last_output_ms(),
-                ));
+                let was_outputting = self
+                    .runtime
+                    .terminal_busy
+                    .get(&pane.id)
+                    .is_some_and(|state| state.outputting);
+                targets.push(BusyProbeTarget {
+                    session_id: pane.id,
+                    target: pane.session.busy_target(),
+                    last_output_ms: pane.session.last_output_ms(),
+                    last_input_ms: pane.session.last_input_ms(),
+                    last_resize_ms: pane.session.last_resize_ms(),
+                    was_outputting,
+                });
             }
         }
         if targets.is_empty() {
@@ -609,35 +885,28 @@ impl LazeApp {
         self.busy_in_flight = true;
         let tx = self.busy_tx.clone();
         std::thread::spawn(move || {
-            let mut rows = Vec::with_capacity(targets.len());
-            // Match the stable batch policy: at most eight `ps` probes at once,
-            // then serial batches, so many panes don't stampede at once.
-            for chunk in targets.chunks(8) {
-                let batch: Vec<TerminalBusyRow> = std::thread::scope(|scope| {
-                    let handles: Vec<_> = chunk
-                        .iter()
-                        .cloned()
-                        .map(|(session_id, target, last_output_ms)| {
-                            scope.spawn(move || {
-                                let info = probe_busy(&target);
-                                TerminalBusyRow {
-                                    session_id,
-                                    busy: info.busy,
-                                    outputting: info.busy
-                                        && last_output_ms.is_some_and(|age| age < 2000),
-                                    commands: info.commands,
-                                    last_output_ms,
-                                }
-                            })
-                        })
-                        .collect();
-                    handles
-                        .into_iter()
-                        .filter_map(|handle| handle.join().ok())
-                        .collect()
-                });
-                rows.extend(batch);
-            }
+            // One `ps` snapshot for every pane. Spawning a probe per pane made
+            // a 200-console workspace fork 200 processes every two seconds.
+            let probes: Vec<BusyTarget> =
+                targets.iter().map(|target| target.target.clone()).collect();
+            let infos = probe_busy_many(&probes);
+            let rows: Vec<TerminalBusyRow> = targets
+                .into_iter()
+                .zip(infos)
+                .map(|(target, info)| TerminalBusyRow {
+                    session_id: target.session_id,
+                    busy: info.busy,
+                    outputting: lazecode_ui::runtime::console_outputting(
+                        info.busy,
+                        target.last_output_ms,
+                        target.last_input_ms,
+                        target.last_resize_ms,
+                        target.was_outputting,
+                    ),
+                    commands: info.commands,
+                    last_output_ms: target.last_output_ms,
+                })
+                .collect();
             let _ = tx.send(rows);
         });
     }
@@ -704,7 +973,13 @@ impl LazeApp {
         let title = self
             .model
             .active_project()
-            .map(|project| format!("LazeCode — {}", project.name))
+            .map(|project| {
+                if project.is_single_file && project.tabs.is_empty() {
+                    "LazeCode".to_string()
+                } else {
+                    format!("LazeCode — {}", project.name)
+                }
+            })
             .unwrap_or_else(|| "LazeCode".to_string());
         window.set_title(&title);
         gfx.painter.paint_and_update_textures(
@@ -827,11 +1102,10 @@ impl ApplicationHandler<AppEvent> for LazeApp {
                 if path.is_dir() {
                     let _ = self.model.open_project(path);
                 } else if path.is_file() {
-                    let settings = self.model.settings.clone();
-                    if let Some(project) = self.model.active_project_mut() {
-                        let _ = project.open_file(path, &settings);
+                    if let Some(active) = self.model.active_project {
+                        let _ = self.model.open_file_in(active, path);
                     } else {
-                        let _ = self.model.open_project(path);
+                        let _ = self.model.open_files(vec![path]);
                     }
                 }
                 gfx.window.request_redraw();
@@ -847,6 +1121,8 @@ impl ApplicationHandler<AppEvent> for LazeApp {
                 self.model.tick();
                 self.autosave();
                 self.render();
+                #[cfg(target_os = "macos")]
+                self.publish_titlebar_controls();
                 let had_commands = self.process_commands();
                 self.poll_jobs();
                 if self.model.should_quit {

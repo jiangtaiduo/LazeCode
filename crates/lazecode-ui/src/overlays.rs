@@ -15,6 +15,42 @@ use crate::widgets::{
     checkbox, primary_button, secondary_button, secondary_button_enabled, text_clipped,
 };
 
+/// Shared constructor for the Push dialog so every entry point sees the
+/// project's remotes and pending commits.
+fn remotes_width(remotes: &[lazecode_git::RemoteInfo], available: f32) -> f32 {
+    let longest = remotes
+        .iter()
+        .map(|remote| remote.name.chars().count())
+        .max()
+        .unwrap_or(8);
+    (longest as f32 * 7.5 + 34.0).clamp(90.0, available)
+}
+
+pub fn push_dialog_state(
+    project: &lazecode_core::ProjectState,
+    remote: String,
+    branch: String,
+) -> DialogState {
+    let tracking = project
+        .branches
+        .iter()
+        .find(|candidate| candidate.name == branch)
+        .and_then(|candidate| candidate.tracking.clone());
+    let pending =
+        lazecode_git::pending_commits(project.active_root(), tracking.as_deref(), &branch, 200)
+            .unwrap_or_default();
+    DialogState::Push {
+        remote,
+        branch,
+        set_upstream: tracking.is_none(),
+        force: false,
+        push_tags: false,
+        remotes: project.remotes.clone(),
+        pending,
+        status: None,
+    }
+}
+
 /// Phase of the background update task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UpdatePhase {
@@ -292,6 +328,19 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             MenuKind::BranchContext { project } => {
                 let payload = menu.payload.clone();
                 draw_branch_context_menu(
+                    ui,
+                    model,
+                    rt,
+                    theme,
+                    screen,
+                    menu,
+                    project,
+                    payload.as_deref(),
+                )
+            }
+            MenuKind::TagContext { project } => {
+                let payload = menu.payload.clone();
+                draw_tag_context_menu(
                     ui,
                     model,
                     rt,
@@ -971,114 +1020,308 @@ fn draw_project_menu(
     menu: MenuState,
 ) {
     let p = theme.palette;
-    let count = model.projects.len();
-    let height = 46.0 + (count as f32 * 46.0).min(300.0) + 74.0;
-    let rect = popover_rect(screen, menu.anchor, 326.0, height);
+    let zh = model.settings.language.is_zh();
+    let open_roots: Vec<PathBuf> = model
+        .projects
+        .iter()
+        .filter(|project| !project.is_single_file)
+        .map(|project| project.root.clone())
+        .collect();
+    // An open project is not offered again as a recent entry.
+    let recents: Vec<PathBuf> = model
+        .recent
+        .iter()
+        .filter(|path| !open_roots.contains(path))
+        .take(12)
+        .cloned()
+        .collect();
+    let open_indices: Vec<usize> = model
+        .projects
+        .iter()
+        .enumerate()
+        .filter(|(_, project)| !(project.is_single_file && project.tabs.is_empty()))
+        .map(|(index, _)| index)
+        .collect();
+    let open_count = open_indices.len();
+    let recent_count = recents.len();
+    let header_h = 36.0;
+    let footer_h = 42.0;
+    // The body lays out sections and rows with the normal item spacing. Count
+    // it here as well, otherwise the content is a few pixels taller than the
+    // popover and egui shows a scrollbar even when the menu is far below the
+    // 80%-of-screen cap.
+    const ROW_GAP: f32 = 4.0;
+    let widget_count = 2
+        + open_count
+        + recent_count
+        + usize::from(open_count == 0)
+        + usize::from(recent_count == 0);
+    let content_h = 24.0
+        + open_count as f32 * 42.0
+        + if open_count == 0 { 28.0 } else { 0.0 }
+        + 24.0
+        + recent_count as f32 * 40.0
+        + if recent_count == 0 { 28.0 } else { 0.0 }
+        + ROW_GAP * widget_count.saturating_sub(1) as f32;
+    // Stay under 80% of the screen; only the excess scrolls.
+    let max_body_h = (screen.height() * 0.8 - header_h - footer_h).max(120.0);
+    let body_h = content_h.min(max_body_h);
+    let rect = popover_rect(screen, menu.anchor, 326.0, header_h + body_h + footer_h);
     menu_frame(ui, rect, theme);
     ui.painter().text(
         Pos2::new(rect.left() + 14.0, rect.top() + 20.0),
         Align2::LEFT_CENTER,
-        crate::tr!(model, "Switch project", "切换项目"),
+        if zh { "项目" } else { "Projects" },
         FontId::proportional(12.5),
         p.text3,
     );
     ui.painter().text(
         Pos2::new(rect.right() - 14.0, rect.top() + 20.0),
         Align2::RIGHT_CENTER,
-        if model.settings.language.is_zh() {
-            format!("{} 个已打开", count)
+        if zh {
+            format!("{open_count} 个已打开")
         } else {
-            format!("{count} open")
+            format!("{open_count} open")
         },
         FontId::monospace(11.0),
         p.text3,
     );
-    let mut y = rect.top() + 34.0;
-    let mut switch_to: Option<usize> = None;
+
+    let body_rect = Rect::from_min_max(
+        Pos2::new(rect.left() + 4.0, rect.top() + header_h),
+        Pos2::new(rect.right() - 4.0, rect.bottom() - footer_h),
+    );
     let mut close = false;
-    let max_rows = if height > 300.0 { 6 } else { count };
-    for index in 0..model.projects.len().min(max_rows) {
-        let project = &model.projects[index];
-        let row = Rect::from_min_size(
-            Pos2::new(rect.left() + 6.0, y),
-            Vec2::new(rect.width() - 12.0, 44.0),
-        );
-        let response = ui.interact(row, ui.scope_id().with(("pm", index)), Sense::click());
-        if model.active_project == Some(index) {
-            ui.painter()
-                .rect_filled(row, egui::CornerRadius::same(5), p.active);
-        } else if response.hovered() {
-            ui.painter()
-                .rect_filled(row, egui::CornerRadius::same(5), p.hover);
-        }
-        let tone = Color32::from_rgb(project.tone.0, project.tone.1, project.tone.2);
-        let avatar = Rect::from_center_size(
-            Pos2::new(row.left() + 20.0, row.center().y),
-            Vec2::splat(26.0),
-        );
-        ui.painter().rect_filled(
-            avatar,
-            egui::CornerRadius::same(7),
-            tone.gamma_multiply(0.16),
-        );
-        ui.painter().text(
-            avatar.center(),
-            Align2::CENTER_CENTER,
-            &project.initials,
-            FontId::proportional(11.0),
-            tone,
-        );
-        text_clipped(
-            ui.painter(),
-            Rect::from_min_max(
-                Pos2::new(row.left() + 40.0, row.top() + 4.0),
-                Pos2::new(row.right() - 58.0, row.top() + 23.0),
-            ),
-            &project.name,
-            FontId::proportional(13.0),
-            p.text,
-            Align2::LEFT_CENTER,
-        );
-        text_clipped(
-            ui.painter(),
-            Rect::from_min_max(
-                Pos2::new(row.left() + 40.0, row.top() + 21.0),
-                Pos2::new(row.right() - 58.0, row.bottom() - 4.0),
-            ),
-            &project.root.display().to_string(),
-            FontId::proportional(11.0),
-            p.text3,
-            Align2::LEFT_CENTER,
-        );
-        // Console activity is intentionally shown only on the project rail;
-        // this dropdown stays a quiet switcher.
-        if model.active_project == Some(index) {
-            paint_icon(
-                ui.painter(),
-                Rect::from_center_size(
-                    Pos2::new(row.right() - 16.0, row.center().y),
-                    Vec2::splat(11.0),
-                ),
-                Icon::Check,
-                p.accent,
-            );
-        }
-        if response.clicked() {
-            switch_to = Some(index);
-            close = true;
-        }
-        y += 46.0;
-    }
-    // Footer actions.
+    let mut switch_to: Option<usize> = None;
+    let mut open_recent: Option<PathBuf> = None;
+    let mut remove_recent: Option<PathBuf> = None;
+    super::app_ui::region(ui, body_rect, "project-menu-body", |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("project-menu-scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = ROW_GAP;
+                let width = ui.available_width();
+                let (section, _) = ui.allocate_exact_size(Vec2::new(width, 24.0), Sense::hover());
+                ui.painter().text(
+                    Pos2::new(section.left() + 10.0, section.center().y),
+                    Align2::LEFT_CENTER,
+                    if zh { "已打开" } else { "Open" },
+                    FontId::proportional(11.0),
+                    p.text3,
+                );
+                if open_count == 0 {
+                    let (empty, _) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::hover());
+                    ui.painter().text(
+                        Pos2::new(empty.left() + 14.0, empty.center().y),
+                        Align2::LEFT_CENTER,
+                        if zh {
+                            "暂无已打开项目"
+                        } else {
+                            "No projects open"
+                        },
+                        FontId::proportional(12.0),
+                        p.text3,
+                    );
+                }
+                for &index in &open_indices {
+                    let project = &model.projects[index];
+                    let is_single = project.is_single_file;
+                    let (row, response) =
+                        ui.allocate_exact_size(Vec2::new(width, 42.0), Sense::click());
+                    if model.active_project == Some(index) {
+                        ui.painter()
+                            .rect_filled(row, egui::CornerRadius::same(5), p.active);
+                    } else if response.hovered() {
+                        ui.painter()
+                            .rect_filled(row, egui::CornerRadius::same(5), p.hover);
+                    }
+                    let tone = Color32::from_rgb(project.tone.0, project.tone.1, project.tone.2);
+                    let avatar = Rect::from_center_size(
+                        Pos2::new(row.left() + 20.0, row.center().y),
+                        Vec2::splat(26.0),
+                    );
+                    ui.painter().rect_filled(
+                        avatar,
+                        egui::CornerRadius::same(7),
+                        tone.gamma_multiply(0.16),
+                    );
+                    if is_single {
+                        paint_icon(ui.painter(), avatar.shrink(6.0), Icon::File, tone);
+                    } else {
+                        ui.painter().text(
+                            avatar.center(),
+                            Align2::CENTER_CENTER,
+                            &project.initials,
+                            FontId::proportional(11.0),
+                            tone,
+                        );
+                    }
+                    let display_name = if is_single {
+                        crate::tr!(model, "Single files", "单文件").to_string()
+                    } else {
+                        project.name.clone()
+                    };
+                    let subtitle = if is_single {
+                        if zh {
+                            format!("{} 个文件", project.tabs.len())
+                        } else {
+                            format!("{} files", project.tabs.len())
+                        }
+                    } else {
+                        project.root.display().to_string()
+                    };
+                    text_clipped(
+                        ui.painter(),
+                        Rect::from_min_max(
+                            Pos2::new(row.left() + 40.0, row.top() + 4.0),
+                            Pos2::new(row.right() - 58.0, row.top() + 22.0),
+                        ),
+                        &display_name,
+                        FontId::proportional(13.0),
+                        p.text,
+                        Align2::LEFT_CENTER,
+                    );
+                    text_clipped(
+                        ui.painter(),
+                        Rect::from_min_max(
+                            Pos2::new(row.left() + 40.0, row.top() + 21.0),
+                            Pos2::new(row.right() - 58.0, row.bottom() - 3.0),
+                        ),
+                        &subtitle,
+                        FontId::proportional(11.0),
+                        p.text3,
+                        Align2::LEFT_CENTER,
+                    );
+                    if model.active_project == Some(index) {
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(row.right() - 16.0, row.center().y),
+                                Vec2::splat(11.0),
+                            ),
+                            Icon::Check,
+                            p.accent,
+                        );
+                    }
+                    if response.clicked() {
+                        switch_to = Some(index);
+                        close = true;
+                    }
+                }
+
+                let (section, _) = ui.allocate_exact_size(Vec2::new(width, 24.0), Sense::hover());
+                ui.painter().text(
+                    Pos2::new(section.left() + 10.0, section.center().y),
+                    Align2::LEFT_CENTER,
+                    if zh {
+                        "最近打开"
+                    } else {
+                        "Recent projects"
+                    },
+                    FontId::proportional(11.0),
+                    p.text3,
+                );
+                if recents.is_empty() {
+                    let (empty, _) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::hover());
+                    ui.painter().text(
+                        Pos2::new(empty.left() + 14.0, empty.center().y),
+                        Align2::LEFT_CENTER,
+                        if zh {
+                            "暂无最近项目"
+                        } else {
+                            "No recent projects"
+                        },
+                        FontId::proportional(12.0),
+                        p.text3,
+                    );
+                }
+                for path in &recents {
+                    let (row, response) =
+                        ui.allocate_exact_size(Vec2::new(width, 40.0), Sense::click());
+                    if response.hovered() {
+                        ui.painter()
+                            .rect_filled(row, egui::CornerRadius::same(5), p.hover);
+                    }
+                    let icon_box = Rect::from_center_size(
+                        Pos2::new(row.left() + 20.0, row.center().y),
+                        Vec2::splat(24.0),
+                    );
+                    ui.painter()
+                        .rect_filled(icon_box, egui::CornerRadius::same(6), p.panel2);
+                    paint_icon(ui.painter(), icon_box.shrink(5.0), Icon::Folder, p.text3);
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string());
+                    text_clipped(
+                        ui.painter(),
+                        Rect::from_min_max(
+                            Pos2::new(row.left() + 40.0, row.top() + 3.0),
+                            Pos2::new(row.right() - 38.0, row.top() + 21.0),
+                        ),
+                        &name,
+                        FontId::proportional(13.0),
+                        p.text2,
+                        Align2::LEFT_CENTER,
+                    );
+                    text_clipped(
+                        ui.painter(),
+                        Rect::from_min_max(
+                            Pos2::new(row.left() + 40.0, row.top() + 20.0),
+                            Pos2::new(row.right() - 38.0, row.bottom() - 3.0),
+                        ),
+                        &path.display().to_string(),
+                        FontId::proportional(11.0),
+                        p.text3,
+                        Align2::LEFT_CENTER,
+                    );
+                    let remove_rect = Rect::from_center_size(
+                        Pos2::new(row.right() - 18.0, row.center().y),
+                        Vec2::splat(20.0),
+                    );
+                    let remove_resp = ui.interact(
+                        remove_rect,
+                        ui.scope_id().with(("recent-remove", path.clone())),
+                        Sense::click(),
+                    );
+                    paint_icon(
+                        ui.painter(),
+                        remove_rect.shrink(4.0),
+                        Icon::X,
+                        if remove_resp.hovered() {
+                            p.rose
+                        } else {
+                            p.text3
+                        },
+                    );
+                    if remove_resp.clicked() {
+                        remove_recent = Some(path.clone());
+                    } else if response.clicked() {
+                        open_recent = Some(path.clone());
+                        close = true;
+                    }
+                }
+            });
+    });
+
     let footer = Rect::from_min_max(
         Pos2::new(rect.left() + 6.0, rect.bottom() - 36.0),
         Pos2::new(rect.right() - 6.0, rect.bottom() - 4.0),
     );
-    let open_rect = Rect::from_min_size(footer.min, Vec2::new(footer.width() * 0.5 - 3.0, 30.0));
+    let has_active = model
+        .active_project
+        .is_some_and(|index| open_indices.contains(&index));
+    let open_width = if has_active {
+        footer.width() * 0.5 - 3.0
+    } else {
+        footer.width()
+    };
+    let open_rect = Rect::from_min_size(footer.min, Vec2::new(open_width, 30.0));
     if secondary_button(
         ui,
         open_rect,
-        crate::tr!(model, "Open project…", "打开项目…"),
+        if zh { "打开…" } else { "Open…" },
         Some(Icon::Plus),
         theme,
     )
@@ -1087,24 +1330,24 @@ fn draw_project_menu(
         model.queue(Command::OpenProjectDialog);
         close = true;
     }
-    let close_rect = Rect::from_min_size(
-        Pos2::new(open_rect.right() + 6.0, footer.top()),
-        Vec2::new(footer.width() * 0.5 - 3.0, 30.0),
-    );
-    if secondary_button(
-        ui,
-        close_rect,
-        crate::tr!(model, "Close project", "关闭项目"),
-        Some(Icon::X),
-        theme,
-    )
-    .clicked()
-    {
-        if let Some(active) = model.active_project {
+    if let Some(active) = model.active_project {
+        let close_rect = Rect::from_min_size(
+            Pos2::new(open_rect.right() + 6.0, footer.top()),
+            Vec2::new(footer.width() * 0.5 - 3.0, 30.0),
+        );
+        if secondary_button(
+            ui,
+            close_rect,
+            if zh { "关闭项目" } else { "Close project" },
+            Some(Icon::X),
+            theme,
+        )
+        .clicked()
+        {
             let dirty = model.projects[active].tabs.iter().any(|tab| tab.is_dirty());
             if dirty {
                 model.toast(
-                    if model.settings.language.is_zh() {
+                    if zh {
                         "该项目有未保存的文件，请先保存或关闭标签页"
                     } else {
                         "This project has unsaved files; save or close its tabs first"
@@ -1117,17 +1360,25 @@ fn draw_project_menu(
                     crate::runtime::TerminalCloseAction::Project(active),
                 );
             }
+            close = true;
         }
-        close = true;
+    }
+    if let Some(path) = remove_recent {
+        model.forget_recent(&path);
     }
     if let Some(index) = switch_to {
         model.switch_project(index);
         rt.clear_terminal_cache();
     }
+    if let Some(path) = open_recent {
+        model.queue(Command::OpenProject(path));
+    }
     if should_dismiss(ui, rect, menu.opened_frame, rt.frame_count) {
         close = true;
     }
-    if !close {
+    if close {
+        rt.menu = None;
+    } else {
         rt.menu = Some(menu);
     }
 }
@@ -1266,16 +1517,20 @@ fn draw_worktree_menu(
     )
     .clicked()
     {
-        let (branch, default_loc) = if let Some(p) = model.projects.get(index) {
-            let b = p.branch();
-            let loc = format!("{}/.worktree", p.root.display());
-            (b, loc)
+        let (branch, create_new, default_loc) = if let Some(project) = model.projects.get(index) {
+            let (branch, create_new) = next_worktree_branch(project);
+            (
+                branch,
+                create_new,
+                format!("{}/.worktree", project.root.display()),
+            )
         } else {
-            ("main".to_string(), String::new())
+            (String::new(), true, String::new())
         };
         rt.dialog = DialogState::NewWorktree {
             name: String::new(),
             branch,
+            create_new,
             location: default_loc,
             error: None,
         };
@@ -1287,9 +1542,14 @@ fn draw_worktree_menu(
             .iter()
             .find(|worktree| worktree.name == name)
         {
+            let changes = lazecode_git::snapshot(&worktree.path)
+                .map(|snapshot| snapshot.changes.len())
+                .unwrap_or(0);
             rt.dialog = DialogState::RemoveWorktree {
                 name: name.clone(),
                 worktree_path: worktree.path.clone(),
+                dirty: changes > 0,
+                changes,
             };
         }
         close = true;
@@ -1313,6 +1573,50 @@ fn row_index(model: &AppModel, project: usize, name: &str) -> usize {
         .iter()
         .position(|worktree| worktree.name == name)
         .unwrap_or(0)
+}
+
+/// Branches currently checked out in any worktree of `project`, mapped to the
+/// worktree name. Includes registrations that are not attached to a pane yet.
+fn used_worktree_branches(
+    project: &lazecode_core::ProjectState,
+) -> std::collections::HashMap<String, String> {
+    let mut used = std::collections::HashMap::new();
+    let main_branch = project.branch();
+    if !main_branch.is_empty() && main_branch != "no branch" {
+        used.insert(main_branch, "main".to_string());
+    }
+    for worktree in &project.worktrees {
+        let branch = worktree.branch();
+        if !branch.is_empty() && branch != "no branch" && !branch.contains("(detached)") {
+            used.insert(branch, worktree.name.clone());
+        }
+    }
+    if let Ok(worktrees) = lazecode_git::list_worktrees(&project.root) {
+        for worktree in worktrees {
+            if let Some(branch) = worktree.branch {
+                used.insert(branch, worktree.name);
+            }
+        }
+    }
+    used
+}
+
+/// Default branch for the New worktree dialog. Prefer an unused local branch;
+/// when every local branch is occupied, start in "create a new branch" mode.
+fn next_worktree_branch(project: &lazecode_core::ProjectState) -> (String, bool) {
+    let used = used_worktree_branches(project);
+    let current = project.branch();
+    if !current.is_empty() && current != "no branch" && !used.contains_key(&current) {
+        return (current, false);
+    }
+    if let Some(branch) = project
+        .branches
+        .iter()
+        .find(|branch| !branch.remote && !used.contains_key(&branch.name))
+    {
+        return (branch.name.clone(), false);
+    }
+    (String::new(), true)
 }
 
 /// Branch/global filter dropdown of the Git log view.
@@ -1842,6 +2146,8 @@ fn draw_commit_menu(
             12 => {
                 rt.dialog = DialogState::NewBranch {
                     value: String::new(),
+                    start_point: Some(commit.id.clone()),
+                    checkout: true,
                     error: None,
                 };
             }
@@ -1918,6 +2224,104 @@ fn copy_to_clipboard(ui: &mut Ui, text: &str) {
     ui.ctx().copy_text(text.to_owned());
 }
 
+/// Context menu for a tag row: checkout, working-tree diff, merge, push,
+/// delete.
+#[allow(clippy::too_many_arguments)]
+fn draw_tag_context_menu(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    screen: Rect,
+    menu: MenuState,
+    index: usize,
+    payload: Option<&str>,
+) {
+    let Some(tag) = payload else { return };
+    let current = model.projects[index].branch();
+    let remote = model.projects[index]
+        .remotes
+        .first()
+        .map(|remote| remote.name.clone())
+        .unwrap_or_else(|| "origin".to_string());
+    let items = [
+        (
+            crate::tr!(model, "Checkout tag", "检出标签").to_string(),
+            0u8,
+        ),
+        (
+            crate::tr!(model, "Show Diff with Working Tree", "与工作区比较差异").to_string(),
+            1,
+        ),
+        (
+            format!(
+                "{} '{tag}' {} '{current}'",
+                crate::tr!(model, "Merge", "合并"),
+                crate::tr!(model, "into", "到")
+            ),
+            2,
+        ),
+        (
+            format!(
+                "{} '{}' {} '{}'",
+                crate::tr!(model, "Push tag", "推送标签"),
+                tag,
+                crate::tr!(model, "to", "到"),
+                remote
+            ),
+            3,
+        ),
+        (crate::tr!(model, "Delete tag", "删除标签").to_string(), 4),
+    ];
+    let height = items.len() as f32 * MENU_ROW_H + 8.0;
+    let rect = popover_rect(screen, menu.anchor, 300.0, height);
+    menu_frame(ui, rect, theme);
+    let mut action = None;
+    for (i, (label, code)) in items.iter().enumerate() {
+        let row = Rect::from_min_size(
+            Pos2::new(rect.left() + 4.0, rect.top() + 4.0 + i as f32 * MENU_ROW_H),
+            Vec2::new(rect.width() - 8.0, MENU_ROW_H),
+        );
+        if menu_row(
+            ui,
+            theme,
+            row,
+            ui.scope_id().with(("tagctx", i)),
+            label,
+            *code == 4,
+            true,
+        ) {
+            action = Some(*code);
+        }
+    }
+    let mut close = false;
+    if let Some(code) = action {
+        match code {
+            0 => model.queue(Command::CheckoutRevision(tag.to_string())),
+            1 => model.queue(Command::OpenCompareWithLocalDiff {
+                commit: tag.to_string(),
+                path: String::new(),
+            }),
+            2 => model.queue(Command::Merge {
+                ref_name: tag.to_string(),
+            }),
+            3 => model.queue(Command::PushTag {
+                remote: remote.clone(),
+                tag: tag.to_string(),
+            }),
+            4 => model.queue(Command::DeleteTag(tag.to_string())),
+            _ => {}
+        }
+        close = true;
+    }
+    if should_dismiss(ui, rect, menu.opened_frame, rt.frame_count) {
+        close = true;
+    }
+    if !close {
+        rt.menu = Some(menu);
+    }
+}
+
 /// Git log branch tree context menu. Items differ by remote/local.
 /// Payload format: `name\u{1}local|remote`.
 #[allow(clippy::too_many_arguments)]
@@ -1948,7 +2352,9 @@ fn draw_branch_context_menu(
                 crate::tr!(model, "Compare branches…", "比较所选两个分支…"),
                 70,
             ));
+            list.push((crate::tr!(model, "Show files diff…", "显示文件差异…"), 73));
         }
+        list.push((crate::tr!(model, "Update selected", "更新选中项"), 72));
         list.push((
             crate::tr!(model, "Delete selected branches", "删除选中的分支"),
             71,
@@ -2058,6 +2464,8 @@ fn draw_branch_context_menu(
             1 => {
                 rt.dialog = DialogState::NewBranch {
                     value: name.clone(),
+                    start_point: Some(name.clone()),
+                    checkout: true,
                     error: None,
                 };
             }
@@ -2071,6 +2479,8 @@ fn draw_branch_context_menu(
             3 => {
                 rt.dialog = DialogState::DeleteBranch {
                     name: name.clone(),
+                    force: false,
+                    remote,
                     error: None,
                 };
             }
@@ -2106,9 +2516,34 @@ fn draw_branch_context_menu(
                     );
                 }
             }
+            72 => {
+                model.queue(Command::FetchAll);
+            }
+            73 => {
+                if selected_refs.len() == 2 {
+                    model.queue(Command::CompareOpen {
+                        from: selected_refs[1].clone(),
+                        to: selected_refs[0].clone(),
+                    });
+                    model.ui.sidebar_view = lazecode_core::SidebarView::Compare;
+                }
+            }
             71 => {
                 for b in selected_refs {
-                    model.queue(Command::DeleteBranch(b));
+                    if model.projects[index]
+                        .branches
+                        .iter()
+                        .any(|branch| branch.name == b && branch.remote)
+                    {
+                        model.queue(Command::DeleteRemoteBranch(b));
+                    } else if model.projects[index].tags.iter().any(|tag| tag == &b) {
+                        model.queue(Command::DeleteTag(b));
+                    } else {
+                        model.queue(Command::DeleteBranch {
+                            name: b,
+                            force: false,
+                        });
+                    }
                 }
             }
             _ => {}
@@ -2138,9 +2573,9 @@ fn draw_tree_context_menu(
     let p = theme.palette;
     let project = &model.projects[project_idx];
     let abs_path = if rel_path.is_empty() {
-        project.root.clone()
+        project.active_root().to_path_buf()
     } else {
-        project.root.join(rel_path)
+        project.active_root().join(rel_path)
     };
     let dir_for_new = if is_dir {
         abs_path.clone()
@@ -2148,7 +2583,7 @@ fn draw_tree_context_menu(
         abs_path
             .parent()
             .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| project.root.clone())
+            .unwrap_or_else(|| project.active_root().to_path_buf())
     };
 
     let zh = model.settings.language.is_zh();
@@ -2492,7 +2927,7 @@ fn draw_tree_context_menu(
                     .ui
                     .tree_selection
                     .iter()
-                    .map(|p| project.root.join(p))
+                    .map(|p| project.active_root().join(p))
                     .collect();
                 rt.dialog = DialogState::ConfirmDeleteUntracked { paths };
             }
@@ -2519,7 +2954,8 @@ fn draw_tree_context_menu(
                     }
                     let base = std::path::Path::new(rel_path);
                     project.expanded.insert(base.to_path_buf());
-                    expand_rec(&project.tree.nodes, &mut project.expanded);
+                    let nodes = project.active_tree().nodes.clone();
+                    expand_rec(&nodes, &mut project.expanded);
                 }
             }
             106 => {
@@ -2533,7 +2969,8 @@ fn draw_tree_context_menu(
             }
             107 => {
                 if let Some(project) = model.projects.get_mut(project_idx) {
-                    project.tree = lazecode_fs::tree::load_tree(&project.root);
+                    let root = project.active_root().to_path_buf();
+                    project.active_worktree_mut().tree = lazecode_fs::tree::load_tree(&root);
                     model.queue(Command::ReloadGit);
                 }
             }
@@ -2541,8 +2978,7 @@ fn draw_tree_context_menu(
                 model.queue(Command::Stage(vec![rel_path.to_string()]));
             }
             211 => {
-                let settings = model.settings.clone();
-                if let Ok(id) = model.projects[project_idx].open_file(abs_path.clone(), &settings) {
+                if let Ok(id) = model.open_file_in(project_idx, abs_path.clone()) {
                     rt.set_editor_focus(id);
                     if let Some(tab) = model.projects[project_idx].tab_mut_by_id(id) {
                         if let lazecode_core::TabKind::File(file_tab) = &mut tab.kind {
@@ -2683,49 +3119,52 @@ fn draw_editor_tab_context_menu(
     }
 
     if let Some(code) = action {
-        if let Some(project) = model.projects.get_mut(project_idx) {
-            match code {
-                0 => project.close_tab(tab_id),
-                1 => project.close_other_tabs(tab_id),
-                2 => project.close_tabs_to_right(tab_id),
-                3 => project.close_unmodified_tabs(),
-                4 => project.close_all_tabs(),
-                8 => project.close_tabs_to_left(tab_id),
-                5 => {
-                    ui.ctx().copy_text(path.to_string());
-                    model.toast(
-                        crate::tr!(model, "Path copied", "已复制路径").to_string(),
-                        ToastKind::Info,
-                    );
-                }
-                6 => {
-                    let rel = std::path::Path::new(path)
-                        .strip_prefix(&project.root)
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|_| path.to_string());
-                    ui.ctx().copy_text(rel);
-                    model.toast(
-                        crate::tr!(model, "Relative path copied", "已复制相对路径").to_string(),
-                        ToastKind::Info,
-                    );
-                }
-                7 => {
-                    #[cfg(target_os = "macos")]
-                    {
-                        let _ = std::process::Command::new("open")
-                            .arg("-R")
-                            .arg(path)
-                            .spawn();
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        if let Some(parent) = std::path::Path::new(path).parent() {
-                            let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
-                        }
-                    }
-                }
-                _ => {}
+        let relative_root = model
+            .projects
+            .get(project_idx)
+            .map(|project| project.active_root().to_path_buf());
+        match code {
+            0 => model.close_tab(project_idx, tab_id),
+            1 => model.close_other_tabs(project_idx, tab_id),
+            2 => model.close_tabs_to_right(project_idx, tab_id),
+            3 => model.close_unmodified_tabs(project_idx),
+            4 => model.close_all_tabs(project_idx),
+            8 => model.close_tabs_to_left(project_idx, tab_id),
+            5 => {
+                ui.ctx().copy_text(path.to_string());
+                model.toast(
+                    crate::tr!(model, "Path copied", "已复制路径").to_string(),
+                    ToastKind::Info,
+                );
             }
+            6 => {
+                let rel = relative_root
+                    .as_deref()
+                    .and_then(|root| std::path::Path::new(path).strip_prefix(root).ok())
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.to_string());
+                ui.ctx().copy_text(rel);
+                model.toast(
+                    crate::tr!(model, "Relative path copied", "已复制相对路径").to_string(),
+                    ToastKind::Info,
+                );
+            }
+            7 => {
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("open")
+                        .arg("-R")
+                        .arg(path)
+                        .spawn();
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    if let Some(parent) = std::path::Path::new(path).parent() {
+                        let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
+                    }
+                }
+            }
+            _ => {}
         }
         close = true;
     }
@@ -3098,7 +3537,7 @@ fn draw_changelist_header_menu(
             101 => {
                 // 删除前确认（稳定版语义）：移入默认列表 or 回滚丢弃。
                 if let Some(project) = model.projects.get(project_idx) {
-                    let lists = lazecode_git::Changelists::open(&project.root);
+                    let lists = lazecode_git::Changelists::open(project.active_root());
                     let count = lists.files_of(name).len();
                     rt.dialog = DialogState::DeleteChangelist {
                         name: name.to_string(),
@@ -3512,7 +3951,7 @@ fn draw_commit_details_file_menu(
                 });
             }
             2 => {
-                let root = model.projects[project_idx].root.clone();
+                let root = model.projects[project_idx].active_root().to_path_buf();
                 let _ = lazecode_git::checkout_revision_path(&root, &commit_id, &file_path);
                 model.toast(
                     if zh {
@@ -3524,7 +3963,7 @@ fn draw_commit_details_file_menu(
                 );
             }
             3 => {
-                let root = model.projects[project_idx].root.clone();
+                let root = model.projects[project_idx].active_root().to_path_buf();
                 if let Ok(patch) = lazecode_git::commit_patch(&root, &commit_id) {
                     ui.ctx().copy_text(patch);
                     model.toast(
@@ -3538,7 +3977,7 @@ fn draw_commit_details_file_menu(
                 }
             }
             4 => {
-                let root = model.projects[project_idx].root.clone();
+                let root = model.projects[project_idx].active_root().to_path_buf();
                 if let Ok(patch) = lazecode_git::commit_patch(&root, &commit_id) {
                     let default_name = format!("{}.patch", &commit_id[..commit_id.len().min(8)]);
                     let target = dirs::desktop_dir()
@@ -3705,7 +4144,7 @@ fn draw_editor_context_menu(
                 }
             }
             6 => {
-                let root = model.projects[project_idx].root.clone();
+                let root = model.projects[project_idx].active_root().to_path_buf();
                 let rel = std::path::Path::new(path_str)
                     .strip_prefix(&root)
                     .map(|p| p.to_string_lossy().to_string())
@@ -3798,10 +4237,10 @@ fn change_menu_items(
 ) -> (Vec<ChangeMenuItem>, ChangeMenuCtx) {
     let single = paths.len() == 1;
     let first = paths.first().cloned().unwrap_or_default();
-    let lists = lazecode_git::Changelists::open(&project.root);
+    let lists = lazecode_git::Changelists::open(project.active_root());
     let all_lists: Vec<String> = lists.lists().to_vec();
     let ctx = ChangeMenuCtx {
-        project_root: project.root.clone(),
+        project_root: project.active_root().to_path_buf(),
         conflicts: project.conflicts.clone(),
         paths: paths.to_vec(),
         single,
@@ -3816,8 +4255,7 @@ fn change_menu_items(
     // 稳定版 allUntracked 规则：所选文件全部是未跟踪才走未跟踪菜单。
     let all_untracked = paths.iter().all(|path| {
         project
-            .git
-            .as_ref()
+            .active_git()
             .map(|git| {
                 git.changes
                     .iter()
@@ -4116,10 +4554,8 @@ fn apply_change_menu_action(
         1 => {
             // Jump to Source：在编辑器打开（仓库相对 → 绝对路径）。
             let abs = ctx.project_root.join(&ctx.first);
-            if let Some(project) = model.projects.get_mut(project_idx) {
-                if let Err(err) = project.open_file(abs, &model.settings) {
-                    model.toast(err, ToastKind::Error);
-                }
+            if let Err(err) = model.open_file_in(project_idx, abs) {
+                model.toast(err, ToastKind::Error);
             }
         }
         2 => {
@@ -4356,7 +4792,10 @@ fn draw_commit_extras_menu(
                     if output.status.success() {
                         let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
                         if !path_str.is_empty() {
-                            let root = model.active_project().map(|p| p.root.clone()).unwrap_or_default();
+                            let root = model
+                                .active_project()
+                                .map(|p| p.active_root().to_path_buf())
+                                .unwrap_or_default();
                             match lazecode_git::shelf_import_patch(&root, std::path::Path::new(&path_str), None) {
                                 Ok(name) => {
                                     model.toast(
@@ -4678,7 +5117,7 @@ fn draw_shelf_context_menu(
         // Copy as Patch（补丁读取是本地小文件，同步可接受）
         Some(2) => {
             if let Some(project) = model.projects.get(model.active_project.unwrap_or(0)) {
-                match lazecode_git::shelf_patch(&project.root, &name) {
+                match lazecode_git::shelf_patch(project.active_root(), &name) {
                     Ok(patch) => {
                         ui.ctx().copy_text(patch);
                         let zh = model.settings.language.is_zh();
@@ -5023,17 +5462,17 @@ fn draw_branch_menu(
                         close = true;
                     }
                     3 => {
-                        rt.dialog = DialogState::Push {
-                            remote: "origin".into(),
-                            branch: current_branch.clone(),
-                            set_upstream: false,
-                            status: None,
-                        };
+                        if let Some(project) = model.active_project() {
+                            rt.dialog =
+                                push_dialog_state(project, "origin".into(), current_branch.clone());
+                        }
                         close = true;
                     }
                     4 => {
                         rt.dialog = DialogState::NewBranch {
                             value: String::new(),
+                            start_point: None,
+                            checkout: true,
                             error: None,
                         };
                         close = true;
@@ -5363,6 +5802,13 @@ fn draw_branch_menu(
                             );
                             if trash_resp.clicked() {
                                 delete_tag = Some(tag.clone());
+                            } else if resp.secondary_clicked() {
+                                rt.open_menu(
+                                    MenuKind::TagContext { project: index },
+                                    row_rect,
+                                    Some(tag.clone()),
+                                );
+                                close = true;
                             } else if resp.clicked() {
                                 checkout_tag = Some(tag.clone());
                             }
@@ -5387,7 +5833,7 @@ fn draw_branch_menu(
         close = true;
     }
     if let Some(tag) = checkout_tag {
-        model.queue(Command::CheckoutBranch(tag));
+        model.queue(Command::CheckoutRevision(tag));
         close = true;
     }
 
@@ -5600,6 +6046,8 @@ fn draw_branch_menu(
                 1 => {
                     rt.dialog = DialogState::NewBranch {
                         value: String::new(),
+                        start_point: Some(bname.clone()),
+                        checkout: true,
                         error: None,
                     };
                     close = true;
@@ -5612,18 +6060,20 @@ fn draw_branch_menu(
                     close = true;
                 }
                 3 => {
-                    model.queue(Command::Pull {
-                        mode: lazecode_git::PullMode::Merge,
-                    });
+                    if is_curr {
+                        rt.dialog = DialogState::Pull {
+                            mode: lazecode_git::PullMode::Merge,
+                            status: None,
+                        };
+                    } else {
+                        model.queue(Command::FetchAll);
+                    }
                     close = true;
                 }
                 4 => {
-                    rt.dialog = DialogState::Push {
-                        remote: "origin".into(),
-                        branch: bname.clone(),
-                        set_upstream: false,
-                        status: None,
-                    };
+                    if let Some(project) = model.active_project() {
+                        rt.dialog = push_dialog_state(project, "origin".into(), bname.clone());
+                    }
                     close = true;
                 }
                 5 => {
@@ -5662,20 +6112,24 @@ fn draw_branch_menu(
                     close = true;
                 }
                 15 => {
-                    model.queue(Command::Pull {
+                    rt.dialog = DialogState::Pull {
                         mode: lazecode_git::PullMode::Rebase,
-                    });
+                        status: None,
+                    };
                     close = true;
                 }
                 16 => {
-                    model.queue(Command::Pull {
+                    rt.dialog = DialogState::Pull {
                         mode: lazecode_git::PullMode::Merge,
-                    });
+                        status: None,
+                    };
                     close = true;
                 }
                 20 => {
                     rt.dialog = DialogState::DeleteBranch {
                         name: bname.clone(),
+                        force: false,
+                        remote: is_rem,
                         error: None,
                     };
                     close = true;
@@ -5709,14 +6163,9 @@ fn draw_agent_menu(
     anchor: Rect,
 ) {
     let p = theme.palette;
-    let options = [
-        ("Claude Code", "Anthropic's terminal agent", "claude"),
-        ("Codex CLI", "OpenAI coding agent", "codex"),
-        ("OpenCode", "Open-source terminal agent", "opencode"),
-        ("Aider", "Pair programming in the terminal", "aider"),
-        ("Shell", "Start a plain login shell", ""),
-    ];
-    let height = 52.0 + options.len() as f32 * 46.0 + 24.0;
+    let options = model.settings.agents.options.clone();
+    let visible_rows = options.len().min(9);
+    let height = 52.0 + visible_rows as f32 * 46.0 + 24.0;
     let rect = popover_rect(screen, anchor, 320.0, height);
     menu_frame(ui, rect, theme);
     ui.painter().text(
@@ -5726,55 +6175,84 @@ fn draw_agent_menu(
         FontId::proportional(11.0),
         p.text3,
     );
-    let mut y = rect.top() + 36.0;
+    let rows = Rect::from_min_max(
+        Pos2::new(rect.left() + 6.0, rect.top() + 34.0),
+        Pos2::new(rect.right() - 6.0, rect.bottom() - 10.0),
+    );
     let mut launch: Option<(String, String)> = None;
     let mut close = false;
-    for (label, description, command) in options {
-        let row = Rect::from_min_size(
-            Pos2::new(rect.left() + 6.0, y),
-            Vec2::new(rect.width() - 12.0, 44.0),
-        );
-        let response = ui.interact(row, ui.scope_id().with(("agent", label)), Sense::click());
-        if response.hovered() {
-            ui.painter()
-                .rect_filled(row, egui::CornerRadius::same(5), p.hover);
-        }
-        let icon_rect = Rect::from_center_size(
-            Pos2::new(row.left() + 20.0, row.center().y),
-            Vec2::splat(24.0),
-        );
-        ui.painter()
-            .rect_filled(icon_rect, egui::CornerRadius::same(6), p.accent_soft);
-        paint_icon(ui.painter(), icon_rect.shrink(5.0), Icon::Spark, p.accent);
-        ui.painter().text(
-            Pos2::new(row.left() + 38.0, row.center().y - 8.0),
-            Align2::LEFT_CENTER,
-            label,
-            FontId::proportional(11.5),
-            p.text,
-        );
-        ui.painter().text(
-            Pos2::new(row.left() + 38.0, row.center().y + 8.0),
-            Align2::LEFT_CENTER,
-            description,
-            FontId::proportional(9.5),
-            p.text3,
-        );
-        if !command.is_empty() {
-            ui.painter().text(
-                Pos2::new(row.right() - 12.0, row.center().y),
-                Align2::RIGHT_CENTER,
-                command,
-                FontId::monospace(9.0),
-                p.text3,
-            );
-        }
-        if response.clicked() {
-            launch = Some((label.to_string(), command.to_string()));
-            close = true;
-        }
-        y += 46.0;
-    }
+    super::app_ui::region(ui, rows, "agent-menu", |ui| {
+        egui::ScrollArea::vertical()
+            .id_salt("agent-menu-scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for option in &options {
+                    let (row, response) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
+                    if response.hovered() {
+                        ui.painter()
+                            .rect_filled(row, egui::CornerRadius::same(5), p.hover);
+                    }
+                    let icon_rect = Rect::from_center_size(
+                        Pos2::new(row.left() + 20.0, row.center().y),
+                        Vec2::splat(24.0),
+                    );
+                    ui.painter()
+                        .rect_filled(icon_rect, egui::CornerRadius::same(6), p.accent_soft);
+                    paint_icon(ui.painter(), icon_rect.shrink(5.0), Icon::Spark, p.accent);
+                    text_clipped(
+                        ui.painter(),
+                        Rect::from_min_max(
+                            Pos2::new(row.left() + 38.0, row.top() + 5.0),
+                            Pos2::new(row.right() - 12.0, row.center().y + 3.0),
+                        ),
+                        &option.name,
+                        FontId::proportional(11.5),
+                        p.text,
+                        Align2::LEFT_CENTER,
+                    );
+                    let description = if option.description.is_empty() {
+                        if option.command.is_empty() {
+                            crate::tr!(model, "Start a plain login shell", "启动登录 Shell")
+                                .to_string()
+                        } else {
+                            format!("Run {}", option.command)
+                        }
+                    } else {
+                        option.description.clone()
+                    };
+                    text_clipped(
+                        ui.painter(),
+                        Rect::from_min_max(
+                            Pos2::new(row.left() + 38.0, row.center().y + 3.0),
+                            Pos2::new(row.right() - 12.0, row.bottom() - 3.0),
+                        ),
+                        &description,
+                        FontId::proportional(9.5),
+                        p.text3,
+                        Align2::LEFT_CENTER,
+                    );
+                    if !option.command.is_empty() {
+                        text_clipped(
+                            ui.painter(),
+                            Rect::from_min_max(
+                                Pos2::new(row.right() - 120.0, row.top()),
+                                Pos2::new(row.right() - 12.0, row.center().y - 2.0),
+                            ),
+                            &option.command,
+                            FontId::monospace(8.5),
+                            p.text3,
+                            Align2::RIGHT_CENTER,
+                        );
+                    }
+                    if response.clicked() {
+                        launch = Some((option.name.clone(), option.command.clone()));
+                        close = true;
+                    }
+                }
+            });
+    });
     if let Some((title, command)) = launch {
         if command.is_empty() {
             model.queue(Command::NewTerminal);
@@ -5883,7 +6361,7 @@ fn draw_conflict_tool(
         && count_conflicts == 0
     {
         if let Some(active) = model.active_project {
-            let root = model.projects[active].root.clone();
+            let root = model.projects[active].active_root().to_path_buf();
             match lazecode_git::mark_conflict_resolved(&root, path, Some(worktree)) {
                 Ok(()) => {
                     model.queue(Command::RefreshLog);
@@ -6294,7 +6772,7 @@ fn draw_stash_manager_dialog(
     if !*loaded && error.is_none() {
         *loaded = true;
         if let Some(active) = model.active_project {
-            let root = model.projects[active].root.clone();
+            let root = model.projects[active].active_root().to_path_buf();
             match lazecode_git::stash_list(&root) {
                 Ok(list) => *stashes = list,
                 Err(err) => *error = Some(err.to_string()),
@@ -6452,7 +6930,7 @@ fn draw_shelf_manager_dialog(
     if !*loaded && error.is_none() {
         *loaded = true;
         if let Some(active) = model.active_project {
-            let root = model.projects[active].root.clone();
+            let root = model.projects[active].active_root().to_path_buf();
             match lazecode_git::shelf_list(&root) {
                 Ok(list) => *shelves = list,
                 Err(err) => *error = Some(err.to_string()),
@@ -6610,7 +7088,7 @@ fn draw_shelf_manager_dialog(
             Rect::from_min_size(Pos2::new(r2.right() + 8.0, bottom_y), Vec2::new(90.0, 24.0));
         if secondary_button(ui, r_un, "Unshelve…", None, theme).clicked() {
             if let Some(active) = model.active_project {
-                let root = model.projects[active].root.clone();
+                let root = model.projects[active].active_root().to_path_buf();
                 match lazecode_git::shelf_files(&root, shelf_name) {
                     Ok(files) => {
                         rt.dialog = DialogState::Unshelve {
@@ -6669,7 +7147,7 @@ fn draw_file_history_dialog(
     if !*loaded {
         *loaded = true;
         if let Some(active) = model.active_project {
-            let root = model.projects[active].root.clone();
+            let root = model.projects[active].active_root().to_path_buf();
             if let Ok(list) = lazecode_git::file_history(&root, path, 200) {
                 *entries = list;
             }
@@ -6853,7 +7331,7 @@ fn draw_git_tools_dialog(
     if !loaded.0 && *tab == crate::runtime::GitToolsTab::Submodules {
         loaded.0 = true;
         if let Some(active) = model.active_project {
-            let root = model.projects[active].root.clone();
+            let root = model.projects[active].active_root().to_path_buf();
             if let Ok(subs) = lazecode_git::submodule_list(&root) {
                 *submodules = subs;
             }
@@ -6862,7 +7340,7 @@ fn draw_git_tools_dialog(
     if !loaded.1 && *tab == crate::runtime::GitToolsTab::Lfs {
         loaded.1 = true;
         if let Some(active) = model.active_project {
-            let root = model.projects[active].root.clone();
+            let root = model.projects[active].active_root().to_path_buf();
             *lfs_status = Some(lazecode_git::lfs_status(&root));
         }
     }
@@ -7017,7 +7495,6 @@ fn draw_git_tools_dialog(
                 }
             });
         }
-        crate::runtime::GitToolsTab::Remotes => {}
     }
 }
 
@@ -7449,6 +7926,7 @@ fn delete_paths_to_trash(model: &mut AppModel, paths: &[std::path::PathBuf]) {
             project.close_tab(tab_id);
         }
     }
+    model.settle_single_files_workspace();
     if failed.is_empty() {
         let zh = model.settings.language.is_zh();
         let message = if paths.len() == 1 {
@@ -7695,19 +8173,19 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
     let (title, subtitle, width, height) = match &dialog {
         DialogState::NewBranch { .. } => (
             crate::tr!(model, "New branch", "新建分支"),
-            crate::tr!(model, "Create a branch at HEAD. The branch is not checked out automatically.", "在 HEAD 处创建分支；不会自动检出。"),
+            crate::tr!(model, "Create a branch at the selected start point. Checkout is optional.", "从选定起点创建分支，可选创建后检出。"),
             460.0,
-            230.0,
+            290.0,
         ),
         DialogState::NewWorktree { .. } => (
             crate::tr!(model, "New worktree", "新建工作树"),
             crate::tr!(
                 model,
-                "Creates a linked worktree. Default save location is under .worktree/ and ignored by Git.",
-                "创建关联的工作树。保存位置默认在当前项目的 .worktree/ 目录下，并自动由 Git 忽略。"
+                "Creates a linked worktree. One branch can be checked out in only one worktree; create a new branch or pick an unused one.",
+                "创建关联的工作树。同一分支只能在一个工作树中检出；可新建分支或选择未使用的分支。"
             ),
             520.0,
-            340.0,
+            370.0,
         ),
         DialogState::CheckoutRevision { .. } => (
             crate::tr!(model, "Checkout tag or revision", "检出标签或修订版本"),
@@ -7719,22 +8197,50 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             460.0,
             230.0,
         ),
-        DialogState::RemoveWorktree { .. } => (
+        DialogState::RemoveWorktree { dirty: false, .. } => (
             crate::tr!(model, "Remove worktree", "删除工作树"),
             crate::tr!(
                 model,
-                "The directories of the worktree and its consoles are removed. Uncommitted changes require confirmation.",
-                "将删除工作树目录及其控制台；未提交的更改需要确认。"
+                "The directories of the worktree and its consoles are removed.",
+                "将删除工作树目录及其控制台。"
             ),
             470.0,
             210.0,
         ),
-        DialogState::DeleteBranch { .. } => (
-            crate::tr!(model, "Delete branch", "删除分支"),
-            crate::tr!(model, "The branch and its reflog entry are removed. Commits stay reachable until garbage collection.", "将删除该分支及其 reflog 记录；提交在垃圾回收前仍可访问。"),
-            440.0,
-            210.0,
+        DialogState::RemoveWorktree { dirty: true, .. } => (
+            crate::tr!(model, "Remove worktree with changes", "删除有更改的工作树"),
+            crate::tr!(
+                model,
+                "This worktree has uncommitted changes. They will be permanently discarded.",
+                "此工作树有未提交的更改，删除后将永久丢失。"
+            ),
+            470.0,
+            230.0,
         ),
+        DialogState::DeleteBranch { remote, force, .. } => {
+            if *remote {
+                (
+                    crate::tr!(model, "Delete remote branch", "删除远程分支"),
+                    crate::tr!(model, "The remote branch is deleted on the remote. The local branch is not touched.", "将在远程删除该分支，不会影响本地分支。"),
+                    460.0,
+                    220.0,
+                )
+            } else if *force {
+                (
+                    crate::tr!(model, "Force delete branch", "强制删除分支"),
+                    crate::tr!(model, "This branch is not fully merged. Confirm explicitly to delete its reference.", "该分支尚未合并。确认后将强制删除其引用。"),
+                    480.0,
+                    230.0,
+                )
+            } else {
+                (
+                    crate::tr!(model, "Delete branch", "删除分支"),
+                    crate::tr!(model, "The branch and its reflog entry are removed. Commits stay reachable until garbage collection.", "将删除该分支及其 reflog 记录；提交在垃圾回收前仍可访问。"),
+                    440.0,
+                    210.0,
+                )
+            }
+        }
         DialogState::RenameBranch { .. } => (
             crate::tr!(model, "Rename branch", "重命名分支"),
             crate::tr!(model, "The ref name of a local branch is rewritten in place.", "直接重命名本地分支的引用名。"),
@@ -7743,9 +8249,9 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         ),
         DialogState::Push { .. } => (
             crate::tr!(model, "Push", "推送"),
-            crate::tr!(model, "Publish the local branch to the remote (creates the upstream when chosen).", "将本地分支推送到远程（可选建立 upstream）。"),
-            460.0,
-            250.0,
+            crate::tr!(model, "Publish the branch and review commits before pushing. Force uses force-with-lease semantics.", "推送分支并在推送前检查提交；Force 使用 force-with-lease 语义。"),
+            570.0,
+            500.0,
         ),
         DialogState::Pull { .. } => (
             crate::tr!(model, "Pull", "拉取"),
@@ -8041,9 +8547,26 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
     let mut close = false;
     let mut confirm = false;
     match &mut dialog {
-        DialogState::NewBranch { value, error } => {
+        DialogState::NewBranch {
+            value,
+            start_point,
+            checkout,
+            error,
+        } => {
+            let start_label = start_point.as_deref().unwrap_or("HEAD");
+            ui.painter().text(
+                Pos2::new(rect.left() + 22.0, rect.top() + 92.0),
+                Align2::LEFT_CENTER,
+                format!(
+                    "{} {}",
+                    crate::tr!(model, "Start point:", "起点："),
+                    start_label
+                ),
+                FontId::monospace(10.5),
+                p.text3,
+            );
             let input = Rect::from_min_size(
-                Pos2::new(rect.left() + 22.0, rect.top() + 94.0),
+                Pos2::new(rect.left() + 22.0, rect.top() + 112.0),
                 Vec2::new(rect.width() - 44.0, 30.0),
             );
             ui.painter()
@@ -8064,9 +8587,23 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             if rt.branch_create_error.is_none() {
                 response.request_focus();
             }
+            let check = Rect::from_center_size(
+                Pos2::new(rect.left() + 30.0, rect.top() + 166.0),
+                Vec2::splat(16.0),
+            );
+            if checkbox(ui, check, *checkout, theme).clicked() {
+                *checkout = !*checkout;
+            }
+            ui.painter().text(
+                Pos2::new(rect.left() + 44.0, rect.top() + 166.0),
+                Align2::LEFT_CENTER,
+                crate::tr!(model, "Checkout after create", "创建后检出"),
+                FontId::proportional(10.5),
+                p.text2,
+            );
             if let Some(err) = error {
                 ui.painter().text(
-                    Pos2::new(input.left(), input.bottom() + 12.0),
+                    Pos2::new(rect.left() + 22.0, rect.top() + 196.0),
                     Align2::LEFT_CENTER,
                     err,
                     FontId::proportional(9.5),
@@ -8080,6 +8617,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         DialogState::NewWorktree {
             name,
             branch,
+            create_new,
             location,
             error,
         } => {
@@ -8087,36 +8625,10 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             let width = rect.width() - 44.0;
             let mut y = rect.top() + 82.0;
 
-            let used_branches: std::collections::HashMap<String, String> = {
-                let mut map = std::collections::HashMap::new();
-                if let Some(project) = model.active_project() {
-                    let main_branch = project.branch();
-                    if !main_branch.is_empty() && main_branch != "no branch" {
-                        map.insert(
-                            main_branch,
-                            if model.settings.language.is_zh() {
-                                "主工作树".to_string()
-                            } else {
-                                "main worktree".to_string()
-                            },
-                        );
-                    }
-                    for wt in &project.worktrees {
-                        let b = wt.branch();
-                        if !b.is_empty() && b != "no branch" && !b.contains("(detached)") {
-                            map.insert(b, wt.name.clone());
-                        }
-                    }
-                    if let Ok(wts) = lazecode_git::list_worktrees(&project.root) {
-                        for wt in wts {
-                            if let Some(b) = wt.branch {
-                                map.insert(b, wt.name);
-                            }
-                        }
-                    }
-                }
-                map
-            };
+            let used_branches = model
+                .active_project()
+                .map(used_worktree_branches)
+                .unwrap_or_default();
 
             // 1. 名称 (Name)
             ui.painter().text(
@@ -8163,69 +8675,120 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             }
             y += 36.0;
 
-            // 2. 选择分支 (Branch)
+            // 2. 分支 (Branch): existing branch picker or a new branch name.
             ui.painter().text(
                 Pos2::new(left, y),
                 Align2::LEFT_TOP,
-                crate::tr!(
-                    model,
-                    "Branch (cannot reuse branches checked out in other worktrees):",
-                    "选择分支 (不能与已有工作树冲突):"
-                ),
+                if *create_new {
+                    crate::tr!(model, "New branch name:", "新分支名称:")
+                } else {
+                    crate::tr!(
+                        model,
+                        "Branch (cannot reuse branches checked out in other worktrees):",
+                        "选择分支 (不能与已有工作树冲突):"
+                    )
+                },
                 FontId::proportional(11.5),
                 p.text2,
             );
             y += 18.0;
 
-            let selected_branch_label = if branch.is_empty() {
-                crate::tr!(model, "Select branch...", "选择分支...").to_string()
-            } else if let Some(wt_name) = used_branches.get(branch) {
-                format!(
-                    "{branch} ({}: {wt_name})",
-                    crate::tr!(model, "used in", "已检出于")
-                )
+            if *create_new {
+                let input = Rect::from_min_size(Pos2::new(left, y), Vec2::new(width, 28.0));
+                ui.painter()
+                    .rect_filled(input, egui::CornerRadius::same(4), p.panel2);
+                ui.painter().rect_stroke(
+                    input,
+                    egui::CornerRadius::same(4),
+                    Stroke::new(1.0, p.border),
+                    StrokeKind::Inside,
+                );
+                ui.put(
+                    input.shrink2(Vec2::new(8.0, 4.0)),
+                    TextEdit::singleline(branch)
+                        .frame(egui::Frame::NONE)
+                        .hint_text("feat/my-branch")
+                        .font(FontId::monospace(11.5)),
+                );
             } else {
-                branch.clone()
-            };
-
-            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(
-                Pos2::new(left, y),
-                Vec2::new(width, 28.0),
-            )));
-            egui::ComboBox::from_id_salt("worktree-branch-picker")
-                .width(width - 8.0)
-                .selected_text(egui::RichText::new(selected_branch_label).color(p.text))
-                .show_ui(&mut child, |ui| {
-                    if let Some(proj) = model.active_project() {
-                        for b in &proj.branches {
-                            if let Some(wt_name) = used_branches.get(&b.name) {
-                                let label_text = format!(
-                                    "{} ({} {})",
-                                    b.name,
-                                    crate::tr!(model, "checked out in", "已检出于"),
-                                    wt_name
-                                );
-                                ui.add_enabled(
-                                    false,
-                                    egui::Button::new(
-                                        egui::RichText::new(label_text).color(p.text3),
-                                    ),
-                                );
-                            } else {
-                                let is_sel = *branch == b.name;
-                                if ui.selectable_label(is_sel, &b.name).clicked() {
-                                    *branch = b.name.clone();
-                                    if name.is_empty() {
-                                        *name = b.name.clone();
-                                        let base_wt = format!("{}/.worktree", proj.root.display());
-                                        *location = format!("{}/{}", base_wt, name);
+                let selected_branch_label = if branch.is_empty() {
+                    crate::tr!(model, "Select branch...", "选择分支...").to_string()
+                } else if let Some(wt_name) = used_branches.get(branch) {
+                    format!(
+                        "{branch} ({}: {wt_name})",
+                        crate::tr!(model, "used in", "已检出于")
+                    )
+                } else {
+                    branch.clone()
+                };
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(
+                    Pos2::new(left, y),
+                    Vec2::new(width, 28.0),
+                )));
+                egui::ComboBox::from_id_salt("worktree-branch-picker")
+                    .width(width - 8.0)
+                    .selected_text(egui::RichText::new(selected_branch_label).color(p.text))
+                    .show_ui(&mut child, |ui| {
+                        if let Some(proj) = model.active_project() {
+                            for b in proj.branches.iter().filter(|b| !b.remote) {
+                                if let Some(wt_name) = used_branches.get(&b.name) {
+                                    let label_text = format!(
+                                        "{} ({} {})",
+                                        b.name,
+                                        crate::tr!(model, "checked out in", "已检出于"),
+                                        wt_name
+                                    );
+                                    ui.add_enabled(
+                                        false,
+                                        egui::Button::new(
+                                            egui::RichText::new(label_text).color(p.text3),
+                                        ),
+                                    );
+                                } else {
+                                    let is_sel = *branch == b.name;
+                                    if ui.selectable_label(is_sel, &b.name).clicked() {
+                                        *branch = b.name.clone();
+                                        if name.is_empty() {
+                                            *name = b.name.clone();
+                                            let base_wt =
+                                                format!("{}/.worktree", proj.root.display());
+                                            *location = format!("{}/{}", base_wt, name);
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                });
-            y += 36.0;
+                    });
+            }
+            y += 34.0;
+
+            let check = Rect::from_center_size(Pos2::new(left + 8.0, y + 8.0), Vec2::splat(16.0));
+            if checkbox(ui, check, *create_new, theme).clicked() {
+                *create_new = !*create_new;
+                if *create_new {
+                    *branch = String::new();
+                } else {
+                    let used = used_branches.clone();
+                    *branch = model
+                        .active_project()
+                        .and_then(|project| {
+                            project
+                                .branches
+                                .iter()
+                                .find(|branch| !branch.remote && !used.contains_key(&branch.name))
+                                .map(|branch| branch.name.clone())
+                        })
+                        .unwrap_or_default();
+                }
+            }
+            ui.painter().text(
+                Pos2::new(left + 22.0, y + 8.0),
+                Align2::LEFT_CENTER,
+                crate::tr!(model, "Create a new branch", "新建分支"),
+                FontId::proportional(10.5),
+                p.text2,
+            );
+            y += 26.0;
 
             // 3. 保存位置 (Save Location)
             ui.painter().text(
@@ -8327,7 +8890,12 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 confirm = true;
             }
         }
-        DialogState::DeleteBranch { name, .. } => {
+        DialogState::DeleteBranch {
+            name,
+            force,
+            remote,
+            error,
+        } => {
             text_clipped(
                 ui.painter(),
                 Rect::from_min_max(
@@ -8339,6 +8907,40 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 p.amber,
                 Align2::LEFT_CENTER,
             );
+            if *remote {
+                ui.painter().text(
+                    Pos2::new(rect.left() + 22.0, rect.top() + 142.0),
+                    Align2::LEFT_CENTER,
+                    crate::tr!(
+                        model,
+                        "Remote deletion uses push --delete.",
+                        "远程删除使用 push --delete。"
+                    ),
+                    FontId::proportional(9.5),
+                    p.text3,
+                );
+            } else if *force {
+                ui.painter().text(
+                    Pos2::new(rect.left() + 22.0, rect.top() + 142.0),
+                    Align2::LEFT_CENTER,
+                    crate::tr!(
+                        model,
+                        "This bypasses the merged check.",
+                        "此操作会跳过合并检查。"
+                    ),
+                    FontId::proportional(9.5),
+                    p.rose,
+                );
+            }
+            if let Some(err) = error {
+                ui.painter().text(
+                    Pos2::new(rect.left() + 22.0, rect.top() + 166.0),
+                    Align2::LEFT_CENTER,
+                    err,
+                    FontId::proportional(9.5),
+                    p.rose,
+                );
+            }
         }
         DialogState::RenameBranch { from, value, error } => {
             let input = Rect::from_min_size(
@@ -8374,23 +8976,66 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 confirm = true;
             }
         }
-        DialogState::RemoveWorktree { name, .. } => {
+        DialogState::RemoveWorktree {
+            name,
+            worktree_path,
+            dirty,
+            changes,
+        } => {
             text_clipped(
                 ui.painter(),
                 Rect::from_min_max(
                     Pos2::new(rect.left() + 22.0, rect.top() + 96.0),
-                    Pos2::new(rect.right() - 22.0, rect.top() + 118.0),
+                    Pos2::new(rect.right() - 22.0, rect.top() + 112.0),
                 ),
                 name,
                 FontId::monospace(11.0),
                 p.amber,
                 Align2::LEFT_CENTER,
             );
+            text_clipped(
+                ui.painter(),
+                Rect::from_min_max(
+                    Pos2::new(rect.left() + 22.0, rect.top() + 114.0),
+                    Pos2::new(rect.right() - 22.0, rect.top() + 130.0),
+                ),
+                &worktree_path.display().to_string(),
+                FontId::monospace(10.0),
+                p.text3,
+                Align2::LEFT_CENTER,
+            );
+            if *dirty {
+                let detail = if *changes > 0 {
+                    if model.settings.language.is_zh() {
+                        format!("{changes} 个文件有未提交的更改，将一并丢弃")
+                    } else {
+                        format!(
+                            "{changes} uncommitted change{} will be discarded",
+                            if *changes == 1 { "" } else { "s" }
+                        )
+                    }
+                } else if model.settings.language.is_zh() {
+                    "检测到未提交的更改，将一并丢弃".to_string()
+                } else {
+                    "Uncommitted changes detected and will be discarded".to_string()
+                };
+                ui.painter().text(
+                    Pos2::new(rect.left() + 22.0, rect.top() + 150.0),
+                    Align2::LEFT_CENTER,
+                    detail,
+                    FontId::proportional(10.5),
+                    p.amber,
+                );
+            }
         }
         DialogState::Push {
             remote,
             branch,
             set_upstream,
+            force,
+            push_tags,
+            remotes,
+            pending,
             status,
         } => {
             ui.painter().text(
@@ -8400,49 +9045,146 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 FontId::proportional(9.5),
                 p.text3,
             );
-            ui.painter().text(
-                Pos2::new(rect.left() + 90.0, rect.top() + 92.0),
-                Align2::LEFT_CENTER,
-                remote,
-                FontId::monospace(11.0),
-                p.text,
+            let remote_rect = Rect::from_min_size(
+                Pos2::new(rect.left() + 90.0, rect.top() + 78.0),
+                Vec2::new(210.0, 26.0),
             );
+            if remotes.is_empty() {
+                ui.painter().text(
+                    Pos2::new(remote_rect.left() + 8.0, remote_rect.center().y),
+                    Align2::LEFT_CENTER,
+                    remote.as_str(),
+                    FontId::monospace(11.0),
+                    p.text,
+                );
+            } else {
+                ui.scope_builder(egui::UiBuilder::new().max_rect(remote_rect), |ui| {
+                    egui::ComboBox::from_id_salt("push-remote")
+                        .width(remotes_width(remotes, remote_rect.width()))
+                        .selected_text(egui::RichText::new(remote.as_str()).color(p.text))
+                        .show_ui(ui, |ui| {
+                            for candidate in remotes.iter() {
+                                if ui
+                                    .selectable_label(remote == &candidate.name, &candidate.name)
+                                    .clicked()
+                                {
+                                    *remote = candidate.name.clone();
+                                }
+                            }
+                        });
+                });
+            }
             ui.painter().text(
-                Pos2::new(rect.left() + 22.0, rect.top() + 118.0),
+                Pos2::new(rect.left() + 22.0, rect.top() + 124.0),
                 Align2::LEFT_CENTER,
                 crate::tr!(model, "Branch", "分支"),
                 FontId::proportional(9.5),
                 p.text3,
             );
             ui.painter().text(
-                Pos2::new(rect.left() + 90.0, rect.top() + 118.0),
+                Pos2::new(rect.left() + 90.0, rect.top() + 124.0),
                 Align2::LEFT_CENTER,
                 branch,
                 FontId::monospace(11.0),
                 p.text,
             );
-            let checkbox_y = rect.top() + 146.0;
-            let upstream_rect = Rect::from_center_size(
-                Pos2::new(rect.left() + 30.0, checkbox_y),
-                Vec2::splat(16.0),
+            let option_y = rect.top() + 158.0;
+            let mut option = |x: f32, value: &mut bool, label: &str| {
+                let check = Rect::from_center_size(
+                    Pos2::new(rect.left() + x + 8.0, option_y),
+                    Vec2::splat(16.0),
+                );
+                if checkbox(ui, check, *value, theme).clicked() {
+                    *value = !*value;
+                }
+                ui.painter().text(
+                    Pos2::new(check.right() + 6.0, option_y),
+                    Align2::LEFT_CENTER,
+                    label,
+                    FontId::proportional(10.5),
+                    p.text2,
+                );
+            };
+            option(
+                22.0,
+                set_upstream,
+                crate::tr!(model, "Set upstream", "建立 upstream"),
             );
-            if crate::widgets::checkbox(ui, upstream_rect, *set_upstream, theme).clicked() {
-                *set_upstream = !*set_upstream;
-            }
+            option(
+                190.0,
+                force,
+                crate::tr!(model, "Force (with lease)", "强制（with lease）"),
+            );
+            option(382.0, push_tags, crate::tr!(model, "Push tags", "推送标签"));
+
             ui.painter().text(
-                Pos2::new(rect.left() + 36.0, checkbox_y),
+                Pos2::new(rect.left() + 22.0, rect.top() + 196.0),
                 Align2::LEFT_CENTER,
-                crate::tr!(
-                    model,
-                    "Set upstream (first push)",
-                    "建立 upstream（首次推送）"
+                format!(
+                    "{} {}",
+                    crate::tr!(model, "Commits to push:", "待推送提交："),
+                    pending.len()
                 ),
-                FontId::proportional(10.0),
-                p.text2,
+                FontId::proportional(10.5),
+                p.text3,
             );
+            let list_rect = Rect::from_min_max(
+                Pos2::new(rect.left() + 18.0, rect.top() + 208.0),
+                Pos2::new(rect.right() - 18.0, rect.bottom() - 72.0),
+            );
+            super::app_ui::region(ui, list_rect, "push-pending", |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("push-pending-scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if pending.is_empty() {
+                            ui.label(
+                                egui::RichText::new(crate::tr!(
+                                    model,
+                                    "Everything is already pushed.",
+                                    "没有待推送的提交。"
+                                ))
+                                .color(p.text3)
+                                .size(10.5),
+                            );
+                        }
+                        for commit in pending.iter() {
+                            let (row, _) = ui.allocate_exact_size(
+                                Vec2::new(ui.available_width(), 24.0),
+                                Sense::hover(),
+                            );
+                            ui.painter().text(
+                                Pos2::new(row.left() + 4.0, row.center().y),
+                                Align2::LEFT_CENTER,
+                                &commit.short,
+                                FontId::monospace(9.5),
+                                p.accent,
+                            );
+                            text_clipped(
+                                ui.painter(),
+                                Rect::from_min_max(
+                                    Pos2::new(row.left() + 66.0, row.top()),
+                                    Pos2::new(row.right() - 160.0, row.bottom()),
+                                ),
+                                &commit.message,
+                                FontId::proportional(10.5),
+                                p.text,
+                                Align2::LEFT_CENTER,
+                            );
+                            ui.painter().text(
+                                Pos2::new(row.right() - 4.0, row.center().y),
+                                Align2::RIGHT_CENTER,
+                                &commit.author,
+                                FontId::proportional(9.0),
+                                p.text3,
+                            );
+                        }
+                    });
+            });
+
             if let Some(status) = status {
                 ui.painter().text(
-                    Pos2::new(rect.left() + 22.0, rect.bottom() - 66.0),
+                    Pos2::new(rect.left() + 22.0, rect.bottom() - 58.0),
                     Align2::LEFT_CENTER,
                     status,
                     FontId::proportional(9.5),
@@ -8521,6 +9263,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             remotes,
             new_name,
             new_url,
+            editing,
             error,
         } => {
             let rows = Rect::from_min_max(
@@ -8534,6 +9277,8 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 FontId::proportional(9.5),
                 p.text3,
             );
+            let mut edit_remote: Option<(String, String)> = None;
+            let mut remove_remote: Option<String> = None;
             super::app_ui::region(ui, rows, "remotes-rows", |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("remotes-scroll")
@@ -8541,26 +9286,92 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                     .show(ui, |ui| {
                         for list_remote in remotes.iter() {
                             let (row, _) = ui.allocate_exact_size(
-                                Vec2::new(ui.available_width(), 26.0),
+                                Vec2::new(ui.available_width(), 34.0),
                                 Sense::hover(),
                             );
                             ui.painter().text(
-                                Pos2::new(row.left() + 6.0, row.center().y - 5.0),
+                                Pos2::new(row.left() + 6.0, row.center().y - 6.0),
                                 Align2::LEFT_CENTER,
                                 &list_remote.name,
                                 FontId::proportional(10.5),
                                 p.text,
                             );
-                            ui.painter().text(
-                                Pos2::new(row.left() + 6.0, row.center().y + 6.0),
-                                Align2::LEFT_CENTER,
+                            text_clipped(
+                                ui.painter(),
+                                Rect::from_min_max(
+                                    Pos2::new(row.left() + 6.0, row.center().y + 3.0),
+                                    Pos2::new(row.right() - 92.0, row.bottom()),
+                                ),
                                 &list_remote.url,
                                 FontId::monospace(8.5),
                                 p.text3,
+                                Align2::LEFT_CENTER,
                             );
+                            let edit_rect = Rect::from_center_size(
+                                Pos2::new(row.right() - 74.0, row.center().y),
+                                Vec2::new(38.0, 20.0),
+                            );
+                            let delete_rect = Rect::from_center_size(
+                                Pos2::new(row.right() - 34.0, row.center().y),
+                                Vec2::new(38.0, 20.0),
+                            );
+                            let edit_resp = ui.interact(
+                                edit_rect,
+                                ui.scope_id().with(("edit-remote", &list_remote.name)),
+                                Sense::click(),
+                            );
+                            let delete_resp = ui.interact(
+                                delete_rect,
+                                ui.scope_id().with(("delete-remote", &list_remote.name)),
+                                Sense::click(),
+                            );
+                            for (rect, hovered, label, color) in [
+                                (
+                                    edit_rect,
+                                    edit_resp.hovered(),
+                                    crate::tr!(model, "Edit", "编辑"),
+                                    p.accent,
+                                ),
+                                (
+                                    delete_rect,
+                                    delete_resp.hovered(),
+                                    crate::tr!(model, "Delete", "删除"),
+                                    p.rose,
+                                ),
+                            ] {
+                                if hovered {
+                                    ui.painter().rect_filled(
+                                        rect,
+                                        egui::CornerRadius::same(3),
+                                        p.hover,
+                                    );
+                                }
+                                ui.painter().text(
+                                    rect.center(),
+                                    Align2::CENTER_CENTER,
+                                    label,
+                                    FontId::proportional(9.0),
+                                    color,
+                                );
+                            }
+                            if edit_resp.clicked() {
+                                edit_remote =
+                                    Some((list_remote.name.clone(), list_remote.url.clone()));
+                            } else if delete_resp.clicked() {
+                                remove_remote = Some(list_remote.name.clone());
+                            }
                         }
                     });
             });
+            if let Some((name, url)) = edit_remote {
+                *editing = Some(name.clone());
+                *new_name = name;
+                *new_url = url;
+            }
+            if let Some(name) = remove_remote {
+                model.queue(Command::RemoteRemove(name));
+                close = true;
+            }
             let name_rect = Rect::from_min_size(
                 Pos2::new(rect.left() + 12.0, rect.bottom() - 92.0),
                 Vec2::new(120.0, 26.0),
@@ -8592,15 +9403,12 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 Pos2::new(url_rect.right() + 8.0, url_rect.top()),
                 Vec2::new(64.0, 26.0),
             );
-            if crate::widgets::primary_button(
-                ui,
-                add_rect,
-                crate::tr!(model, "Add", "添加"),
-                None,
-                true,
-                theme,
-            )
-            .clicked()
+            let form_label = if editing.is_some() {
+                crate::tr!(model, "Save", "保存")
+            } else {
+                crate::tr!(model, "Add", "添加")
+            };
+            if crate::widgets::primary_button(ui, add_rect, form_label, None, true, theme).clicked()
             {
                 confirm_add_remote = true;
             }
@@ -9025,7 +9833,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             let existing_lists: Vec<String> = model
                 .active_project()
                 .map(|project| {
-                    lazecode_git::Changelists::open(&project.root)
+                    lazecode_git::Changelists::open(project.active_root())
                         .lists()
                         .to_vec()
                 })
@@ -9153,8 +9961,19 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         DialogState::NewBranch { .. } => crate::tr!(model, "Create", "创建"),
         DialogState::NewWorktree { .. } => crate::tr!(model, "Create", "创建"),
         DialogState::CheckoutRevision { .. } => crate::tr!(model, "Checkout", "检出"),
-        DialogState::RemoveWorktree { .. } => crate::tr!(model, "Remove", "删除"),
-        DialogState::DeleteBranch { .. } => crate::tr!(model, "Delete", "删除"),
+        DialogState::RemoveWorktree { dirty: true, .. } => {
+            crate::tr!(model, "Force remove", "强制删除")
+        }
+        DialogState::RemoveWorktree { dirty: false, .. } => {
+            crate::tr!(model, "Remove", "删除")
+        }
+        DialogState::DeleteBranch { force, .. } => {
+            if *force {
+                crate::tr!(model, "Force delete", "强制删除")
+            } else {
+                crate::tr!(model, "Delete", "删除")
+            }
+        }
         DialogState::RenameBranch { .. } => crate::tr!(model, "Rename", "重命名"),
         DialogState::Push { .. } => crate::tr!(model, "Push", "推送"),
         DialogState::Pull { .. } => crate::tr!(model, "Pull", "拉取"),
@@ -9194,24 +10013,36 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
     }
     if confirm {
         match &dialog {
-            DialogState::NewBranch { value, .. } => {
+            DialogState::NewBranch {
+                value,
+                start_point,
+                checkout,
+                ..
+            } => {
                 let value = value.trim().to_string();
                 if value.is_empty() {
                     rt.dialog = DialogState::NewBranch {
                         value,
+                        start_point: start_point.clone(),
+                        checkout: *checkout,
                         error: Some(
                             crate::tr!(model, "Enter a branch name", "请输入分支名").to_string(),
                         ),
                     };
                     close = true;
                 } else {
-                    model.queue(Command::CreateBranch(value));
+                    model.queue(Command::CreateBranch {
+                        name: value,
+                        start_point: start_point.clone(),
+                        checkout: *checkout,
+                    });
                     close = true;
                 }
             }
             DialogState::NewWorktree {
                 name,
                 branch,
+                create_new,
                 location,
                 ..
             } => {
@@ -9219,41 +10050,16 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 let branch = branch.trim().to_string();
                 let location_str = location.trim().to_string();
 
-                let used_branches: std::collections::HashMap<String, String> = {
-                    let mut map = std::collections::HashMap::new();
-                    if let Some(project) = model.active_project() {
-                        let main_branch = project.branch();
-                        if !main_branch.is_empty() && main_branch != "no branch" {
-                            map.insert(
-                                main_branch,
-                                if model.settings.language.is_zh() {
-                                    "主工作树".to_string()
-                                } else {
-                                    "main worktree".to_string()
-                                },
-                            );
-                        }
-                        for wt in &project.worktrees {
-                            let b = wt.branch();
-                            if !b.is_empty() && b != "no branch" && !b.contains("(detached)") {
-                                map.insert(b, wt.name.clone());
-                            }
-                        }
-                        if let Ok(wts) = lazecode_git::list_worktrees(&project.root) {
-                            for wt in wts {
-                                if let Some(b) = wt.branch {
-                                    map.insert(b, wt.name);
-                                }
-                            }
-                        }
-                    }
-                    map
-                };
+                let used_branches = model
+                    .active_project()
+                    .map(used_worktree_branches)
+                    .unwrap_or_default();
 
                 if name.is_empty() {
                     rt.dialog = DialogState::NewWorktree {
                         name,
                         branch,
+                        create_new: *create_new,
                         location: location_str,
                         error: Some(
                             crate::tr!(model, "Enter a worktree name", "请输入工作树名称")
@@ -9264,13 +10070,20 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                     rt.dialog = DialogState::NewWorktree {
                         name,
                         branch,
+                        create_new: *create_new,
                         location: location_str,
-                        error: Some(crate::tr!(model, "Select a branch", "请选择分支").to_string()),
+                        error: Some(if *create_new {
+                            crate::tr!(model, "Enter a new branch name", "请输入新分支名称")
+                                .to_string()
+                        } else {
+                            crate::tr!(model, "Select a branch", "请选择分支").to_string()
+                        }),
                     };
                 } else if let Some(wt_name) = used_branches.get(&branch) {
                     rt.dialog = DialogState::NewWorktree {
                         name,
                         branch: branch.clone(),
+                        create_new: *create_new,
                         location: location_str,
                         error: Some(if model.settings.language.is_zh() {
                             format!("分支 '{branch}' 已在工作树 '{wt_name}' 检出，多个工作树不能使用相同分支")
@@ -9312,15 +10125,32 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                     close = true;
                 }
             }
-            DialogState::RemoveWorktree { name, .. } => {
+            DialogState::RemoveWorktree {
+                name,
+                dirty,
+                worktree_path: _,
+                changes: _,
+            } => {
                 model.queue(Command::RemoveWorktree {
                     name: name.clone(),
-                    force: false,
+                    force: *dirty,
                 });
                 close = true;
             }
-            DialogState::DeleteBranch { name, .. } => {
-                model.queue(Command::DeleteBranch(name.clone()));
+            DialogState::DeleteBranch {
+                name,
+                force,
+                remote,
+                ..
+            } => {
+                if *remote {
+                    model.queue(Command::DeleteRemoteBranch(name.clone()));
+                } else {
+                    model.queue(Command::DeleteBranch {
+                        name: name.clone(),
+                        force: *force,
+                    });
+                }
                 close = true;
             }
             DialogState::RenameBranch { from, value, .. } => {
@@ -9343,8 +10173,8 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 }
             }
             DialogState::CloseDirtyTab { tab_id, .. } => {
-                if let Some(project) = model.active_project_mut() {
-                    project.close_tab(*tab_id);
+                if let Some(index) = model.active_project {
+                    model.close_tab(index, *tab_id);
                 }
                 if rt.editor_focus == Some(*tab_id) {
                     rt.editor_focus = None;
@@ -9364,13 +10194,16 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 remote,
                 branch,
                 set_upstream,
+                force,
+                push_tags,
                 ..
             } => {
                 model.queue(Command::Push {
                     remote: remote.clone(),
                     branch: branch.clone(),
                     set_upstream: *set_upstream,
-                    force: false,
+                    force: *force,
+                    push_tags: *push_tags,
                 });
                 close = true;
             }
@@ -9382,6 +10215,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 remotes,
                 new_name,
                 new_url,
+                editing,
                 ..
             } => {
                 if confirm_add_remote {
@@ -9392,11 +10226,15 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                             remotes: remotes.clone(),
                             new_name: new_name.clone(),
                             new_url: new_url.clone(),
+                            editing: editing.clone(),
                             error: Some(
                                 crate::tr!(model, "Enter a name and a URL", "请输入名称和 URL")
                                     .to_string(),
                             ),
                         };
+                    } else if let Some(from) = editing.clone() {
+                        model.queue(Command::RemoteEdit { from, name, url });
+                        close = true;
                     } else {
                         model.queue(Command::RemoteAdd { name, url });
                         close = true;
@@ -9462,7 +10300,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                         };
                     } else {
                         if let Some(active) = model.active_project {
-                            let _ = model.projects[active].open_file(target, &model.settings);
+                            let _ = model.open_file_in(active, target);
                         }
                         close = true;
                     }

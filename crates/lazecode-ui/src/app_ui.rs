@@ -34,18 +34,16 @@ pub struct Layout {
 fn drawer_width(model: &AppModel) -> f32 {
     match model.ui.sidebar_view {
         SidebarView::Git => model.ui.commit_width,
-        // 稳定版 .compare-drawer 固定 320px。
-        SidebarView::Compare => 320.0,
+        SidebarView::Compare => model.ui.compare_width,
         SidebarView::Files | SidebarView::Consoles => model.ui.sidebar_width,
     }
 }
 
 pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
     let titlebar = Rect::from_min_max(full.min, pos2(full.right(), full.top() + TITLEBAR_H));
-    let status = Rect::from_min_max(
-        pos2(full.left() + STRIP_W, full.bottom() - STATUS_H),
-        full.max,
-    );
+    // The status bar spans the full window width; the project rail ends
+    // above it so the bottom-left status text aligns with the window edge.
+    let status = Rect::from_min_max(pos2(full.left(), full.bottom() - STATUS_H), full.max);
     let workspace = Rect::from_min_max(
         pos2(full.left(), titlebar.bottom()),
         pos2(full.right(), status.top()),
@@ -56,7 +54,14 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
     );
     let mut stage_left = strip.right();
     let has_project = !model.projects.is_empty();
-    let sidebar = if model.ui.sidebar_visible && has_project {
+    let active_single = model
+        .active_project()
+        .is_some_and(|project| project.is_single_file);
+    // Single files has no project tree or Git drawer. The console drawer is
+    // still allowed because ad-hoc files often need a shell.
+    let sidebar_allowed =
+        !active_single || model.ui.sidebar_view == lazecode_core::SidebarView::Consoles;
+    let sidebar = if model.ui.sidebar_visible && has_project && sidebar_allowed {
         let max_width = (workspace.width() - STRIP_W - 360.0).max(180.0);
         let width = drawer_width(model).clamp(180.0, max_width);
         let rect = Rect::from_min_max(
@@ -88,7 +93,7 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
     } else {
         0.0
     };
-    let panel = if show_panel && has_project {
+    let panel = if show_panel && has_project && !active_single {
         Some(Rect::from_min_max(
             pos2(stage.left(), status.top() - panel_height),
             pos2(stage.right(), status.top()),
@@ -191,12 +196,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
                 .first()
                 .map(|info| info.name.clone())
                 .unwrap_or_else(|| "origin".to_string());
-            rt.dialog = crate::runtime::DialogState::Push {
-                remote,
-                branch,
-                set_upstream: false,
-                status: None,
-            };
+            rt.dialog = crate::overlays::push_dialog_state(project, remote, branch);
         }
     }
 
@@ -383,7 +383,7 @@ fn splitter_vertical(
         let width = drawer_width(model) + response.drag_delta().x;
         match model.ui.sidebar_view {
             SidebarView::Git => model.ui.commit_width = width.clamp(240.0, 640.0),
-            SidebarView::Compare => {}
+            SidebarView::Compare => model.ui.compare_width = width.clamp(240.0, 640.0),
             SidebarView::Files | SidebarView::Consoles => {
                 model.ui.sidebar_width = width.clamp(180.0, 520.0)
             }
@@ -393,6 +393,7 @@ fn splitter_vertical(
         rt.sidebar_drag = false;
         model.settings.sidebar_width = model.ui.sidebar_width;
         model.settings.commit_drawer_width = model.ui.commit_width;
+        model.settings.compare_drawer_width = model.ui.compare_width;
         model.save_settings();
     }
 }

@@ -49,7 +49,7 @@ pub use diff::{
     commit_details, commit_file_diff, diff_commits, diff_ref_worktree, diff_two_files, file_diff,
 };
 pub use history::{
-    amend_commit_message, checkout_revision, checkout_revision_path, cherry_pick,
+    amend_commit_message, checkout_ref, checkout_revision, checkout_revision_path, cherry_pick,
     cherry_pick_abort, cherry_pick_continue, commit_patch, conflict_list, drop_commit,
     mark_conflict_resolved, merge, merge_abort, merge_continue, merge_file_content, rebase,
     rebase_abort, rebase_continue, rebase_interactive, rebase_skip, require_clean, reset,
@@ -64,8 +64,9 @@ pub use introspect::{
 pub use log::{branches, head_ancestors, log, log_ref, tags};
 pub use model::*;
 pub use ops::{
-    apply_patch, checkout_branch, commit, commit_checked, create_branch, create_tag, delete_branch,
-    delete_tag, discard_file_changes, git_init, rename_branch, stage, unstage,
+    apply_patch, checkout_branch, commit, commit_checked, create_branch, create_branch_from,
+    create_tag, delete_branch, delete_tag, discard_file_changes, force_delete_branch, git_init,
+    rename_branch, stage, unstage,
 };
 pub use shelf::{
     diff_patch_paths, shelf_delete, shelf_files, shelf_import_patch, shelf_list,
@@ -75,8 +76,9 @@ pub use shelf::{
 };
 pub use status::{ignored_entries, ignored_files, invalidate_ignored_cache, snapshot};
 pub use sync::{
-    clone, fetch_all, pending_count, pull, push, remote_add, remote_list, remote_remove,
-    remote_rename, remote_set_url, PullMode, RemoteInfo,
+    clone, delete_remote_branch, fetch_all, pending_commits, pending_count, pull, push, push_tag,
+    push_tags, remote_add, remote_list, remote_remove, remote_rename, remote_set_url, PullMode,
+    RemoteInfo,
 };
 pub use worktree::{
     add_worktree, add_worktree_detached_at_head, is_linked_worktree, list_worktrees, main_worktree,

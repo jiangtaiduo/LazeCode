@@ -243,11 +243,19 @@ pub fn draw(
         Pos2::new(rect.left(), rect.top()),
         Pos2::new(rect.right() - SCROLLBAR, rect.bottom()),
     );
-    let response = ui.interact(
-        input_rect,
-        ui.scope_id().with(("terminal", session_id)),
-        Sense::click_and_drag(),
-    );
+    let response = ui
+        .interact(
+            input_rect,
+            ui.scope_id().with(("terminal", session_id)),
+            Sense::click_and_drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::Text);
+    if ui
+        .input(|i| i.pointer.hover_pos())
+        .is_some_and(|pos| input_rect.contains(pos))
+    {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+    }
     if response.clicked() || response.dragged() {
         focus_requested = true;
     }

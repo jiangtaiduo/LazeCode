@@ -619,25 +619,93 @@ fn head_branch_name(repo: &gix::Repository) -> Option<String> {
 }
 
 pub fn create_branch(root: &Path, name: &str, checkout: bool) -> Result<()> {
+    create_branch_from(root, name, None, checkout)
+}
+
+/// Create a branch at `start_point` (HEAD when empty). `start_point` accepts
+/// a local branch, remote-tracking branch, tag or commit hash.
+pub fn create_branch_from(
+    root: &Path,
+    name: &str,
+    start_point: Option<&str>,
+    checkout: bool,
+) -> Result<()> {
     let name = name.trim();
+    if name.is_empty() {
+        anyhow::bail!("branch name is empty");
+    }
     let repo = discover(root)?;
-    let head = repo.head_id()?.detach();
-    let full = format!("refs/heads/{name}");
-    let full_name: FullName = full.as_str().try_into()?;
-    let edit = RefEdit::update(
-        full_name,
-        head,
-        PreviousValue::MustNotExist,
-        "branch: Created from HEAD",
-    );
-    repo.edit_reference(edit)?;
+    let target = match start_point.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("HEAD") | None => repo.head_id()?.detach(),
+        Some(spec) => resolve_start_point(&repo, spec)?,
+    };
     if checkout {
-        checkout_branch(root, name)?;
+        let snapshot = crate::status::snapshot(root)?;
+        if snapshot.has_tracked_changes() {
+            anyhow::bail!("cannot switch branches: the worktree has staged or unstaged changes");
+        }
+    }
+    create_local_ref(&repo, name, target, start_point.unwrap_or("HEAD"))?;
+    if checkout {
+        if let Err(error) = checkout_branch(root, name) {
+            // Do not leave behind a branch the user never got to use.
+            let _ = repo.edit_reference(RefEdit::delete(
+                format!("refs/heads/{name}").try_into()?,
+                PreviousValue::MustExist,
+            ));
+            return Err(error);
+        }
     }
     Ok(())
 }
 
+fn create_local_ref(
+    repo: &gix::Repository,
+    name: &str,
+    target: ObjectId,
+    source: &str,
+) -> Result<()> {
+    let full = format!("refs/heads/{name}");
+    let full_name: FullName = full.as_str().try_into()?;
+    let edit = RefEdit::update(
+        full_name,
+        target,
+        PreviousValue::MustNotExist,
+        format!("branch: Created from {source}"),
+    );
+    repo.edit_reference(edit)?;
+    Ok(())
+}
+
+fn resolve_start_point(repo: &gix::Repository, spec: &str) -> Result<ObjectId> {
+    if let Ok(id) = crate::resolve_commit(repo, spec) {
+        return Ok(id);
+    }
+    for prefix in ["refs/remotes/", "refs/tags/"] {
+        let name = format!("{prefix}{spec}");
+        if let Ok(mut reference) = repo.find_reference(name.as_str()) {
+            if let Ok(commit) = reference.peel_to_commit() {
+                return Ok(commit.id().detach());
+            }
+            if let Some(id) = reference.target().try_id() {
+                return Ok(id.to_owned());
+            }
+        }
+    }
+    anyhow::bail!("unknown start point '{spec}'")
+}
+
 pub fn delete_branch(root: &Path, name: &str) -> Result<()> {
+    delete_branch_impl(root, name, false)
+}
+
+/// Force-delete a branch, bypassing Git's merged check. Callers must have
+/// shown an explicit confirmation before using this.
+pub fn force_delete_branch(root: &Path, name: &str) -> Result<()> {
+    delete_branch_impl(root, name, true)
+}
+
+fn delete_branch_impl(root: &Path, name: &str, force: bool) -> Result<()> {
     let name = name.trim();
     let repo = discover(root)?;
     if head_branch_name(&repo).as_deref() == Some(name) {
@@ -659,9 +727,31 @@ pub fn delete_branch(root: &Path, name: &str) -> Result<()> {
         anyhow::bail!("branch name is empty");
     }
     let full = format!("refs/heads/{name}");
+    let target = repo
+        .find_reference(full.as_str())
+        .ok()
+        .and_then(|reference| reference.target().try_id().map(|id| id.to_owned()))
+        .ok_or_else(|| anyhow::anyhow!("branch '{name}' does not exist"))?;
+    if !force {
+        let head = repo.head_id()?.detach();
+        let merged = repo.merge_base(head, target)?.map(|base| base.detach()) == Some(target);
+        if !merged {
+            anyhow::bail!(
+                "branch '{name}' is not fully merged; confirm force deletion to remove it"
+            );
+        }
+    }
     let full_name: FullName = full.as_str().try_into()?;
     repo.edit_reference(RefEdit::delete(full_name, PreviousValue::MustExist))?;
     Ok(())
+}
+
+fn remote_tracking_parts(name: &str) -> Option<(&str, &str)> {
+    let (remote, branch) = name.split_once('/')?;
+    if remote.is_empty() || branch.is_empty() {
+        return None;
+    }
+    Some((remote, branch))
 }
 
 /// Switch branches by materialising the target tree on a clean worktree, then
@@ -766,6 +856,48 @@ pub fn checkout_branch(root: &Path, name: &str) -> Result<()> {
     let name = name.trim();
     let repo = discover(root)?;
     let workdir = workdir(&repo)?;
+    // A remote-tracking ref has no local branch yet: create the local
+    // tracking branch, then check it out. This is what the branch tree's
+    // "Checkout" action does for origin/<branch>.
+    if repo
+        .find_reference(format!("refs/heads/{name}").as_str())
+        .is_err()
+    {
+        if let Some(tracking) = remote_tracking_parts(name) {
+            let (remote, short) = tracking;
+            let remote_ref = format!("refs/remotes/{name}");
+            if let Ok(reference) = repo.find_reference(remote_ref.as_str()) {
+                if repo
+                    .find_reference(format!("refs/heads/{short}").as_str())
+                    .is_ok()
+                {
+                    return checkout_branch(root, short);
+                }
+                let target = reference
+                    .target()
+                    .try_id()
+                    .map(|id| id.to_owned())
+                    .ok_or_else(|| anyhow::anyhow!("remote branch '{name}' has no target"))?;
+                let snapshot = crate::status::snapshot(root)?;
+                if snapshot.has_tracked_changes() {
+                    anyhow::bail!(
+                        "cannot switch branches: the worktree has staged or unstaged changes"
+                    );
+                }
+                create_local_ref(&repo, short, target, name)?;
+                if let Err(error) = crate::push::write_upstream(&repo, short, remote)
+                    .and_then(|_| checkout_branch(root, short))
+                {
+                    let _ = repo.edit_reference(RefEdit::delete(
+                        format!("refs/heads/{short}").try_into()?,
+                        PreviousValue::MustExist,
+                    ));
+                    return Err(error);
+                }
+                return Ok(());
+            }
+        }
+    }
     if let Ok(worktrees) = crate::worktree::list_worktrees(root) {
         let current_workdir = workdir
             .canonicalize()

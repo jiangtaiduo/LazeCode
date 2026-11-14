@@ -10,13 +10,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The home "Open" action and titlebar "Open…" now use one native picker that
+  accepts a folder or several files. Folders keep the normal project
+  workspace; files open in a single virtual "Single files" checkout that has
+  no explorer, Git snapshot, Git drawer, branch/worktree chips or status-bar
+  branch. More
+  files append to the same workspace, opening a folder switches to it, and
+  the project menu keeps the Single files workspace one click away. Its
+  consoles start in the user's home directory, and the workspace is restored
+  across restarts. Opening a console from the empty home screen creates the
+  same virtual workspace only as a console host, so HOME is never registered
+  as a project and the titlebar keeps its empty "Open" state. Ad-hoc file tabs
+  keep their normal file badge instead of showing the out-of-project diff
+  marker, closing the last one returns to an open project (or the empty home
+  when there is none), and the console toggle stays unlit until a console is
+  actually opened.
+- Home now shows recent projects and recent files in separate groups; recent
+  files are recorded when opened from the home list, an ad-hoc file workspace,
+  the explorer, search or the command palette.
+- The titlebar project menu grows up to 80% of the screen before its list
+  starts scrolling, rather than always capping at a fixed height. Row spacing
+  is included in the layout measurement, so a scrollbar only appears when the
+  menu genuinely reaches the 80% cap.
+- Coding Agent entries are now configurable in Settings → Coding Agents:
+  name, description and shell script per entry, plus add/remove/restore
+  defaults. The default menu keeps Claude Code, OpenCode and Shell, adds
+  `omp`, and removes Codex CLI and Aider. The agent menu is available from
+  both the Consoles drawer header and the terminal dock header.
+- A Consoles action in the titlebar opens the previously unreachable
+  console drawer; without an open project it starts a console rooted at the
+  user's home directory. Project, Commit and Git Log titlebar actions are
+  disabled while no project is open.
 - Shell layout: open projects now live in a wider vertical project rail with
   a fixed “open project” button and per-project console activity rings; the
   Project, Commit, Compare, Git Log and Terminal actions moved to the
   titlebar. The titlebar now uses the packaged application icon, its tool
   icons are larger, and the rail is 50px wide with compact project tiles.
-  The active-project dropdown is a quiet switcher, and Settings sits at the
-  far right after search.
+  Worktree and branch selectors are borderless with larger type and even
+  spacing. The active-project dropdown is a quiet switcher, and Settings
+  sits at the far right after search.
 - Interface, editor and terminal font pickers in Settings, backed by the
   installed-font catalog (`fontdb`, including macOS `AssetsV2` fonts).
   Editor and terminal monospace families are independent; the terminal
@@ -106,6 +138,87 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mock-server lifecycle test.
 
 ### Fixed
+
+- Agent console admission is now global (`terminal.max_agent_consoles`,
+  default 20) and the per-worktree allowance is 12, so the initial login shell
+  does not consume one of ten agent slots. Agent terminals use smaller
+  scrollback, cold-spool and graphics-cache budgets than shells.
+- Running-command detection no longer assumes the PTY child is always the
+  shell. `zsh -lc omp`/`zsh -lc sleep` exec the command in place and are now
+  reported busy before a console is closed. Busy polling uses one `ps`
+  snapshot for all panes instead of spawning one `ps` per pane every two
+  seconds.
+- Switching worktrees now switches the branch chip, source-control changes,
+  file tree, searches, diffs and Git commands to that checkout instead of
+  reusing the main worktree's snapshot. Checked file selections are cleared
+  on every switch so staging/commit cannot leak into another worktree.
+  Removing a worktree no longer forces the Consoles drawer open; the current
+  drawer stays on the fallback checkout.
+- Titlebar double-click now uses a native event monitor that consumes the
+  second click, runs the macOS double-click action (`AppleActionOnDoubleClick`),
+  and never lets AppKit start a second zoom. The old path called `zoom:`
+  without consuming the event, so AppKit could zoom again and produce the
+  stretch-and-snap flicker. Double-clicks on titlebar buttons remain excluded.
+- The empty Git Tools "Remotes" tab was removed; Remotes has its own dialog
+  and the empty tab had no reachable entry.
+- Git remote and branch workflows now match the stable behavior: Fetch All
+  performs a native fetch and refreshes tracking refs; remote branches
+  checkout as local tracking branches; remote branches delete without
+  touching the local ref; unmerged local branches require an explicit force
+  confirmation; tags checkout detached; and New Branch records the selected
+  start point with an optional checkout. The Push dialog again exposes force
+  (with lease), tag push, remote selection and pending commits; Remotes has
+  edit/delete; tag rows have their own context menu; multi-select supports
+  update, files diff and kind-aware deletion; and non-current branch Update
+  fetches instead of pulling the current branch.
+- Worktrees now have explicit lifecycle safety: the New worktree dialog can
+  create a new branch (or pick an unused local one) because a branch can only
+  be checked out in one worktree; occupied branches are disabled and rejected
+  on submit; removing a worktree with staged, unstaged or untracked changes
+  opens a warning with the change count and requires Force remove; a stale
+  dialog re-checks the checkout and turns a dirty removal failure into the
+  same confirmation instead of only a toast.
+- Branch/tag data is now cached when a project opens, so the first branch
+  menu includes the Tags section instead of waiting for a Git Log refresh.
+- Project identity colors are assigned from a collision-free palette that
+  excludes the red/green reserved for console activity rings and runners.
+- The output marquee now follows the exact rounded outline as a single bright
+  dash over a dim ring, with round caps and no square-corner chords.
+- Find in Files now searches live with a 160 ms debounce, includes the project
+  root in its result signature, and no longer renders a duplicate close hit
+  target or top-aligned placeholder text.
+- Editor and terminal hover now consistently request the text/I-beam cursor.
+- The editor gutter has its own clip rect, restoring line numbers and Git
+  blame text.
+- Switching projects preserves cached console activity, and PTY resize/input
+  echo no longer starts the marquee.
+- The Compare Versions drawer can now be resized from its right edge and
+  remembers the width. File rows reserve room for the numstat, ellipsize
+  long names, show the parent path after the file name, and paint additions/
+  deletions above the clipped text.
+- The empty-workspace page doubles the packaged application icon (42 → 84
+  px), keeps the action labels aligned, and renders shortcut keycaps at a
+  readable size. The titlebar's empty “Open a project” selector is
+  vertically centred.
+- The project selector now opens one menu containing open projects and recent
+  projects (open paths are filtered out of recents), with per-entry removal
+  and a direct Open project action.
+- Plain folders (no Git repository) show “no worktree” and “no branch” without
+  dropdown chevrons or menus.
+- Native titlebar zoom is suppressed across the custom 40px strip, so
+  double-clicking any titlebar icon no longer resizes the window.
+- Commit changelist rows put the parent path after the filename and clip both
+  before the rollback control. The duplicate vertical “Git” caption in the
+  Log toolbar is gone, and Compare Versions uses the same surface as Commit/
+  Shelf.
+
+- Project tree rows no longer inherit egui's item spacing, reclaiming the
+  inter-row gap and fitting more files in the same drawer height.
+- Titlebar drag/maximize is restricted to empty titlebar space; double-clicking
+  a toolbar, project, worktree, branch, sequencer or search control no longer
+  zooms the window.
+- Project activity rings are 1px thicker inward and the outputting runner now
+  repaints per frame with a fading tail instead of a fixed 16ms jump.
 
 - Committing no longer fails when `.git/index` carries Git's optional
   resolve-undo (`REUC`) extension. `gix` cannot round-trip that extension, so

@@ -30,8 +30,17 @@ pub enum Command {
         list: String,
     },
     CheckoutBranch(String),
-    CreateBranch(String),
-    DeleteBranch(String),
+    CreateBranch {
+        name: String,
+        start_point: Option<String>,
+        checkout: bool,
+    },
+    DeleteBranch {
+        name: String,
+        force: bool,
+    },
+    /// Delete `<remote>/<branch>` on the remote (never the local branch).
+    DeleteRemoteBranch(String),
     RenameBranch {
         from: String,
         to: String,
@@ -138,6 +147,7 @@ pub enum Command {
         branch: String,
         set_upstream: bool,
         force: bool,
+        push_tags: bool,
     },
     Pull {
         mode: lazecode_git::PullMode,
@@ -154,6 +164,17 @@ pub enum Command {
     RemoteSetUrl {
         name: String,
         url: String,
+    },
+    /// Atomically apply a remote edit: rename (when needed) then set the URL.
+    RemoteEdit {
+        from: String,
+        name: String,
+        url: String,
+    },
+    /// Push one local tag to a remote.
+    PushTag {
+        remote: String,
+        tag: String,
     },
     /// Apply a unified patch to the worktree or index (hunk staging).
     ApplyPatch {

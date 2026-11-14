@@ -3896,6 +3896,7 @@ name = "lazecode-app"
 version = "0.4.0"
 dependencies = [
  "anyhow",
+ "block2 0.6.2",
  "bytemuck",
  "crossbeam-channel",
  "dirs",
@@ -3918,6 +3919,7 @@ dependencies = [
  "parking_lot",
  "png 0.17.16",
  "pollster",
+ "raw-window-handle",
  "rfd",
  "serde",
  "serde_json",

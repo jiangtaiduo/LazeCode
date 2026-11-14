@@ -32,7 +32,14 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         pos2(rect.right() - 2.0, plus_rect.top() - GAP),
     );
 
-    let count = model.projects.len();
+    let visible: Vec<usize> = model
+        .projects
+        .iter()
+        .enumerate()
+        .filter(|(_, project)| !(project.is_single_file && project.tabs.is_empty()))
+        .map(|(index, _)| index)
+        .collect();
+    let count = visible.len();
     let content_height = if count == 0 {
         0.0
     } else {
@@ -56,8 +63,8 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     rt.project_rail_scroll = rt.project_rail_scroll.clamp(0.0, max_scroll);
     let scroll = rt.project_rail_scroll;
 
-    for index in 0..count {
-        let y = viewport.top() + index as f32 * (TILE + GAP) - scroll;
+    for (slot, &index) in visible.iter().enumerate() {
+        let y = viewport.top() + slot as f32 * (TILE + GAP) - scroll;
         let tile = Rect::from_min_size(Pos2::new(cx - TILE * 0.5, y), Vec2::splat(TILE));
         if !tile.intersects(viewport) {
             continue;
@@ -184,43 +191,193 @@ fn paint_activity_border(
     if !activity.busy {
         return;
     }
-    let color = if activity.outputting {
-        p.rose
+    const RING_STROKE: f32 = 2.25;
+    let ring_color = if activity.outputting {
+        // Stable draws a dim red frame while outputting; the moving dash is
+        // the only bright red element. A full-bright frame hides the dash and
+        // makes any path error look like a spike.
+        p.rose.gamma_multiply(0.45)
     } else {
         p.running
     };
     painter.rect_stroke(
         rect,
         CornerRadius::same(radius),
-        Stroke::new(1.25, color),
+        Stroke::new(RING_STROKE, ring_color),
         StrokeKind::Inside,
     );
     if !activity.outputting {
         return;
     }
-    ui.ctx()
-        .request_repaint_after(std::time::Duration::from_millis(16));
+    // Match the compositor's presentation cadence so the dash advances once
+    // per visible frame instead of on a separate fixed timer.
+    ui.ctx().request_repaint();
     let time = ui.ctx().input(|input| input.time) as f32;
-    let w = (rect.width() - 2.0).max(1.0);
-    let h = (rect.height() - 2.0).max(1.0);
-    let perimeter = 2.0 * (w + h);
-    let at = |distance: f32| {
-        let mut d = distance % perimeter;
-        if d < w {
-            return Pos2::new(rect.left() + 1.0 + d, rect.top() + 1.0);
+
+    // The ring is stroked inside the rect. Put the dash centerline on the
+    // same centerline, then trace the rounded rectangle by arc length.
+    let inset = RING_STROKE * 0.5;
+    let path_rect = rect.shrink(inset);
+    let path_radius =
+        (radius as f32 - inset).clamp(0.5, path_rect.width().min(path_rect.height()) * 0.5);
+    let perimeter = rounded_rect_perimeter(path_rect, path_radius);
+    if perimeter <= 0.0 {
+        return;
+    }
+    // Stable marquee: a 9%-perimeter dash with round caps, one revolution
+    // every 2.4 s, no trailing copies.
+    let dash_len = perimeter * 0.09;
+    let start = (time / 2.4).rem_euclid(1.0) * perimeter;
+    let steps = ((dash_len * 3.0).ceil() as usize).clamp(10, 96);
+    let points: Vec<Pos2> = (0..=steps)
+        .map(|step| {
+            let d = start + dash_len * step as f32 / steps as f32;
+            rounded_rect_point(path_rect, path_radius, d)
+        })
+        .collect();
+    let dash = Stroke::new(2.0, p.rose);
+    painter.add(egui::Shape::line(points, dash));
+    // Caps make the ends circular, exactly like SVG stroke-linecap="round".
+    painter.circle_filled(
+        rounded_rect_point(path_rect, path_radius, start),
+        1.0,
+        p.rose,
+    );
+    painter.circle_filled(
+        rounded_rect_point(path_rect, path_radius, start + dash_len),
+        1.0,
+        p.rose,
+    );
+}
+
+fn rounded_rect_perimeter(rect: Rect, radius: f32) -> f32 {
+    let r = radius.clamp(0.0, rect.width().min(rect.height()) * 0.5);
+    2.0 * (rect.width() - 2.0 * r).max(0.0)
+        + 2.0 * (rect.height() - 2.0 * r).max(0.0)
+        + std::f32::consts::TAU * r
+}
+
+/// Point at `distance` along a clockwise rounded-rectangle outline.
+fn rounded_rect_point(rect: Rect, radius: f32, distance: f32) -> Pos2 {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let r = radius.clamp(0.0, rect.width().min(rect.height()) * 0.5);
+    let left = rect.left();
+    let top = rect.top();
+    let right = rect.right();
+    let bottom = rect.bottom();
+    let straight_w = (rect.width() - 2.0 * r).max(0.0);
+    let straight_h = (rect.height() - 2.0 * r).max(0.0);
+    let arc = FRAC_PI_2 * r;
+    let perimeter = rounded_rect_perimeter(rect, r);
+    let mut d = distance.rem_euclid(perimeter);
+
+    // Top edge, left to right.
+    if d <= straight_w {
+        return Pos2::new(left + r + d, top);
+    }
+    d -= straight_w;
+
+    // Top-right corner.
+    if d <= arc {
+        let angle = -FRAC_PI_2 + if r > 0.0 { d / r } else { 0.0 };
+        return Pos2::new(right - r + r * angle.cos(), top + r + r * angle.sin());
+    }
+    d -= arc;
+
+    // Right edge, top to bottom.
+    if d <= straight_h {
+        return Pos2::new(right, top + r + d);
+    }
+    d -= straight_h;
+
+    // Bottom-right corner.
+    if d <= arc {
+        let angle = if r > 0.0 { d / r } else { 0.0 };
+        return Pos2::new(right - r + r * angle.cos(), bottom - r + r * angle.sin());
+    }
+    d -= arc;
+
+    // Bottom edge, right to left.
+    if d <= straight_w {
+        return Pos2::new(right - r - d, bottom);
+    }
+    d -= straight_w;
+
+    // Bottom-left corner.
+    if d <= arc {
+        let angle = FRAC_PI_2 + if r > 0.0 { d / r } else { 0.0 };
+        return Pos2::new(left + r + r * angle.cos(), bottom - r + r * angle.sin());
+    }
+    d -= arc;
+
+    // Left edge, bottom to top.
+    if d <= straight_h {
+        return Pos2::new(left, bottom - r - d);
+    }
+    d -= straight_h;
+
+    // Top-left corner.
+    let angle = PI + if r > 0.0 { d / r } else { 0.0 };
+    Pos2::new(left + r + r * angle.cos(), top + r + r * angle.sin())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rounded_perimeter_matches_css_rect_path() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::splat(34.0));
+        let r = 6.875;
+        let expected = 2.0 * (34.0 - 2.0 * r) * 2.0 + std::f32::consts::TAU * r;
+        assert!((rounded_rect_perimeter(rect, r) - expected).abs() < 0.001);
+    }
+
+    #[test]
+    fn rounded_point_traverses_corners_on_the_arc() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::splat(34.0));
+        let r = 6.875;
+        let straight = 34.0 - 2.0 * r;
+        // Midpoint of the top-right quarter arc: 45 degrees from vertical.
+        let d = straight + std::f32::consts::FRAC_PI_2 * r * 0.5;
+        let point = rounded_rect_point(rect, r, d);
+        let center = Pos2::new(34.0 - r, r);
+        let distance = (point - center).length();
+        assert!((distance - r).abs() < 0.01);
+        assert!(point.x > center.x);
+        assert!(point.y < center.y);
+    }
+
+    #[test]
+    fn sampled_perimeter_has_no_chord_jumps() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::splat(34.0));
+        let r = 6.875;
+        let perimeter = rounded_rect_perimeter(rect, r);
+        let step = 0.25;
+        let mut previous = rounded_rect_point(rect, r, 0.0);
+        let mut distance = step;
+        while distance <= perimeter + step {
+            let point = rounded_rect_point(rect, r, distance);
+            // A dense sample of the true outline never jumps by a chord:
+            // this is the regression test for the square-corner marquee.
+            assert!(
+                (point - previous).length() <= step * 1.5,
+                "seam jump at {distance}: {:?} -> {:?}",
+                previous,
+                point
+            );
+            previous = point;
+            distance += step;
         }
-        d -= w;
-        if d < h {
-            return Pos2::new(rect.right() - 1.0, rect.top() + 1.0 + d);
-        }
-        d -= h;
-        if d < w {
-            return Pos2::new(rect.right() - 1.0 - d, rect.bottom() - 1.0);
-        }
-        d -= w;
-        Pos2::new(rect.left() + 1.0, rect.bottom() - 1.0 - d)
-    };
-    let start = (time * 70.0) % perimeter;
-    let len = 12.0f32.min(perimeter * 0.35);
-    painter.line_segment([at(start), at(start + len)], Stroke::new(2.0, p.rose));
+    }
+
+    #[test]
+    fn rounded_point_wraps_without_discontinuity() {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::splat(34.0));
+        let r = 6.875;
+        let perimeter = rounded_rect_perimeter(rect, r);
+        let a = rounded_rect_point(rect, r, 1.0);
+        let b = rounded_rect_point(rect, r, perimeter + 1.0);
+        assert!((a - b).length() < 0.001);
+    }
 }

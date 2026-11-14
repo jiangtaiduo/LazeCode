@@ -93,6 +93,89 @@ pub fn push(
     crate::push::push(root, remote, branch, set_upstream, force)
 }
 
+/// Commits on `branch` after `upstream` (or the newest commits when no
+/// upstream is configured), used by the Push dialog.
+pub fn pending_commits(
+    root: &Path,
+    upstream: Option<&str>,
+    branch: &str,
+    limit: usize,
+) -> Result<Vec<crate::CommitInfo>> {
+    use crate::LogOptions;
+    let range = upstream
+        .filter(|upstream| !upstream.trim().is_empty())
+        .map(|upstream| format!("{upstream}..{branch}"))
+        .unwrap_or_else(|| branch.to_string());
+    crate::log(
+        root,
+        LogOptions {
+            limit,
+            branch: Some(range),
+            topo_order: false,
+            ..Default::default()
+        },
+    )
+}
+
+/// Delete a branch on the remote. `full_name` is the remote-tracking name
+/// shown by the UI, e.g. `origin/docs-only`. The local remote-tracking ref is
+/// removed after the remote confirms deletion.
+pub fn delete_remote_branch(root: &Path, full_name: &str) -> Result<String> {
+    let (remote, branch) = full_name
+        .split_once('/')
+        .ok_or_else(|| anyhow!("remote branch must be '<remote>/<branch>'"))?;
+    if remote.is_empty()
+        || branch.is_empty()
+        || remote.starts_with('-')
+        || branch.starts_with('-')
+        || remote.chars().any(char::is_whitespace)
+        || branch.chars().any(char::is_whitespace)
+    {
+        anyhow::bail!("unsuitable remote branch name '{full_name}'");
+    }
+    let output = crate::porcelain(root)
+        .args(["push", remote, "--delete", branch])
+        .output()
+        .map_err(|err| anyhow!("git push --delete failed to spawn: {err}"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let repo = discover(root)?;
+    let tracking = format!("refs/remotes/{full_name}");
+    if let Ok(reference) = repo.find_reference(tracking.as_str()) {
+        if let Some(target) = reference.target().try_id().map(|id| id.to_owned()) {
+            let edit = RefEdit::delete(
+                tracking.as_str().try_into()?,
+                PreviousValue::MustExistAndMatch(gix::refs::Target::Object(target)),
+            );
+            let _ = repo.edit_reference(edit);
+        }
+    }
+    Ok(format!("Deleted remote branch {full_name}"))
+}
+
+/// Push every local tag to `remote`.
+pub fn push_tags(root: &Path, remote: &str) -> Result<String> {
+    if remote.is_empty() || remote.starts_with('-') || remote.chars().any(char::is_whitespace) {
+        anyhow::bail!("unsuitable remote name '{remote}'");
+    }
+    run(root, &["push", remote, "--tags"])
+}
+
+/// Push one local tag to `remote`.
+pub fn push_tag(root: &Path, remote: &str, tag: &str) -> Result<String> {
+    if remote.is_empty() || remote.starts_with('-') || remote.chars().any(char::is_whitespace) {
+        anyhow::bail!("unsuitable remote name '{remote}'");
+    }
+    if tag.is_empty() || tag.starts_with('-') || tag.chars().any(char::is_whitespace) {
+        anyhow::bail!("unsuitable tag name '{tag}'");
+    }
+    run(root, &["push", remote, &format!("refs/tags/{tag}")])
+}
+
 /// Fetch all remotes and prune stale remote-tracking branches.
 pub fn fetch_all(root: &Path) -> Result<String> {
     let repo = discover(root)?;

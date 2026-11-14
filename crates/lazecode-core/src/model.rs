@@ -16,9 +16,14 @@ use crate::settings::{canonical, Language, Settings, ThemeMode, WorkspaceFile};
 
 static NEXT_TAB: AtomicU64 = AtomicU64::new(1);
 static NEXT_TERMINAL: AtomicU64 = AtomicU64::new(1);
-/// Stable caps consoles per project; each PTY costs two file descriptors and
-/// macOS GUI processes inherit a small soft limit. Panes count as consoles.
-const MAX_TERMINALS_PER_WORKTREE: usize = 10;
+/// Hard cap per worktree. Agent consoles get a separate global cap, but a
+/// worktree still needs room for its initial shell plus ten agents.
+const MAX_TERMINALS_PER_WORKTREE: usize = 12;
+/// Agent consoles are much heavier than a shell. Keep the default bounded
+/// even when many projects/worktrees are open.
+const AGENT_SCROLLBACK_LINES: usize = 4_000;
+const AGENT_COLD_BYTES: usize = 16 * 1024 * 1024;
+const AGENT_GRAPHICS_BYTES: usize = 8 * 1024 * 1024;
 /// Stable `MAX_PANES_PER_TAB`: a tab splits into at most four panes.
 pub const MAX_PANES_PER_TAB: usize = 4;
 
@@ -72,6 +77,8 @@ pub struct UiState {
     pub sidebar_width: f32,
     /// Commit 抽屉（源控视图）宽度，独立于文件树抽屉持久化（稳定版语义）。
     pub commit_width: f32,
+    /// Compare Versions 抽屉宽度（默认 320，可拖动右缘调整）。
+    pub compare_width: f32,
     pub panel_visible: bool,
     /// 终端 dock 独立可见（稳定版 grid：main / dock / bottom / status 四行）。
     pub terminal_visible: bool,
@@ -203,8 +210,12 @@ impl Default for UiState {
             sidebar_view: SidebarView::Files,
             sidebar_width: 262.0,
             commit_width: 330.0,
+            compare_width: 320.0,
             panel_visible: true,
-            terminal_visible: true,
+            // Consoles are opened explicitly. A restored workspace keeps its
+            // terminal tabs, but the initial home screen must not show the
+            // console toggle as active before any console exists.
+            terminal_visible: false,
             branch_search_open: false,
             panel_tab: PanelTab::Console,
             panel_height: 248.0,
@@ -792,6 +803,88 @@ pub struct ProjectState {
 }
 
 impl ProjectState {
+    /// The singleton ad-hoc editor workspace used by "Open" when the user
+    /// selects files instead of a folder. It deliberately has no tree, Git
+    /// snapshot, branches or watcher: files can come from any directory, and
+    /// the console starts in the user's home directory.
+    pub fn single_files() -> Self {
+        // A virtual checkout that groups ad-hoc files without turning the
+        // user's home directory into a project. It has no tree, Git, or
+        // watcher; consoles override their cwd to HOME.
+        let root = crate::settings::Settings::config_dir().join("Single files");
+        let _ = std::fs::create_dir_all(&root);
+        let name = "Single files".to_string();
+        let initials = "SF".to_string();
+        let tone = tone_for(&root);
+        let worktree = WorktreeState {
+            name: "main".to_string(),
+            path: root.clone(),
+            is_main: true,
+            tree: lazecode_fs::tree::FileTree::default(),
+            git: None,
+            git_error: None,
+            terminals: Vec::new(),
+            active_terminal: None,
+            watcher: None,
+            last_watch_poll: Instant::now(),
+            git_loading: false,
+            log_branch: None,
+        };
+        Self {
+            root,
+            name,
+            initials,
+            tone,
+            tree: lazecode_fs::tree::FileTree::default(),
+            root_expanded: false,
+            expanded: HashSet::new(),
+            git: None,
+            git_error: None,
+            log: Vec::new(),
+            log_error: None,
+            branches: Vec::new(),
+            branch_query: String::new(),
+            ref_dirs_expanded: std::collections::HashSet::new(),
+            ref_selection: Vec::new(),
+            favorites: std::collections::HashSet::new(),
+            commit_file_dirs_collapsed: std::collections::HashSet::new(),
+            commit_files_root_collapsed: false,
+            tags: Vec::new(),
+            tag_targets: Vec::new(),
+            remotes: Vec::new(),
+            pending_push: 0,
+            conflicts: Vec::new(),
+            sequencer: None,
+            log_query: LogQuery::default(),
+            log_loaded: 0,
+            log_seed: Vec::new(),
+            log_paging: false,
+            log_reached_end: true,
+            log_branch: None,
+            selected_commit: None,
+            selected_commits: Vec::new(),
+            is_single_file: true,
+            commit_details: None,
+            commit_details_attempted: None,
+            tabs: Vec::new(),
+            active_tab: None,
+            commit_message: String::new(),
+            amend: false,
+            checked_paths: HashSet::new(),
+            collapsed_lists: HashSet::new(),
+            change_selection: HashSet::new(),
+            change_anchor: None,
+            open_push_after_commit: false,
+            worktrees: vec![worktree],
+            active_worktree: 0,
+            watcher: None,
+            last_watch_poll: Instant::now(),
+            git_loading: false,
+            log_loading: false,
+            compare_session: None,
+        }
+    }
+
     pub fn open(
         root: PathBuf,
         settings: &Settings,
@@ -851,6 +944,14 @@ impl ProjectState {
             (Vec::new(), Vec::new(), None)
         };
         let init_dirs = expanded_ref_dirs(&branches);
+        // Tags are part of the initial branch-menu inventory. The git-log
+        // refresh also reloads them later, but waiting for that job leaves the
+        // first menu without a Tags section.
+        let tags = if git.is_some() {
+            lazecode_git::tags(&root).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let mut project = Self {
             root,
             name,
@@ -871,7 +972,7 @@ impl ProjectState {
             favorites: std::collections::HashSet::new(),
             commit_file_dirs_collapsed: std::collections::HashSet::new(),
             commit_files_root_collapsed: false,
-            tags: Vec::new(),
+            tags,
             tag_targets: Vec::new(),
             remotes: Vec::new(),
             pending_push: 0,
@@ -905,6 +1006,16 @@ impl ProjectState {
             log_loading: false,
             compare_session: None,
         };
+        // The worktree projection must exist before branch/changes accessors
+        // are used (refresh_branches reads the active branch for pending count).
+        project.worktrees.push(WorktreeState::load(
+            "main".to_string(),
+            project.root.clone(),
+            true,
+        ));
+        // Populate remotes/tags/ahead-behind in the initial frame so the
+        // branch menu, Push dialog and Remotes dialog are usable immediately.
+        project.refresh_branches();
         if let Some(first) = project.log.first() {
             project.selected_commit = Some(first.id.clone());
         }
@@ -914,8 +1025,6 @@ impl ProjectState {
         if let Some(file_path) = file_to_open {
             let _ = project.open_file(file_path, settings);
         }
-        let main = WorktreeState::load("main".to_string(), project.root.clone(), true);
-        project.worktrees.push(main);
         if let Err(err) = project.open_terminal(None, None, SessionKind::Shell, settings, notifier)
         {
             // A bad shell setting must not make the whole project (and every
@@ -928,51 +1037,65 @@ impl ProjectState {
         Ok(project)
     }
     pub fn reload_tree(&mut self, settings: &Settings) {
-        self.tree = lazecode_fs::tree::load_tree_with_expanded(
-            &self.root,
+        if self.is_single_file {
+            return;
+        }
+        let root = self.active_root().to_path_buf();
+        let tree = lazecode_fs::tree::load_tree_with_expanded(
+            &root,
             Some(&self.expanded),
             20_000,
             Some(&settings.ignored_patterns),
         );
+        self.active_worktree_mut().tree = tree;
+    }
+
+    /// Root of the checkout currently shown in the editor/source-control pane.
+    pub fn active_root(&self) -> &Path {
+        &self.active_worktree().path
+    }
+
+    /// Git snapshot of the focused worktree.
+    pub fn active_git(&self) -> Option<&RepoSnapshot> {
+        self.active_worktree().git.as_ref()
+    }
+
+    pub fn active_git_error(&self) -> Option<&str> {
+        self.active_worktree().git_error.as_deref()
+    }
+
+    pub fn active_git_loading(&self) -> bool {
+        self.active_worktree().git_loading
+    }
+
+    pub fn active_tree(&self) -> &FileTree {
+        &self.active_worktree().tree
     }
 
     pub fn branch(&self) -> String {
-        self.git
-            .as_ref()
-            .and_then(|git| git.branch.clone())
-            .unwrap_or_else(|| {
-                if let Some(head) = self.git.as_ref().and_then(|git| git.head.as_ref()) {
-                    format!("{} (detached)", head.short)
-                } else {
-                    "no branch".to_string()
-                }
-            })
+        self.active_worktree().branch()
     }
 
     pub fn changes(&self) -> &[lazecode_git::Change] {
-        self.git
-            .as_ref()
+        self.active_git()
             .map(|git| git.changes.as_slice())
             .unwrap_or(&[])
     }
 
     pub fn ignored_files(&self) -> &[String] {
-        self.git
-            .as_ref()
+        self.active_git()
             .map(|git| git.ignored_files.as_slice())
             .unwrap_or(&[])
     }
 
     pub fn ignored_dirs(&self) -> &[String] {
-        self.git
-            .as_ref()
+        self.active_git()
             .map(|git| git.ignored_dirs.as_slice())
             .unwrap_or(&[])
     }
 
     pub fn is_git_ignored(&self, rel_path: &std::path::Path) -> bool {
-        self.git
-            .as_ref()
+        self.active_git()
             .is_some_and(|git| is_snapshot_ignored(git, rel_path))
     }
 
@@ -985,6 +1108,10 @@ impl ProjectState {
     }
 
     pub fn refresh_git(&mut self) {
+        if self.is_single_file {
+            self.git_loading = false;
+            return;
+        }
         self.git_loading = true;
         match lazecode_git::snapshot(&self.root) {
             Ok(snapshot) => {
@@ -999,6 +1126,9 @@ impl ProjectState {
 
     /// Refresh the Git snapshot of one worktree by its path.
     pub fn refresh_git_for(&mut self, path: &Path) {
+        if self.is_single_file {
+            return;
+        }
         let Some(worktree) = self
             .worktrees
             .iter_mut()
@@ -1015,6 +1145,46 @@ impl ProjectState {
             Err(err) => worktree.git_error = Some(err.to_string()),
         }
         worktree.git_loading = false;
+    }
+
+    /// Apply a completed Git snapshot job to the matching checkout and keep
+    /// the compatibility projection in sync when that checkout is focused.
+    pub fn apply_git_snapshot(
+        &mut self,
+        path: &Path,
+        result: Result<RepoSnapshot, String>,
+    ) -> bool {
+        let is_main = self.root == path;
+        let worktree_index = self
+            .worktrees
+            .iter()
+            .position(|worktree| worktree.path == path);
+        let Some(worktree_index) = worktree_index else {
+            return false;
+        };
+        let active = self.active_worktree == worktree_index;
+        let worktree = &mut self.worktrees[worktree_index];
+        worktree.git_loading = false;
+        match result {
+            Ok(snapshot) => {
+                if is_main || active {
+                    self.git = Some(snapshot.clone());
+                    self.git_error = None;
+                }
+                worktree.git = Some(snapshot);
+                worktree.git_error = None;
+            }
+            Err(err) => {
+                if is_main || active {
+                    self.git_error = Some(err.clone());
+                }
+                worktree.git_error = Some(err);
+            }
+        }
+        if active {
+            self.prune_unchecked();
+        }
+        true
     }
 
     pub fn prune_unchecked_public(&mut self) {
@@ -1038,11 +1208,12 @@ impl ProjectState {
     }
 
     pub fn refresh_log(&mut self) {
-        if self.git.is_none() {
+        if self.active_git().is_none() {
             return;
         }
+        let root = self.active_root().to_path_buf();
         self.log_loading = true;
-        match lazecode_git::log(&self.root, LogOptions::default()) {
+        match lazecode_git::log(&root, LogOptions::default()) {
             Ok(log) => {
                 if let Some(branch) = &self.log_branch {
                     self.log = log
@@ -1108,11 +1279,12 @@ impl ProjectState {
     }
 
     pub fn refresh_conflicts(&mut self) {
-        if self.git.is_none() {
+        if self.active_git().is_none() {
             return;
         }
-        self.conflicts = lazecode_git::conflict_list(&self.root).unwrap_or_default();
-        self.sequencer = lazecode_git::sequencer_state(&self.root).ok();
+        let root = self.active_root().to_path_buf();
+        self.conflicts = lazecode_git::conflict_list(&root).unwrap_or_default();
+        self.sequencer = lazecode_git::sequencer_state(&root).ok();
         if self.conflicts.is_empty() && self.sequencer == Some(lazecode_git::SequencerState::None) {
             self.sequencer = None;
         }
@@ -1149,12 +1321,22 @@ impl ProjectState {
         self.worktrees.iter().position(|wt| wt.name == name)
     }
 
+    fn focus_worktree(&mut self, index: usize) {
+        self.active_worktree = index;
+        // Checked paths, multi-selection and anchors are repo-relative but
+        // belong to the previously visible checkout. Carrying them across a
+        // switch would commit/stage files in the wrong worktree.
+        self.checked_paths.clear();
+        self.change_selection.clear();
+        self.change_anchor = None;
+    }
+
     /// Switch to an already attached worktree, or attach one that exists in
     /// Git but is not yet loaded into the model. Returns `Ok(Some(()))` when
     /// a new worktree was attached, `Ok(None)` when it was already loaded.
     pub fn ensure_worktree(&mut self, name: &str) -> Result<Option<()>, String> {
         if let Some(index) = self.worktree_index(name) {
-            self.active_worktree = index;
+            self.focus_worktree(index);
             return Ok(None);
         }
         // A worktree registered in git but not attached yet: load it cold
@@ -1166,7 +1348,7 @@ impl ProjectState {
         let worktree = WorktreeState::load(info.name, info.path, false);
         let index = self.worktrees.len();
         self.worktrees.push(worktree);
-        self.active_worktree = index;
+        self.focus_worktree(index);
         Ok(Some(()))
     }
 
@@ -1179,11 +1361,11 @@ impl ProjectState {
             .position(|existing| existing.path == worktree.path)
         {
             self.worktrees[index] = worktree;
-            self.active_worktree = index;
+            self.focus_worktree(index);
             return;
         }
         self.worktrees.push(worktree);
-        self.active_worktree = self.worktrees.len() - 1;
+        self.focus_worktree(self.worktrees.len() - 1);
     }
 
     /// Drop the model entry for a linked worktree after git removal.
@@ -1194,7 +1376,12 @@ impl ProjectState {
         self.worktrees.remove(index);
         if self.active_worktree >= self.worktrees.len() {
             self.active_worktree = self.worktrees.len().saturating_sub(1);
+        } else if self.active_worktree > index {
+            self.active_worktree -= 1;
         }
+        self.checked_paths.clear();
+        self.change_selection.clear();
+        self.change_anchor = None;
     }
 
     pub fn tab_by_id(&self, id: u64) -> Option<&Tab> {
@@ -1208,6 +1395,10 @@ impl ProjectState {
     pub fn open_file(&mut self, path: PathBuf, settings: &Settings) -> Result<u64, String> {
         let path = if path.is_absolute() {
             path
+        } else if self.is_single_file {
+            dirs::home_dir()
+                .unwrap_or_else(|| self.root.clone())
+                .join(path)
         } else {
             self.root.join(path)
         };
@@ -1223,7 +1414,10 @@ impl ProjectState {
             return Ok(tab.id);
         }
         let id = NEXT_TAB.fetch_add(1, Ordering::Relaxed);
-        let external = !path.starts_with(&self.root);
+        // The Single files checkout is virtual: every ad-hoc file lives
+        // outside its metadata root by design. Only real projects use the
+        // "diff" badge for files opened from outside the checkout.
+        let external = !self.is_single_file && !path.starts_with(&self.root);
         if is_image_path(&path) {
             self.tabs.push(Tab {
                 id,
@@ -1556,7 +1750,11 @@ impl ProjectState {
         settings: &Settings,
         notifier: Option<Arc<dyn Notifier>>,
     ) -> Result<u64, String> {
-        let cwd = self.active_worktree().path.clone();
+        let cwd = if self.is_single_file {
+            dirs::home_dir().unwrap_or_else(|| self.active_worktree().path.clone())
+        } else {
+            self.active_worktree().path.clone()
+        };
         self.open_terminal_in(cwd, command, title, kind, settings, notifier)
     }
 
@@ -1755,18 +1953,34 @@ fn spawn_pane(
     settings: &Settings,
     notifier: Option<Arc<dyn Notifier>>,
 ) -> Result<Session, String> {
+    let is_agent = kind == SessionKind::Agent;
+    let scrollback = if is_agent {
+        settings.terminal.scrollback.min(AGENT_SCROLLBACK_LINES)
+    } else {
+        settings.terminal.scrollback
+    };
     lazecode_terminal::spawn(SpawnOptions {
         shell: settings.terminal.shell.clone(),
         command,
         cwd,
         cols: 110,
         rows: 28,
-        scrollback: settings.terminal.scrollback,
+        scrollback,
         // Cold history extends the hot budget onto disk; both the spool and
-        // the kitty image cache stay bounded by these caps.
-        cold_lines: settings.terminal.scrollback.saturating_mul(8),
-        cold_bytes: 64 * 1024 * 1024,
-        graphics_bytes: 32 * 1024 * 1024,
+        // the kitty image cache stay bounded by these caps. Agent consoles
+        // keep a much smaller per-session cache because their process memory
+        // already dominates a large workspace.
+        cold_lines: scrollback.saturating_mul(8),
+        cold_bytes: if is_agent {
+            AGENT_COLD_BYTES
+        } else {
+            64 * 1024 * 1024
+        },
+        graphics_bytes: if is_agent {
+            AGENT_GRAPHICS_BYTES
+        } else {
+            32 * 1024 * 1024
+        },
         notifier,
         kind,
     })
@@ -1780,6 +1994,9 @@ pub struct AppModel {
     pub ui: UiState,
     pub toasts: Vec<Toast>,
     pub recent: Vec<PathBuf>,
+    /// Recently opened files, independent of the directory recents. Files
+    /// opened inside projects and in the ad-hoc workspace both land here.
+    pub recent_files: Vec<PathBuf>,
     pub commands: Vec<Command>,
     pub notifier: Option<Arc<dyn Notifier>>,
     /// Optional language-server sessions + aggregated diagnostics.
@@ -1799,6 +2016,7 @@ impl AppModel {
             ui: UiState {
                 sidebar_width: settings.sidebar_width,
                 commit_width: settings.commit_drawer_width,
+                compare_width: settings.compare_drawer_width,
                 panel_height: settings.panel_height,
                 show_minimap: settings.editor.show_minimap,
                 sidebar_visible: workspace.sidebar_visible.unwrap_or(true),
@@ -1822,6 +2040,7 @@ impl AppModel {
             active_project: None,
             toasts: Vec::new(),
             recent: workspace.recent.clone(),
+            recent_files: workspace.recent_files.clone(),
             commands: Vec::new(),
             notifier,
             lsp,
@@ -1872,6 +2091,39 @@ impl AppModel {
                 self.projects[*index].commit_message = draft.clone();
             }
         }
+        let active_before_single = self.active_project;
+        if !workspace.single_files.is_empty() {
+            let index = self.ensure_single_files();
+            for path in &workspace.single_files {
+                let _ = self.projects[index].open_file(path.clone(), &self.settings);
+            }
+            if self.projects[index].tabs.is_empty() {
+                // Every saved ad-hoc file disappeared; do not leave an empty
+                // "Single files" workspace behind.
+                self.projects.remove(index);
+                self.active_project = active_before_single;
+            } else {
+                if let Some(active) = &workspace.active_single_file {
+                    if let Some(tab) =
+                        self.projects[index]
+                            .tabs
+                            .iter()
+                            .find(|tab| match &tab.kind {
+                                TabKind::File(file) => &file.doc.path == active,
+                                TabKind::Image(img) => &img.path == active,
+                                _ => false,
+                            })
+                    {
+                        self.projects[index].active_tab = Some(tab.id);
+                    }
+                }
+                if workspace.single_files_active {
+                    self.active_project = Some(index);
+                } else {
+                    self.active_project = active_before_single.or(Some(index));
+                }
+            }
+        }
         if self.active_project.is_none() {
             self.active_project = if self.projects.is_empty() {
                 None
@@ -1915,10 +2167,13 @@ impl AppModel {
 
     pub fn open_project(&mut self, path: PathBuf) -> Result<usize, String> {
         let path = canonical(&path);
+        if path.is_file() {
+            return self.open_files(vec![path]);
+        }
         if let Some(index) = self
             .projects
             .iter()
-            .position(|project| project.root == path)
+            .position(|project| project.root == path && !project.is_single_file)
         {
             self.active_project = Some(index);
             return Ok(index);
@@ -1927,32 +2182,183 @@ impl AppModel {
         Ok(self.add_loaded_project(project))
     }
 
+    pub fn single_files_index(&self) -> Option<usize> {
+        self.projects
+            .iter()
+            .position(|project| project.is_single_file)
+    }
+
+    /// Ensure the one ad-hoc files workspace exists and make it active.
+    pub fn ensure_single_files(&mut self) -> usize {
+        if let Some(index) = self.single_files_index() {
+            self.active_project = Some(index);
+            return index;
+        }
+        let mut project = ProjectState::single_files();
+        let preferred = PROJECT_TONES[self.projects.len() % PROJECT_TONES.len()];
+        project.tone = unique_project_tone(
+            self.projects.iter().map(|existing| existing.tone),
+            preferred,
+        );
+        let index = self.projects.len();
+        self.projects.push(project);
+        self.active_project = Some(index);
+        index
+    }
+
+    /// Live agent panes across every project and worktree. Shell consoles do
+    /// not count; this is the memory admission control for OMP-like agents.
+    pub fn live_agent_console_count(&self) -> usize {
+        self.projects
+            .iter()
+            .flat_map(|project| project.worktrees.iter())
+            .flat_map(|worktree| worktree.terminals.iter())
+            .flat_map(|tab| tab.panes.iter())
+            .filter(|pane| pane.kind == SessionKind::Agent)
+            .count()
+    }
+
+    /// Spawn an agent console with the global admission limit applied. This is
+    /// the single entry point used by the agent menu and command palette.
+    pub fn open_agent_console(
+        &mut self,
+        title: String,
+        command: String,
+        settings: &Settings,
+        notifier: Option<Arc<dyn Notifier>>,
+    ) -> Result<u64, String> {
+        let max = settings.terminal.max_agent_consoles.max(1);
+        if self.live_agent_console_count() >= max {
+            return Err(if settings.language.is_zh() {
+                format!("最多同时打开 {max} 个智能体控制台")
+            } else {
+                format!("At most {max} agent consoles can be open at once")
+            });
+        }
+        self.active_project_mut()
+            .ok_or_else(|| "no active project".to_string())?
+            .open_terminal(
+                Some(command),
+                Some(title),
+                SessionKind::Agent,
+                settings,
+                notifier,
+            )
+    }
+
+    /// Open one or more files in the singleton "Single files" workspace.
+    /// Opening a directory always goes through `open_project`/`OpenProject`
+    /// instead and therefore switches to that real project.
+    pub fn open_files(&mut self, paths: Vec<PathBuf>) -> Result<usize, String> {
+        if paths.is_empty() {
+            return Err("no files selected".to_string());
+        }
+        let index = self.ensure_single_files();
+        let mut opened = 0usize;
+        let mut first_error: Option<String> = None;
+        for path in paths {
+            let path = canonical(&path);
+            if !path.is_file() {
+                first_error.get_or_insert_with(|| format!("{} is not a file", path.display()));
+                continue;
+            }
+            match self.projects[index].open_file(path.clone(), &self.settings) {
+                Ok(_) => {
+                    opened += 1;
+                    self.note_recent_file(path);
+                }
+                Err(err) => {
+                    first_error.get_or_insert(err);
+                }
+            }
+        }
+        if opened == 0 {
+            if self.projects[index].tabs.is_empty() {
+                self.projects.remove(index);
+                self.active_project = self
+                    .active_project
+                    .filter(|active| *active < self.projects.len())
+                    .or_else(|| (!self.projects.is_empty()).then_some(0));
+            }
+            return Err(first_error.unwrap_or_else(|| "could not open files".to_string()));
+        }
+        self.active_project = Some(index);
+        if let Some(project) = self.projects.get_mut(index) {
+            project.root_expanded = false;
+        }
+        let message = if self.settings.language.is_zh() {
+            format!("已在单文件页面打开 {opened} 个文件")
+        } else {
+            format!("Opened {opened} file(s) in Single files")
+        };
+        self.toast(message, ToastKind::Success);
+        Ok(index)
+    }
+
+    pub fn note_recent_file(&mut self, path: PathBuf) {
+        let path = canonical(&path);
+        self.recent_files.retain(|recent| recent != &path);
+        self.recent_files.insert(0, path);
+        self.recent_files.truncate(12);
+    }
+
+    pub fn forget_recent_file(&mut self, path: &Path) {
+        self.recent_files.retain(|recent| recent != path);
+        self.save_workspace();
+    }
+
+    /// Open a file inside an existing project (tree, search, palette) and
+    /// keep the global recent-files list fresh.
+    pub fn open_file_in(&mut self, index: usize, path: PathBuf) -> Result<u64, String> {
+        let result = self
+            .projects
+            .get_mut(index)
+            .ok_or_else(|| "project not found".to_string())?
+            .open_file(path.clone(), &self.settings);
+        if result.is_ok() {
+            self.note_recent_file(path);
+        }
+        result
+    }
+
     /// Insert a project that was loaded on a worker thread.
-    pub fn add_loaded_project(&mut self, project: ProjectState) -> usize {
+    pub fn add_loaded_project(&mut self, mut project: ProjectState) -> usize {
+        if project.is_single_file {
+            let index = self.ensure_single_files();
+            let active = project.active_tab;
+            let tabs = std::mem::take(&mut project.tabs);
+            self.projects[index].tabs.extend(tabs);
+            if active.is_some() {
+                self.projects[index].active_tab = active;
+            }
+            return index;
+        }
         if let Some(index) = self
             .projects
             .iter()
-            .position(|existing| existing.root == project.root)
+            .position(|existing| !existing.is_single_file && existing.root == project.root)
         {
             self.active_project = Some(index);
             return index;
         }
+        let preferred = PROJECT_TONES[self.projects.len() % PROJECT_TONES.len()];
+        project.tone = unique_project_tone(
+            self.projects.iter().map(|existing| existing.tone),
+            preferred,
+        );
         let path = project.root.clone();
         let name = project.name.clone();
-        let is_single_file = project.is_single_file;
-        let was_empty = self.projects.is_empty();
+        let had_real_project = self.projects.iter().any(|project| !project.is_single_file);
         let index = self.projects.len();
         self.projects.push(project);
-        if was_empty {
+        if !had_real_project {
             self.ui.sidebar_visible = true;
             self.ui.panel_visible = true;
         }
         self.active_project = Some(index);
-        if !is_single_file {
-            self.recent.retain(|recent| recent != &path);
-            self.recent.insert(0, path);
-            self.recent.truncate(12);
-        }
+        self.recent.retain(|recent| recent != &path);
+        self.recent.insert(0, path);
+        self.recent.truncate(12);
         let message = if self.settings.language.is_zh() {
             format!("已打开 {name}")
         } else {
@@ -1968,11 +2374,129 @@ impl AppModel {
             .position(|project| project.root == root)
     }
 
+    /// Project owning a Git operation root: either the registered project
+    /// root or any attached linked worktree.
+    pub fn index_of_git_root(&self, root: &Path) -> Option<usize> {
+        self.projects.iter().position(|project| {
+            project.root == root
+                || project
+                    .worktrees
+                    .iter()
+                    .any(|worktree| worktree.path == root)
+        })
+    }
+
+    pub fn project_for_git_root(&self, root: &Path) -> Option<&ProjectState> {
+        self.index_of_git_root(root)
+            .and_then(|index| self.projects.get(index))
+    }
+
+    pub fn project_mut_for_git_root(&mut self, root: &Path) -> Option<&mut ProjectState> {
+        let index = self.index_of_git_root(root)?;
+        self.projects.get_mut(index)
+    }
+
+    /// Close a central tab and settle the Single files workspace when the
+    /// last ad-hoc tab disappears.
+    pub fn close_tab(&mut self, index: usize, id: u64) {
+        let Some(project) = self.projects.get_mut(index) else {
+            return;
+        };
+        project.close_tab(id);
+        self.settle_single_files_workspace();
+    }
+
+    pub fn close_other_tabs(&mut self, index: usize, id: u64) {
+        let Some(project) = self.projects.get_mut(index) else {
+            return;
+        };
+        project.close_other_tabs(id);
+        self.settle_single_files_workspace();
+    }
+
+    pub fn close_tabs_to_right(&mut self, index: usize, id: u64) {
+        let Some(project) = self.projects.get_mut(index) else {
+            return;
+        };
+        project.close_tabs_to_right(id);
+        self.settle_single_files_workspace();
+    }
+
+    pub fn close_tabs_to_left(&mut self, index: usize, id: u64) {
+        let Some(project) = self.projects.get_mut(index) else {
+            return;
+        };
+        project.close_tabs_to_left(id);
+        self.settle_single_files_workspace();
+    }
+
+    pub fn close_unmodified_tabs(&mut self, index: usize) {
+        let Some(project) = self.projects.get_mut(index) else {
+            return;
+        };
+        project.close_unmodified_tabs();
+        self.settle_single_files_workspace();
+    }
+
+    pub fn close_all_tabs(&mut self, index: usize) {
+        let Some(project) = self.projects.get_mut(index) else {
+            return;
+        };
+        project.close_all_tabs();
+        self.settle_single_files_workspace();
+    }
+
+    /// If the active Single files checkout just lost its last file, leave it:
+    /// return to an open project, or go back to the empty home when there is
+    /// nothing else. An empty checkout is only kept when it owns consoles and
+    /// is the sole workspace (the hidden console host).
+    pub fn settle_single_files_workspace(&mut self) {
+        let Some(index) = self.active_project else {
+            return;
+        };
+        let Some(project) = self.projects.get(index) else {
+            return;
+        };
+        if !project.is_single_file || !project.tabs.is_empty() {
+            return;
+        }
+        let has_terminals = project
+            .worktrees
+            .iter()
+            .any(|worktree| !worktree.terminals.is_empty());
+        if self.projects.len() > 1 {
+            self.close_project(index);
+            let target_has_terminals = self.active_project().is_some_and(|project| {
+                project
+                    .worktrees
+                    .iter()
+                    .any(|worktree| !worktree.terminals.is_empty())
+            });
+            if !target_has_terminals {
+                self.ui.terminal_visible = false;
+                self.ui.terminal_maximised = false;
+            }
+        } else if !has_terminals {
+            self.close_project(index);
+            self.ui.terminal_visible = false;
+            self.ui.terminal_maximised = false;
+        }
+    }
+
     pub fn close_project(&mut self, index: usize) {
         if index >= self.projects.len() {
             return;
         }
+        let closed_root = self.projects[index].root.clone();
+        let closed_single_file = self.projects[index].is_single_file;
         self.projects.remove(index);
+        // A project disappears from recents while it is open; closing it makes
+        // it eligible for the recent list again.
+        if !closed_single_file {
+            self.recent.retain(|recent| recent != &closed_root);
+            self.recent.insert(0, closed_root);
+            self.recent.truncate(12);
+        }
         self.active_project = match self.active_project {
             Some(active) if active == index => {
                 if self.projects.is_empty() {
@@ -1990,6 +2514,13 @@ impl AppModel {
         if index < self.projects.len() {
             self.active_project = Some(index);
         }
+    }
+
+    /// Remove one entry from the recent-project list and persist the
+    /// workspace immediately so the menu's delete action survives a restart.
+    pub fn forget_recent(&mut self, path: &Path) {
+        self.recent.retain(|recent| recent != path);
+        self.save_workspace();
     }
 
     pub fn queue(&mut self, command: Command) {
@@ -2109,7 +2640,7 @@ impl AppModel {
         project.reload_tree(&self.settings);
 
         let rel = file_path
-            .strip_prefix(&project.root)
+            .strip_prefix(project.active_root())
             .unwrap_or(&file_path)
             .to_path_buf();
         self.ui.tree_selected = Some(rel.clone());
@@ -2139,15 +2670,47 @@ impl AppModel {
     }
 
     pub fn save_workspace(&mut self) {
+        let single_index = self.single_files_index();
+        let single_files: Vec<PathBuf> = single_index
+            .and_then(|index| self.projects.get(index))
+            .map(|project| {
+                project
+                    .tabs
+                    .iter()
+                    .filter_map(|tab| match &tab.kind {
+                        TabKind::File(file) => Some(file.doc.path.clone()),
+                        TabKind::Image(img) => Some(img.path.clone()),
+                        TabKind::Diff(_) | TabKind::Compare(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let active_single_file = single_index.and_then(|index| {
+            let project = self.projects.get(index)?;
+            let tab = project.tab_by_id(project.active_tab?)?;
+            match &tab.kind {
+                TabKind::File(file) => Some(file.doc.path.clone()),
+                TabKind::Image(img) => Some(img.path.clone()),
+                _ => None,
+            }
+        });
+        let single_files_active = single_index.is_some() && self.active_project == single_index;
         let mut file = WorkspaceFile {
             recent: self.recent.clone(),
+            recent_files: self.recent_files.clone(),
             projects: self
                 .projects
                 .iter()
                 .filter(|p| !p.is_single_file)
                 .map(|project| project.root.clone())
                 .collect(),
-            active_project: self.active_project().map(|project| project.root.clone()),
+            active_project: self
+                .active_project()
+                .filter(|project| !project.is_single_file)
+                .map(|project| project.root.clone()),
+            single_files,
+            active_single_file,
+            single_files_active,
             sidebar_view: Some(
                 match self.ui.sidebar_view {
                     SidebarView::Files => "files",
@@ -2179,6 +2742,9 @@ impl AppModel {
             commit_drafts: BTreeMap::new(),
         };
         for project in &self.projects {
+            if project.is_single_file {
+                continue;
+            }
             if !project.commit_message.trim().is_empty() {
                 file.commit_drafts
                     .insert(project.root.clone(), project.commit_message.clone());
@@ -2253,23 +2819,43 @@ fn initials_of(name: &str) -> String {
     }
 }
 
+/// Project identity colors. Keep red and green out of this palette: those
+/// hues are reserved for the console activity ring and its output runner.
+const PROJECT_TONES: [(u8, u8, u8); 10] = [
+    (138, 180, 255), // blue
+    (185, 167, 255), // violet
+    (240, 198, 116), // gold
+    (129, 140, 248), // indigo
+    (240, 166, 202), // pink
+    (103, 232, 249), // cyan
+    (245, 169, 127), // orange
+    (196, 181, 253), // lavender
+    (56, 189, 248),  // sky
+    (232, 121, 249), // magenta
+];
+
 fn tone_for(path: &Path) -> (u8, u8, u8) {
-    const TONES: [(u8, u8, u8); 8] = [
-        (168, 189, 131),
-        (138, 180, 255),
-        (185, 167, 255),
-        (240, 198, 116),
-        (245, 169, 127),
-        (240, 166, 202),
-        (87, 217, 163),
-        (251, 139, 139),
-    ];
     let mut hash = 1469598103934665603u64;
     for byte in path.to_string_lossy().bytes() {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(1099511628211);
     }
-    TONES[(hash % TONES.len() as u64) as usize]
+    PROJECT_TONES[(hash % PROJECT_TONES.len() as u64) as usize]
+}
+
+fn unique_project_tone(
+    used: impl Iterator<Item = (u8, u8, u8)>,
+    fallback: (u8, u8, u8),
+) -> (u8, u8, u8) {
+    let used: HashSet<(u8, u8, u8)> = used.collect();
+    if !used.contains(&fallback) {
+        return fallback;
+    }
+    PROJECT_TONES
+        .iter()
+        .copied()
+        .find(|tone| !used.contains(tone))
+        .unwrap_or(fallback)
 }
 /// Language-server workspace root for one open file.
 ///

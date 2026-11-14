@@ -50,6 +50,7 @@ fn model(project: ProjectState) -> (AppModel, usize) {
         ui: UiState::default(),
         toasts: Vec::new(),
         recent: Vec::new(),
+        recent_files: Vec::new(),
         commands: Vec::new(),
         notifier: None,
         lsp: lazecode_core::LspManager::new(true, None),

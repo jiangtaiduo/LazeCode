@@ -14,6 +14,7 @@ fn model() -> AppModel {
         ui: UiState::default(),
         toasts: Vec::new(),
         recent: Vec::new(),
+        recent_files: Vec::new(),
         commands: Vec::new(),
         notifier: None,
         lsp: lazecode_core::LspManager::new(true, None),
@@ -598,4 +599,189 @@ fn terminal_close_others_keeps_active_tab_and_panes() {
     assert_eq!(worktree.active_tab_id(), Some(tab_a));
     assert!(project.term_by_id(third).is_none());
     assert!(project.term_by_id(second).is_some());
+}
+
+#[test]
+fn switching_worktrees_switches_branch_changes_and_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Tester"]);
+    git(&["config", "user.email", "tester@example.com"]);
+    std::fs::write(root.join("main.txt"), "main\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "main"]);
+    git(&["branch", "side"]);
+    let linked = root.with_extension("side-worktree");
+    lazecode_git::add_worktree(root, &linked, "side").unwrap();
+
+    std::fs::write(root.join("main-only.txt"), "main change\n").unwrap();
+    std::fs::write(linked.join("side-only.txt"), "side change\n").unwrap();
+
+    let settings = Settings::default();
+    let mut project = ProjectState::open(root.to_path_buf(), &settings, None).unwrap();
+    let side_name = lazecode_git::list_worktrees(root)
+        .unwrap()
+        .into_iter()
+        .find(|worktree| worktree.name != "main")
+        .map(|worktree| worktree.name)
+        .unwrap();
+    project.ensure_worktree(&side_name).unwrap();
+    project.refresh_git_for(&linked);
+    project.reload_tree(&settings);
+
+    assert_eq!(project.branch(), "side");
+    assert!(project
+        .changes()
+        .iter()
+        .any(|change| change.path == "side-only.txt"));
+    assert!(!project
+        .changes()
+        .iter()
+        .any(|change| change.path == "main-only.txt"));
+    assert_eq!(
+        project.active_root(),
+        linked.canonicalize().unwrap().as_path()
+    );
+    assert!(project
+        .active_tree()
+        .nodes
+        .iter()
+        .any(|node| node.name == "side-only.txt"));
+
+    project.ensure_worktree("main").unwrap();
+    project.refresh_git_for(root);
+    assert_eq!(project.branch(), "main");
+    assert!(project
+        .changes()
+        .iter()
+        .any(|change| change.path == "main-only.txt"));
+    assert!(!project
+        .changes()
+        .iter()
+        .any(|change| change.path == "side-only.txt"));
+    assert!(project.checked_paths.is_empty());
+    assert!(project.change_selection.is_empty());
+
+    let _ = std::fs::remove_dir_all(&linked);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn single_files_workspace_is_singleton_and_switches_back() {
+    let files = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let a = files.path().join("a.txt");
+    let b = files.path().join("b.txt");
+    let c = files.path().join("c.txt");
+    std::fs::write(&a, "a\n").unwrap();
+    std::fs::write(&b, "b\n").unwrap();
+    std::fs::write(&c, "c\n").unwrap();
+
+    let mut model = model();
+    model.open_project(a.clone()).unwrap();
+    assert_eq!(model.projects.len(), 1);
+    assert!(model.projects[0].is_single_file);
+    assert!(model.projects[0].active_git().is_none());
+    assert!(model.projects[0].root.ends_with("Single files"));
+    assert_eq!(model.projects[0].tabs.len(), 1);
+    assert_eq!(model.recent_files.first(), Some(&a.canonicalize().unwrap()));
+
+    model.open_files(vec![b.clone()]).unwrap();
+    assert_eq!(model.projects.len(), 1, "files must share one workspace");
+    assert_eq!(model.projects[0].tabs.len(), 2);
+    assert_eq!(model.recent_files.first(), Some(&b.canonicalize().unwrap()));
+
+    model.open_project(project.path().to_path_buf()).unwrap();
+    assert_eq!(model.projects.len(), 2);
+    assert!(!model.projects[model.active_project.unwrap()].is_single_file);
+
+    model.open_files(vec![c.clone()]).unwrap();
+    assert_eq!(model.active_project, Some(0));
+    assert_eq!(model.projects[0].tabs.len(), 3);
+    assert!(!model.projects[1].is_single_file);
+}
+
+#[test]
+fn last_single_tab_falls_back_to_an_open_project() {
+    let real_dir = tempfile::tempdir().unwrap();
+    std::fs::write(real_dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+    let ad_hoc_dir = tempfile::tempdir().unwrap();
+    let ad_hoc = ad_hoc_dir.path().join("standalone.rs");
+    std::fs::write(&ad_hoc, "fn standalone() {}\n").unwrap();
+
+    let mut model = model();
+    assert!(!model.ui.terminal_visible);
+    let real = ProjectState::open(real_dir.path().to_path_buf(), &model.settings, None).unwrap();
+    let real_index = model.add_loaded_project(real);
+    let single_index = model.open_files(vec![ad_hoc]).unwrap();
+    assert_eq!(model.active_project, Some(single_index));
+    let tab = model.projects[single_index].tabs[0].id;
+    let TabKind::File(file) = &model.projects[single_index].tabs[0].kind else {
+        panic!("expected a file tab");
+    };
+    assert!(!file.external, "ad-hoc Single files tabs are not external");
+
+    model.close_tab(single_index, tab);
+    assert_eq!(model.projects.len(), 1);
+    assert_eq!(model.active_project, Some(real_index));
+    assert!(!model.projects[0].is_single_file);
+}
+
+#[test]
+fn last_single_tab_without_other_projects_returns_home() {
+    let ad_hoc_dir = tempfile::tempdir().unwrap();
+    let ad_hoc = ad_hoc_dir.path().join("standalone.rs");
+    std::fs::write(&ad_hoc, "fn standalone() {}\n").unwrap();
+
+    let mut model = model();
+    let single_index = model.open_files(vec![ad_hoc]).unwrap();
+    let tab = model.projects[single_index].tabs[0].id;
+    model.ui.terminal_visible = true;
+    model.close_tab(single_index, tab);
+    assert!(model.projects.is_empty());
+    assert_eq!(model.active_project, None);
+    assert!(!model.ui.terminal_visible);
+}
+
+#[test]
+fn agent_console_cap_is_global_and_ignores_initial_shell() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+    let settings = Settings {
+        terminal: lazecode_core::settings::TerminalSettings {
+            max_agent_consoles: 10,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut model = model();
+    model.settings = settings.clone();
+    let project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
+    let index = model.add_loaded_project(project);
+    // The auto-created login shell is not an agent console and does not count.
+    assert_eq!(model.live_agent_console_count(), 0);
+    for i in 0..10 {
+        model
+            .open_agent_console(format!("agent-{i}"), "sleep 5".into(), &settings, None)
+            .unwrap();
+    }
+    assert_eq!(model.live_agent_console_count(), 10);
+    let err = model
+        .open_agent_console("overflow".into(), "sleep 5".into(), &settings, None)
+        .unwrap_err();
+    assert!(err.contains("10"), "{err}");
+    assert_eq!(model.projects[index].active_worktree().pane_count(), 11);
 }

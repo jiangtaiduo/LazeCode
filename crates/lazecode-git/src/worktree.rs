@@ -236,6 +236,39 @@ mod tests {
     }
 
     #[test]
+    fn multiple_worktrees_require_distinct_branches() {
+        let dir = init();
+        git(dir.path(), &["branch", "side"]);
+        git(dir.path(), &["branch", "feat"]);
+        let side = dir.path().join("wt-side");
+        let feat = dir.path().join("wt-feat");
+        add_worktree(dir.path(), &side, "side").unwrap();
+        add_worktree(dir.path(), &feat, "feat").unwrap();
+
+        let listed = list_worktrees(dir.path()).unwrap();
+        assert_eq!(listed.len(), 3);
+        let branches: Vec<_> = listed
+            .iter()
+            .filter_map(|wt| wt.branch.as_deref())
+            .collect();
+        assert!(branches.contains(&"main"));
+        assert!(branches.contains(&"side"));
+        assert!(branches.contains(&"feat"));
+
+        for branch in ["main", "side", "feat"] {
+            let destination = dir.path().join(format!("reuse-{branch}"));
+            let err = add_worktree(dir.path(), &destination, branch).unwrap_err();
+            assert!(
+                err.to_string().contains("already checked out")
+                    || err.to_string().contains("Checked out")
+                    || err.to_string().contains("checked out"),
+                "branch {branch} was reused: {err}"
+            );
+            assert!(!destination.exists(), "failed add left a checkout behind");
+        }
+    }
+
+    #[test]
     fn remove_worktree_removes_registration() {
         let dir = init();
         let destination = dir.path().join("temp-wt");
@@ -245,5 +278,61 @@ mod tests {
         remove_worktree(dir.path(), &destination, false).unwrap();
         assert!(!destination.exists());
         assert_eq!(list_worktrees(dir.path()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn remove_dirty_worktree_requires_force_and_then_discards() {
+        let dir = init();
+        let destination = dir.path().join("dirty-wt");
+        git(dir.path(), &["branch", "dirty-branch"]);
+        let path = add_worktree(dir.path(), &destination, "dirty-branch").unwrap();
+        std::fs::write(path.join("a.txt"), "uncommitted\n").unwrap();
+        std::fs::write(path.join("untracked.txt"), "scratch\n").unwrap();
+
+        let err = remove_worktree(dir.path(), &path, false).unwrap_err();
+        assert!(
+            err.to_string().contains("modified")
+                || err.to_string().contains("untracked")
+                || err.to_string().contains("changes")
+                || err.to_string().contains("dirty"),
+            "unexpected error: {err}"
+        );
+        assert!(path.exists(), "non-forced removal deleted the checkout");
+        assert_eq!(list_worktrees(dir.path()).unwrap().len(), 2);
+
+        remove_worktree(dir.path(), &path, true).unwrap();
+        assert!(!path.exists());
+        assert_eq!(list_worktrees(dir.path()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn add_worktree_rejects_occupied_destination_without_registration() {
+        let dir = init();
+        git(dir.path(), &["branch", "side-branch"]);
+        let destination = dir.path().join("occupied");
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(destination.join("keep.txt"), "keep\n").unwrap();
+
+        let err = add_worktree(dir.path(), &destination, "side-branch").unwrap_err();
+        assert!(!err.to_string().is_empty());
+        assert_eq!(list_worktrees(dir.path()).unwrap().len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(destination.join("keep.txt")).unwrap(),
+            "keep\n"
+        );
+    }
+
+    #[test]
+    fn prune_removes_registration_when_checkout_vanished() {
+        let dir = init();
+        git(dir.path(), &["branch", "side-branch"]);
+        let destination = dir.path().join("gone-wt");
+        add_worktree(dir.path(), &destination, "side-branch").unwrap();
+        std::fs::remove_dir_all(&destination).unwrap();
+
+        assert_eq!(prune_worktrees(dir.path()).unwrap(), 1);
+        let listed = list_worktrees(dir.path()).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "main");
     }
 }

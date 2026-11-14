@@ -89,7 +89,9 @@ PAYLOAD="$(printf '{"version":"%s","url":"%s","sha256":"%s","notes":"%s","min_os
   "$VERSION" "$URL" "$SHA256" "$NOTES" "$UPDATER_ARCH")"
 PAYLOAD_FILE="$(mktemp)"
 printf '%s' "$PAYLOAD" > "$PAYLOAD_FILE"
-SIGNATURE="$(openssl pkeyutl -sign -inkey "$KEY" -rawin -in "$PAYLOAD_FILE" | base64)"
+# No `-rawin`: OpenSSL 1.1.1 does not know it, while Ed25519 signs the
+# input bytes as the raw message in every supported version.
+SIGNATURE="$(openssl pkeyutl -sign -inkey "$KEY" -in "$PAYLOAD_FILE" | base64)"
 rm -f "$PAYLOAD_FILE"
 
 # 4. Emit the manifest.

@@ -95,7 +95,7 @@ jobs:
           )
           result = subprocess.run(
               ["openssl", "pkeyutl", "-verify", "-pubin", "-keyform", "DER",
-               "-inkey", "manifest-public.der", "-rawin", "-in", "payload.bin",
+               "-inkey", "manifest-public.der", "-in", "payload.bin",
                "-sigfile", "payload.sig"],
               capture_output=True, text=True,
           )

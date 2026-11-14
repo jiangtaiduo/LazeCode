@@ -117,7 +117,7 @@ fn sign(manifest: &mut Manifest, dir: &Path) -> String {
         let signed = Command::new("openssl")
             .args(["pkeyutl", "-sign", "-inkey"])
             .arg(&openssl_key)
-            .args(["-rawin", "-in"])
+            .arg("-in")
             .arg(&payload_path)
             .arg("-out")
             .arg(&sig_path)

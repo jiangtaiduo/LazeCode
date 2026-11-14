@@ -1738,7 +1738,6 @@ mod tests {
                 "-sign",
                 "-inkey",
                 "signing.key",
-                "-rawin",
                 "-in",
                 "payload.bin",
                 "-out",

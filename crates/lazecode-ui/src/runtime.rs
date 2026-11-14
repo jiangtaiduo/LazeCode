@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use lazecode_core::{AppModel, ProjectState};
 use lazecode_fs::SearchHit;
-use lazecode_terminal::Snapshot;
+use lazecode_terminal::{probe_busy_many, BusyTarget, Snapshot};
 use lazecode_text::Cursor;
 
 use crate::icons::Icon;
@@ -46,6 +46,44 @@ pub enum TerminalCloseAction {
     Project(usize),
 }
 
+/// Stable console-activity thresholds.
+pub const OUTPUT_ACTIVE_MS: u64 = 2_000;
+pub const INPUT_ECHO_GRACE_MS: u64 = 200;
+pub const UI_REDRAW_GRACE_MS: u64 = 500;
+
+/// Whether recent PTY output should light the project marquee.
+///
+/// `last_output_ms`, `last_input_ms` and `last_resize_ms` are ages sampled at
+/// the same instant. Output produced just after a user keypress (shell/TUI
+/// echo) or just after a PTY resize (SIGWINCH repaint) is interaction
+/// feedback, not command output. If the console was already outputting when
+/// a resize happened, keep it hot: switching onto a live console must not
+/// blank its marquee for one poll cycle.
+pub fn console_outputting(
+    busy: bool,
+    last_output_ms: Option<u64>,
+    last_input_ms: Option<u64>,
+    last_resize_ms: Option<u64>,
+    was_outputting: bool,
+) -> bool {
+    if !busy {
+        return false;
+    }
+    let Some(output_age) = last_output_ms.filter(|age| *age < OUTPUT_ACTIVE_MS) else {
+        return false;
+    };
+    let after_input = last_input_ms.is_some_and(|input_age| {
+        output_age <= input_age && input_age.saturating_sub(output_age) <= INPUT_ECHO_GRACE_MS
+    });
+    if after_input {
+        return false;
+    }
+    let after_resize = last_resize_ms.is_some_and(|resize_age| {
+        output_age <= resize_age && resize_age.saturating_sub(output_age) <= UI_REDRAW_GRACE_MS
+    });
+    !after_resize || was_outputting
+}
+
 #[derive(Default)]
 pub struct TermSearchState {
     pub open: bool,
@@ -83,6 +121,10 @@ pub enum MenuKind {
     },
     /// Git log branch tree context menu (payload: name \u{1} "remote"|"local").
     BranchContext {
+        project: usize,
+    },
+    /// Tag row context menu (payload = tag name).
+    TagContext {
         project: usize,
     },
     /// Project tree right-click context menu (payload: relative path).
@@ -150,7 +192,6 @@ pub enum GitToolsTab {
     #[default]
     Submodules,
     Lfs,
-    Remotes,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -172,10 +213,14 @@ pub enum DialogState {
     None,
     NewBranch {
         value: String,
+        start_point: Option<String>,
+        checkout: bool,
         error: Option<String>,
     },
     DeleteBranch {
         name: String,
+        force: bool,
+        remote: bool,
         error: Option<String>,
     },
     RenameBranch {
@@ -187,6 +232,10 @@ pub enum DialogState {
         remote: String,
         branch: String,
         set_upstream: bool,
+        force: bool,
+        push_tags: bool,
+        remotes: Vec<lazecode_git::RemoteInfo>,
+        pending: Vec<lazecode_git::CommitInfo>,
         status: Option<String>,
     },
     Pull {
@@ -197,6 +246,7 @@ pub enum DialogState {
         remotes: Vec<lazecode_git::RemoteInfo>,
         new_name: String,
         new_url: String,
+        editing: Option<String>,
         error: Option<String>,
     },
     Reset {
@@ -211,6 +261,7 @@ pub enum DialogState {
     NewWorktree {
         name: String,
         branch: String,
+        create_new: bool,
         location: String,
         error: Option<String>,
     },
@@ -221,6 +272,8 @@ pub enum DialogState {
     RemoveWorktree {
         name: String,
         worktree_path: std::path::PathBuf,
+        dirty: bool,
+        changes: usize,
     },
     CloseDirtyTab {
         tab_id: u64,
@@ -415,6 +468,12 @@ pub struct SearchState {
     pub focus_requested: bool,
     pub request_id: u64,
     pub opened_frame: u64,
+    /// When the query/flags last changed; drives the short debounce before
+    /// the async filesystem search starts.
+    pub dirty_since: Option<f64>,
+    /// Query+flags signature represented by the current results.
+    pub signature: String,
+    pub searching: bool,
 }
 
 #[derive(Default)]
@@ -512,6 +571,10 @@ pub struct UiRuntime {
     pub project_rail_scroll: f32,
     /// Lazily uploaded titlebar copy of the packaged application icon.
     pub app_icon: Option<egui::TextureHandle>,
+    /// Titlebar control rectangles in egui/window coordinates. The macOS
+    /// native `zoom:` guard uses these to keep double-clicks on buttons from
+    /// reaching AppKit's titlebar zoom.
+    pub titlebar_controls: Vec<egui::Rect>,
     pub sidebar_drag: bool,
     pub panel_drag: bool,
     /// 分支比较页：pane 高度分隔条拖拽中（松手时落盘 settings）。
@@ -628,6 +691,7 @@ impl Default for UiRuntime {
             editor_drag: false,
             project_rail_scroll: 0.0,
             app_icon: None,
+            titlebar_controls: Vec::new(),
             sidebar_drag: false,
             panel_drag: false,
             diff_balloon: None,
@@ -679,6 +743,27 @@ impl Default for UiRuntime {
 }
 
 impl UiRuntime {
+    /// Decode the packaged application icon once and reuse it in the
+    /// titlebar and the empty-workspace page.
+    pub fn app_icon_texture(&mut self, ctx: &egui::Context) -> egui::TextureId {
+        self.app_icon
+            .get_or_insert_with(|| {
+                let bytes = include_bytes!("../../../packaging/macos/icon-1024.png");
+                let decoded = image::load_from_memory(bytes)
+                    .expect("embedded LazeCode application icon must be a valid PNG")
+                    .to_rgba8();
+                let resized = image::imageops::resize(
+                    &decoded,
+                    64,
+                    64,
+                    image::imageops::FilterType::Lanczos3,
+                );
+                let pixels = egui::ColorImage::from_rgba_unmultiplied([64, 64], resized.as_raw());
+                ctx.load_texture("lazecode-app-icon", pixels, egui::TextureOptions::LINEAR)
+            })
+            .id()
+    }
+
     /// True while a full-screen surface or popover owns input. Used by the
     /// shell to place a full-screen hit-test blocker and by the editor and
     /// terminal to keep keystrokes out of the document behind it.
@@ -807,6 +892,9 @@ impl UiRuntime {
         let mut roots = Vec::with_capacity(model.projects.len());
         for project in &model.projects {
             roots.push(project.root.clone());
+            for worktree in project.worktrees.iter().skip(1) {
+                roots.push(worktree.path.clone());
+            }
             for tab in &project.tabs {
                 match &tab.kind {
                     TabKind::Image(image) => {
@@ -910,6 +998,15 @@ impl UiRuntime {
     /// Probe the requested panes now, bypassing the 2s cache. Used when the
     /// user closes a console so a just-started command is still detected.
     pub fn probe_busy_for(&mut self, model: &AppModel, pane_ids: &[u64]) -> Vec<String> {
+        struct ProbeInput {
+            id: u64,
+            target: BusyTarget,
+            output_ms: Option<u64>,
+            input_ms: Option<u64>,
+            resize_ms: Option<u64>,
+            was_outputting: bool,
+        }
+        let mut rows: Vec<ProbeInput> = Vec::new();
         for project in &model.projects {
             for pane in project
                 .worktrees
@@ -920,18 +1017,38 @@ impl UiRuntime {
                 if !pane_ids.contains(&pane.id) {
                     continue;
                 }
-                let info = pane.session.busy_info();
-                let age = pane.session.last_output_ms();
-                self.terminal_busy.insert(
-                    pane.id,
-                    TerminalBusyState {
-                        busy: info.busy,
-                        outputting: info.busy && age.is_some_and(|age| age < 2000),
-                        commands: info.commands,
-                        last_output_ms: age,
-                    },
-                );
+                let was_outputting = self
+                    .terminal_busy
+                    .get(&pane.id)
+                    .is_some_and(|state| state.outputting);
+                rows.push(ProbeInput {
+                    id: pane.id,
+                    target: pane.session.busy_target(),
+                    output_ms: pane.session.last_output_ms(),
+                    input_ms: pane.session.last_input_ms(),
+                    resize_ms: pane.session.last_resize_ms(),
+                    was_outputting,
+                });
             }
+        }
+        let targets: Vec<BusyTarget> = rows.iter().map(|row| row.target.clone()).collect();
+        let infos = probe_busy_many(&targets);
+        for (row, info) in rows.into_iter().zip(infos) {
+            self.terminal_busy.insert(
+                row.id,
+                TerminalBusyState {
+                    busy: info.busy,
+                    outputting: console_outputting(
+                        info.busy,
+                        row.output_ms,
+                        row.input_ms,
+                        row.resize_ms,
+                        row.was_outputting,
+                    ),
+                    commands: info.commands,
+                    last_output_ms: row.output_ms,
+                },
+            );
         }
         self.busy_commands_for(pane_ids)
     }
@@ -1139,7 +1256,9 @@ impl UiRuntime {
         self.terminal_preedit.clear();
         self.terminal_wheel.clear();
         self.terminal_graphics.clear();
-        self.terminal_busy.clear();
+        // Keep `terminal_busy`: switching projects must not make a running
+        // green ring disappear until the next 2s probe. Entries are keyed by
+        // globally unique pane ids and `forget_terminal` removes closed ones.
         self.terminal_focus = None;
     }
 
@@ -1205,3 +1324,36 @@ pub enum PaletteAction {
 }
 
 pub const PALETTE_WIDTH: f32 = 640.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_output_lights_marquee() {
+        assert!(console_outputting(true, Some(100), None, None, false));
+    }
+
+    #[test]
+    fn input_echo_does_not_light_marquee() {
+        assert!(!console_outputting(true, Some(100), Some(180), None, false));
+        assert!(console_outputting(true, Some(100), Some(350), None, false));
+    }
+
+    #[test]
+    fn resize_repaint_does_not_light_marquee() {
+        assert!(!console_outputting(true, Some(100), None, Some(300), false));
+        assert!(console_outputting(true, Some(100), None, Some(700), false));
+    }
+
+    #[test]
+    fn resize_keeps_an_already_hot_marquee() {
+        assert!(console_outputting(true, Some(100), None, Some(300), true));
+    }
+
+    #[test]
+    fn stale_output_or_idle_console_stays_dark() {
+        assert!(!console_outputting(true, Some(2_500), None, None, false));
+        assert!(!console_outputting(false, Some(100), None, None, false));
+    }
+}

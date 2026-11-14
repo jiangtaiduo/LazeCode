@@ -151,16 +151,16 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         }
     }
     if close_tab {
-        if let Some(project) = model.active_project_mut() {
-            if let Some(id) = project.active_tab {
-                if let Some(tab) = project.tab_by_id(id) {
+        if let Some(index) = model.active_project {
+            if let Some(id) = model.projects[index].active_tab {
+                if let Some(tab) = model.projects[index].tab_by_id(id) {
                     if tab.is_dirty() {
                         rt.dialog = DialogState::CloseDirtyTab {
                             tab_id: id,
                             name: tab.title(),
                         };
                     } else {
-                        project.close_tab(id);
+                        model.close_tab(index, id);
                         rt.editor_focus = None;
                         rt.last_revealed_tab = None;
                     }
@@ -263,7 +263,7 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     if new_file {
         if let Some(project) = model.active_project() {
             rt.dialog = DialogState::NewFile {
-                dir: project.root.clone(),
+                dir: project.active_root().to_path_buf(),
                 value: String::new(),
                 error: None,
             };
@@ -283,7 +283,7 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
                 let default_list = model
                     .active_project()
                     .and_then(|p| {
-                        lazecode_git::Changelists::open(&p.root)
+                        lazecode_git::Changelists::open(p.active_root())
                             .lists()
                             .first()
                             .cloned()
@@ -298,7 +298,7 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
             } else {
                 let root = model
                     .active_project()
-                    .map(|p| p.root.clone())
+                    .map(|p| p.active_root().to_path_buf())
                     .unwrap_or_default();
                 let files = lazecode_git::shelf_files(&root, &name).unwrap_or_default();
                 let entries: Vec<(String, bool)> = files

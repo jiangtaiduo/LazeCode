@@ -393,7 +393,7 @@ pub fn draw_terminal_dock(
         x += width + 2.0;
     }
     // 新建按钮（22×22，底对齐）。
-    if x + 22.0 < head.right() - 90.0 {
+    if x + 22.0 < head.right() - 120.0 {
         let plus =
             Rect::from_center_size(Pos2::new(x + 11.0, head.bottom() - 15.0), Vec2::splat(22.0));
         let response = ui.interact(plus, ui.scope_id().with("new-console"), Sense::click());
@@ -459,6 +459,15 @@ pub fn draw_terminal_dock(
             lazecode_core::TerminalPlacement::Right
         };
         model.save_workspace();
+    }
+    rx -= 24.0;
+    let agent_rect =
+        Rect::from_center_size(Pos2::new(rx - 10.0, head.center().y), Vec2::splat(20.0));
+    if icon_button(ui, agent_rect, Icon::Spark, rt.agent_menu.is_some(), theme)
+        .on_hover_text(crate::tr!(model, "Coding Agent", "编码智能体"))
+        .clicked()
+    {
+        rt.toggle_agent_menu(agent_rect);
     }
     if let Some(tab_id) = close_tab {
         rt.request_terminal_close(model, crate::runtime::TerminalCloseAction::Tab(tab_id));
@@ -970,7 +979,7 @@ fn draw_git_log(
             );
             if r_resp.clicked() {
                 if let Some(first) = model.projects[index].conflicts.first() {
-                    let root = model.projects[index].root.clone();
+                    let root = model.projects[index].active_root().to_path_buf();
                     if let Ok(c) = lazecode_git::merge_file_content(&root, &first.path) {
                         rt.dialog = crate::runtime::DialogState::ConflictResolve {
                             path: first.path.clone(),
@@ -1011,7 +1020,6 @@ fn draw_git_log(
                 if kind == 1 { p.rose } else { p.accent },
             );
             if response.clicked() {
-                let root = model.projects[index].root.clone();
                 if kind == 0 {
                     // Continue semantic depends on the sequencer.
                     match sequencer {
@@ -1040,7 +1048,6 @@ fn draw_git_log(
                         _ => {}
                     }
                 }
-                let _ = root;
             }
         }
     }
@@ -1467,22 +1474,14 @@ fn draw_git_log(
         Stroke::new(1.0, p.border_soft),
     );
     let mut tb_y = toolbar_rect.top() + 6.0;
-    // Header: "Git"
-    ui.painter().text(
-        Pos2::new(toolbar_rect.center().x, tb_y + 8.0),
-        Align2::CENTER_CENTER,
-        "Git",
-        FontId::proportional(12.0),
-        p.text,
-    );
-    tb_y += 20.0;
-    // Separator 0
+    // The Log tab already identifies the panel; the old vertical "Git"
+    // caption wasted the first row of the toolbar.
     ui.painter().hline(
         (toolbar_rect.left() + 7.0)..=(toolbar_rect.right() - 7.0),
         tb_y + 0.5,
         Stroke::new(1.0, p.border_soft),
     );
-    tb_y += 5.0;
+    tb_y += 6.0;
 
     // 1. Collapse / expand branches button (« / »)
     let collapse_rect = Rect::from_min_size(
@@ -1527,6 +1526,8 @@ fn draw_git_log(
     if new_branch_resp.clicked() {
         rt.dialog = crate::runtime::DialogState::NewBranch {
             value: String::new(),
+            start_point: None,
+            checkout: true,
             error: None,
         };
     }
@@ -1546,9 +1547,7 @@ fn draw_git_log(
         ));
     }
     if update_resp.clicked() {
-        model.queue(Command::Pull {
-            mode: lazecode_git::PullMode::Merge,
-        });
+        model.queue(Command::FetchAll);
     }
     tb_y += 25.0;
 
@@ -1570,6 +1569,8 @@ fn draw_git_log(
             if target != &current_branch {
                 rt.dialog = crate::runtime::DialogState::DeleteBranch {
                     name: target.clone(),
+                    force: false,
+                    remote: false,
                     error: None,
                 };
             }

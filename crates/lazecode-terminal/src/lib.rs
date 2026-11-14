@@ -14,10 +14,11 @@ pub use cold::ColdStore;
 pub use input::{encode_key, encode_paste, KeyEvent, KeyStroke, TerminalKey};
 pub use rio_vt::ansi::CursorShape;
 pub use session::{
-    probe_busy, spawn, BusyInfo, BusyTarget, CellData, ColorSpec, CursorView, HistoryStats,
-    ImagePlacement, KittyImage, KittyKeyboard, Modes, Notifier, Session, SessionKind, Snapshot,
-    SpawnOptions, TerminalMatch, VirtualImageRun, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN, ATTR_INVERSE,
-    ATTR_ITALIC, ATTR_LEADING_SPACER, ATTR_SPACER, ATTR_STRIKEOUT, ATTR_UNDERLINE, ATTR_WIDE,
+    probe_busy, probe_busy_many, spawn, BusyInfo, BusyTarget, CellData, ColorSpec, CursorView,
+    HistoryStats, ImagePlacement, KittyImage, KittyKeyboard, Modes, Notifier, Session, SessionKind,
+    Snapshot, SpawnOptions, TerminalMatch, VirtualImageRun, ATTR_BOLD, ATTR_DIM, ATTR_HIDDEN,
+    ATTR_INVERSE, ATTR_ITALIC, ATTR_LEADING_SPACER, ATTR_SPACER, ATTR_STRIKEOUT, ATTR_UNDERLINE,
+    ATTR_WIDE,
 };
 
 use std::sync::atomic::{AtomicU64, Ordering};

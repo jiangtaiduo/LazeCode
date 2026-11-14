@@ -40,5 +40,7 @@ encoding_rs.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.21"
 objc2 = "0.6.5"
-objc2-app-kit = { version = "0.3.2", features = ["NSPasteboard"] }
-objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSData", "NSURL"] }
+objc2-app-kit = { version = "0.3.2", features = ["NSPasteboard", "NSEvent", "block2"] }
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSData", "NSURL", "NSString", "NSGeometry", "objc2-core-foundation"] }
+block2 = "0.6"
+raw-window-handle = "0.6"

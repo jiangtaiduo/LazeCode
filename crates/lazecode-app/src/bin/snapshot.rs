@@ -48,6 +48,7 @@ fn main() -> anyhow::Result<()> {
         ui: UiState::default(),
         toasts: Vec::new(),
         recent: Vec::new(),
+        recent_files: Vec::new(),
         commands: Vec::new(),
         notifier: None,
         lsp: lazecode_core::LspManager::new(settings.lsp_enabled, None),
@@ -56,7 +57,29 @@ fn main() -> anyhow::Result<()> {
         favorite_branches: HashSet::new(),
         git_cmd_log: Vec::new(),
     };
-    if mode != "welcome" {
+    if mode == "single" || mode == "single_menu" {
+        let mut files = Vec::new();
+        let readme = project_root.join("README.md");
+        if readme.exists() {
+            files.push(readme);
+        }
+        let source = project_root.join("crates/lazecode-ui/src/editor.rs");
+        if source.exists() {
+            files.push(source);
+        }
+        let docs = project_root.join("docs/design/architecture.md");
+        if docs.exists() {
+            files.push(docs);
+        }
+        model
+            .open_files(files)
+            .map_err(|err| anyhow::anyhow!(err))?;
+    } else if mode == "home_recents" {
+        let readme = project_root.join("README.md");
+        let source = project_root.join("crates/lazecode-ui/src/editor.rs");
+        model.recent = vec![project_root.clone()];
+        model.recent_files = vec![readme, source];
+    } else if mode != "welcome" {
         let mut project = ProjectState::open(project_root.clone(), &settings, None)
             .map_err(|err| anyhow::anyhow!(err))?;
         let readme = project_root.join("README.md");
@@ -250,6 +273,16 @@ fn main() -> anyhow::Result<()> {
             runtime.settings_open = true;
             model.ui.settings_section = 2;
         }
+        "settings-agents" => {
+            runtime.settings_open = true;
+            model.ui.settings_section = 3;
+        }
+        "agent_menu" => {
+            runtime.open_agent_menu(egui::Rect::from_min_size(
+                egui::pos2(230.0, 10.0),
+                egui::vec2(1.0, 1.0),
+            ));
+        }
         "palette" => model.ui.command_palette_open = true,
         "search" => {
             runtime.search.open = true;
@@ -280,7 +313,28 @@ fn main() -> anyhow::Result<()> {
                 None,
             );
         }
-        "project_menu" => {
+        "remove_worktree_dialog" => {
+            runtime.dialog = lazecode_ui::runtime::DialogState::RemoveWorktree {
+                name: "feature-login".to_string(),
+                worktree_path: project_root.join(".worktree").join("feature-login"),
+                dirty: true,
+                changes: 2,
+            };
+        }
+        "new_worktree_dialog" => {
+            runtime.dialog = lazecode_ui::runtime::DialogState::NewWorktree {
+                name: "feature-login".to_string(),
+                branch: String::new(),
+                create_new: true,
+                location: project_root
+                    .join(".worktree")
+                    .join("feature-login")
+                    .display()
+                    .to_string(),
+                error: None,
+            };
+        }
+        "single_menu" | "project_menu" => {
             runtime.open_menu(
                 lazecode_ui::MenuKind::Project,
                 egui::Rect::from_min_size(egui::pos2(70.0, 10.0), egui::vec2(120.0, 24.0)),

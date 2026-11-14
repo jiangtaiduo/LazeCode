@@ -6,6 +6,7 @@ pub enum Icon {
     Git,
     Changes,
     Terminal,
+    Consoles,
     Search,
     Plus,
     X,
@@ -196,6 +197,11 @@ fn paint_vector(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 egui::CornerRadius::same((1.2 * scale) as u8),
                 color,
             );
+        }
+        Icon::Consoles => {
+            rect_outline((2.0, 2.2), (14.0, 12.8), 1.5);
+            line(&[(4.7, 5.4), (7.2, 7.4), (4.7, 9.4)]);
+            line(&[(8.8, 9.5), (11.4, 9.5)]);
         }
         Icon::Layers => {
             line(&[(8.0, 1.9), (14.0, 5.0), (8.0, 8.1), (2.0, 5.0), (8.0, 1.9)]);

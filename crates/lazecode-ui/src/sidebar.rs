@@ -9,7 +9,7 @@ use crate::runtime::{CommitTab, UiRuntime};
 use crate::theme::Theme;
 use crate::widgets::{
     checkbox, checkbox_tri, icon_button, live_dot, primary_button, secondary_button_enabled,
-    text_clipped, TriState,
+    text_clipped, text_width, TriState,
 };
 
 const HEAD_H: f32 = 36.0;
@@ -175,6 +175,7 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
     let filter = model.ui.tree_filter.to_lowercase();
     let (rows, changes): (Vec<VisibleRow>, HashMap<String, char>) = {
         let project = &model.projects[active_index];
+        let tree = project.active_tree();
         let changes = project
             .changes()
             .iter()
@@ -183,9 +184,9 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
         let mut rows = Vec::new();
         if project.is_single_file {
             if filter.is_empty() {
-                rows = visible_rows(&project.tree, &project.expanded);
+                rows = visible_rows(tree, &project.expanded);
             } else {
-                collect_matches(&project.tree.nodes, &filter, 0, &mut rows);
+                collect_matches(&tree.nodes, &filter, 0, &mut rows);
             }
         } else {
             // 对齐稳定版：第一行为项目根目录节点 (ProjectDrawer tree-root-item)
@@ -198,13 +199,13 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
             });
             if project.root_expanded {
                 if filter.is_empty() {
-                    for mut r in visible_rows(&project.tree, &project.expanded) {
+                    for mut r in visible_rows(tree, &project.expanded) {
                         r.depth += 1;
                         rows.push(r);
                     }
                 } else {
                     let mut matches = Vec::new();
-                    collect_matches(&project.tree.nodes, &filter, 1, &mut matches);
+                    collect_matches(&tree.nodes, &filter, 1, &mut matches);
                     rows.extend(matches);
                 }
             }
@@ -261,7 +262,7 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
         .and_then(|tab| {
             tab.path().map(|path| {
                 std::path::Path::new(path)
-                    .strip_prefix(&model.projects[active_index].root)
+                    .strip_prefix(model.projects[active_index].active_root())
                     .map(|rel| rel.to_path_buf())
                     .unwrap_or_else(|_| std::path::PathBuf::from(path))
             })
@@ -275,6 +276,10 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
         .and_then(|(rel, _)| rows.iter().position(|row| &row.path == rel))
         .map(|index| (index as f32 * ROW_H - list_rect.height() * 0.5 + ROW_H * 0.5).max(0.0));
     super::app_ui::region(ui, list_rect, "tree-scroll", |ui| {
+        // `show_rows` adds the Ui item spacing between virtual rows. The tree
+        // rows already have a fixed height; leaving that gap wastes ~4px per
+        // row and shows fewer files in the same viewport.
+        ui.spacing_mut().item_spacing.y = 0.0;
         let mut area = egui::ScrollArea::vertical()
             .id_salt("tree")
             .auto_shrink([false, false]);
@@ -447,7 +452,7 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
                         text_color,
                     );
                     let display_path =
-                        lazecode_fs::display_path(&model.projects[active_index].root);
+                        lazecode_fs::display_path(model.projects[active_index].active_root());
                     let path_rect = Rect::from_min_max(
                         Pos2::new(draw_rect.left() + pad + 38.0 + name_w, draw_rect.top()),
                         Pos2::new(draw_rect.right() - 8.0, draw_rect.bottom()),
@@ -537,9 +542,8 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
                             }
                         }
                         NodeKind::File => {
-                            let settings = model.settings.clone();
-                            let path = model.projects[active_index].root.join(&row.path);
-                            match model.projects[active_index].open_file(path, &settings) {
+                            let path = model.projects[active_index].active_root().join(&row.path);
+                            match model.open_file_in(active_index, path) {
                                 Ok(id) => rt.set_editor_focus(id),
                                 Err(err) => model.toast(err, ToastKind::Error),
                             }
@@ -687,38 +691,50 @@ fn change_row(
             _ => p.blue,
         }
     };
-    let name_right = if show_dir_hint {
-        rect.right() - 100.0
-    } else {
-        rect.right() - 26.0
-    };
-    text_clipped(
-        ui.painter(),
-        Rect::from_min_max(
-            Pos2::new(text_left, rect.top()),
-            Pos2::new(name_right, rect.bottom()),
-        ),
-        name,
-        FontId::proportional(13.0),
-        name_color,
-        Align2::LEFT_CENTER,
-    );
-    if show_dir_hint {
-        let dir = {
-            let path = change.path.trim_end_matches(name);
-            path.trim_end_matches('/').to_string()
-        };
+    let name_right = rect.right() - 30.0;
+    let name_font = FontId::proportional(13.0);
+    let name_width = text_width(ui.painter(), name, name_font.clone());
+    let parent = change
+        .path
+        .rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("");
+    if text_left + name_width > name_right {
         text_clipped(
             ui.painter(),
             Rect::from_min_max(
-                Pos2::new(rect.right() - 220.0, rect.top()),
-                Pos2::new(rect.right() - 26.0, rect.bottom()),
+                Pos2::new(text_left, rect.top()),
+                Pos2::new(name_right, rect.bottom()),
             ),
-            &dir,
-            FontId::proportional(12.0),
-            p.text3,
-            Align2::RIGHT_CENTER,
+            name,
+            name_font,
+            name_color,
+            Align2::LEFT_CENTER,
         );
+    } else {
+        ui.painter().text(
+            Pos2::new(text_left, rect.center().y),
+            Align2::LEFT_CENTER,
+            name,
+            name_font,
+            name_color,
+        );
+        if show_dir_hint && !parent.is_empty() {
+            let path_left = text_left + name_width + 8.0;
+            if path_left + 4.0 < name_right {
+                text_clipped(
+                    ui.painter(),
+                    Rect::from_min_max(
+                        Pos2::new(path_left, rect.top()),
+                        Pos2::new(name_right, rect.bottom()),
+                    ),
+                    parent,
+                    FontId::proportional(11.5),
+                    p.text3,
+                    Align2::LEFT_CENTER,
+                );
+            }
+        }
     }
     // 行尾 hover 回滚（稳定版：未跟踪/被忽略不显示）。
     let rollback_rect = Rect::from_center_size(
@@ -935,7 +951,7 @@ fn source_control(
             if let Some(name) = rt.shelf_selected.clone() {
                 let default_list = {
                     let project = model.active_project().unwrap();
-                    lazecode_git::Changelists::open(&project.root)
+                    lazecode_git::Changelists::open(project.active_root())
                         .lists()
                         .first()
                         .cloned()
@@ -987,9 +1003,9 @@ fn source_control(
             ignored_indices.push(idx);
         }
     }
-    let last = project.git.as_ref().and_then(|git| git.head.clone());
-    let can_git = project.git.is_some();
-    let git_error = project.git_error.clone();
+    let last = project.active_git().and_then(|git| git.head.clone());
+    let can_git = project.active_git().is_some();
+    let git_error = project.active_git_error().map(str::to_string);
     let commit_message = project.commit_message.clone();
     let amend = project.amend;
     let checked: HashSet<String> = project.checked_paths.clone();
@@ -1065,7 +1081,7 @@ fn source_control(
     }
 
     if changes.is_empty() {
-        if project.git_loading {
+        if project.active_git_loading() {
             // 稳定版加载中空态（Reading changes…），别把「工作区干净」
             // 在快照回来前先画出来。
             let zh = model.settings.language.is_zh();
@@ -1672,7 +1688,8 @@ fn source_control(
                             {
                                 if let Some(first) = group.conflicts.first() {
                                     let path = changes[*first].path.clone();
-                                    let root = model.active_project().unwrap().root.clone();
+                                    let root =
+                                        model.active_project().unwrap().active_root().to_path_buf();
                                     if let Ok(content) =
                                         lazecode_git::merge_file_content(&root, &path)
                                     {
@@ -2020,7 +2037,7 @@ fn group_check_state(checked: &HashSet<String>, paths: &[String]) -> TriState {
 fn all_list_keys(project: &ProjectState) -> HashSet<String> {
     // 借助 changelist 存储推断分组键集合；Unversioned/冲突子组键固定。
     let mut keys: HashSet<String> = HashSet::new();
-    let lists = lazecode_git::Changelists::open(&project.root);
+    let lists = lazecode_git::Changelists::open(project.active_root());
     for name in lists.lists() {
         if !name.is_empty() {
             keys.insert(name.clone());
@@ -2551,7 +2568,7 @@ fn shelf_date(seconds: u64) -> String {
 /// 稳定版 Shelf 页签：架藏列表（可展开文件）+ Recently Deleted + 右键。
 fn shelf_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, rect: Rect) {
     let p = theme.palette;
-    let root = model.active_project().unwrap().root.clone();
+    let root = model.active_project().unwrap().active_root().to_path_buf();
     if rt.shelf_loaded.as_deref() != Some(root.as_path()) {
         rt.shelf_entries = lazecode_git::shelf_list(&root).unwrap_or_default();
         rt.shelf_deleted = lazecode_git::shelf_list_deleted(&root).unwrap_or_default();
@@ -2870,8 +2887,8 @@ pub fn compare_drawer(
         return;
     };
     let zh = model.settings.language.is_zh();
-    // 不透明 bg-app（稳定版 .compare-drawer），右缘 1px 分隔。
-    ui.painter().rect_filled(rect, 0.0, p.bg);
+    // The parent sidebar already paints the Commit/Shelf surface; do not
+    // overlay another translucent fill here or Compare turns darker.
     ui.painter().vline(
         rect.right() - 0.5,
         rect.top()..=rect.bottom(),
@@ -2880,7 +2897,6 @@ pub fn compare_drawer(
 
     // ---- 1. 头部 34px：Changes Between pill + close，右侧 ⋮ / — ----
     let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), CMP_HEADER_H));
-    ui.painter().rect_filled(head, 0.0, p.bg);
     ui.painter().hline(
         head.x_range(),
         head.bottom() - 0.5,
@@ -2895,7 +2911,7 @@ pub fn compare_drawer(
     };
     let title_rect = Rect::from_min_max(
         Pos2::new(head.left() + 12.0, head.top() + 4.0),
-        Pos2::new(head.right() - 56.0, head.bottom() - 4.0),
+        Pos2::new(head.right() - 76.0, head.bottom() - 4.0),
     );
     text_clipped(
         ui.painter(),
@@ -2906,7 +2922,7 @@ pub fn compare_drawer(
         Align2::LEFT_CENTER,
     );
     let close_btn = Rect::from_min_size(
-        Pos2::new(title_rect.right() + 4.0, head.center().y - 8.0),
+        Pos2::new(head.right() - 70.0, head.center().y - 8.0),
         Vec2::new(16.0, 16.0),
     );
     if icon_16(ui, "cmp-close", close_btn, Icon::X, p.text3) {
@@ -2914,12 +2930,12 @@ pub fn compare_drawer(
         return;
     }
     let more_btn = Rect::from_min_size(
-        Pos2::new(head.right() - 44.0, head.center().y - 9.0),
+        Pos2::new(head.right() - 48.0, head.center().y - 9.0),
         Vec2::new(20.0, 18.0),
     );
     let _ = icon_16(ui, "cmp-more", more_btn, Icon::More, p.text3);
     let min_btn = Rect::from_min_size(
-        Pos2::new(head.right() - 24.0, head.center().y - 9.0),
+        Pos2::new(head.right() - 26.0, head.center().y - 9.0),
         Vec2::new(20.0, 18.0),
     );
     if icon_16(ui, "cmp-min", min_btn, Icon::Minimize, p.text3) {
@@ -2935,7 +2951,6 @@ pub fn compare_drawer(
         Pos2::new(rect.left(), head.bottom()),
         Vec2::new(rect.width(), CMP_TOOLBAR_H),
     );
-    ui.painter().rect_filled(tb, 0.0, p.bg);
     ui.painter().hline(
         tb.x_range(),
         tb.bottom() - 0.5,
@@ -3175,15 +3190,6 @@ pub fn compare_drawer(
                     }
                 } else {
                     // 文件行。
-                    let name_color = if row.selected {
-                        Color32::WHITE
-                    } else if row.status == 'A' || row.status == '?' || row.status == 'R' {
-                        p.green
-                    } else if row.status == 'D' {
-                        p.rose
-                    } else {
-                        p.blue
-                    };
                     let icon_rect = Rect::from_center_size(
                         Pos2::new(row_rect.left() + indent, row_rect.center().y),
                         Vec2::new(14.0, 14.0),
@@ -3199,38 +3205,91 @@ pub fn compare_drawer(
                         },
                     );
                     let base = row.path.rsplit('/').next().unwrap_or(&row.path);
-                    ui.painter().text(
-                        Pos2::new(row_rect.left() + indent + 12.0, row_rect.center().y),
-                        Align2::LEFT_CENTER,
-                        base,
-                        FontId::proportional(12.0),
-                        name_color,
-                    );
-                    let mut nx = row_rect.right() - 12.0;
-                    if row.deletions > 0 {
-                        let label = format!("-{}", row.deletions);
-                        nx -= label.chars().count() as f32 * 6.2;
-                        ui.painter().text(
-                            Pos2::new(nx, row_rect.center().y),
-                            Align2::LEFT_CENTER,
-                            label,
-                            FontId::proportional(11.0),
-                            if row.selected {
-                                Color32::from_rgba_unmultiplied(255, 255, 255, 220)
-                            } else {
-                                p.rose
-                            },
-                        );
-                        nx -= 6.0;
+                    let parent = row
+                        .path
+                        .rsplit_once('/')
+                        .map(|(parent, _)| parent)
+                        .unwrap_or("");
+                    let name_font = FontId::proportional(12.0);
+                    let path_font = FontId::proportional(10.5);
+                    let num_font = FontId::monospace(10.5);
+                    let add_label = (row.additions > 0 || row.deletions == 0)
+                        .then(|| format!("+{}", row.additions));
+                    let del_label = (row.deletions > 0).then(|| format!("-{}", row.deletions));
+                    let add_w = add_label
+                        .as_deref()
+                        .map(|label| text_width(ui.painter(), label, num_font.clone()))
+                        .unwrap_or(0.0);
+                    let del_w = del_label
+                        .as_deref()
+                        .map(|label| text_width(ui.painter(), label, num_font.clone()))
+                        .unwrap_or(0.0);
+                    let num_w = add_w + del_w + if add_w > 0.0 && del_w > 0.0 { 6.0 } else { 0.0 };
+                    let num_right = row_rect.right() - 10.0;
+                    let num_left = num_right - num_w;
+                    let text_left = row_rect.left() + indent + 12.0;
+                    let text_right = num_left - if num_w > 0.0 { 8.0 } else { 2.0 };
+                    let name_color = if row.selected {
+                        Color32::WHITE
+                    } else if row.status == 'A' || row.status == '?' || row.status == 'R' {
+                        p.green
+                    } else if row.status == 'D' {
+                        p.rose
+                    } else {
+                        p.blue
+                    };
+                    if text_right > text_left {
+                        let name_w = text_width(ui.painter(), base, name_font.clone());
+                        if text_left + name_w > text_right {
+                            text_clipped(
+                                ui.painter(),
+                                Rect::from_min_max(
+                                    Pos2::new(text_left, row_rect.top()),
+                                    Pos2::new(text_right, row_rect.bottom()),
+                                ),
+                                base,
+                                name_font,
+                                name_color,
+                                Align2::LEFT_CENTER,
+                            );
+                        } else {
+                            ui.painter().text(
+                                Pos2::new(text_left, row_rect.center().y),
+                                Align2::LEFT_CENTER,
+                                base,
+                                name_font,
+                                name_color,
+                            );
+                            if !parent.is_empty() {
+                                let path_left = text_left + name_w + 8.0;
+                                if path_left + 4.0 < text_right {
+                                    text_clipped(
+                                        ui.painter(),
+                                        Rect::from_min_max(
+                                            Pos2::new(path_left, row_rect.top()),
+                                            Pos2::new(text_right, row_rect.bottom()),
+                                        ),
+                                        parent,
+                                        path_font,
+                                        if row.selected {
+                                            Color32::from_rgba_unmultiplied(255, 255, 255, 165)
+                                        } else {
+                                            p.text3
+                                        },
+                                        Align2::LEFT_CENTER,
+                                    );
+                                }
+                            }
+                        }
                     }
-                    if row.additions > 0 || row.deletions == 0 {
-                        let label = format!("+{}", row.additions);
-                        nx -= label.chars().count() as f32 * 6.2;
+                    // Numstat is painted last so it always sits above the
+                    // filename/path that was clipped to its left.
+                    if let Some(label) = add_label {
                         ui.painter().text(
-                            Pos2::new(nx, row_rect.center().y),
+                            Pos2::new(num_left, row_rect.center().y),
                             Align2::LEFT_CENTER,
                             label,
-                            FontId::proportional(11.0),
+                            num_font.clone(),
                             if row.selected {
                                 Color32::from_rgba_unmultiplied(255, 255, 255, 220)
                             } else {
@@ -3238,11 +3297,32 @@ pub fn compare_drawer(
                             },
                         );
                     }
-                    let response = ui.interact(
-                        row_rect,
-                        ui.scope_id().with(("cmp-file", row.path.as_str())),
-                        Sense::click(),
-                    );
+                    if let Some(label) = del_label {
+                        ui.painter().text(
+                            Pos2::new(
+                                num_left + add_w + if add_w > 0.0 { 6.0 } else { 0.0 },
+                                row_rect.center().y,
+                            ),
+                            Align2::LEFT_CENTER,
+                            label,
+                            num_font,
+                            if row.selected {
+                                Color32::from_rgba_unmultiplied(255, 255, 255, 220)
+                            } else {
+                                p.rose
+                            },
+                        );
+                    }
+                    let response = ui
+                        .interact(
+                            row_rect,
+                            ui.scope_id().with(("cmp-file", row.path.as_str())),
+                            Sense::click(),
+                        )
+                        .on_hover_text(format!(
+                            "{} (+{} −{})",
+                            row.path, row.additions, row.deletions
+                        ));
                     if response.clicked() {
                         if let Some(session) = model.projects[index].compare_session.as_mut() {
                             session.selected = Some(row.path.clone());

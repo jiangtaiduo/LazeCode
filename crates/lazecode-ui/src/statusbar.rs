@@ -45,15 +45,21 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         });
         (
             project
-                .map(|project| project.name.clone())
+                .map(|project| {
+                    if project.is_single_file {
+                        crate::tr!(model, "Single files", "单文件").to_string()
+                    } else {
+                        project.name.clone()
+                    }
+                })
                 .unwrap_or_default(),
             project.map(|project| project.branch()).unwrap_or_default(),
             project
-                .and_then(|project| project.git.as_ref())
+                .and_then(|project| project.active_git())
                 .map(|git| git.ahead)
                 .unwrap_or(0),
             project
-                .and_then(|project| project.git.as_ref())
+                .and_then(|project| project.active_git())
                 .map(|git| git.behind)
                 .unwrap_or(0),
             project.map(|project| project.changes().len()).unwrap_or(0),
@@ -63,6 +69,9 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     };
     let running = rt.busy_count();
     let has_project = model.active_project().is_some();
+    let is_single = model
+        .active_project()
+        .is_some_and(|project| project.is_single_file);
 
     if !has_project {
         ui.painter().text(
@@ -86,7 +95,11 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     paint_icon(
         painter,
         Rect::from_center_size(Pos2::new(x + 7.0, y), Vec2::splat(13.0)),
-        Icon::Worktree,
+        if is_single {
+            Icon::File
+        } else {
+            Icon::Worktree
+        },
         p.text3,
     );
     x += 18.0;
@@ -104,78 +117,80 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     );
     x += name_width + 2.0;
 
-    painter.vline(
-        x,
-        (rect.top() + 6.0)..=(rect.bottom() - 6.0),
-        Stroke::new(1.0, p.border_soft),
-    );
-    x += 9.0;
-
-    // Branch (click opens the branch menu).
-    let branch_rect = Rect::from_min_max(
-        Pos2::new(x - 3.0, rect.top() + 2.0),
-        Pos2::new(
-            x + 18.0 + branch.chars().count() as f32 * 6.0 + 40.0,
-            rect.bottom() - 2.0,
-        ),
-    );
-    let response = ui.interact(
-        branch_rect,
-        ui.scope_id().with("status-branch"),
-        Sense::click(),
-    );
-    if response.hovered() {
-        painter.rect_filled(branch_rect, egui::CornerRadius::same(4), p.hover);
-    }
-    paint_icon(
-        ui.painter(),
-        Rect::from_center_size(Pos2::new(x + 6.0, y), Vec2::splat(12.0)),
-        Icon::Git,
-        p.text3,
-    );
-    x += 16.0;
-    text_clipped(
-        ui.painter(),
-        Rect::from_min_max(
-            Pos2::new(x, rect.top()),
-            Pos2::new(x + 180.0, rect.bottom()),
-        ),
-        &branch,
-        font.clone(),
-        p.text2,
-        Align2::LEFT_CENTER,
-    );
-    x += branch.chars().count() as f32 * 6.0 + 12.0;
-    if ahead > 0 {
-        painter.text(
-            Pos2::new(x, y),
-            Align2::LEFT_CENTER,
-            format!("↑{ahead}"),
-            FontId::monospace(11.0),
-            p.green,
+    if !is_single {
+        painter.vline(
+            x,
+            (rect.top() + 6.0)..=(rect.bottom() - 6.0),
+            Stroke::new(1.0, p.border_soft),
         );
-        x += 24.0;
-    }
-    if behind > 0 {
-        painter.text(
-            Pos2::new(x, y),
-            Align2::LEFT_CENTER,
-            format!("↓{behind}"),
-            FontId::monospace(11.0),
-            p.orange,
-        );
-    }
-    if response.clicked() {
-        rt.toggle_menu(crate::runtime::MenuKind::Branch, branch_rect, None);
-    }
+        x += 9.0;
 
-    let mut x = branch_rect.right() + 10.0;
-    painter.vline(
-        x,
-        (rect.top() + 6.0)..=(rect.bottom() - 6.0),
-        Stroke::new(1.0, p.border_soft),
-    );
-    x += 9.0;
+        // Branch (click opens the branch menu).
+        let branch_rect = Rect::from_min_max(
+            Pos2::new(x - 3.0, rect.top() + 2.0),
+            Pos2::new(
+                x + 18.0 + branch.chars().count() as f32 * 6.0 + 40.0,
+                rect.bottom() - 2.0,
+            ),
+        );
+        let response = ui.interact(
+            branch_rect,
+            ui.scope_id().with("status-branch"),
+            Sense::click(),
+        );
+        if response.hovered() {
+            painter.rect_filled(branch_rect, egui::CornerRadius::same(4), p.hover);
+        }
+        paint_icon(
+            ui.painter(),
+            Rect::from_center_size(Pos2::new(x + 6.0, y), Vec2::splat(12.0)),
+            Icon::Git,
+            p.text3,
+        );
+        x += 16.0;
+        text_clipped(
+            ui.painter(),
+            Rect::from_min_max(
+                Pos2::new(x, rect.top()),
+                Pos2::new(x + 180.0, rect.bottom()),
+            ),
+            &branch,
+            font.clone(),
+            p.text2,
+            Align2::LEFT_CENTER,
+        );
+        x += branch.chars().count() as f32 * 6.0 + 12.0;
+        if ahead > 0 {
+            painter.text(
+                Pos2::new(x, y),
+                Align2::LEFT_CENTER,
+                format!("↑{ahead}"),
+                FontId::monospace(11.0),
+                p.green,
+            );
+            x += 24.0;
+        }
+        if behind > 0 {
+            painter.text(
+                Pos2::new(x, y),
+                Align2::LEFT_CENTER,
+                format!("↓{behind}"),
+                FontId::monospace(11.0),
+                p.orange,
+            );
+        }
+        if response.clicked() {
+            rt.toggle_menu(crate::runtime::MenuKind::Branch, branch_rect, None);
+        }
+
+        x = branch_rect.right() + 10.0;
+        painter.vline(
+            x,
+            (rect.top() + 6.0)..=(rect.bottom() - 6.0),
+            Stroke::new(1.0, p.border_soft),
+        );
+        x += 9.0;
+    }
 
     // Running processes.
     let running_rect = Rect::from_min_max(

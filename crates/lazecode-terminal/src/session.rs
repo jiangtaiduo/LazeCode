@@ -327,6 +327,12 @@ pub(crate) struct Shared {
     running: AtomicBool,
     exit_code: AtomicI32,
     last_output_ms: AtomicU64,
+    /// Last user write to the PTY (keystrokes/paste/IME). Busy polling uses
+    /// this to distinguish shell echo from real command output.
+    last_input_ms: AtomicU64,
+    /// Last PTY grid resize. SIGWINCH makes full-screen TUIs repaint; that
+    /// repaint must not start the project marquee.
+    last_resize_ms: AtomicU64,
     last_notify_ms: AtomicU64,
     pending_notify: AtomicBool,
     timer_running: AtomicBool,
@@ -840,59 +846,37 @@ pub struct BusyInfo {
 pub struct BusyTarget {
     pub tty: Option<PathBuf>,
     pub shell_pid: Option<u32>,
+    /// Configured shell path, used to distinguish the idle shell from a
+    /// command that `zsh -lc ...` exec'd in place.
+    pub shell: String,
 }
 
-/// Probe a tty with `ps -t`. A command is anything on the tty other than the
-/// shell itself; this covers foreground programs and background jobs, exactly
-/// what closing the console would kill.
-pub fn probe_busy(target: &BusyTarget) -> BusyInfo {
-    #[cfg(unix)]
-    {
-        let Some(tty) = target.tty.as_deref() else {
-            return BusyInfo::default();
-        };
-        let output = match std::process::Command::new("ps")
-            .arg("-o")
-            .arg("pid=,comm=")
-            .arg("-t")
-            .arg(tty)
-            .output()
-        {
-            Ok(output) if output.status.success() => output,
-            Ok(output) => {
-                log::warn!(
-                    "ps probe for {} failed: {}",
-                    tty.display(),
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
-                return BusyInfo::default();
-            }
-            Err(err) => {
-                log::warn!("ps probe for {} failed: {err}", tty.display());
-                return BusyInfo::default();
-            }
-        };
-        parse_busy_output(&String::from_utf8_lossy(&output.stdout), target.shell_pid)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = target;
-        BusyInfo::default()
-    }
+fn is_shell_name(name: &str, shell: &str) -> bool {
+    let base = std::path::Path::new(name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(name)
+        .trim_start_matches('-');
+    let configured = std::path::Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(shell)
+        .trim_start_matches('-');
+    base == configured
+        || matches!(
+            base,
+            "zsh" | "bash" | "sh" | "dash" | "ksh" | "fish" | "tcsh" | "csh" | "nu" | "pwsh"
+        )
 }
 
-fn parse_busy_output(stdout: &str, shell_pid: Option<u32>) -> BusyInfo {
+fn busy_from_entries(entries: &[(u32, String)], shell_pid: Option<u32>, shell: &str) -> BusyInfo {
     let mut commands = Vec::new();
-    for line in stdout.lines() {
-        let mut parts = line.trim().splitn(2, char::is_whitespace);
-        let Some(pid) = parts.next().and_then(|pid| pid.trim().parse::<u32>().ok()) else {
-            continue;
-        };
-        if Some(pid) == shell_pid {
+    for (pid, name) in entries {
+        let name = name.trim();
+        if name.is_empty() {
             continue;
         }
-        let name = parts.next().unwrap_or("").trim();
-        if name.is_empty() {
+        if Some(*pid) == shell_pid && is_shell_name(name, shell) {
             continue;
         }
         let short = name.rsplit('/').next().unwrap_or(name).to_string();
@@ -907,6 +891,91 @@ fn parse_busy_output(stdout: &str, shell_pid: Option<u32>) -> BusyInfo {
         busy: !commands.is_empty(),
         commands,
     }
+}
+
+#[cfg(test)]
+fn parse_busy_output(stdout: &str, shell_pid: Option<u32>, shell: &str) -> BusyInfo {
+    let entries: Vec<(u32, String)> = stdout
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.trim().splitn(2, char::is_whitespace);
+            let pid = parts.next()?.trim().parse::<u32>().ok()?;
+            let name = parts.next()?.trim().to_string();
+            (!name.is_empty()).then_some((pid, name))
+        })
+        .collect();
+    busy_from_entries(&entries, shell_pid, shell)
+}
+
+/// Probe all targets with one `ps` snapshot. A command is anything attached to
+/// the tty other than the idle shell itself. If `zsh -lc omp` exec'd the
+/// command, the shell PID now runs omp, so it is correctly reported as busy.
+pub fn probe_busy_many(targets: &[BusyTarget]) -> Vec<BusyInfo> {
+    #[cfg(unix)]
+    {
+        if targets.is_empty() {
+            return Vec::new();
+        }
+        let output = match std::process::Command::new("ps")
+            .args(["-axo", "pid=,tty=,comm=", "-ww"])
+            .output()
+        {
+            Ok(output) if output.status.success() => output,
+            Ok(output) => {
+                log::warn!(
+                    "batch busy probe failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+                return vec![BusyInfo::default(); targets.len()];
+            }
+            Err(err) => {
+                log::warn!("batch busy probe failed: {err}");
+                return vec![BusyInfo::default(); targets.len()];
+            }
+        };
+        let mut by_tty: std::collections::HashMap<String, Vec<(u32, String)>> =
+            std::collections::HashMap::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let mut parts = line.split_whitespace();
+            let Some(pid) = parts.next().and_then(|pid| pid.parse::<u32>().ok()) else {
+                continue;
+            };
+            let Some(tty) = parts.next() else {
+                continue;
+            };
+            let name = parts.collect::<Vec<_>>().join(" ");
+            if !name.is_empty() {
+                by_tty
+                    .entry(tty.trim_start_matches("/dev/").to_string())
+                    .or_default()
+                    .push((pid, name));
+            }
+        }
+        targets
+            .iter()
+            .map(|target| {
+                let Some(tty) = target.tty.as_deref() else {
+                    return BusyInfo::default();
+                };
+                let tty = tty.to_string_lossy();
+                let key = tty.strip_prefix("/dev/").unwrap_or(&tty);
+                let entries = by_tty.get(key).map(Vec::as_slice).unwrap_or(&[]);
+                busy_from_entries(entries, target.shell_pid, &target.shell)
+            })
+            .collect()
+    }
+    #[cfg(not(unix))]
+    {
+        vec![BusyInfo::default(); targets.len()]
+    }
+}
+
+/// Probe one tty. Kept as the single-target convenience wrapper.
+pub fn probe_busy(target: &BusyTarget) -> BusyInfo {
+    probe_busy_many(std::slice::from_ref(target))
+        .into_iter()
+        .next()
+        .unwrap_or_default()
 }
 
 fn modes_from(term: &Crosswords<Proxy>) -> Modes {
@@ -967,6 +1036,7 @@ impl Session {
         BusyTarget {
             tty: self.tty_name.clone(),
             shell_pid: self.shell_pid,
+            shell: self.shell.clone(),
         }
     }
 
@@ -1006,6 +1076,24 @@ impl Session {
         }
     }
 
+    pub fn last_input_ms(&self) -> Option<u64> {
+        let value = self.shared.last_input_ms.load(Ordering::Relaxed);
+        if value == 0 {
+            None
+        } else {
+            Some(now_ms().saturating_sub(value))
+        }
+    }
+
+    pub fn last_resize_ms(&self) -> Option<u64> {
+        let value = self.shared.last_resize_ms.load(Ordering::Relaxed);
+        if value == 0 {
+            None
+        } else {
+            Some(now_ms().saturating_sub(value))
+        }
+    }
+
     pub fn age_secs(&self) -> u64 {
         now_ms().saturating_sub(self.created_ms) / 1000
     }
@@ -1023,6 +1111,11 @@ impl Session {
         if bytes.is_empty() {
             return;
         }
+        // Remember user input before it reaches the PTY. The shell/TUI echo
+        // that follows is an interaction redraw, not command output.
+        self.shared
+            .last_input_ms
+            .store(now_ms().max(1), Ordering::Relaxed);
         // Never block the UI thread on a full PTY input queue. The bounded
         // writer queue is drained by a dedicated thread.
         if self.writer.try_send(bytes.to_vec()).is_err() {
@@ -1083,6 +1176,10 @@ impl Session {
             term.mark_fully_damaged();
         }
         if size_changed {
+            // Mark before ioctl: a TUI may repaint synchronously in response.
+            self.shared
+                .last_resize_ms
+                .store(now_ms().max(1), Ordering::Relaxed);
             if let Some(master) = self.master.lock().as_ref() {
                 let _ = master.resize(PtySize {
                     rows,
@@ -1668,6 +1765,8 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
         running: AtomicBool::new(true),
         exit_code: AtomicI32::new(i32::MIN),
         last_output_ms: AtomicU64::new(0),
+        last_input_ms: AtomicU64::new(0),
+        last_resize_ms: AtomicU64::new(0),
         last_notify_ms: AtomicU64::new(0),
         pending_notify: AtomicBool::new(false),
         timer_running: AtomicBool::new(false),
@@ -2031,10 +2130,49 @@ mod tests {
         let info = parse_busy_output(
             "  100 /bin/zsh\n 101 /usr/local/bin/vite\n 102 vite\n 103 node\n",
             Some(100),
+            "/bin/zsh",
         );
         assert!(info.busy);
         assert_eq!(info.commands, ["vite", "node"]);
-        assert!(!parse_busy_output("  100 /bin/zsh\n", Some(100)).busy);
+        assert!(!parse_busy_output("  100 /bin/zsh\n", Some(100), "/bin/zsh").busy);
+        let exec = parse_busy_output("  100 omp\n", Some(100), "/bin/zsh");
+        assert!(exec.busy);
+        assert_eq!(exec.commands, ["omp"]);
+    }
+
+    #[test]
+    fn busy_probe_batches_distinct_ttys() {
+        let mut busy_options = SpawnOptions {
+            cwd: std::env::temp_dir(),
+            cols: 60,
+            rows: 6,
+            command: Some("sleep 30".to_string()),
+            ..Default::default()
+        };
+        busy_options.scrollback = 32;
+        let busy = spawn(busy_options).unwrap();
+        let mut idle_options = SpawnOptions {
+            cwd: std::env::temp_dir(),
+            cols: 60,
+            rows: 6,
+            ..Default::default()
+        };
+        idle_options.scrollback = 32;
+        let idle = spawn(idle_options).unwrap();
+        let targets = [busy.busy_target(), idle.busy_target()];
+        let mut infos = Vec::new();
+        for _ in 0..100 {
+            infos = probe_busy_many(&targets);
+            if infos.first().is_some_and(|info| info.busy) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(infos.len(), 2);
+        assert!(infos[0].busy, "exec'd sleep must be busy: {infos:?}");
+        assert!(!infos[1].busy, "idle shell must stay idle: {infos:?}");
+        busy.kill();
+        idle.kill();
     }
 
     #[test]
@@ -2695,4 +2833,32 @@ mod tests {
             std::time::Duration::from_secs(5)
         ));
     }
+}
+
+#[test]
+fn busy_probe_detects_exec_and_batch_mapping() {
+    let mut options = SpawnOptions {
+        cwd: std::env::temp_dir(),
+        cols: 60,
+        rows: 6,
+        command: Some("sleep 30".to_string()),
+        ..Default::default()
+    };
+    options.scrollback = 32;
+    let session = spawn(options).unwrap();
+    let target = session.busy_target();
+    let mut info = BusyInfo::default();
+    for _ in 0..100 {
+        info = probe_busy_many(std::slice::from_ref(&target))
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        if info.busy {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(info.busy, "exec'd command must be reported busy: {info:?}");
+    assert!(info.commands.iter().any(|command| command == "sleep"));
+    session.kill();
 }

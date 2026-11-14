@@ -13,53 +13,37 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     let painter = ui.painter().clone();
     let top = rect.top();
 
-    // Window dragging on the empty titlebar surface.
-    let drag_rect = Rect::from_min_max(rect.min, Pos2::new(rect.left() + 6.0, rect.bottom()));
+    // Window dragging on the empty titlebar surface. The full surface is
+    // registered first (below every control); controls therefore win hit
+    // testing, and `titlebar_control_hovered` guards drag/maximize when the
+    // pointer is over one of them. Traffic lights own the left 78px.
+    let drag_rect = Rect::from_min_max(Pos2::new(rect.left() + 78.0, rect.top()), rect.max);
     let drag = ui.interact(
         drag_rect,
-        ui.scope_id().with("title-drag-left"),
+        ui.scope_id().with("title-drag"),
         Sense::click_and_drag(),
     );
-    if drag.dragged() {
-        ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
-    }
-    if drag.double_clicked() {
-        let maximized = ui
-            .ctx()
-            .input(|input| input.viewport().maximized.unwrap_or(false));
-        ui.ctx()
-            .send_viewport_cmd(ViewportCommand::Maximized(!maximized));
-    }
+    let mut titlebar_control_hovered = false;
+    let mut control_rects: Vec<Rect> = Vec::new();
 
     // macOS traffic lights overlay the first ~70px of the full-width
     // titlebar (stable `padding-left: 78px`).
     let mut x = rect.left() + 78.0;
-    let mut open_project_dialog = false;
 
     // App logo → command palette. (The stable logo opens its project menu;
     // that lands with the titlebar replication batch.)
     let logo_rect = Rect::from_center_size(Pos2::new(x + 15.0, top + 20.0), Vec2::splat(30.0));
     let logo_response = ui.interact(logo_rect, ui.scope_id().with("title-logo"), Sense::click());
     // Use the packaged application icon rather than a synthetic `>_` tile.
-    // Decode once into a small texture: the image-loader path is asynchronous
-    // and would flash a placeholder on the first frame.
-    let icon_texture = rt.app_icon.get_or_insert_with(|| {
-        let bytes = include_bytes!("../../../packaging/macos/icon-1024.png");
-        let decoded = image::load_from_memory(bytes)
-            .expect("embedded LazeCode application icon must be a valid PNG")
-            .to_rgba8();
-        let resized =
-            image::imageops::resize(&decoded, 64, 64, image::imageops::FilterType::Lanczos3);
-        let pixels = egui::ColorImage::from_rgba_unmultiplied([64, 64], resized.as_raw());
-        ui.ctx()
-            .load_texture("lazecode-app-icon", pixels, egui::TextureOptions::LINEAR)
-    });
+    let icon_texture = rt.app_icon_texture(ui.ctx());
     painter.image(
-        icon_texture.id(),
+        icon_texture,
         logo_rect,
         Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
         Color32::WHITE,
     );
+    titlebar_control_hovered |= logo_response.hovered();
+    control_rects.push(logo_response.rect);
     if logo_response.hovered() {
         painter.rect_stroke(
             logo_rect.expand(1.0),
@@ -77,110 +61,149 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
 
     // Tool buttons used to live in the LeftStrip. They now form the titlebar
     // action group; the project list itself is the vertical rail.
+    let has_project = model.active_project().is_some();
+    let single_active = model
+        .active_project()
+        .is_some_and(|project| project.is_single_file);
+    let single_empty = single_active
+        && model
+            .active_project()
+            .is_some_and(|project| project.tabs.is_empty());
     let changes = model
         .active_project()
         .map(|project| project.changes().len())
         .unwrap_or(0);
-    let project_active = model.ui.sidebar_visible && model.ui.sidebar_view == SidebarView::Files;
-    let commit_active = model.ui.sidebar_visible && model.ui.sidebar_view == SidebarView::Git;
-    let compare_active = model.ui.sidebar_visible && model.ui.sidebar_view == SidebarView::Compare;
-    let log_active = model.ui.panel_visible && model.ui.panel_tab == PanelTab::Git;
+    let project_active =
+        !single_active && model.ui.sidebar_visible && model.ui.sidebar_view == SidebarView::Files;
+    let commit_active =
+        !single_active && model.ui.sidebar_visible && model.ui.sidebar_view == SidebarView::Git;
+    let compare_active =
+        !single_active && model.ui.sidebar_visible && model.ui.sidebar_view == SidebarView::Compare;
+    let console_active = model.ui.sidebar_visible && model.ui.sidebar_view == SidebarView::Consoles;
+    let log_active =
+        !single_active && model.ui.panel_visible && model.ui.panel_tab == PanelTab::Git;
     let terminal_active = model.ui.terminal_visible;
-    let has_compare = model
-        .active_project()
-        .is_some_and(|project| project.compare_session.is_some());
+    let has_compare = !single_active
+        && model
+            .active_project()
+            .is_some_and(|project| project.compare_session.is_some());
+    let single_needs_terminal = single_active
+        && model.active_project().is_some_and(|project| {
+            project
+                .worktrees
+                .iter()
+                .all(|worktree| worktree.terminals.is_empty())
+        });
+    let terminal_needs_host = single_needs_terminal || !has_project;
 
     let mut tool_x = x + 14.0;
     let tool_y = top + 20.0;
-    let response = toolbar_button(
-        ui,
-        theme,
-        Pos2::new(tool_x, tool_y),
-        "title-project",
-        Icon::Files,
-        project_active,
-        None,
-        crate::tr!(model, "Project", "项目").to_string(),
-    );
-    if response.clicked() {
-        if project_active {
-            model.ui.sidebar_visible = false;
-        } else {
-            model.ui.sidebar_view = SidebarView::Files;
-            model.ui.sidebar_visible = true;
-        }
-    }
-    tool_x += 34.0;
-
-    let response = toolbar_button(
-        ui,
-        theme,
-        Pos2::new(tool_x, tool_y),
-        "title-commit",
-        Icon::Changes,
-        commit_active,
-        (changes > 0).then_some(p.rose),
-        crate::tr!(model, "Commit", "提交").to_string(),
-    );
-    if response.clicked() {
-        if commit_active {
-            model.ui.sidebar_visible = false;
-        } else {
-            model.ui.sidebar_view = SidebarView::Git;
-            model.ui.sidebar_visible = true;
-        }
-    }
-    tool_x += 34.0;
-
-    if has_compare {
+    // An empty Single files checkout is only a console host: keep the empty
+    // home titlebar (disabled project/Git actions) exactly as it was.
+    if !single_active || single_empty {
         let response = toolbar_button(
             ui,
             theme,
             Pos2::new(tool_x, tool_y),
-            "title-compare",
-            Icon::Compare,
-            compare_active,
+            "title-project",
+            Icon::Files,
+            project_active,
+            has_project && !single_active,
             None,
-            crate::tr!(model, "Compare", "比较").to_string(),
+            crate::tr!(model, "Project", "项目").to_string(),
         );
+        titlebar_control_hovered |= response.hovered();
+        control_rects.push(response.rect);
         if response.clicked() {
-            if compare_active {
-                model.ui.sidebar_view = SidebarView::Git;
+            if project_active {
+                model.ui.sidebar_visible = false;
             } else {
-                model.ui.sidebar_view = SidebarView::Compare;
+                model.ui.sidebar_view = SidebarView::Files;
                 model.ui.sidebar_visible = true;
-                if let Some(project) = model.active_project_mut() {
-                    if let Some(session) = project.compare_session.as_mut() {
-                        session.minimized = false;
-                    }
-                }
             }
         }
         tool_x += 34.0;
-    }
 
-    let response = toolbar_button(
-        ui,
-        theme,
-        Pos2::new(tool_x, tool_y),
-        "title-gitlog",
-        Icon::GitLog,
-        log_active,
-        None,
-        crate::tr!(model, "Git Log · ⌘9", "Git 日志 · ⌘9").to_string(),
-    );
-    if response.clicked() {
-        if log_active {
-            model.ui.panel_visible = false;
-        } else {
-            model.ui.panel_visible = true;
-            model.ui.panel_tab = PanelTab::Git;
-            if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
-                model.ui.terminal_visible = false;
+        let response = toolbar_button(
+            ui,
+            theme,
+            Pos2::new(tool_x, tool_y),
+            "title-commit",
+            Icon::Changes,
+            commit_active,
+            has_project && !single_active,
+            (changes > 0).then_some(p.rose),
+            crate::tr!(model, "Commit", "提交").to_string(),
+        );
+        titlebar_control_hovered |= response.hovered();
+        control_rects.push(response.rect);
+        if response.clicked() {
+            if commit_active {
+                model.ui.sidebar_visible = false;
+            } else {
+                model.ui.sidebar_view = SidebarView::Git;
+                model.ui.sidebar_visible = true;
             }
-            model.queue(Command::RefreshLog);
+        }
+        tool_x += 34.0;
+
+        if has_compare {
+            let response = toolbar_button(
+                ui,
+                theme,
+                Pos2::new(tool_x, tool_y),
+                "title-compare",
+                Icon::Compare,
+                compare_active,
+                true,
+                None,
+                crate::tr!(model, "Compare", "比较").to_string(),
+            );
+            titlebar_control_hovered |= response.hovered();
+            control_rects.push(response.rect);
+            if response.clicked() {
+                if compare_active {
+                    model.ui.sidebar_view = SidebarView::Git;
+                } else {
+                    model.ui.sidebar_view = SidebarView::Compare;
+                    model.ui.sidebar_visible = true;
+                    if let Some(project) = model.active_project_mut() {
+                        if let Some(session) = project.compare_session.as_mut() {
+                            session.minimized = false;
+                        }
+                    }
+                }
+            }
+            tool_x += 34.0;
+        }
+
+        let response = toolbar_button(
+            ui,
+            theme,
+            Pos2::new(tool_x, tool_y),
+            "title-gitlog",
+            Icon::GitLog,
+            log_active,
+            has_project && !single_active,
+            None,
+            crate::tr!(model, "Git Log · ⌘9", "Git 日志 · ⌘9").to_string(),
+        );
+        titlebar_control_hovered |= response.hovered();
+        control_rects.push(response.rect);
+        if response.clicked() {
+            if log_active {
+                model.ui.panel_visible = false;
+            } else {
+                model.ui.panel_visible = true;
+                model.ui.panel_tab = PanelTab::Git;
+                if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
+                    model.ui.terminal_visible = false;
+                }
+                model.queue(Command::RefreshLog);
+            }
         }
     }
+
     tool_x += 34.0;
 
     let response = toolbar_button(
@@ -190,31 +213,85 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         "title-terminal",
         Icon::Terminal,
         terminal_active,
+        true,
         None,
         crate::tr!(model, "Terminal", "终端").to_string(),
     );
+    titlebar_control_hovered |= response.hovered();
+    control_rects.push(response.rect);
     if response.clicked() {
         if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
-            if terminal_active {
+            if terminal_active && terminal_needs_host {
+                // The dock is visible but empty: the first click should
+                // create the home-rooted console, not hide the dock.
+                model.queue(Command::NewTerminal);
+            } else if terminal_active {
                 model.ui.terminal_visible = false;
             } else {
                 model.ui.terminal_visible = true;
                 model.ui.panel_visible = false;
+                if terminal_needs_host {
+                    model.queue(Command::NewTerminal);
+                }
             }
         } else {
             model.ui.terminal_visible = !terminal_active;
+            if model.ui.terminal_visible && terminal_needs_host {
+                model.queue(Command::NewTerminal);
+            }
         }
     }
-    x = tool_x + 20.0;
+    tool_x += 34.0;
+
+    let response = toolbar_button(
+        ui,
+        theme,
+        Pos2::new(tool_x, tool_y),
+        "title-consoles",
+        Icon::Spark,
+        console_active,
+        true,
+        None,
+        crate::tr!(model, "Consoles · sidebar", "控制台 · 侧栏").to_string(),
+    );
+    titlebar_control_hovered |= response.hovered();
+    control_rects.push(response.rect);
+    if response.clicked() {
+        if console_active {
+            model.ui.sidebar_visible = false;
+        } else {
+            if !has_project || single_needs_terminal {
+                // No project, or the ad-hoc files workspace with no shell
+                // yet: create a console rooted at the user's home directory.
+                model.queue(Command::NewTerminal);
+            }
+            model.ui.sidebar_view = SidebarView::Consoles;
+            model.ui.sidebar_visible = true;
+        }
+    }
+    // Separate the action group from the project selector; the red-line
+    // groups in the shell mock should never touch.
+    x = tool_x + 24.0;
 
     let project = model.active_project();
-    let has_project = project.is_some();
-    let project_name = project
-        .map(|project| project.name.clone())
-        .unwrap_or_else(|| crate::tr!(model, "Open a project", "打开项目").to_string());
-    let project_path = project
-        .map(|project| lazecode_fs::display_path(&project.root))
-        .unwrap_or_default();
+    let project_name = if single_active {
+        crate::tr!(model, "Open", "打开").to_string()
+    } else {
+        project
+            .map(|project| project.name.clone())
+            .unwrap_or_else(|| crate::tr!(model, "Open", "打开").to_string())
+    };
+    let project_path = if single_active {
+        if single_empty {
+            String::new()
+        } else {
+            crate::tr!(model, "Single files", "单文件").to_string()
+        }
+    } else {
+        project
+            .map(|project| lazecode_fs::display_path(&project.root))
+            .unwrap_or_default()
+    };
     let initials = project
         .map(|project| project.initials.clone())
         .unwrap_or_default();
@@ -230,6 +307,8 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         ui.scope_id().with("project-id"),
         Sense::click(),
     );
+    titlebar_control_hovered |= response.hovered();
+    control_rects.push(response.rect);
     if response.hovered() {
         painter.rect_filled(project_rect, egui::CornerRadius::same(6), p.hover);
     }
@@ -242,7 +321,9 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         egui::CornerRadius::same(6),
         tone.gamma_multiply(0.16),
     );
-    if has_project {
+    if single_active && !single_empty {
+        paint_icon(ui.painter(), badge.shrink(5.0), Icon::File, tone);
+    } else if has_project && !single_empty {
         painter.text(
             badge.center(),
             Align2::CENTER_CENTER,
@@ -253,28 +334,46 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     } else {
         paint_icon(ui.painter(), badge.shrink(5.0), Icon::FolderOpen, p.text3);
     }
-    text_clipped(
-        ui.painter(),
-        Rect::from_min_max(
-            Pos2::new(x + 32.0, top + 7.0),
-            Pos2::new(project_rect.right() - 88.0, top + 22.0),
-        ),
-        &project_name,
-        FontId::proportional(13.5),
-        p.text,
-        Align2::LEFT_CENTER,
-    );
-    text_clipped(
-        ui.painter(),
-        Rect::from_min_max(
-            Pos2::new(x + 32.0, top + 21.0),
-            Pos2::new(project_rect.right() - 40.0, top + 34.0),
-        ),
-        &project_path,
-        FontId::proportional(11.0),
-        p.text3,
-        Align2::LEFT_CENTER,
-    );
+    if has_project && !single_empty {
+        // Two lines share the 28px card: name 7..21, path 20..33. The group
+        // centre stays on the card's centre line.
+        text_clipped(
+            ui.painter(),
+            Rect::from_min_max(
+                Pos2::new(x + 32.0, top + 7.0),
+                Pos2::new(project_rect.right() - 40.0, top + 21.0),
+            ),
+            &project_name,
+            FontId::proportional(13.5),
+            p.text,
+            Align2::LEFT_CENTER,
+        );
+        text_clipped(
+            ui.painter(),
+            Rect::from_min_max(
+                Pos2::new(x + 32.0, top + 20.0),
+                Pos2::new(project_rect.right() - 40.0, top + 33.0),
+            ),
+            &project_path,
+            FontId::proportional(11.0),
+            p.text3,
+            Align2::LEFT_CENTER,
+        );
+    } else {
+        // The empty state is one line: centre it in the whole card instead of
+        // leaving it on the first line of the two-line project layout.
+        text_clipped(
+            ui.painter(),
+            Rect::from_min_max(
+                Pos2::new(x + 32.0, project_rect.top()),
+                Pos2::new(project_rect.right() - 40.0, project_rect.bottom()),
+            ),
+            &project_name,
+            FontId::proportional(13.5),
+            p.text,
+            Align2::LEFT_CENTER,
+        );
+    }
     paint_icon(
         ui.painter(),
         Rect::from_center_size(
@@ -284,89 +383,81 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         Icon::ChevronDown,
         p.text3,
     );
+    titlebar_control_hovered |= response.hovered();
+    control_rects.push(response.rect);
     if response.clicked() {
-        if has_project {
-            rt.toggle_menu(MenuKind::Project, project_rect, None);
-        } else {
-            open_project_dialog = true;
-        }
+        // The selector is the project switcher even when no project is open:
+        // the menu lists open projects, recents, and the open-project action.
+        rt.toggle_menu(MenuKind::Project, project_rect, None);
     }
-    if has_project {
+    if has_project && !single_empty {
         response.on_hover_text(format!("{project_name} · {project_path}"));
     }
-    x = project_rect.right() + 6.0;
+    x = project_rect.right() + 12.0;
 
     painter.vline(
-        x - 3.5,
+        x - 6.0,
         (top + 10.0)..=(rect.bottom() - 10.0),
         Stroke::new(1.0, p.border_soft),
     );
 
-    // Branch chip only exists with an open project.
-    if project.is_some() {
+    // Branch/worktree chips are omitted for the ad-hoc files workspace; it
+    // has no repository context of its own.
+    if project.is_some_and(|project| !project.is_single_file) {
+        let is_git = project.is_some_and(|project| project.active_git().is_some());
+        let is_single = project.is_some_and(|project| project.is_single_file);
         // Worktree chip first (Hierarchy: Project -> Worktree -> Branch).
-        let worktree_name = project
-            .map(|project| project.active_worktree().name.clone())
-            .unwrap_or_else(|| "main".to_string());
-        let wt_width = (worktree_name.chars().count() as f32 * 7.0 + 36.0).clamp(66.0, 160.0);
-        let worktree_rect =
-            Rect::from_min_size(Pos2::new(x + 4.0, top + 7.0), Vec2::new(wt_width, 26.0));
+        // A plain folder has no worktree and no worktree menu.
+        let worktree_name = if is_git {
+            project
+                .map(|project| project.active_worktree().name.clone())
+                .unwrap_or_else(|| "main".to_string())
+        } else {
+            crate::tr!(model, "no worktree", "无工作树").to_string()
+        };
+        let worktree_enabled = is_git && !is_single;
+        let wt_width = (worktree_name.chars().count() as f32 * 8.0 + 38.0).clamp(70.0, 180.0);
+        let worktree_rect = Rect::from_min_size(Pos2::new(x, top + 6.0), Vec2::new(wt_width, 28.0));
         let worktree_response = ui.interact(
             worktree_rect,
             ui.scope_id().with("worktree-chip"),
             Sense::click(),
         );
-        painter.rect_filled(
-            worktree_rect,
-            egui::CornerRadius::same(6),
-            if worktree_response.hovered() {
-                p.hover
-            } else {
-                p.panel2
-            },
-        );
-        painter.rect_stroke(
-            worktree_rect,
-            egui::CornerRadius::same(6),
-            Stroke::new(
-                1.0,
-                if worktree_response.hovered() {
-                    p.border_strong
-                } else {
-                    p.border
-                },
-            ),
-            StrokeKind::Inside,
-        );
+        titlebar_control_hovered |= worktree_response.hovered();
+        control_rects.push(worktree_response.rect);
+        if worktree_enabled && worktree_response.hovered() {
+            painter.rect_filled(worktree_rect, egui::CornerRadius::same(6), p.hover);
+        }
         paint_icon(
             &painter,
             Rect::from_center_size(
-                Pos2::new(worktree_rect.left() + 12.0, worktree_rect.center().y),
-                Vec2::splat(12.0),
+                Pos2::new(worktree_rect.left() + 14.0, worktree_rect.center().y),
+                Vec2::splat(15.0),
             ),
             Icon::Worktree,
-            p.accent,
+            if is_git { p.accent } else { p.text3 },
         );
         text_clipped(
             &painter,
             Rect::from_min_max(
-                Pos2::new(worktree_rect.left() + 22.0, worktree_rect.top()),
-                Pos2::new(worktree_rect.right() - 6.0, worktree_rect.bottom()),
+                Pos2::new(worktree_rect.left() + 28.0, worktree_rect.top()),
+                Pos2::new(worktree_rect.right() - 8.0, worktree_rect.bottom()),
             ),
             &worktree_name,
-            FontId::proportional(12.5),
-            p.text,
+            FontId::proportional(14.0),
+            p.text2,
             Align2::LEFT_CENTER,
         );
-        let is_single = project.map(|p| p.is_single_file).unwrap_or(false);
-        if worktree_response.clicked() && has_project && !is_single {
+        if worktree_response.clicked() && worktree_enabled {
             rt.toggle_menu(MenuKind::Worktree, worktree_rect, None);
         }
-        worktree_response.on_hover_text(crate::tr!(
-            model,
-            "Switch worktree · create linked checkouts with independent consoles",
-            "切换工作树 · 可创建独立控制台的关联检出"
-        ));
+        if worktree_enabled {
+            worktree_response.on_hover_text(crate::tr!(
+                model,
+                "Switch worktree · create linked checkouts with independent consoles",
+                "切换工作树 · 可创建独立控制台的关联检出"
+            ));
+        }
 
         let (conflicts, sequencer) = project
             .map(|p| (p.conflicts.clone(), p.sequencer.clone()))
@@ -375,19 +466,21 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         let op_active = sequencer.is_some() || op_conflicts;
 
         // Branch chip inside the selected worktree.
-        let branch = if is_single {
+        let branch = if !is_git {
+            crate::tr!(model, "no branch", "无分支").to_string()
+        } else if is_single {
             crate::tr!(model, "Single-file", "单文件模式").to_string()
         } else {
             project
                 .map(|project| project.branch())
-                .unwrap_or_else(|| crate::tr!(model, "no repository", "无仓库").to_string())
+                .unwrap_or_else(|| crate::tr!(model, "no branch", "无分支").to_string())
         };
         let ahead = project
-            .and_then(|project| project.git.as_ref())
+            .and_then(|project| project.active_git())
             .map(|git| git.ahead)
             .unwrap_or(0);
         let behind = project
-            .and_then(|project| project.git.as_ref())
+            .and_then(|project| project.active_git())
             .map(|git| git.behind)
             .unwrap_or(0);
 
@@ -435,62 +528,65 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         };
 
         let display_name = if op_active { &op_label } else { &branch };
-        let branch_width = (display_name.chars().count() as f32 * 6.6
+        let branch_width = (display_name.chars().count() as f32 * 7.4
             + 58.0
             + usize::from(!op_active && ahead > 0) as f32 * 24.0
             + usize::from(!op_active && behind > 0) as f32 * 24.0)
-            .clamp(90.0, 320.0);
+            .clamp(96.0, 340.0);
         let branch_rect = Rect::from_min_size(
-            Pos2::new(worktree_rect.right() + 4.0, top + 7.0),
-            Vec2::new(branch_width, 26.0),
+            Pos2::new(worktree_rect.right() + 12.0, top + 6.0),
+            Vec2::new(branch_width, 28.0),
         );
         let response = ui.interact(
             branch_rect,
             ui.scope_id().with("branch-chip"),
             Sense::click(),
         );
-        let bg_color = if op_active {
-            p.amber.gamma_multiply(0.18)
-        } else if response.hovered() {
-            p.hover
-        } else {
-            p.panel2
-        };
-        let border_color = if op_active {
-            p.amber
-        } else if response.hovered() {
-            p.border_strong
-        } else {
-            p.border
-        };
-        painter.rect_filled(branch_rect, egui::CornerRadius::same(6), bg_color);
-        painter.rect_stroke(
-            branch_rect,
-            egui::CornerRadius::same(6),
-            Stroke::new(1.0, border_color),
-            StrokeKind::Inside,
-        );
+        titlebar_control_hovered |= response.hovered();
+        control_rects.push(response.rect);
+        if op_active {
+            painter.rect_filled(
+                branch_rect,
+                egui::CornerRadius::same(6),
+                p.amber.gamma_multiply(0.18),
+            );
+        } else if is_git && response.hovered() {
+            painter.rect_filled(branch_rect, egui::CornerRadius::same(6), p.hover);
+        }
         paint_icon(
             ui.painter(),
             Rect::from_center_size(
-                Pos2::new(branch_rect.left() + 13.0, branch_rect.center().y),
-                Vec2::splat(14.0),
+                Pos2::new(branch_rect.left() + 15.0, branch_rect.center().y),
+                Vec2::splat(16.0),
             ),
             if op_active { Icon::Alert } else { Icon::Git },
-            if op_active { p.amber } else { p.accent },
+            if op_active {
+                p.amber
+            } else if is_git {
+                p.accent
+            } else {
+                p.text3
+            },
         );
-        let mut bx = branch_rect.left() + 22.0;
+        let mut bx = branch_rect.left() + 28.0;
         text_clipped(
             ui.painter(),
             Rect::from_min_max(
                 Pos2::new(bx, branch_rect.top()),
                 Pos2::new(
-                    branch_rect.right() - if op_active { 20.0 } else { 36.0 },
+                    branch_rect.right()
+                        - if op_active {
+                            20.0
+                        } else if is_git {
+                            36.0
+                        } else {
+                            12.0
+                        },
                     branch_rect.bottom(),
                 ),
             ),
             display_name,
-            FontId::proportional(13.0),
+            FontId::proportional(14.0),
             if op_active { p.amber } else { p.text2 },
             Align2::LEFT_CENTER,
         );
@@ -501,7 +597,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                     Pos2::new(bx, branch_rect.center().y),
                     Align2::LEFT_CENTER,
                     format!("↑{ahead}"),
-                    FontId::monospace(11.0),
+                    FontId::monospace(12.0),
                     p.green,
                 );
                 bx += 20.0;
@@ -511,21 +607,23 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                     Pos2::new(bx, branch_rect.center().y),
                     Align2::LEFT_CENTER,
                     format!("↓{behind}"),
-                    FontId::monospace(11.0),
+                    FontId::monospace(12.0),
                     p.orange,
                 );
             }
         }
-        paint_icon(
-            ui.painter(),
-            Rect::from_center_size(
-                Pos2::new(branch_rect.right() - 10.0, branch_rect.center().y),
-                Vec2::splat(11.0),
-            ),
-            Icon::ChevronDown,
-            if op_active { p.amber } else { p.text3 },
-        );
-        if response.clicked() && has_project && !is_single {
+        if is_git {
+            paint_icon(
+                ui.painter(),
+                Rect::from_center_size(
+                    Pos2::new(branch_rect.right() - 10.0, branch_rect.center().y),
+                    Vec2::splat(12.0),
+                ),
+                Icon::ChevronDown,
+                if op_active { p.amber } else { p.text3 },
+            );
+        }
+        if response.clicked() && is_git && !is_single {
             rt.toggle_menu(MenuKind::Branch, branch_rect, None);
         }
 
@@ -541,6 +639,8 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 ui.scope_id().with("sequencer-continue"),
                 Sense::click(),
             );
+            titlebar_control_hovered |= continue_resp.hovered();
+            control_rects.push(continue_resp.rect);
             let green_base = Color32::from_rgb(73, 156, 84);
             let green_hover = Color32::from_rgb(87, 167, 99);
             painter.rect_filled(
@@ -609,6 +709,8 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 ui.scope_id().with("sequencer-abort"),
                 Sense::click(),
             );
+            titlebar_control_hovered |= abort_resp.hovered();
+            control_rects.push(abort_resp.rect);
             let red_base = Color32::from_rgb(219, 88, 96);
             let red_hover = Color32::from_rgb(226, 106, 113);
             painter.rect_filled(
@@ -663,9 +765,12 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         15.0,
         Icon::Settings,
         rt.settings_open,
+        true,
         None,
         crate::tr!(model, "Settings · ⌘,", "设置 · ⌘,").to_string(),
     );
+    titlebar_control_hovered |= settings_resp.hovered();
+    control_rects.push(settings_resp.rect);
     if settings_resp.clicked() {
         rt.settings_open = !rt.settings_open;
         rt.about_open = false;
@@ -677,14 +782,18 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         false,
         theme,
     );
+    titlebar_control_hovered |= search_resp.hovered();
+    control_rects.push(search_resp.rect);
     if search_resp.clicked() {
         rt.open_palette();
         model.ui.command_palette_open = true;
     }
-    let _ = MenuKind::Project;
-    if open_project_dialog {
-        model.queue(Command::OpenProjectDialog);
+    if !titlebar_control_hovered && drag.dragged() {
+        ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);
     }
+
+    rt.titlebar_controls.clear();
+    rt.titlebar_controls.extend(control_rects);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -695,11 +804,12 @@ fn toolbar_button(
     id: &'static str,
     icon: Icon,
     active: bool,
+    enabled: bool,
     dot: Option<Color32>,
     tooltip: String,
 ) -> egui::Response {
     toolbar_button_sized(
-        ui, theme, center, id, 32.0, 18.0, icon, active, dot, tooltip,
+        ui, theme, center, id, 32.0, 18.0, icon, active, enabled, dot, tooltip,
     )
 }
 
@@ -713,13 +823,22 @@ fn toolbar_button_sized(
     icon_size: f32,
     icon: Icon,
     active: bool,
+    enabled: bool,
     dot: Option<Color32>,
     tooltip: String,
 ) -> egui::Response {
     let p = theme.palette;
     let rect = Rect::from_center_size(center, Vec2::splat(size));
-    let response = ui.interact(rect, ui.scope_id().with(id), Sense::click());
-    if active || response.hovered() {
+    let response = ui.interact(
+        rect,
+        ui.scope_id().with(id),
+        if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        },
+    );
+    if enabled && (active || response.hovered()) {
         ui.painter().rect_filled(
             rect,
             egui::CornerRadius::same(7),
@@ -730,12 +849,20 @@ fn toolbar_button_sized(
         ui.painter(),
         Rect::from_center_size(center, Vec2::splat(icon_size)),
         icon,
-        if active { p.text } else { p.text2 },
+        if !enabled {
+            p.text3.gamma_multiply(0.55)
+        } else if active {
+            p.text
+        } else {
+            p.text2
+        },
     );
-    if let Some(color) = dot {
-        let c = Pos2::new(rect.right() - 4.0, rect.top() + 4.0);
-        ui.painter().circle_filled(c, 3.0, p.titlebar);
-        ui.painter().circle_filled(c, 2.0, color);
+    if enabled {
+        if let Some(color) = dot {
+            let c = Pos2::new(rect.right() - 4.0, rect.top() + 4.0);
+            ui.painter().circle_filled(c, 3.0, p.titlebar);
+            ui.painter().circle_filled(c, 2.0, color);
+        }
     }
     response.on_hover_text(tooltip)
 }

@@ -1388,6 +1388,39 @@ pub fn checkout_revision(root: &Path, revision: &str) -> Result<String> {
     Ok(format!("checked out revision {revision}"))
 }
 
+/// Checkout an arbitrary ref (tag, branch, commit) detached. Unlike
+/// `checkout_revision`, this accepts human-readable ref names but resolves
+/// them to a commit hash before invoking checkout, so option-like input can
+/// never reach the Git command line.
+pub fn checkout_ref(root: &Path, spec: &str) -> Result<String> {
+    let spec = spec.trim();
+    if spec.is_empty() || spec.starts_with('-') {
+        anyhow::bail!("unsuitable revision '{spec}'");
+    }
+    require_clean(root)?;
+    let resolved = run(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{spec}^{{commit}}"),
+        ],
+    )?;
+    let hash = resolved.trim().lines().next().unwrap_or("");
+    validated_hash(hash)?;
+    let output = builder(root, &["checkout", "--detach", hash])
+        .output()
+        .map_err(|e| anyhow!("git checkout failed: {e}"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(format!("checked out {spec}"))
+}
+
 /// Checkout a single file from a given revision (`git checkout <revision> -- <path>`).
 pub fn checkout_revision_path(root: &Path, revision: &str, path: &str) -> Result<()> {
     validated_hash(revision)?;

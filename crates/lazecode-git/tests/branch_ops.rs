@@ -1,7 +1,10 @@
 use std::path::Path;
 use std::process::Command;
 
-use lazecode_git::{create_tag, delete_branch, delete_tag, rename_branch};
+use lazecode_git::{
+    checkout_branch, create_branch_from, create_tag, delete_branch, delete_tag,
+    force_delete_branch, rename_branch,
+};
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
@@ -81,4 +84,60 @@ fn delete_branch_rejects_current() {
     delete_branch(root, "side").unwrap();
     let refs = git(root, &["for-each-ref", "refs/heads/"]);
     assert!(!refs.contains("side"));
+}
+
+#[test]
+fn create_branch_from_start_point_can_checkout() {
+    let dir = repo();
+    let root = dir.path();
+    let base = git(root, &["rev-parse", "HEAD"]);
+    std::fs::write(root.join("b.txt"), "second\n").unwrap();
+    git(root, &["add", "b.txt"]);
+    git(root, &["commit", "-q", "-m", "second"]);
+
+    create_branch_from(root, "from-base", Some(&base), true).unwrap();
+    assert_eq!(git(root, &["branch", "--show-current"]), "from-base");
+    assert_eq!(git(root, &["rev-parse", "HEAD"]), base);
+    assert!(!root.join("b.txt").exists());
+}
+
+#[test]
+fn delete_unmerged_branch_requires_force() {
+    let dir = repo();
+    let root = dir.path();
+    git(root, &["checkout", "-q", "-b", "side"]);
+    std::fs::write(root.join("side.txt"), "side\n").unwrap();
+    git(root, &["add", "side.txt"]);
+    git(root, &["commit", "-q", "-m", "side"]);
+    git(root, &["checkout", "-q", "main"]);
+
+    let err = delete_branch(root, "side").unwrap_err().to_string();
+    assert!(err.contains("not fully merged"), "{err}");
+    assert!(!git(root, &["for-each-ref", "refs/heads/"]).is_empty());
+    force_delete_branch(root, "side").unwrap();
+    assert!(!git(root, &["for-each-ref", "refs/heads/side"]).contains("side"));
+}
+
+#[test]
+fn checkout_remote_branch_creates_local_tracking_branch() {
+    let dir = repo();
+    let root = dir.path();
+    let remote = tempfile::tempdir().unwrap();
+    git(remote.path(), &["init", "-q", "--bare"]);
+    git(
+        root,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git(root, &["push", "-q", "origin", "main"]);
+    git(root, &["branch", "docs-only"]);
+    git(root, &["push", "-q", "origin", "docs-only"]);
+    git(root, &["branch", "-D", "docs-only"]);
+    git(root, &["fetch", "-q", "origin"]);
+
+    checkout_branch(root, "origin/docs-only").unwrap();
+    assert_eq!(git(root, &["branch", "--show-current"]), "docs-only");
+    assert_eq!(
+        git(root, &["rev-parse", "docs-only@{upstream}"]),
+        git(root, &["rev-parse", "origin/docs-only"])
+    );
 }

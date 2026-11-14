@@ -10,7 +10,7 @@ use lazecode_text::{Cursor, Document, MatchOptions, Motion, Selection, TokenKind
 use crate::icons::{paint as paint_icon, Icon};
 use crate::runtime::{DialogState, UiRuntime};
 use crate::theme::{Theme, MONO};
-use crate::widgets::{mono_char_width, primary_button, secondary_button, text_clipped};
+use crate::widgets::{mono_char_width, secondary_button, text_clipped, text_width};
 
 const TABBAR_H: f32 = 30.0;
 const CRUMBS_H: f32 = 26.0;
@@ -29,7 +29,14 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     };
     let tab_count = model.projects[index].tabs.len();
     if tab_count == 0 {
-        draw_welcome(ui, model, rt, theme, rect, Some(index));
+        // The virtual Single files checkout may exist only to host a console
+        // opened from the empty home screen. Keep the home screen intact.
+        let welcome_index = if model.projects[index].is_single_file {
+            None
+        } else {
+            Some(index)
+        };
+        draw_welcome(ui, model, rt, theme, rect, welcome_index);
         return;
     }
 
@@ -353,7 +360,7 @@ fn draw_tabbar(
                 };
             } else {
                 let was_compare = matches!(tab.kind, lazecode_core::TabKind::Compare(_));
-                model.projects[index].close_tab(id);
+                model.close_tab(index, id);
                 if was_compare {
                     // 关闭比较页即结束会话（稳定版关闭标签页同理）。
                     model.ui.compare_branches = lazecode_core::CompareBranchesState::default();
@@ -384,7 +391,7 @@ fn draw_crumbs(
         rect.bottom() - 0.5,
         Stroke::new(1.0, p.border_soft),
     );
-    let project_root = model.projects[index].root.clone();
+    let project_root = model.projects[index].active_root().to_path_buf();
     let (is_annotated, _cur_mode, path, file_path) = {
         let Some(tab) = model.projects[index].tab_by_id(tab_id) else {
             return;
@@ -401,9 +408,9 @@ fn draw_crumbs(
         };
         (ann, mode, p_str, fp)
     };
-    let root = &model.projects[index].root;
+    let root = model.projects[index].active_root().to_path_buf();
     let relative = std::path::Path::new(&path)
-        .strip_prefix(root)
+        .strip_prefix(&root)
         .map(|rel| rel.to_string_lossy().into_owned())
         .unwrap_or_else(|_| path.clone());
     let parts: Vec<&str> = relative
@@ -1013,15 +1020,21 @@ fn draw_file_inner(
             Pos2::new(gutter.left(), rect.top()),
             Pos2::new(minimap_rect.left(), rect.bottom()),
         );
-        let response = ui.interact(
-            input_rect,
-            ui.scope_id().with(("editor", tab_id)),
-            Sense::click_and_drag(),
-        );
-        let is_hovering = ui
-            .input(|i| i.pointer.hover_pos())
-            .is_some_and(|pos| input_rect.contains(pos));
-        if is_hovering || response.hovered() || response.dragged() {
+        let response = ui
+            .interact(
+                input_rect,
+                ui.scope_id().with(("editor", tab_id)),
+                Sense::click_and_drag(),
+            )
+            .on_hover_cursor(egui::CursorIcon::Text);
+        if !overlays_open
+            && ui
+                .input(|i| i.pointer.hover_pos())
+                .is_some_and(|pos| input_rect.contains(pos))
+        {
+            // `Response::hovered` can be shadowed by a transparent interaction
+            // layer on the same pass; containment is the authoritative test
+            // for the editor's I-beam cursor.
             ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
         }
         if response.clicked() || response.dragged() {
@@ -1098,8 +1111,11 @@ fn draw_file_inner(
             doc.scroll_line = (offset / line_h).clamp(0.0, (max_scroll / line_h).max(0.0));
         }
 
-        // Render visible lines.
+        // Render visible lines. Text is clipped to the content column; the
+        // gutter (line numbers and blame) needs its own clip because it lives
+        // to the left of `content`.
         let painter = ui.painter().with_clip_rect(content);
+        let gutter_painter = ui.painter().with_clip_rect(gutter);
         let sel = doc.selection_char_range();
         let cursor = doc.cursor;
         let scroll_line = doc.scroll_line;
@@ -1144,7 +1160,7 @@ fn draw_file_inner(
             if annotate {
                 if let Some(blame_lines) = blame {
                     if let Some(bl) = blame_lines.get(line_index) {
-                        painter.text(
+                        gutter_painter.text(
                             Pos2::new(gutter.left() + 6.0, y + line_h * 0.5),
                             Align2::LEFT_CENTER,
                             format!("{} {}", bl.short, bl.author),
@@ -1155,7 +1171,7 @@ fn draw_file_inner(
                 }
             }
             if line_numbers {
-                painter.text(
+                gutter_painter.text(
                     Pos2::new(gutter.right() - 10.0, y + line_h * 0.5),
                     Align2::RIGHT_CENTER,
                     (line_index + 1).to_string(),
@@ -1980,7 +1996,7 @@ fn draw_diff(
             .unwrap_or_default(),
         DiffSource::Worktree { .. } => {
             let project = &model.projects[index];
-            let lists = lazecode_git::Changelists::open(&project.root);
+            let lists = lazecode_git::Changelists::open(project.active_root());
             let changes = project.changes();
             let mut ordered = Vec::new();
             for list_name in lists.lists() {
@@ -2228,7 +2244,7 @@ fn draw_diff(
                             patch,
                             cached,
                             reverse,
-                            root: model.projects[index].root.clone(),
+                            root: model.projects[index].active_root().to_path_buf(),
                         });
                     }
                 }
@@ -2760,7 +2776,7 @@ fn draw_diff(
                     patch,
                     cached: false,
                     reverse: true,
-                    root: model.projects[index].root.clone(),
+                    root: model.projects[index].active_root().to_path_buf(),
                 });
             }
         }
@@ -3005,213 +3021,139 @@ fn jump_to_match(doc: &mut Document, rt: &mut UiRuntime) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_welcome(
+fn welcome_action_button(
     ui: &mut Ui,
-    model: &mut AppModel,
-    rt: &mut UiRuntime,
+    rect: Rect,
+    id: &'static str,
+    label: &str,
+    icon: Icon,
+    primary: bool,
+    theme: &Theme,
+) -> egui::Response {
+    let p = theme.palette;
+    let response = ui.interact(
+        rect,
+        ui.scope_id().with(("welcome-action", id)),
+        Sense::click(),
+    );
+    let hovered = response.hovered();
+    let (fill, text_color) = if primary {
+        (
+            if hovered {
+                p.accent.gamma_multiply(1.06)
+            } else {
+                p.accent
+            },
+            p.accent_on_fill,
+        )
+    } else {
+        (
+            if hovered {
+                p.hover
+            } else {
+                Color32::TRANSPARENT
+            },
+            p.text2,
+        )
+    };
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(6), fill);
+    if !primary {
+        ui.painter().rect_stroke(
+            rect,
+            egui::CornerRadius::same(6),
+            Stroke::new(1.0, p.border),
+            StrokeKind::Inside,
+        );
+    }
+    paint_icon(
+        ui.painter(),
+        Rect::from_center_size(
+            Pos2::new(rect.left() + 16.0, rect.center().y),
+            Vec2::splat(14.0),
+        ),
+        icon,
+        if primary { text_color } else { p.text2 },
+    );
+    text_clipped(
+        ui.painter(),
+        Rect::from_min_max(
+            Pos2::new(rect.left() + 34.0, rect.top()),
+            Pos2::new(rect.right() - 8.0, rect.bottom()),
+        ),
+        label,
+        FontId::proportional(12.5),
+        text_color,
+        Align2::LEFT_CENTER,
+    );
+    response
+}
+
+fn welcome_kbd(painter: &egui::Painter, rect: Rect, label: &str, theme: &Theme) {
+    let p = theme.palette;
+    painter.rect_filled(rect, egui::CornerRadius::same(4), p.panel2);
+    painter.rect_stroke(
+        rect,
+        egui::CornerRadius::same(4),
+        Stroke::new(1.0, p.border),
+        StrokeKind::Inside,
+    );
+    text_clipped(
+        painter,
+        rect.shrink2(Vec2::new(4.0, 0.0)),
+        label,
+        FontId::proportional(13.0),
+        p.text,
+        Align2::CENTER_CENTER,
+    );
+}
+
+fn welcome_recent_card(
+    ui: &mut Ui,
     theme: &Theme,
     rect: Rect,
-    index: Option<usize>,
-) {
+    title: &str,
+    empty: &str,
+    items: &[(PathBuf, bool)],
+) -> Option<(PathBuf, bool)> {
     let p = theme.palette;
-    ui.painter().rect_filled(rect, 0.0, p.editor);
-    let card = Rect::from_center_size(
-        rect.center(),
-        Vec2::new(
-            720.0_f32.min(rect.width() - 60.0),
-            420.0_f32.min(rect.height() - 60.0),
-        ),
-    );
-    let left = card.left() + 34.0;
-    let mut y = card.top() + 40.0;
-
-    // Logo mark.
-    let mark = Rect::from_min_size(Pos2::new(left, y), Vec2::splat(42.0));
     ui.painter()
-        .rect_filled(mark, egui::CornerRadius::same(11), p.accent);
+        .rect_filled(rect, egui::CornerRadius::same(8), p.panel);
     ui.painter().text(
-        mark.center(),
-        Align2::CENTER_CENTER,
-        ">_",
-        FontId::monospace(16.0),
-        p.accent_on_fill,
-    );
-    y += 58.0;
-    let name = index
-        .and_then(|index| model.projects.get(index))
-        .map(|project| project.name.clone())
-        .unwrap_or_else(|| "LazeCode".to_string());
-    ui.painter().text(
-        Pos2::new(left, y),
+        Pos2::new(rect.left() + 14.0, rect.top() + 18.0),
         Align2::LEFT_CENTER,
-        &name,
-        FontId::proportional(24.0),
-        p.text,
-    );
-    y += 28.0;
-    let subtitle = if index.is_some() {
-        if model.settings.language.is_zh() {
-            format!("{} 个项目已打开。所有进程一目了然。", model.projects.len())
-        } else {
-            format!(
-                "{} projects open. Every process in view.",
-                model.projects.len()
-            )
-        }
-    } else {
-        crate::tr!(
-            model,
-            "A quiet place for many projects. Open one to begin.",
-            "一个安静的工作空间。打开项目即可开始。"
-        )
-        .to_string()
-    };
-    ui.painter().text(
-        Pos2::new(left, y),
-        Align2::LEFT_CENTER,
-        subtitle,
-        FontId::proportional(13.5),
-        p.text2,
-    );
-    y += 30.0;
-
-    let actions = [
-        (
-            crate::tr!(model, "Open project", "打开项目"),
-            Icon::FolderOpen,
-            "open-project",
-        ),
-        (
-            crate::tr!(model, "Clone repo", "克隆仓库"),
-            Icon::Worktree,
-            "clone-repo",
-        ),
-        (
-            crate::tr!(model, "New file", "新建文件"),
-            Icon::Plus,
-            "new-file",
-        ),
-        (
-            crate::tr!(model, "New console", "新建控制台"),
-            Icon::Terminal,
-            "new-console",
-        ),
-        (
-            crate::tr!(model, "Find in files", "在文件中查找"),
-            Icon::Search,
-            "search",
-        ),
-    ];
-    let mut x = left;
-    for (label, icon, id) in actions {
-        let width = 104.0;
-        let button = Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, 30.0));
-        let primary = id == "open-project";
-        let response = if primary {
-            primary_button(ui, button, label, Some(icon), true, theme)
-        } else {
-            secondary_button(ui, button, label, Some(icon), theme)
-        };
-        if response.clicked() {
-            match id {
-                "open-project" => model.queue(Command::OpenProjectDialog),
-                "clone-repo" => {
-                    rt.dialog = crate::runtime::DialogState::CloneRepo {
-                        url: String::new(),
-                        dest: String::new(),
-                        error: None,
-                    };
-                }
-                "new-file" => {
-                    let dir = model
-                        .active_project()
-                        .map(|p| p.root.clone())
-                        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
-                    rt.dialog = crate::runtime::DialogState::NewFile {
-                        dir,
-                        value: String::new(),
-                        error: None,
-                    };
-                }
-                "new-console" => model.queue(Command::NewTerminal),
-                _ => {
-                    rt.search.open = true;
-                    rt.search.focus_requested = true;
-                }
-            }
-        }
-        x += width + 8.0;
-    }
-    y += 52.0;
-
-    // Recent / open files and shortcuts, two columns when there is room.
-    let column_w = (card.width() - 88.0) * 0.56;
-    let recent_rect = Rect::from_min_size(Pos2::new(left, y), Vec2::new(column_w, 168.0));
-    ui.painter()
-        .rect_filled(recent_rect, egui::CornerRadius::same(8), p.panel);
-    let items: Vec<(PathBuf, bool)> = if let Some(index) = index {
-        model.projects[index]
-            .tabs
-            .iter()
-            .filter_map(|tab| match &tab.kind {
-                TabKind::File(file) => Some((file.doc.path.clone(), false)),
-                _ => None,
-            })
-            .take(5)
-            .collect()
-    } else {
-        model
-            .recent
-            .iter()
-            .take(5)
-            .cloned()
-            .map(|path| (path, true))
-            .collect()
-    };
-    ui.painter().text(
-        Pos2::new(recent_rect.left() + 14.0, recent_rect.top() + 18.0),
-        Align2::LEFT_CENTER,
-        if index.is_some() {
-            crate::tr!(model, "Open files", "打开的文件")
-        } else {
-            crate::tr!(model, "Recent projects", "最近项目")
-        },
+        title,
         FontId::proportional(13.0),
         p.text,
     );
     if items.is_empty() {
         ui.painter().text(
-            Pos2::new(recent_rect.left() + 14.0, recent_rect.top() + 44.0),
+            Pos2::new(rect.left() + 14.0, rect.top() + 44.0),
             Align2::LEFT_CENTER,
-            if index.is_some() {
-                crate::tr!(
-                    model,
-                    "Click a file in the explorer",
-                    "在资源管理器中点击文件"
-                )
-            } else {
-                crate::tr!(model, "No recent projects", "暂无最近项目")
-            },
+            empty,
             FontId::proportional(12.5),
             p.text3,
         );
+        return None;
     }
-    let mut row_y = recent_rect.top() + 32.0;
-    for (path, is_project) in items {
+    let mut clicked = None;
+    for (index, (path, is_project)) in items.iter().take(5).enumerate() {
+        let row_y = rect.top() + 32.0 + index as f32 * 27.0;
         let row = Rect::from_min_size(
-            Pos2::new(recent_rect.left() + 8.0, row_y),
-            Vec2::new(recent_rect.width() - 16.0, 24.0),
+            Pos2::new(rect.left() + 8.0, row_y),
+            Vec2::new(rect.width() - 16.0, 24.0),
         );
         let response = ui.interact(
             row,
-            ui.scope_id().with(("recent", path.clone())),
+            ui.scope_id()
+                .with(("welcome-recent", path.clone(), *is_project)),
             Sense::click(),
         );
         if response.hovered() {
             ui.painter()
                 .rect_filled(row, egui::CornerRadius::same(4), p.hover);
         }
-        let (icon, tone) = if is_project {
+        let (icon, tone) = if *is_project {
             (Icon::Folder, p.accent)
         } else {
             tab_icon(path.to_str().unwrap_or_default(), theme)
@@ -3240,54 +3182,265 @@ fn draw_welcome(
             p.text,
             Align2::LEFT_CENTER,
         );
+        let response = response.on_hover_text(path.display().to_string());
         if response.clicked() {
-            if is_project {
-                model.queue(Command::OpenProject(path));
-            } else {
-                let settings = model.settings.clone();
-                if let Some(project) = model.active_project_mut() {
-                    let _ = project.open_file(path, &settings);
+            clicked = Some((path.clone(), *is_project));
+        }
+    }
+    clicked
+}
+
+fn draw_welcome(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    rect: Rect,
+    index: Option<usize>,
+) {
+    let p = theme.palette;
+    ui.painter().rect_filled(rect, 0.0, p.editor);
+    let card = Rect::from_center_size(
+        rect.center(),
+        Vec2::new(
+            720.0_f32.min(rect.width() - 60.0),
+            460.0_f32.min(rect.height() - 60.0),
+        ),
+    );
+    let left = card.left() + 34.0;
+    let mut y = card.top() + 40.0;
+
+    // Use the packaged application icon rather than a synthetic `>_` tile.
+    let mark = Rect::from_min_size(Pos2::new(left, y), Vec2::splat(84.0));
+    let icon_texture = rt.app_icon_texture(ui.ctx());
+    ui.painter().image(
+        icon_texture,
+        mark,
+        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+        Color32::WHITE,
+    );
+    y += 96.0;
+    let name = index
+        .and_then(|index| model.projects.get(index))
+        .map(|project| project.name.clone())
+        .unwrap_or_else(|| "LazeCode".to_string());
+    ui.painter().text(
+        Pos2::new(left, y),
+        Align2::LEFT_CENTER,
+        &name,
+        FontId::proportional(24.0),
+        p.text,
+    );
+    y += 28.0;
+    let subtitle = if index.is_some() {
+        if model.settings.language.is_zh() {
+            format!("{} 个项目已打开。所有进程一目了然。", model.projects.len())
+        } else {
+            format!(
+                "{} projects open. Every process in view.",
+                model.projects.len()
+            )
+        }
+    } else {
+        crate::tr!(
+            model,
+            "A quiet place for many projects. Open a folder or files to begin.",
+            "一个安静的工作空间。打开目录或文件即可开始。"
+        )
+        .to_string()
+    };
+    ui.painter().text(
+        Pos2::new(left, y),
+        Align2::LEFT_CENTER,
+        subtitle,
+        FontId::proportional(13.5),
+        p.text2,
+    );
+    y += 30.0;
+
+    let actions = [
+        (
+            crate::tr!(model, "Open", "打开"),
+            Icon::FolderOpen,
+            "open-project",
+        ),
+        (
+            crate::tr!(model, "Clone repo", "克隆仓库"),
+            Icon::Worktree,
+            "clone-repo",
+        ),
+        (
+            crate::tr!(model, "New file", "新建文件"),
+            Icon::Plus,
+            "new-file",
+        ),
+        (
+            crate::tr!(model, "New console", "新建控制台"),
+            Icon::Terminal,
+            "new-console",
+        ),
+        (
+            crate::tr!(model, "Find in files", "在文件中查找"),
+            Icon::Search,
+            "search",
+        ),
+    ];
+    let mut x = left;
+    // Keep the five actions on one row on narrow windows as well.
+    let action_width = ((card.width() - 68.0 - 32.0) / 5.0).clamp(96.0, 124.0);
+    for (label, icon, id) in actions {
+        let width = action_width;
+        let button = Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, 30.0));
+        let primary = id == "open-project";
+        let response = welcome_action_button(ui, button, id, label, icon, primary, theme);
+        if response.clicked() {
+            match id {
+                "open-project" => model.queue(Command::OpenProjectDialog),
+                "clone-repo" => {
+                    rt.dialog = crate::runtime::DialogState::CloneRepo {
+                        url: String::new(),
+                        dest: String::new(),
+                        error: None,
+                    };
+                }
+                "new-file" => {
+                    let dir = model
+                        .active_project()
+                        .map(|p| p.active_root().to_path_buf())
+                        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")));
+                    rt.dialog = crate::runtime::DialogState::NewFile {
+                        dir,
+                        value: String::new(),
+                        error: None,
+                    };
+                }
+                "new-console" => model.queue(Command::NewTerminal),
+                _ => {
+                    rt.search.open = true;
+                    rt.search.focus_requested = true;
                 }
             }
         }
-        row_y += 26.0;
+        x += width + 8.0;
+    }
+    y += 52.0;
+
+    // Recent / open files and shortcuts, two columns when there is room.
+    let column_w = (card.width() - 88.0) * 0.56;
+    let recent_rect = Rect::from_min_size(Pos2::new(left, y), Vec2::new(column_w, 168.0));
+    ui.painter()
+        .rect_filled(recent_rect, egui::CornerRadius::same(8), p.panel);
+    let home_groups = index.is_none();
+    let left_title = if home_groups {
+        crate::tr!(model, "Recent projects", "最近项目")
+    } else {
+        crate::tr!(model, "Open files", "打开的文件")
+    };
+    let left_empty = if home_groups {
+        crate::tr!(model, "No recent projects", "暂无最近项目")
+    } else {
+        crate::tr!(
+            model,
+            "Click a file in the explorer",
+            "在资源管理器中点击文件"
+        )
+    };
+    let left_items: Vec<(PathBuf, bool)> = if let Some(index) = index {
+        model.projects[index]
+            .tabs
+            .iter()
+            .filter_map(|tab| match &tab.kind {
+                TabKind::File(file) => Some((file.doc.path.clone(), false)),
+                TabKind::Image(img) => Some((img.path.clone(), false)),
+                _ => None,
+            })
+            .take(5)
+            .collect()
+    } else {
+        model
+            .recent
+            .iter()
+            .take(5)
+            .cloned()
+            .map(|path| (path, true))
+            .collect()
+    };
+    if let Some((path, is_project)) =
+        welcome_recent_card(ui, theme, recent_rect, left_title, left_empty, &left_items)
+    {
+        if is_project {
+            model.queue(Command::OpenProject(path));
+        } else if let Some(active) = model.active_project {
+            let _ = model.open_file_in(active, path);
+        } else if let Err(err) = model.open_files(vec![path]) {
+            model.toast(err, lazecode_core::ToastKind::Error);
+        }
     }
 
-    let shortcuts = Rect::from_min_size(
+    let right_rect = Rect::from_min_size(
         Pos2::new(recent_rect.right() + 16.0, y),
         Vec2::new(card.right() - 34.0 - (recent_rect.right() + 16.0), 168.0),
     );
-    ui.painter()
-        .rect_filled(shortcuts, egui::CornerRadius::same(8), p.panel);
-    ui.painter().text(
-        Pos2::new(shortcuts.left() + 14.0, shortcuts.top() + 18.0),
-        Align2::LEFT_CENTER,
-        crate::tr!(model, "Keyboard", "快捷键"),
-        FontId::proportional(13.0),
-        p.text,
-    );
-    let entries = [
-        (crate::tr!(model, "Command palette", "命令面板"), "⌘⇧A"),
-        (crate::tr!(model, "Toggle explorer", "切换资源管理器"), "⌘1"),
-        (crate::tr!(model, "Commit", "提交"), "⌘K"),
-        (crate::tr!(model, "Open Git log", "打开 Git 日志"), "⌘9"),
-        (crate::tr!(model, "Find in files", "在文件中查找"), "⌘⇧F"),
-    ];
-    let mut row_y = shortcuts.top() + 36.0;
-    for (label, key) in entries {
+    if home_groups {
+        let recent_files: Vec<(PathBuf, bool)> = model
+            .recent_files
+            .iter()
+            .take(5)
+            .cloned()
+            .map(|path| (path, false))
+            .collect();
+        if let Some((path, _)) = welcome_recent_card(
+            ui,
+            theme,
+            right_rect,
+            crate::tr!(model, "Recent files", "最近文件"),
+            crate::tr!(model, "No recent files", "暂无最近文件"),
+            &recent_files,
+        ) {
+            if let Err(err) = model.open_files(vec![path]) {
+                model.toast(err, lazecode_core::ToastKind::Error);
+            }
+        }
+    }
+
+    let shortcuts = right_rect;
+    if !home_groups {
         ui.painter().text(
-            Pos2::new(shortcuts.left() + 14.0, row_y),
+            Pos2::new(shortcuts.left() + 14.0, shortcuts.top() + 18.0),
             Align2::LEFT_CENTER,
-            label,
-            FontId::proportional(12.5),
-            p.text2,
+            crate::tr!(model, "Keyboard", "快捷键"),
+            FontId::proportional(13.0),
+            p.text,
         );
-        let kbd_rect = Rect::from_center_size(
-            Pos2::new(shortcuts.right() - 26.0, row_y),
-            Vec2::new(key.chars().count() as f32 * 9.0 + 10.0, 19.0),
-        );
-        crate::widgets::kbd(ui.painter(), kbd_rect, key, theme);
-        row_y += 24.0;
+        let entries = [
+            (crate::tr!(model, "Command palette", "命令面板"), "⌘⇧A"),
+            (crate::tr!(model, "Toggle explorer", "切换资源管理器"), "⌘1"),
+            (crate::tr!(model, "Commit", "提交"), "⌘K"),
+            (crate::tr!(model, "Open Git log", "打开 Git 日志"), "⌘9"),
+            (crate::tr!(model, "Find in files", "在文件中查找"), "⌘⇧F"),
+        ];
+        let key_font = FontId::proportional(13.0);
+        let mut row_y = shortcuts.top() + 36.0;
+        for (label, key) in entries.iter() {
+            let key_width = text_width(ui.painter(), key, key_font.clone()) + 16.0;
+            let kbd_rect = Rect::from_center_size(
+                Pos2::new(shortcuts.right() - 14.0 - key_width * 0.5, row_y),
+                Vec2::new(key_width, 22.0),
+            );
+            text_clipped(
+                ui.painter(),
+                Rect::from_min_max(
+                    Pos2::new(shortcuts.left() + 14.0, row_y - 10.0),
+                    Pos2::new(kbd_rect.left() - 8.0, row_y + 10.0),
+                ),
+                label,
+                FontId::proportional(12.5),
+                p.text2,
+                Align2::LEFT_CENTER,
+            );
+            welcome_kbd(ui.painter(), kbd_rect, key, theme);
+            row_y += 27.0;
+        }
     }
 
     let foot_y = card.bottom() - 20.0;

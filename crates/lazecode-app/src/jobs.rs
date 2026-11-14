@@ -12,6 +12,66 @@ use lazecode_git::{BranchInfo, CommitDetails, CommitInfo, FileDiff, LogOptions, 
 use lazecode_terminal::Notifier;
 use lazecode_ui::UiRuntime;
 
+/// Mixed file/folder picker used by "Open". AppKit's NSOpenPanel is the only
+/// native chooser that lets one dialog return either a directory or several
+/// files; rfd's wrappers split those into separate dialogs.
+#[cfg(target_os = "macos")]
+fn pick_open_paths() -> Vec<PathBuf> {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::NSString;
+
+    unsafe {
+        let panel: *mut AnyObject = msg_send![objc2::class!(NSOpenPanel), openPanel];
+        if panel.is_null() {
+            return Vec::new();
+        }
+        let _: () = msg_send![panel, setCanChooseFiles: true];
+        let _: () = msg_send![panel, setCanChooseDirectories: true];
+        let _: () = msg_send![panel, setAllowsMultipleSelection: true];
+        let title = NSString::from_str("Open");
+        let _: () = msg_send![panel, setTitle: &*title];
+        // NSModalResponseOK == 1.
+        let response: isize = msg_send![panel, runModal];
+        if response != 1 {
+            return Vec::new();
+        }
+        let urls: *mut AnyObject = msg_send![panel, URLs];
+        if urls.is_null() {
+            return Vec::new();
+        }
+        let count: usize = msg_send![urls, count];
+        let mut paths = Vec::with_capacity(count);
+        for index in 0..count {
+            let url: *mut AnyObject = msg_send![urls, objectAtIndex: index];
+            if url.is_null() {
+                continue;
+            }
+            let path: *mut AnyObject = msg_send![url, path];
+            if path.is_null() {
+                continue;
+            }
+            let utf8: *const std::ffi::c_char = msg_send![path, UTF8String];
+            if !utf8.is_null() {
+                paths.push(PathBuf::from(
+                    std::ffi::CStr::from_ptr(utf8)
+                        .to_string_lossy()
+                        .into_owned(),
+                ));
+            }
+        }
+        paths
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn pick_open_paths() -> Vec<PathBuf> {
+    rfd::FileDialog::new()
+        .set_title("Open")
+        .pick_files()
+        .unwrap_or_default()
+}
+
 /// Commit count loaded per log page. Small enough for a snappy first frame,
 /// big enough that a repo rarely needs more than a couple of pages.
 const LOG_PAGE_SIZE: usize = 300;
@@ -137,6 +197,9 @@ pub enum JobResult {
         reload_files: bool,
         clear_commit_message: bool,
     },
+    /// A safe `git branch -d` was rejected because the branch is not merged;
+    /// the UI should show the explicit force-delete confirmation.
+    BranchDeleteNeedsForce { root: PathBuf, name: String },
     /// 文件更改已回滚：除常规刷新外，还要关闭已不存在文件的编辑器标签
     /// （对齐稳定版：新增/未跟踪文件回滚后关闭标签页）。
     Discarded {
@@ -394,19 +457,49 @@ impl JobQueue {
         if loaded || project.commit_details_attempted.as_deref() == Some(id.as_str()) {
             return;
         }
-        let root = project.root.clone();
+        let root = project.active_root().to_path_buf();
         project.commit_details_attempted = Some(id.clone());
         self.commit_details(root, id);
     }
 
     pub fn execute(&mut self, model: &mut AppModel, runtime: &mut UiRuntime, command: Command) {
+        if model
+            .active_project()
+            .is_some_and(|project| project.is_single_file)
+            && matches!(
+                &command,
+                Command::Search { .. } | Command::ReplaceInFiles { .. }
+            )
+        {
+            model.toast(
+                if model.settings.language.is_zh() {
+                    "单文件模式没有项目根目录；请从文件所在项目中使用全局搜索"
+                } else {
+                    "Single files has no project root; open a folder to search across files"
+                },
+                ToastKind::Warning,
+            );
+            return;
+        }
         match command {
             Command::OpenProjectDialog => {
-                if let Some(path) = rfd::FileDialog::new()
-                    .set_title("Open project")
-                    .pick_folder()
-                {
-                    self.load_project(path, model.settings.clone(), model.notifier.clone());
+                let mut directories = Vec::new();
+                let mut files = Vec::new();
+                for path in pick_open_paths() {
+                    if path.is_dir() {
+                        directories.push(path);
+                    } else if path.is_file() {
+                        files.push(path);
+                    }
+                }
+                for directory in directories {
+                    self.load_project(directory, model.settings.clone(), model.notifier.clone());
+                }
+                if !files.is_empty() {
+                    match model.open_files(files) {
+                        Ok(_) => runtime.clear_terminal_cache(),
+                        Err(err) => model.toast(err, ToastKind::Error),
+                    }
                 }
             }
             Command::SavePatch(paths) => {
@@ -427,7 +520,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let paths = paths.clone();
                 self.spawn(
@@ -463,7 +556,14 @@ impl JobQueue {
                 );
             }
             Command::OpenProject(path) => {
-                self.load_project(path, model.settings.clone(), model.notifier.clone());
+                if path.is_file() {
+                    match model.open_files(vec![path]) {
+                        Ok(_) => runtime.clear_terminal_cache(),
+                        Err(err) => model.toast(err, ToastKind::Error),
+                    }
+                } else {
+                    self.load_project(path, model.settings.clone(), model.notifier.clone());
+                }
             }
             Command::CloseProject(index) => {
                 let dirty = model
@@ -505,24 +605,19 @@ impl JobQueue {
             }
             Command::ReloadGit => {
                 if let Some(project) = model.active_project() {
-                    let root = project.root.clone();
+                    let root = project.active_root().to_path_buf();
                     self.refresh_git(root, model.notifier.clone());
                 }
             }
             Command::ReloadTree => {
-                let ignored = model.settings.ignored_patterns.clone();
+                let settings = model.settings.clone();
                 if let Some(project) = model.active_project_mut() {
-                    project.tree = lazecode_fs::tree::load_tree_with_expanded(
-                        &project.root,
-                        Some(&project.expanded),
-                        20_000,
-                        Some(&ignored),
-                    );
+                    project.reload_tree(&settings);
                 }
             }
             Command::Stage(paths) => {
                 if let Some(project) = model.active_project() {
-                    let root = project.root.clone();
+                    let root = project.active_root().to_path_buf();
                     let zh = model.settings.language.is_zh();
                     let key = format!("stage:{}", root.display());
                     let job_root = root.clone();
@@ -555,7 +650,7 @@ impl JobQueue {
             }
             Command::Unstage(paths) => {
                 if let Some(project) = model.active_project() {
-                    let root = project.root.clone();
+                    let root = project.active_root().to_path_buf();
                     let zh = model.settings.language.is_zh();
                     let key = format!("unstage:{}", root.display());
                     let job_root = root.clone();
@@ -590,7 +685,7 @@ impl JobQueue {
                 let Some(project) = model.active_project() else {
                     return;
                 };
-                let root = project.root.clone();
+                let root = project.active_root().to_path_buf();
                 let message = project.commit_message.clone();
                 let amend = project.amend;
                 let paths = project.checked_changes();
@@ -657,7 +752,7 @@ impl JobQueue {
                 let Some(project) = model.active_project() else {
                     return;
                 };
-                let root = project.root.clone();
+                let root = project.active_root().to_path_buf();
                 let excluded: Vec<String> = project
                     .changes()
                     .iter()
@@ -710,7 +805,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let name = name.clone();
                 self.spawn(
@@ -743,7 +838,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let name = name.clone();
                 self.spawn(
@@ -809,7 +904,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let paths = paths.clone();
                 let count = paths.len();
@@ -851,7 +946,7 @@ impl JobQueue {
             } => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn(
                     "cb",
@@ -886,7 +981,7 @@ impl JobQueue {
             } => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn(
                     "cb-more",
@@ -925,7 +1020,7 @@ impl JobQueue {
             } => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("cb-files", format!("cbf:{root:?}:{key}"), move || {
                     let result = if !commit.is_empty() {
@@ -952,7 +1047,7 @@ impl JobQueue {
                     );
                     return;
                 }
-                let root = project.root.clone();
+                let root = project.active_root().to_path_buf();
                 let zh = model.settings.language.is_zh();
                 let key = format!("checkout:{}", root.display());
                 let job_root = root.clone();
@@ -982,27 +1077,42 @@ impl JobQueue {
                     }
                 });
             }
-            Command::CreateBranch(name) => {
+            Command::CreateBranch {
+                name,
+                start_point,
+                checkout,
+            } => {
                 let Some(project) = model.active_project() else {
                     return;
                 };
-                let root = project.root.clone();
+                let root = project.active_root().to_path_buf();
                 let zh = model.settings.language.is_zh();
                 let key = format!("branch:{}", root.display());
                 let job_root = root.clone();
                 self.spawn("branch", key, move || {
-                    let result = lazecode_git::create_branch(&job_root, &name, false);
+                    let result = lazecode_git::create_branch_from(
+                        &job_root,
+                        &name,
+                        start_point.as_deref(),
+                        checkout,
+                    );
                     match result {
                         Ok(()) => JobResult::OpDone {
                             root: job_root,
                             message: if zh {
-                                format!("已创建分支 {name}")
+                                if let Some(start) = start_point.as_deref() {
+                                    format!("已从 {start} 创建分支 {name}")
+                                } else {
+                                    format!("已创建分支 {name}")
+                                }
+                            } else if let Some(start) = start_point.as_deref() {
+                                format!("Created branch {name} from {start}")
                             } else {
                                 format!("Created branch {name}")
                             },
                             ok: true,
                             refresh: true,
-                            reload_files: false,
+                            reload_files: checkout,
                             clear_commit_message: false,
                         },
                         Err(err) => JobResult::OpDone {
@@ -1016,16 +1126,20 @@ impl JobQueue {
                     }
                 });
             }
-            Command::DeleteBranch(name) => {
+            Command::DeleteBranch { name, force } => {
                 let Some(project) = model.active_project() else {
                     return;
                 };
-                let root = project.root.clone();
+                let root = project.active_root().to_path_buf();
                 let zh = model.settings.language.is_zh();
-                let key = format!("delete-branch:{}", root.display());
+                let key = format!("delete-branch:{}:{name}", root.display());
                 let job_root = root.clone();
                 self.spawn("delete-branch", key, move || {
-                    let result = lazecode_git::delete_branch(&job_root, &name);
+                    let result = if force {
+                        lazecode_git::force_delete_branch(&job_root, &name)
+                    } else {
+                        lazecode_git::delete_branch(&job_root, &name)
+                    };
                     match result {
                         Ok(()) => JobResult::OpDone {
                             root: job_root,
@@ -1039,6 +1153,12 @@ impl JobQueue {
                             reload_files: false,
                             clear_commit_message: false,
                         },
+                        Err(err) if !force && err.to_string().contains("not fully merged") => {
+                            JobResult::BranchDeleteNeedsForce {
+                                root: job_root,
+                                name,
+                            }
+                        }
                         Err(err) => JobResult::OpDone {
                             root: job_root,
                             message: err.to_string(),
@@ -1050,11 +1170,33 @@ impl JobQueue {
                     }
                 });
             }
+            Command::DeleteRemoteBranch(name) => {
+                let Some(project) = model.active_project() else {
+                    return;
+                };
+                let root = project.active_root().to_path_buf();
+                let key = format!("delete-remote-branch:{}:{name}", root.display());
+                let job_root = root.clone();
+                self.spawn("delete-remote-branch", key, move || {
+                    let result = lazecode_git::delete_remote_branch(&job_root, &name);
+                    JobResult::OpDone {
+                        root: job_root,
+                        message: match &result {
+                            Ok(message) => message.clone(),
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: result.is_ok(),
+                        reload_files: false,
+                        clear_commit_message: false,
+                    }
+                });
+            }
             Command::RenameBranch { from, to } => {
                 let Some(project) = model.active_project() else {
                     return;
                 };
-                let root = project.root.clone();
+                let root = project.active_root().to_path_buf();
                 let zh = model.settings.language.is_zh();
                 let key = format!("rename-branch:{}:{from}", root.display());
                 let job_root = root.clone();
@@ -1088,7 +1230,7 @@ impl JobQueue {
                 let Some(project) = model.active_project() else {
                     return;
                 };
-                let root = project.root.clone();
+                let root = project.active_root().to_path_buf();
                 let zh = model.settings.language.is_zh();
                 let key = format!("create-tag:{}:{name}:{commit}", root.display());
                 let job_root = root.clone();
@@ -1122,7 +1264,7 @@ impl JobQueue {
                 let Some(project) = model.active_project() else {
                     return;
                 };
-                let root = project.root.clone();
+                let root = project.active_root().to_path_buf();
                 let zh = model.settings.language.is_zh();
                 let key = format!("delete-tag:{}:{name}", root.display());
                 let job_root = root.clone();
@@ -1153,17 +1295,35 @@ impl JobQueue {
                 });
             }
             Command::FetchAll => {
-                let zh = model.settings.language.is_zh();
-                self.spawn("fetch-all", "fetch-all".to_string(), move || {
-                    JobResult::OpDone {
-                        root: PathBuf::new(),
-                        message: if zh {
-                            "fetch 也将在 M4 连接远程后生效".to_string()
+                let Some(project) = model.active_project() else {
+                    model.toast(
+                        if model.settings.language.is_zh() {
+                            "没有活动项目"
                         } else {
-                            "fetch will connect to remotes in M4".to_string()
+                            "No active project"
                         },
-                        ok: true,
-                        refresh: false,
+                        ToastKind::Warning,
+                    );
+                    return;
+                };
+                let root = project.active_root().to_path_buf();
+                let zh = model.settings.language.is_zh();
+                self.spawn("fetch-all", format!("fetch-all:{root:?}"), move || {
+                    let result = lazecode_git::fetch_all(&root);
+                    JobResult::OpDone {
+                        root: root.clone(),
+                        message: match &result {
+                            Ok(_) => {
+                                if zh {
+                                    "已获取全部远程更新".to_string()
+                                } else {
+                                    "Fetched all remotes".to_string()
+                                }
+                            }
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: result.is_ok(),
                         reload_files: false,
                         clear_commit_message: false,
                     }
@@ -1174,14 +1334,28 @@ impl JobQueue {
                 branch,
                 set_upstream,
                 force,
+                push_tags,
             } => {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("push", format!("push:{root:?}:{branch}"), move || {
-                    let result = lazecode_git::push(&root, &remote, &branch, set_upstream, force);
+                    let branch_result =
+                        lazecode_git::push(&root, &remote, &branch, set_upstream, force);
+                    let tags_result = if branch_result.is_ok() && push_tags {
+                        Some(lazecode_git::push_tags(&root, &remote))
+                    } else {
+                        None
+                    };
+                    let result = match (branch_result, tags_result) {
+                        (Ok(_text), Some(Err(err))) => {
+                            Err(anyhow::anyhow!("branch pushed, but tags failed: {err}"))
+                        }
+                        (Ok(text), _) => Ok(text),
+                        (Err(err), _) => Err(err),
+                    };
                     match result {
                         Ok(text) => JobResult::OpDone {
                             root: root.clone(),
@@ -1213,11 +1387,35 @@ impl JobQueue {
                     }
                 });
             }
+            Command::PushTag { remote, tag } => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.active_root().to_path_buf())
+                    .unwrap_or_default();
+                self.spawn(
+                    "push-tag",
+                    format!("push-tag:{root:?}:{remote}:{tag}"),
+                    move || {
+                        let result = lazecode_git::push_tag(&root, &remote, &tag);
+                        JobResult::OpDone {
+                            root: root.clone(),
+                            message: match &result {
+                                Ok(message) => message.clone(),
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: result.is_ok(),
+                            reload_files: false,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
             Command::Pull { mode } => {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("pull", format!("pull:{root:?}:{mode:?}"), move || {
                     let result = lazecode_git::pull(&root, mode);
@@ -1251,7 +1449,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn(
                     "remote-add",
@@ -1287,7 +1485,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn(
                     "remote-remove",
@@ -1322,7 +1520,7 @@ impl JobQueue {
             Command::RemoteRename { from, to } => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn(
                     "remote-rename",
@@ -1347,7 +1545,7 @@ impl JobQueue {
             Command::RemoteSetUrl { name, url } => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn(
                     "remote-url",
@@ -1369,10 +1567,40 @@ impl JobQueue {
                     },
                 );
             }
+            Command::RemoteEdit { from, name, url } => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.active_root().to_path_buf())
+                    .unwrap_or_default();
+                self.spawn(
+                    "remote-edit",
+                    format!("remote-edit:{root:?}:{from}:{name}"),
+                    move || {
+                        let result = (|| -> anyhow::Result<()> {
+                            if from != name {
+                                lazecode_git::remote_rename(&root, &from, &name)?;
+                            }
+                            lazecode_git::remote_set_url(&root, &name, &url)?;
+                            Ok(())
+                        })();
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(()) => format!("Updated remote {name}"),
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: result.is_ok(),
+                            reload_files: false,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
             Command::Merge { ref_name } => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("merge", format!("merge:{root:?}:{ref_name}"), move || {
                     let result = lazecode_git::merge(&root, &ref_name);
@@ -1392,7 +1620,7 @@ impl JobQueue {
             Command::MergeContinue => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("merge-c", format!("mc:{root:?}"), move || {
                     let result = lazecode_git::merge_continue(&root);
@@ -1412,7 +1640,7 @@ impl JobQueue {
             Command::MergeAbort => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("merge-a", format!("ma:{root:?}"), move || {
                     let result = lazecode_git::merge_abort(&root);
@@ -1432,7 +1660,7 @@ impl JobQueue {
             Command::Rebase { onto } => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("rebase", format!("rb:{root:?}:{onto}"), move || {
                     let result = lazecode_git::rebase(&root, &onto);
@@ -1452,7 +1680,7 @@ impl JobQueue {
             Command::InteractiveRebase { onto, steps } => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn(
                     "rebase-i",
@@ -1476,7 +1704,7 @@ impl JobQueue {
             Command::RebaseContinue => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("rebase-c", format!("rc:{root:?}"), move || {
                     let result = lazecode_git::rebase_continue(&root);
@@ -1496,7 +1724,7 @@ impl JobQueue {
             Command::RebaseAbort => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("rebase-a", format!("ra:{root:?}"), move || {
                     let result = lazecode_git::rebase_abort(&root);
@@ -1516,7 +1744,7 @@ impl JobQueue {
             Command::RebaseSkip => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("rebase-s", format!("rs:{root:?}"), move || {
                     let result = lazecode_git::rebase_skip(&root);
@@ -1537,7 +1765,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("cherry-pick", format!("cp:{root:?}:{hash}"), move || {
                     let result = lazecode_git::cherry_pick(&root, &hash);
@@ -1562,7 +1790,7 @@ impl JobQueue {
             Command::ContinueCherryPick => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("cp-continue", format!("cpc:{root:?}"), move || {
                     let result = lazecode_git::history::cherry_pick_continue(&root);
@@ -1582,7 +1810,7 @@ impl JobQueue {
             Command::AbortCherryPick => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("cp-abort", format!("cpa:{root:?}"), move || {
                     let result = lazecode_git::history::cherry_pick_abort(&root);
@@ -1603,7 +1831,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("revert", format!("rv:{root:?}:{hash}"), move || {
                     let result = lazecode_git::revert(&root, &hash);
@@ -1630,7 +1858,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("drop", format!("drop:{root:?}:{hash}"), move || {
                     let result = lazecode_git::drop_commit(&root, &hash, force);
@@ -1657,7 +1885,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn(
                     "reset",
@@ -1688,7 +1916,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let hashes = hashes.clone();
                 let message = message.clone();
@@ -1721,7 +1949,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let paths = paths.clone();
                 self.spawn("vcs-add", format!("vcsa:{root:?}:{paths:?}"), move || {
@@ -1767,7 +1995,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let paths = paths.clone();
                 self.spawn("discard", format!("disc:{root:?}:{paths:?}"), move || {
@@ -1810,14 +2038,14 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let revision = revision.clone();
                 self.spawn(
                     "checkout_rev",
                     format!("corev:{root:?}:{revision}"),
                     move || {
-                        let result = lazecode_git::checkout_revision(&root, &revision);
+                        let result = lazecode_git::checkout_ref(&root, &revision);
                         JobResult::OpDone {
                             root,
                             message: match &result {
@@ -1842,7 +2070,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("init", format!("init:{root:?}"), move || {
                     let result = lazecode_git::git_init(&root);
@@ -1869,7 +2097,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("undo_head", format!("undo:{root:?}"), move || {
                     let result = lazecode_git::undo_commit_head(&root);
@@ -1896,7 +2124,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let message = message.clone();
                 self.spawn("amend_msg", format!("amend_msg:{root:?}"), move || {
@@ -1954,8 +2182,7 @@ impl JobQueue {
                 let Some(index) = index else {
                     return;
                 };
-                let settings = model.settings.clone();
-                match model.projects[index].open_file(path.clone(), &settings) {
+                match model.open_file_in(index, path.clone()) {
                     Ok(tab_id) => {
                         model.active_project = Some(index);
                         if let Some(tab) = model.projects[index].tab_mut_by_id(tab_id) {
@@ -2053,7 +2280,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let message = message.clone();
                 self.spawn("stash-push", format!("stash:{root:?}"), move || {
@@ -2085,7 +2312,7 @@ impl JobQueue {
             Command::StashApply(stash) => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let stash = stash.clone();
                 self.spawn(
@@ -2110,7 +2337,7 @@ impl JobQueue {
             Command::StashDrop(stash) => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let stash = stash.clone();
                 self.spawn(
@@ -2136,7 +2363,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let name = name.clone();
                 self.spawn("shelf-save", format!("shelf:{root:?}:{name}"), move || {
@@ -2166,7 +2393,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let name = name.clone();
                 self.spawn("shelf-delete", format!("shelf-del:{root:?}:{name}"), move || {
@@ -2194,7 +2421,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let (from, to) = (from.clone(), to.clone());
                 self.spawn(
@@ -2226,7 +2453,7 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let name = name.clone();
                 self.spawn(
@@ -2257,7 +2484,7 @@ impl JobQueue {
             Command::ShelfPurgeDeleted(name) => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let name = name.clone();
                 self.spawn(
@@ -2287,7 +2514,7 @@ impl JobQueue {
             } => {
                 let root = model
                     .active_project()
-                    .map(|project| project.root.clone())
+                    .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let name = name.clone();
                 let d_after = delete_after;
@@ -2382,7 +2609,7 @@ impl JobQueue {
                     root_expanded: true,
                     ..Default::default()
                 });
-                let root = project.root.clone();
+                let root = project.active_root().to_path_buf();
                 model.ui.sidebar_view = lazecode_core::model::SidebarView::Compare;
                 model.ui.sidebar_visible = true;
                 self.spawn(
@@ -2408,7 +2635,7 @@ impl JobQueue {
                 session.selected = None;
                 session.loading = true;
                 let (from, to) = (session.from.clone(), session.to.clone());
-                let root = project.root.clone();
+                let root = project.active_root().to_path_buf();
                 // 已打开的 diff 单例标签同步换向并重载。
                 let open_diff = project.tabs.iter_mut().find_map(|tab| match &mut tab.kind {
                     TabKind::Diff(diff) => match &diff.source {
@@ -2456,7 +2683,7 @@ impl JobQueue {
                     project.log_reached_end = false;
                 }
                 if let Some(project) = model.active_project() {
-                    let root = project.root.clone();
+                    let root = project.active_root().to_path_buf();
                     let query = project.log_query.clone();
                     self.refresh_log(root.clone(), query, 0);
                     self.refresh_branches(root);
@@ -2469,7 +2696,7 @@ impl JobQueue {
                 if project.log_reached_end {
                     return;
                 }
-                let root = project.root.clone();
+                let root = project.active_root().to_path_buf();
                 let query = project.log_query.clone();
                 let offset = project.log.len();
                 if let Some(project) = model.active_project_mut() {
@@ -2485,7 +2712,7 @@ impl JobQueue {
                         .map(|details| details.info.id.as_str())
                         != Some(id.as_str())
                     {
-                        let root = project.root.clone();
+                        let root = project.active_root().to_path_buf();
                         project.commit_details_attempted = None;
                         self.commit_details(root, id);
                     }
@@ -2500,7 +2727,7 @@ impl JobQueue {
                     project.change_anchor = Some(path.clone());
                     let source = DiffSource::Worktree { path };
                     project.open_diff_source(source.clone());
-                    let root = project.root.clone();
+                    let root = project.active_root().to_path_buf();
                     self.diff_source(root, source);
                 }
             }
@@ -2508,7 +2735,7 @@ impl JobQueue {
                 if let Some(project) = model.active_project_mut() {
                     let source = DiffSource::Commit { commit, path };
                     project.open_diff_source(source.clone());
-                    let root = project.root.clone();
+                    let root = project.active_root().to_path_buf();
                     self.diff_source(root, source);
                 }
             }
@@ -2516,7 +2743,7 @@ impl JobQueue {
                 if let Some(project) = model.active_project_mut() {
                     let source = DiffSource::CompareWithLocal { commit, path };
                     project.open_diff_source(source.clone());
-                    let root = project.root.clone();
+                    let root = project.active_root().to_path_buf();
                     self.diff_source(root, source);
                 }
             }
@@ -2533,7 +2760,7 @@ impl JobQueue {
                     }
                     let source = DiffSource::CompareCommits { from, to, path };
                     project.open_diff_source(source.clone());
-                    let root = project.root.clone();
+                    let root = project.active_root().to_path_buf();
                     self.diff_source(root, source);
                 }
             }
@@ -2541,7 +2768,7 @@ impl JobQueue {
                 if let Some(project) = model.active_project_mut() {
                     let source = DiffSource::Files { old_path, new_path };
                     project.open_diff_source(source.clone());
-                    let root = project.root.clone();
+                    let root = project.active_root().to_path_buf();
                     self.diff_source(root, source);
                 }
             }
@@ -2587,7 +2814,7 @@ impl JobQueue {
                 options,
             } => {
                 if let Some(project) = model.active_project() {
-                    let root = project.root.clone();
+                    let root = project.active_root().to_path_buf();
                     let key = format!("search:{}:{request_id}", root.display());
                     let job_root = root.clone();
                     let job_query = query.clone();
@@ -2611,7 +2838,7 @@ impl JobQueue {
             } => {
                 let zh = model.settings.language.is_zh();
                 if let Some(project) = model.active_project() {
-                    let root = project.root.clone();
+                    let root = project.active_root().to_path_buf();
                     let key = format!("replace-in-files:{}", root.display());
                     self.spawn("replace-in-files", key, move || {
                         let result = lazecode_fs::replace_in_files(
@@ -2647,7 +2874,7 @@ impl JobQueue {
                 let Some(project) = model.active_project_mut() else {
                     return;
                 };
-                let root = project.root.clone();
+                let root = project.active_root().to_path_buf();
                 let Some(tab) = project.tab_mut_by_id(id) else {
                     return;
                 };
@@ -2723,7 +2950,13 @@ impl JobQueue {
             Command::NewTerminal => {
                 let settings = model.settings.clone();
                 let notifier = model.notifier.clone();
-                if let Some(project) = model.active_project_mut() {
+                // With nothing open the console belongs to the hidden virtual
+                // Single files checkout; it must not register HOME as a
+                // project or change the titlebar's project card.
+                let index = model
+                    .active_project
+                    .unwrap_or_else(|| model.ensure_single_files());
+                if let Some(project) = model.projects.get_mut(index) {
                     match project.open_terminal(
                         None,
                         None,
@@ -2738,57 +2971,29 @@ impl JobQueue {
                             model.toast(err, ToastKind::Error);
                         }
                     }
-                    model.ui.terminal_visible = true;
-                    if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
-                        model.ui.panel_visible = false;
-                    }
-                    model.ui.panel_tab = lazecode_core::PanelTab::Console;
-                } else {
-                    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-                    if let Ok(index) = model.open_project(home) {
-                        model.active_project = Some(index);
-                        if let Some(project) = model.active_project_mut() {
-                            if let Ok(id) = project.open_terminal(
-                                None,
-                                None,
-                                lazecode_terminal::SessionKind::Shell,
-                                &settings,
-                                notifier,
-                            ) {
-                                runtime.set_terminal_focus(id);
-                            }
-                        }
+                }
+                model.active_project = Some(index);
+                model.ui.terminal_visible = true;
+                if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
+                    model.ui.panel_visible = false;
+                }
+                model.ui.panel_tab = lazecode_core::PanelTab::Console;
+            }
+            Command::NewTerminalCommand { title, command } => {
+                let settings = model.settings.clone();
+                let notifier = model.notifier.clone();
+                match model.open_agent_console(title, command, &settings, notifier) {
+                    Ok(id) => {
+                        runtime.set_terminal_focus(id);
                         model.ui.terminal_visible = true;
                         if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
                             model.ui.panel_visible = false;
                         }
                         model.ui.panel_tab = lazecode_core::PanelTab::Console;
                     }
-                }
-            }
-            Command::NewTerminalCommand { title, command } => {
-                let settings = model.settings.clone();
-                let notifier = model.notifier.clone();
-                if let Some(project) = model.active_project_mut() {
-                    match project.open_terminal(
-                        Some(command),
-                        Some(title),
-                        lazecode_terminal::SessionKind::Agent,
-                        &settings,
-                        notifier,
-                    ) {
-                        Ok(id) => {
-                            runtime.set_terminal_focus(id);
-                        }
-                        Err(err) => {
-                            model.toast(err, ToastKind::Error);
-                        }
+                    Err(err) => {
+                        model.toast(err, ToastKind::Warning);
                     }
-                    model.ui.terminal_visible = true;
-                    if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
-                        model.ui.panel_visible = false;
-                    }
-                    model.ui.panel_tab = lazecode_core::PanelTab::Console;
                 }
             }
             Command::RestartTerminal(id) => {
@@ -2882,16 +3087,25 @@ impl JobQueue {
                 });
             }
             Command::SwitchWorktree(name) => {
+                let mut switched = None;
                 if let Some(project) = model.active_project_mut() {
                     match project.ensure_worktree(&name) {
-                        Ok(Some(())) => {
-                            // New worktree attached; snapshot comes via the job below.
+                        Ok(_) => {
+                            switched = Some((
+                                project.active_root().to_path_buf(),
+                                project.log_query.clone(),
+                                project.root.clone(),
+                            ));
                         }
-                        Ok(None) => {}
                         Err(err) => {
                             model.toast(err, ToastKind::Error);
                         }
                     }
+                }
+                if let Some((active_root, query, project_root)) = switched {
+                    self.refresh_git(active_root.clone(), None);
+                    self.refresh_log(active_root, query, 0);
+                    self.refresh_branches(project_root);
                 }
             }
             Command::RemoveWorktree { name, force } => {
@@ -2922,6 +3136,22 @@ impl JobQueue {
                         ToastKind::Error,
                     );
                     return;
+                }
+                // A stale dialog can miss changes made since it was opened.
+                // Recheck right before removal and turn the failure into an
+                // explicit force-confirmation prompt instead of a toast.
+                if !force {
+                    if let Ok(snapshot) = lazecode_git::snapshot(&worktree_path) {
+                        if !snapshot.changes.is_empty() {
+                            runtime.dialog = lazecode_ui::runtime::DialogState::RemoveWorktree {
+                                name: name.clone(),
+                                worktree_path,
+                                dirty: true,
+                                changes: snapshot.changes.len(),
+                            };
+                            return;
+                        }
+                    }
                 }
                 // Drop consoles of the worktree being removed.
                 let terminal_ids: Vec<u64> = project
@@ -2990,11 +3220,7 @@ impl JobQueue {
                 ),
             },
             JobResult::CmpSessionLoaded { root, result } => {
-                if let Some(project) = model
-                    .projects
-                    .iter_mut()
-                    .find(|project| project.root == root)
-                {
+                if let Some(project) = model.project_mut_for_git_root(&root) {
                     if let Some(session) = project.compare_session.as_mut() {
                         match result {
                             Ok(files) => {
@@ -3012,27 +3238,8 @@ impl JobQueue {
                 }
             }
             JobResult::GitRefreshed { root, result } => {
-                if let Some(project) = model
-                    .projects
-                    .iter_mut()
-                    .find(|project| project.root == root)
-                {
-                    match result {
-                        Ok(snapshot) => {
-                            project.git = Some(snapshot);
-                            project.git_error = None;
-                            project.prune_unchecked_public();
-                            // Hide "checked" state for files that vanished.
-                            let existing: HashSet<String> = project
-                                .changes()
-                                .iter()
-                                .map(|change| change.path.clone())
-                                .collect();
-                            project.checked_paths.retain(|path| existing.contains(path));
-                        }
-                        Err(err) => project.git_error = Some(err),
-                    }
-                    project.git_loading = false;
+                if let Some(project) = model.project_mut_for_git_root(&root) {
+                    project.apply_git_snapshot(&root, result);
                 }
                 if self.pending_git.remove(&root) {
                     self.refresh_git(root, None);
@@ -3045,11 +3252,7 @@ impl JobQueue {
                 offset,
                 result,
             } => {
-                let Some(project) = model
-                    .projects
-                    .iter_mut()
-                    .find(|project| project.root == root)
-                else {
+                let Some(project) = model.project_mut_for_git_root(&root) else {
                     return;
                 };
                 // Stale completion (filters changed while the page was in
@@ -3108,21 +3311,13 @@ impl JobQueue {
                 project.log_loading = false;
             }
             JobResult::BranchesLoaded { root, result, tags } => {
-                if let Some(project) = model
-                    .projects
-                    .iter_mut()
-                    .find(|project| project.root == root)
-                {
+                if let Some(project) = model.project_mut_for_git_root(&root) {
                     project.branches = result;
                     project.tags = tags;
                 }
             }
             JobResult::CommitDetails { root, id, result } => {
-                if let Some(project) = model
-                    .projects
-                    .iter_mut()
-                    .find(|project| project.root == root)
-                {
+                if let Some(project) = model.project_mut_for_git_root(&root) {
                     let selected = project.selected_commit.as_deref() == Some(id.as_str());
                     let mut error = None;
                     match result {
@@ -3148,11 +3343,7 @@ impl JobQueue {
                 source,
                 result,
             } => {
-                if let Some(project) = model
-                    .projects
-                    .iter_mut()
-                    .find(|project| project.root == root)
-                {
+                if let Some(project) = model.project_mut_for_git_root(&root) {
                     project.set_diff_for_source(&source, result);
                 }
             }
@@ -3166,17 +3357,19 @@ impl JobQueue {
                     && runtime.search.query == query
                     && model
                         .active_project()
-                        .is_some_and(|project| project.root == root)
+                        .is_some_and(|project| project.active_root() == root)
                 {
                     match result {
                         Ok(hits) => {
                             runtime.search.results = hits;
                             runtime.search.searched = true;
+                            runtime.search.searching = false;
                             runtime.search.selected = 0;
                         }
                         Err(err) => {
                             runtime.search.results.clear();
                             runtime.search.searched = true;
+                            runtime.search.searching = false;
                             model.toast(err, ToastKind::Error);
                         }
                     }
@@ -3274,11 +3467,7 @@ impl JobQueue {
             } => {
                 model.toast(message, ToastKind::Success);
                 if !root.as_os_str().is_empty() {
-                    if let Some(project) = model
-                        .projects
-                        .iter_mut()
-                        .find(|project| project.root == root)
-                    {
+                    if let Some(project) = model.project_mut_for_git_root(&root) {
                         // 关闭已回滚文件（尤其是新增文件，磁盘上已删除）
                         // 的标签页：无论是否 dirty——文件已不存在，保留
                         // 标签只会让用户对着幽灵缓冲编辑。
@@ -3297,15 +3486,31 @@ impl JobQueue {
                             project.close_tab(tab_id);
                         }
                     }
+                    model.settle_single_files_workspace();
                     let log_query = model
-                        .projects
-                        .iter()
-                        .find(|project| project.root == root)
+                        .project_for_git_root(&root)
                         .map(|project| project.log_query.clone())
                         .unwrap_or_default();
                     self.refresh_git(root.clone(), None);
                     self.refresh_log(root.clone(), log_query, 0);
                     self.refresh_branches(root.clone());
+                }
+            }
+            JobResult::BranchDeleteNeedsForce { root, name } => {
+                if model.index_of_git_root(&root).is_some() {
+                    runtime.dialog = lazecode_ui::runtime::DialogState::DeleteBranch {
+                        name,
+                        force: true,
+                        remote: false,
+                        error: Some(
+                            if model.settings.language.is_zh() {
+                                "该分支尚未合并，确认后会强制删除。"
+                            } else {
+                                "This branch is not fully merged; confirm to force-delete it."
+                            }
+                            .to_string(),
+                        ),
+                    };
                 }
             }
             JobResult::OpDone {
@@ -3325,54 +3530,45 @@ impl JobQueue {
                     },
                 );
                 if refresh && !root.as_os_str().is_empty() {
-                    let log_query = model
-                        .projects
-                        .iter()
-                        .find(|project| project.root == root)
-                        .map(|project| project.log_query.clone())
-                        .expect("project exists");
+                    let Some(index) = model.index_of_git_root(&root) else {
+                        return;
+                    };
+                    let log_query = model.projects[index].log_query.clone();
                     self.refresh_git(root.clone(), None);
                     self.refresh_log(root.clone(), log_query, 0);
                     self.refresh_branches(root.clone());
-                    // Sequencer/conflict state follows every git op.
-                    if let Some(project) = model
-                        .projects
-                        .iter_mut()
-                        .find(|project| project.root == root)
-                    {
+                    let project = &mut model.projects[index];
+                    // Sequencer/conflict state follows every git op, but only
+                    // the checkout that actually ran the operation owns it.
+                    let active_checkout = project.active_root() == root;
+                    if active_checkout {
                         project.refresh_conflicts();
                     }
-                    if let Some(project) = model
-                        .projects
-                        .iter_mut()
-                        .find(|project| project.root == root)
-                    {
-                        project.commit_details = None;
-                        if clear_commit_message {
-                            if ok {
-                                // 提交成功：入历史（去重、上限 10 条，对齐
-                                // 稳定版 useCommitMessageHistory）。
-                                let message = project.commit_message.trim().to_string();
-                                model.settings.remember_commit_message(&message);
-                                if project.open_push_after_commit {
-                                    project.open_push_after_commit = false;
-                                    model.ui.open_push_dialog = true;
-                                }
-                            } else {
+                    project.commit_details = None;
+                    if clear_commit_message {
+                        if ok {
+                            // 提交成功：入历史（去重、上限 10 条，对齐
+                            // 稳定版 useCommitMessageHistory）。
+                            let message = project.commit_message.trim().to_string();
+                            model.settings.remember_commit_message(&message);
+                            if project.open_push_after_commit {
                                 project.open_push_after_commit = false;
+                                model.ui.open_push_dialog = true;
                             }
-                            project.commit_message.clear();
+                        } else {
+                            project.open_push_after_commit = false;
                         }
-                        if reload_files {
-                            for tab in &mut project.tabs {
-                                if let TabKind::File(file) = &mut tab.kind {
-                                    if !file.doc.dirty {
-                                        if let Err(err) = file.doc.reload() {
-                                            log::warn!(
-                                                "cannot reload {} after checkout: {err}",
-                                                file.doc.path.display()
-                                            );
-                                        }
+                        project.commit_message.clear();
+                    }
+                    if reload_files {
+                        for tab in &mut project.tabs {
+                            if let TabKind::File(file) = &mut tab.kind {
+                                if !file.doc.dirty {
+                                    if let Err(err) = file.doc.reload() {
+                                        log::warn!(
+                                            "cannot reload {} after checkout: {err}",
+                                            file.doc.path.display()
+                                        );
                                     }
                                 }
                             }
@@ -3386,11 +3582,7 @@ impl JobQueue {
                 revision,
                 result,
             } => {
-                if let Some(project) = model
-                    .projects
-                    .iter_mut()
-                    .find(|project| project.root == root)
-                {
+                if let Some(project) = model.project_mut_for_git_root(&root) {
                     if let Some(tab) = project.tabs.iter_mut().find(
                         |tab| matches!(&tab.kind, TabKind::File(file) if file.doc.path == path),
                     ) {
@@ -3463,6 +3655,7 @@ impl JobQueue {
                 name,
                 result,
             } => {
+                let mut fallback = None;
                 if let Some(project) = model
                     .projects
                     .iter_mut()
@@ -3471,12 +3664,19 @@ impl JobQueue {
                     match result {
                         Ok(()) => {
                             project.detach_worktree(&name);
-                            model.ui.sidebar_view = lazecode_core::SidebarView::Consoles;
+                            fallback = Some((
+                                project.active_root().to_path_buf(),
+                                project.log_query.clone(),
+                            ));
                         }
                         Err(err) => {
                             model.toast(err, ToastKind::Error);
                         }
                     }
+                }
+                if let Some((root, query)) = fallback {
+                    self.refresh_git(root.clone(), None);
+                    self.refresh_log(root, query, 0);
                 }
             }
         }
@@ -3540,6 +3740,7 @@ mod tests {
             ui: UiState::default(),
             toasts: Vec::new(),
             recent: Vec::new(),
+            recent_files: Vec::new(),
             commands: Vec::new(),
             notifier: None,
             lsp: lazecode_core::LspManager::new(true, None),
@@ -3625,5 +3826,477 @@ mod tests {
         assert!(!queue.in_flight.contains(&key));
         assert!(!model.projects[0].log.is_empty());
         assert!(!model.projects[0].log_paging);
+    }
+    fn temp_repo(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "lazecode-app-{name}-{}-{stamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let remote = root.with_extension("remote.git");
+        std::process::Command::new("git")
+            .args(["init", "-q", "--bare", remote.to_str().unwrap()])
+            .status()
+            .unwrap();
+        (root, remote)
+    }
+
+    fn git_ok(root: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn commit(repo: &std::path::Path, file: &str, text: &str, message: &str) {
+        std::fs::write(repo.join(file), text).unwrap();
+        git_ok(repo, &["add", "."]);
+        git_ok(repo, &["commit", "-q", "-m", message]);
+    }
+
+    fn open_command_model(root: &std::path::Path) -> (AppModel, UiRuntime, JobQueue) {
+        let settings = Settings::default();
+        let notifier: Arc<dyn Notifier> = Arc::new(NoopNotifier);
+        let mut model = empty_model();
+        model.settings = settings.clone();
+        let project = ProjectState::open(root.to_path_buf(), &settings, Some(notifier.clone()))
+            .expect("open project");
+        model.projects.push(project);
+        model.active_project = Some(0);
+        let queue = JobQueue::new(notifier);
+        (model, UiRuntime::default(), queue)
+    }
+
+    fn run_command(
+        queue: &mut JobQueue,
+        model: &mut AppModel,
+        runtime: &mut UiRuntime,
+        command: Command,
+    ) {
+        queue.execute(model, runtime, command);
+        while !queue.in_flight.is_empty() {
+            let completion = queue
+                .rx
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .expect("job completion");
+            queue.apply(model, runtime, completion);
+        }
+    }
+
+    #[test]
+    fn fetch_all_command_updates_remote_tracking() {
+        let (root, remote) = temp_repo("fetch");
+        git_ok(&root, &["init", "-q", "-b", "main"]);
+        git_ok(&root, &["config", "user.name", "T"]);
+        git_ok(&root, &["config", "user.email", "t@e"]);
+        commit(&root, "a.txt", "one\n", "one");
+        git_ok(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git_ok(&root, &["push", "-q", "-u", "origin", "main"]);
+
+        let other = root.with_extension("other");
+        git_ok(
+            &root,
+            &[
+                "clone",
+                "-q",
+                remote.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ],
+        );
+        git_ok(&other, &["config", "user.name", "Other"]);
+        git_ok(&other, &["config", "user.email", "other@e"]);
+        commit(&other, "b.txt", "two\n", "remote two");
+        let remote_head = git_ok(&other, &["rev-parse", "HEAD"]);
+        git_ok(&other, &["push", "-q", "origin", "main"]);
+
+        let (mut model, mut runtime, mut queue) = open_command_model(&root);
+        run_command(&mut queue, &mut model, &mut runtime, Command::FetchAll);
+        assert_eq!(
+            git_ok(&root, &["rev-parse", "refs/remotes/origin/main"]),
+            remote_head
+        );
+        let toast = model
+            .toasts
+            .last()
+            .map(|toast| toast.message.clone())
+            .unwrap_or_default();
+        assert!(!toast.contains("M4"), "{toast}");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&remote);
+        let _ = std::fs::remove_dir_all(&other);
+    }
+
+    #[test]
+    fn remove_dirty_worktree_prompts_force_then_removes() {
+        let (root, remote) = temp_repo("worktree-dirty");
+        git_ok(&root, &["init", "-q", "-b", "main"]);
+        git_ok(&root, &["config", "user.name", "T"]);
+        git_ok(&root, &["config", "user.email", "t@e"]);
+        commit(&root, "a.txt", "one\n", "one");
+        git_ok(&root, &["branch", "side"]);
+        let worktree_path = root.with_extension("wt-dirty");
+        lazecode_git::add_worktree(&root, &worktree_path, "side").unwrap();
+        std::fs::write(worktree_path.join("a.txt"), "uncommitted\n").unwrap();
+
+        let (mut model, mut runtime, mut queue) = open_command_model(&root);
+        let worktree_name = lazecode_git::list_worktrees(&root)
+            .unwrap()
+            .into_iter()
+            .find(|wt| wt.name != "main")
+            .map(|wt| wt.name)
+            .unwrap();
+        model.projects[0].ensure_worktree(&worktree_name).unwrap();
+        assert_eq!(model.projects[0].worktrees.len(), 2);
+
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::RemoveWorktree {
+                name: worktree_name.clone(),
+                force: false,
+            },
+        );
+        assert!(worktree_path.exists());
+        assert!(matches!(
+            runtime.dialog,
+            lazecode_ui::runtime::DialogState::RemoveWorktree {
+                dirty: true,
+                changes,
+                ..
+            } if changes > 0
+        ));
+
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::RemoveWorktree {
+                name: worktree_name,
+                force: true,
+            },
+        );
+        assert!(!worktree_path.exists());
+        assert_eq!(model.projects[0].worktrees.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    #[test]
+    fn create_worktrees_with_distinct_branches_and_reject_reuse() {
+        let (root, remote) = temp_repo("worktree-create");
+        git_ok(&root, &["init", "-q", "-b", "main"]);
+        git_ok(&root, &["config", "user.name", "T"]);
+        git_ok(&root, &["config", "user.email", "t@e"]);
+        commit(&root, "a.txt", "one\n", "one");
+
+        let (mut model, mut runtime, mut queue) = open_command_model(&root);
+        for name in ["wt-a", "wt-b"] {
+            run_command(
+                &mut queue,
+                &mut model,
+                &mut runtime,
+                Command::CreateWorktree {
+                    name: name.into(),
+                    branch: format!("feature-{name}"),
+                    location: root.join(".worktree").join(name),
+                },
+            );
+            assert!(
+                root.join(".worktree").join(name).is_dir(),
+                "{name} checkout missing"
+            );
+        }
+        assert_eq!(model.projects[0].worktrees.len(), 3);
+        assert_eq!(model.projects[0].branch(), "feature-wt-b");
+        assert_eq!(
+            model.projects[0].active_root(),
+            root.join(".worktree")
+                .join("wt-b")
+                .canonicalize()
+                .unwrap()
+                .as_path()
+        );
+
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::CreateWorktree {
+                name: "wt-reuse".into(),
+                branch: "feature-wt-a".into(),
+                location: root.join(".worktree").join("wt-reuse"),
+            },
+        );
+        assert_eq!(model.projects[0].worktrees.len(), 3);
+        assert_eq!(lazecode_git::list_worktrees(&root).unwrap().len(), 3);
+        assert!(!root.join(".worktree").join("wt-reuse").exists());
+        assert!(
+            model
+                .toasts
+                .last()
+                .is_some_and(|toast| matches!(toast.kind, ToastKind::Error)),
+            "reusing a checked-out branch must report an error"
+        );
+
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::RemoveWorktree {
+                name: "main".into(),
+                force: false,
+            },
+        );
+        assert_eq!(model.projects[0].worktrees.len(), 3);
+        assert!(root.join("a.txt").exists());
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    #[test]
+    fn switch_worktree_updates_branch_and_changes() {
+        let (root, remote) = temp_repo("worktree-switch");
+        git_ok(&root, &["init", "-q", "-b", "main"]);
+        git_ok(&root, &["config", "user.name", "T"]);
+        git_ok(&root, &["config", "user.email", "t@e"]);
+        commit(&root, "a.txt", "one\n", "one");
+        git_ok(&root, &["branch", "side"]);
+        let linked = root.with_extension("side-worktree");
+        lazecode_git::add_worktree(&root, &linked, "side").unwrap();
+        std::fs::write(linked.join("side-only.txt"), "side change\n").unwrap();
+        let side_name = lazecode_git::list_worktrees(&root)
+            .unwrap()
+            .into_iter()
+            .find(|worktree| worktree.name != "main")
+            .map(|worktree| worktree.name)
+            .unwrap();
+
+        let (mut model, mut runtime, mut queue) = open_command_model(&root);
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::SwitchWorktree(side_name),
+        );
+        assert_eq!(model.projects[0].branch(), "side");
+        assert_eq!(
+            model.projects[0].active_root(),
+            linked.canonicalize().unwrap().as_path()
+        );
+        assert!(model.projects[0]
+            .changes()
+            .iter()
+            .any(|change| change.path == "side-only.txt"));
+
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::SwitchWorktree("main".into()),
+        );
+        assert_eq!(model.projects[0].branch(), "main");
+        assert!(!model.projects[0]
+            .changes()
+            .iter()
+            .any(|change| change.path == "side-only.txt"));
+
+        let _ = std::fs::remove_dir_all(&linked);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    #[test]
+    fn delete_branch_command_requires_force_and_then_succeeds() {
+        let (root, remote) = temp_repo("delete");
+        git_ok(&root, &["init", "-q", "-b", "main"]);
+        git_ok(&root, &["config", "user.name", "T"]);
+        git_ok(&root, &["config", "user.email", "t@e"]);
+        commit(&root, "a.txt", "one\n", "one");
+        git_ok(&root, &["checkout", "-q", "-b", "side"]);
+        commit(&root, "side.txt", "side\n", "side");
+        git_ok(&root, &["checkout", "-q", "main"]);
+
+        let (mut model, mut runtime, mut queue) = open_command_model(&root);
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::DeleteBranch {
+                name: "side".into(),
+                force: false,
+            },
+        );
+        assert!(
+            git_ok(&root, &["show-ref", "--verify", "refs/heads/side"]).contains("refs/heads/side")
+        );
+        assert!(matches!(
+            runtime.dialog,
+            lazecode_ui::runtime::DialogState::DeleteBranch {
+                ref name,
+                force: true,
+                remote: false,
+                ..
+            } if name == "side"
+        ));
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::DeleteBranch {
+                name: "side".into(),
+                force: true,
+            },
+        );
+        let refs = git_ok(&root, &["for-each-ref", "refs/heads/"]);
+        assert!(!refs.contains("refs/heads/side"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+    #[test]
+    fn branch_tag_and_remote_commands_work_end_to_end() {
+        let (root, remote) = temp_repo("branches");
+        git_ok(&root, &["init", "-q", "-b", "main"]);
+        git_ok(&root, &["config", "user.name", "T"]);
+        git_ok(&root, &["config", "user.email", "t@e"]);
+        commit(&root, "a.txt", "one\n", "one");
+        let first = git_ok(&root, &["rev-parse", "HEAD"]);
+        git_ok(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git_ok(&root, &["push", "-q", "-u", "origin", "main"]);
+        commit(&root, "b.txt", "two\n", "two");
+        git_ok(&root, &["branch", "docs-only"]);
+        git_ok(&root, &["push", "-q", "origin", "docs-only"]);
+        git_ok(&root, &["branch", "-D", "docs-only"]);
+        git_ok(&root, &["tag", "v1", &first]);
+        git_ok(&root, &["fetch", "-q", "origin"]);
+
+        let (mut model, mut runtime, mut queue) = open_command_model(&root);
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::CheckoutBranch("origin/docs-only".into()),
+        );
+        assert_eq!(git_ok(&root, &["branch", "--show-current"]), "docs-only");
+        assert_eq!(
+            git_ok(&root, &["rev-parse", "docs-only@{upstream}"]),
+            git_ok(&root, &["rev-parse", "origin/docs-only"])
+        );
+
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::CheckoutBranch("main".into()),
+        );
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::CheckoutRevision("v1".into()),
+        );
+        assert_eq!(git_ok(&root, &["rev-parse", "HEAD"]), first);
+        assert!(git_ok(&root, &["branch", "--show-current"]).is_empty());
+
+        git_ok(&root, &["checkout", "-q", "main"]);
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::CreateBranch {
+                name: "from-first".into(),
+                start_point: Some(first.clone()),
+                checkout: true,
+            },
+        );
+        assert_eq!(git_ok(&root, &["branch", "--show-current"]), "from-first");
+        assert_eq!(git_ok(&root, &["rev-parse", "HEAD"]), first);
+
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::DeleteRemoteBranch("origin/docs-only".into()),
+        );
+        let heads = git_ok(&root, &["ls-remote", "--heads", "origin"]);
+        assert!(!heads.contains("docs-only"), "{heads}");
+
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::PushTag {
+                remote: "origin".into(),
+                tag: "v1".into(),
+            },
+        );
+        let tags = git_ok(&root, &["ls-remote", "--tags", "origin"]);
+        assert!(tags.contains("refs/tags/v1"), "{tags}");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+    #[test]
+    fn push_tags_and_remote_edit_commands_work() {
+        let (root, remote) = temp_repo("sync");
+        git_ok(&root, &["init", "-q", "-b", "main"]);
+        git_ok(&root, &["config", "user.name", "T"]);
+        git_ok(&root, &["config", "user.email", "t@e"]);
+        commit(&root, "a.txt", "one\n", "one");
+        git_ok(
+            &root,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git_ok(&root, &["tag", "v1"]);
+
+        let (mut model, mut runtime, mut queue) = open_command_model(&root);
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::Push {
+                remote: "origin".into(),
+                branch: "main".into(),
+                set_upstream: true,
+                force: false,
+                push_tags: true,
+            },
+        );
+        assert!(git_ok(&root, &["ls-remote", "--heads", "origin"]).contains("refs/heads/main"));
+        assert!(git_ok(&root, &["ls-remote", "--tags", "origin"]).contains("refs/tags/v1"));
+
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::RemoteEdit {
+                from: "origin".into(),
+                name: "upstream".into(),
+                url: remote.to_str().unwrap().to_string(),
+            },
+        );
+        assert_eq!(
+            git_ok(&root, &["remote", "get-url", "upstream"]),
+            remote.to_str().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&remote);
     }
 }

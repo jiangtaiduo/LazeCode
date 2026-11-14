@@ -286,7 +286,7 @@ pub fn draw_page(
     // root 必须参与：不同项目可能有同名分支，refs 相同不等于同一会话。----
     let session_root = model
         .active_project()
-        .map(|project| project.root.clone())
+        .map(|project| project.active_root().to_path_buf())
         .unwrap_or_default();
     {
         let state = &model.ui.compare_branches;

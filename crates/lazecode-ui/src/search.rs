@@ -8,6 +8,8 @@ use crate::widgets::secondary_button;
 
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme) {
     let p = theme.palette;
+    let now = ui.input(|input| input.time);
+    let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
     let screen = ui.max_rect();
     ui.painter()
         .rect_filled(screen, 0.0, Color32::from_black_alpha(120));
@@ -61,6 +63,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         field,
         TextEdit::singleline(&mut state.query)
             .frame(egui::Frame::NONE)
+            .align(egui::Align2::LEFT_CENTER)
             .hint_text(crate::tr!(
                 model,
                 "Search file contents across the project",
@@ -112,7 +115,6 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 "word" => state.whole_word = !state.whole_word,
                 _ => state.regex = !state.regex,
             }
-            run(model, state);
         }
     }
 
@@ -177,9 +179,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 ))
                 .font(FontId::monospace(10.5)),
         );
-        if mask_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-            run(model, state);
-        }
+        let _ = mask_resp;
 
         let rep_all_rect = Rect::from_min_size(
             Pos2::new(row2.right() - 98.0, row2.center().y - 11.0),
@@ -211,27 +211,71 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         }
     }
 
-    let run_search = response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-    if run_search {
+    // Stable Find in Files searches while you type (160ms debounce), rather
+    // than waiting for Enter. Invalidate old results as soon as the query or
+    // one of its flags changes so stale rows can never be clicked.
+    let project_root = model
+        .active_project()
+        .map(|project| project.active_root().display().to_string())
+        .unwrap_or_default();
+    let signature = format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        project_root,
+        state.query,
+        state.case_sensitive,
+        state.whole_word,
+        state.regex,
+        state.file_mask
+    );
+    if signature != state.signature {
+        state.signature = signature;
+        state.request_id = state.request_id.wrapping_add(1);
+        state.results.clear();
+        state.selected = 0;
+        state.searched = false;
+        state.searching = !state.query.trim().is_empty();
+        state.dirty_since = Some(now);
+    }
+    if state.query.trim().is_empty() {
+        state.results.clear();
+        state.searched = false;
+        state.searching = false;
+        state.dirty_since = None;
+    } else if enter_pressed
+        || state
+            .dirty_since
+            .is_some_and(|since| (now - since).max(0.0) >= 0.16)
+    {
         run(model, state);
+    } else if let Some(since) = state.dirty_since {
+        let wait_ms = ((0.16 - (now - since).max(0.0)) * 1000.0).max(16.0);
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(wait_ms as u64));
     }
     let result_area = Rect::from_min_max(
         Pos2::new(panel.left() + 10.0, input.bottom() + 8.0),
         Pos2::new(panel.right() - 10.0, panel.bottom() - 10.0),
     );
     if state.results.is_empty() {
+        let prompt_pos = Pos2::new(panel.center().x, panel.top() + 84.0);
+        let (message, position) = if state.searching {
+            (crate::tr!(model, "Searching…", "正在搜索…"), prompt_pos)
+        } else if state.searched {
+            (crate::tr!(model, "No matches", "没有匹配"), panel.center())
+        } else {
+            (
+                crate::tr!(
+                    model,
+                    "Type to search across the project",
+                    "输入内容以搜索项目"
+                ),
+                prompt_pos,
+            )
+        };
         ui.painter().text(
-            if state.searched {
-                panel.center()
-            } else {
-                Pos2::new(panel.center().x, panel.top() + 84.0)
-            },
+            position,
             Align2::CENTER_CENTER,
-            if state.searched {
-                crate::tr!(model, "No matches", "没有匹配")
-            } else {
-                crate::tr!(model, "Type a query and press Enter", "输入查询并按回车")
-            },
+            message,
             FontId::proportional(12.5),
             p.text3,
         );
@@ -303,10 +347,11 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     });
     if let Some(index) = activate {
         if let Some(hit) = results.get(index) {
-            let settings = model.settings.clone();
-            if let Some(project) = model.active_project_mut() {
-                let path = project.root.join(&hit.path);
-                if let Ok(_id) = project.open_file(path, &settings) {
+            if let Some(active) = model.active_project {
+                let path = model.projects[active].active_root().join(&hit.path);
+                if let Ok(id) = model.open_file_in(active, path) {
+                    let _ = id;
+                    let project = &mut model.projects[active];
                     if let Some(tab_id) = project.active_tab {
                         if let Some(tab) = project.tab_mut_by_id(tab_id) {
                             if let TabKind::File(file) = &mut tab.kind {
@@ -326,14 +371,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             rt.search.open = false;
         }
     }
-    let close = Rect::from_center_size(
-        Pos2::new(panel.right() - 24.0, panel.top() + 24.0),
-        Vec2::splat(18.0),
-    );
-    let close_response = ui.interact(close, ui.scope_id().with("search-close"), Sense::click());
-    paint_icon(ui.painter(), close.shrink(3.0), Icon::X, p.text3);
-    if close_response.clicked()
-        || ui.input(|input| input.key_pressed(egui::Key::Escape))
+    if ui.input(|input| input.key_pressed(egui::Key::Escape))
         || (rt.search.opened_frame != rt.frame_count
             && ui.input(|input| {
                 input.pointer.any_click()
@@ -355,6 +393,8 @@ fn run(model: &mut AppModel, state: &mut SearchState) {
     state.results.clear();
     state.selected = 0;
     state.searched = false;
+    state.searching = true;
+    state.dirty_since = None;
     let options = lazecode_fs::SearchOptions {
         case_sensitive: state.case_sensitive,
         whole_word: state.whole_word,

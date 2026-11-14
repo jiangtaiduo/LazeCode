@@ -61,6 +61,10 @@ pub struct TerminalSettings {
     pub font_family: String,
     pub font_size: f32,
     pub scrollback: usize,
+    /// Maximum number of live agent consoles across every project and
+    /// worktree. OMP sessions are large (hundreds of MB each); the cap keeps
+    /// a multi-worktree workspace from exhausting physical memory.
+    pub max_agent_consoles: usize,
     /// `None` means use `$SHELL` (or /bin/zsh).
     pub shell: Option<String>,
 }
@@ -71,7 +75,53 @@ impl Default for TerminalSettings {
             font_family: String::new(),
             font_size: 13.0,
             scrollback: 10_000,
+            max_agent_consoles: 20,
             shell: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AgentProfile {
+    pub name: String,
+    pub description: String,
+    /// Shell command executed in a new agent console. Empty opens the
+    /// user's login shell.
+    pub command: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentSettings {
+    pub options: Vec<AgentProfile>,
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self {
+            options: vec![
+                AgentProfile {
+                    name: "Claude Code".into(),
+                    description: "Anthropic's terminal agent".into(),
+                    command: "claude".into(),
+                },
+                AgentProfile {
+                    name: "OpenCode".into(),
+                    description: "Open-source terminal agent".into(),
+                    command: "opencode".into(),
+                },
+                AgentProfile {
+                    name: "omp".into(),
+                    description: "omp terminal coding agent".into(),
+                    command: "omp".into(),
+                },
+                AgentProfile {
+                    name: "Shell".into(),
+                    description: "Start a plain login shell".into(),
+                    command: String::new(),
+                },
+            ],
         }
     }
 }
@@ -89,9 +139,12 @@ pub struct Settings {
     pub lsp_enabled: bool,
     pub editor: EditorSettings,
     pub terminal: TerminalSettings,
+    pub agents: AgentSettings,
     pub sidebar_width: f32,
     /// Commit 抽屉宽度（稳定版 ide_commit_drawer_width，默认 330，240-640）。
     pub commit_drawer_width: f32,
+    /// Compare Versions 抽屉宽度（默认 320，240-640）。
+    pub compare_drawer_width: f32,
     pub panel_height: f32,
     /// 分支比较页上下两个 pane 的高度占比（left pane，20-80）。
     pub compare_split: f32,
@@ -121,8 +174,10 @@ impl Default for Settings {
             lsp_enabled: false,
             editor: EditorSettings::default(),
             terminal: TerminalSettings::default(),
+            agents: AgentSettings::default(),
             sidebar_width: 262.0,
             commit_drawer_width: 330.0,
+            compare_drawer_width: 320.0,
             panel_height: 248.0,
             compare_split: 40.0,
             compare_details_width: 36.0,
@@ -212,13 +267,25 @@ impl Settings {
         self.editor.tab_width = self.editor.tab_width.clamp(1, 8);
         self.terminal.font_size = self.terminal.font_size.clamp(9.0, 24.0);
         self.terminal.scrollback = self.terminal.scrollback.clamp(1_000, 200_000);
+        self.terminal.max_agent_consoles = self.terminal.max_agent_consoles.clamp(1, 100);
         self.sidebar_width = self.sidebar_width.clamp(180.0, 520.0);
         self.commit_drawer_width = self.commit_drawer_width.clamp(240.0, 640.0);
+        self.compare_drawer_width = self.compare_drawer_width.clamp(240.0, 640.0);
         self.panel_height = self.panel_height.clamp(120.0, 900.0);
         self.compare_split = self.compare_split.clamp(20.0, 80.0);
         self.compare_details_width = self.compare_details_width.clamp(24.0, 62.0);
         self.update_endpoint = self.update_endpoint.trim().to_string();
         self.update_public_key = self.update_public_key.trim().to_string();
+        for option in &mut self.agents.options {
+            option.name = option.name.trim().to_string();
+            option.description = option.description.trim().to_string();
+            option.command = option.command.trim().to_string();
+        }
+        self.agents.options.retain(|option| !option.name.is_empty());
+        self.agents.options.truncate(12);
+        if self.agents.options.is_empty() {
+            self.agents = AgentSettings::default();
+        }
     }
 }
 
@@ -227,8 +294,13 @@ impl Settings {
 #[serde(default)]
 pub struct WorkspaceFile {
     pub recent: Vec<PathBuf>,
+    pub recent_files: Vec<PathBuf>,
     pub projects: Vec<PathBuf>,
     pub active_project: Option<PathBuf>,
+    /// Files in the singleton ad-hoc editor workspace, in tab order.
+    pub single_files: Vec<PathBuf>,
+    pub active_single_file: Option<PathBuf>,
+    pub single_files_active: bool,
     /// Focused worktree name per project root.
     pub active_worktrees: std::collections::BTreeMap<PathBuf, String>,
     pub sidebar_view: Option<String>,
@@ -318,6 +390,7 @@ mod tests {
         assert!(back.ui_font.is_empty());
         assert!(back.editor.font_family.is_empty());
         assert!(back.terminal.font_family.is_empty());
+        assert_eq!(back.terminal.max_agent_consoles, 20);
         assert!(back.update_endpoint.is_empty());
         assert!(!back.auto_check_updates);
         assert!(!back.updates_configured());
@@ -329,6 +402,7 @@ mod tests {
         settings.editor.font_size = 15.0;
         settings.editor.font_family = "Menlo".into();
         settings.terminal.font_family = "SF Mono".into();
+        settings.terminal.max_agent_consoles = 40;
         settings.ui_font = "PingFang SC".into();
         settings.theme = ThemeMode::Light;
         let text = toml::to_string_pretty(&settings).unwrap();
@@ -336,7 +410,43 @@ mod tests {
         assert_eq!(back.editor.font_size, 15.0);
         assert_eq!(back.editor.font_family, "Menlo");
         assert_eq!(back.terminal.font_family, "SF Mono");
+        assert_eq!(back.terminal.max_agent_consoles, 40);
         assert_eq!(back.ui_font, "PingFang SC");
         assert_eq!(back.theme, ThemeMode::Light);
+    }
+}
+
+#[cfg(test)]
+mod agent_settings_tests {
+    use super::*;
+
+    #[test]
+    fn default_agents_keep_supported_entries_only() {
+        let settings = Settings::default();
+        let names: Vec<&str> = settings
+            .agents
+            .options
+            .iter()
+            .map(|option| option.name.as_str())
+            .collect();
+        assert_eq!(names, ["Claude Code", "OpenCode", "omp", "Shell"]);
+        let shell = settings.agents.options.last().unwrap();
+        assert!(shell.command.is_empty());
+    }
+
+    #[test]
+    fn agent_scripts_round_trip_and_missing_field_uses_defaults() {
+        let mut settings = Settings::default();
+        settings.agents.options[0].command = "claude --dangerously-skip-permissions".into();
+        let text = toml::to_string_pretty(&settings).unwrap();
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(
+            back.agents.options[0].command,
+            "claude --dangerously-skip-permissions"
+        );
+
+        let legacy: Settings = toml::from_str("theme = \"dark\"\n").unwrap();
+        assert_eq!(legacy.agents.options.len(), 4);
+        assert_eq!(legacy.agents.options[2].name, "omp");
     }
 }

@@ -56,6 +56,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         field,
         TextEdit::singleline(&mut rt.palette.query)
             .frame(egui::Frame::NONE)
+            .align(egui::Align2::LEFT_CENTER)
             .hint_text(crate::tr!(
                 model,
                 "Search files, projects, commands",
@@ -219,6 +220,9 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
 
 fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
     let query = query.trim().to_lowercase();
+    let single_mode = model
+        .active_project()
+        .is_some_and(|project| project.is_single_file);
     let mut items: Vec<PaletteItem> = Vec::new();
     let mut action =
         |icon, title: &str, subtitle: &str, shortcut: Option<&str>, action: PaletteAction| {
@@ -238,7 +242,7 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
 
     action(
         Icon::FolderOpen,
-        crate::tr!(model, "Open project…", "打开项目…"),
+        crate::tr!(model, "Open…", "打开…"),
         crate::tr!(model, "Choose a folder", "选择文件夹"),
         None,
         PaletteAction::OpenProject,
@@ -574,7 +578,7 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
         }
         if !query.is_empty() {
             let mut files = Vec::new();
-            flatten_files(&project.tree.nodes, &mut files);
+            flatten_files(&project.active_tree().nodes, &mut files);
             let mut matches = 0;
             for path in files {
                 let path_text = path.to_string_lossy();
@@ -587,7 +591,7 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
                             .unwrap_or_default(),
                         subtitle: path_text.into_owned(),
                         shortcut: None,
-                        action: PaletteAction::OpenFile(project.root.join(&path)),
+                        action: PaletteAction::OpenFile(project.active_root().join(&path)),
                     });
                     matches += 1;
                     if matches >= 30 {
@@ -597,6 +601,26 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
             }
         }
     }
+    if single_mode {
+        items.retain(|item| {
+            !matches!(
+                &item.action,
+                PaletteAction::OpenGitLog
+                    | PaletteAction::OpenPush
+                    | PaletteAction::OpenPull
+                    | PaletteAction::FetchAll
+                    | PaletteAction::OpenRemotes
+                    | PaletteAction::StashChanges
+                    | PaletteAction::StashManager
+                    | PaletteAction::ShelfManager
+                    | PaletteAction::GitTools
+                    | PaletteAction::CompareBranches
+                    | PaletteAction::RefreshGit
+                    | PaletteAction::OpenSearch
+            )
+        });
+    }
+
     items
 }
 
@@ -613,9 +637,8 @@ fn execute(action: PaletteAction, model: &mut AppModel, rt: &mut UiRuntime) {
     model.ui.command_palette_open = false;
     match action {
         PaletteAction::OpenFile(path) => {
-            let settings = model.settings.clone();
-            if let Some(project) = model.active_project_mut() {
-                match project.open_file(path, &settings) {
+            if let Some(index) = model.active_project {
+                match model.open_file_in(index, path) {
                     Ok(id) => rt.set_editor_focus(id),
                     Err(err) => model.toast(err, ToastKind::Error),
                 }
@@ -643,19 +666,21 @@ fn execute(action: PaletteAction, model: &mut AppModel, rt: &mut UiRuntime) {
             }
         }
         PaletteAction::CloseTab => {
-            if let Some(project) = model.active_project_mut() {
-                if let Some(id) = project.active_tab {
-                    let dirty = project.tab_by_id(id).is_some_and(|tab| tab.is_dirty());
+            if let Some(index) = model.active_project {
+                if let Some(id) = model.projects[index].active_tab {
+                    let dirty = model.projects[index]
+                        .tab_by_id(id)
+                        .is_some_and(|tab| tab.is_dirty());
                     if dirty {
                         rt.dialog = crate::runtime::DialogState::CloseDirtyTab {
                             tab_id: id,
-                            name: project
+                            name: model.projects[index]
                                 .tab_by_id(id)
                                 .map(|tab| tab.title())
                                 .unwrap_or_default(),
                         };
                     } else {
-                        project.close_tab(id);
+                        model.close_tab(index, id);
                     }
                 }
             }
@@ -683,12 +708,7 @@ fn execute(action: PaletteAction, model: &mut AppModel, rt: &mut UiRuntime) {
                 .first()
                 .map(|info| info.name.clone())
                 .unwrap_or_else(|| "origin".to_string());
-            rt.dialog = crate::runtime::DialogState::Push {
-                remote,
-                branch,
-                set_upstream: false,
-                status: None,
-            };
+            rt.dialog = crate::overlays::push_dialog_state(project, remote, branch);
         }
         PaletteAction::OpenPull => {
             rt.dialog = crate::runtime::DialogState::Pull {
@@ -705,6 +725,7 @@ fn execute(action: PaletteAction, model: &mut AppModel, rt: &mut UiRuntime) {
                 remotes,
                 new_name: String::new(),
                 new_url: String::new(),
+                editing: None,
                 error: None,
             };
         }

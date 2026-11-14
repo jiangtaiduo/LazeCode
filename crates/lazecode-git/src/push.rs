@@ -114,7 +114,7 @@ fn parse_status(status: &[u8], branch: &str) -> Result<()> {
     Ok(())
 }
 
-fn write_upstream(repo: &gix::Repository, branch: &str, remote: &str) -> Result<()> {
+pub(crate) fn write_upstream(repo: &gix::Repository, branch: &str, remote: &str) -> Result<()> {
     let path = repo.common_dir().join("config");
     let mut config =
         gix::config::File::from_path_no_includes(path.clone(), gix::config::Source::Local)?;

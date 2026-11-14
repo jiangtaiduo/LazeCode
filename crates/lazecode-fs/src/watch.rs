@@ -6,10 +6,18 @@ use std::time::Duration;
 #[derive(Clone, Debug, Default)]
 pub struct WatchBatch {
     pub changed: Vec<PathBuf>,
-    /// A change under `.git` (index, HEAD, refs, worktree metadata) that must
-    /// refresh the source-control snapshot even when no working-tree file
-    /// changed, e.g. a commit made by another tool.
+    /// A change under the project's top-level `.git` (index, HEAD, refs,
+    /// worktree metadata) that must refresh the source-control snapshot even
+    /// when no working-tree file changed, e.g. a commit made by another tool.
+    /// A `.git` deeper inside the tree (a vendored nested repository) does
+    /// not affect this repo's status and must not trigger a refresh.
     pub git_changed: bool,
+    /// Events under a default-ignored directory (node_modules, .venv, ...)
+    /// never enter `changed`, but they still invalidate the Git ignored-file
+    /// cache so its listing cannot go stale. They do not trigger a full VCS
+    /// refresh; the next snapshot (watcher Git event or the periodic
+    /// fallback) picks the refreshed listing up.
+    pub ignored_touched: bool,
 }
 
 /// Owns a recursive watcher for one project. Drop to stop watching.
@@ -29,8 +37,10 @@ impl ProjectWatcher {
         let mut batch = WatchBatch::default();
         while let Ok(next) = self.rx.try_recv() {
             batch.changed.extend(next.changed);
+            batch.git_changed |= next.git_changed;
+            batch.ignored_touched |= next.ignored_touched;
         }
-        if batch.changed.is_empty() && !batch.git_changed {
+        if batch.changed.is_empty() && !batch.git_changed && !batch.ignored_touched {
             None
         } else {
             batch.changed.sort();
@@ -55,12 +65,13 @@ pub fn watch_project(root: &Path) -> anyhow::Result<ProjectWatcher> {
     watcher.watch(root, RecursiveMode::Recursive)?;
 
     let (tx, rx) = mpsc::channel::<WatchBatch>();
+    let batch_root = root.to_path_buf();
     std::thread::Builder::new()
         .name("lazecode-fs-watch".into())
         .spawn(move || {
             while let Ok(first) = raw_rx.recv() {
                 let mut batch = WatchBatch::default();
-                push_event(&mut batch, first);
+                push_event(&mut batch, first, &batch_root);
                 let deadline = std::time::Instant::now() + Duration::from_millis(200);
                 loop {
                     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -68,14 +79,16 @@ pub fn watch_project(root: &Path) -> anyhow::Result<ProjectWatcher> {
                         break;
                     }
                     match raw_rx.recv_timeout(remaining) {
-                        Ok(event) => push_event(&mut batch, event),
+                        Ok(event) => push_event(&mut batch, event, &batch_root),
                         Err(mpsc::RecvTimeoutError::Timeout) => break,
                         Err(mpsc::RecvTimeoutError::Disconnected) => return,
                     }
                 }
                 batch.changed.sort();
                 batch.changed.dedup();
-                if (!batch.changed.is_empty() || batch.git_changed) && tx.send(batch).is_err() {
+                if (!batch.changed.is_empty() || batch.git_changed || batch.ignored_touched)
+                    && tx.send(batch).is_err()
+                {
                     return;
                 }
             }
@@ -88,17 +101,15 @@ pub fn watch_project(root: &Path) -> anyhow::Result<ProjectWatcher> {
     })
 }
 
-fn push_event(batch: &mut WatchBatch, event: notify::Result<notify::Event>) {
+fn push_event(batch: &mut WatchBatch, event: notify::Result<notify::Event>, root: &Path) {
     let Ok(event) = event else { return };
     use notify::EventKind;
     // Git metadata events must be detected before dropping metadata/other
     // events: ref updates and index rewrites commonly arrive as metadata or
     // coalesced events. They refresh the Git snapshot without reloading the
-    // whole file tree.
-    if event.paths.iter().any(|path| {
-        path.components()
-            .any(|component| component.as_os_str() == ".git")
-    }) {
+    // whole file tree. Only the watched root's own `.git` counts — a nested
+    // repository (vendor/lib/.git) does not change this repo's status.
+    if event.paths.iter().any(|path| is_top_level_git(root, path)) {
         batch.git_changed = true;
     }
     if matches!(
@@ -109,17 +120,8 @@ fn push_event(batch: &mut WatchBatch, event: notify::Result<notify::Event>) {
     ) {
         return;
     }
-    let root = event
-        .paths
-        .first()
-        .and_then(|p| p.parent())
-        .unwrap_or(Path::new(""));
-    let _ = root;
     for path in event.paths {
-        if path
-            .components()
-            .any(|component| component.as_os_str() == ".git")
-        {
+        if is_top_level_git(root, &path) {
             batch.git_changed = true;
             continue;
         }
@@ -127,10 +129,27 @@ fn push_event(batch: &mut WatchBatch, event: notify::Result<notify::Event>) {
             .components()
             .any(|component| crate::is_default_ignored(component.as_os_str()))
         {
+            batch.ignored_touched = true;
             continue;
         }
         batch.changed.push(path);
     }
+}
+
+/// Whether `path` points inside the watched project's own `.git`. Paths
+/// outside `root` keep the old any-component rule (conservative: a stray
+/// refresh is cheaper than a missed one).
+fn is_top_level_git(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root)
+        .map(|rel| {
+            rel.components()
+                .next()
+                .is_some_and(|component| component.as_os_str() == ".git")
+        })
+        .unwrap_or_else(|_| {
+            path.components()
+                .any(|component| component.as_os_str() == ".git")
+        })
 }
 
 #[cfg(test)]
@@ -139,11 +158,13 @@ mod tests {
 
     #[test]
     fn git_metadata_sets_git_flag_without_tree_path() {
+        let root = PathBuf::from("/repo");
         let mut batch = WatchBatch::default();
         push_event(
             &mut batch,
             Ok(notify::Event::new(notify::EventKind::Any)
                 .add_path(PathBuf::from("/repo/.git/index"))),
+            &root,
         );
         assert!(batch.git_changed);
         assert!(batch.changed.is_empty());
@@ -155,6 +176,7 @@ mod tests {
                 notify::event::ModifyKind::Metadata(notify::event::MetadataKind::Any),
             ))
             .add_path(PathBuf::from("/repo/.git/refs/heads/main"))),
+            &root,
         );
         assert!(metadata.git_changed);
         assert!(metadata.changed.is_empty());
@@ -163,8 +185,38 @@ mod tests {
             &mut batch,
             Ok(notify::Event::new(notify::EventKind::Any)
                 .add_path(PathBuf::from("/repo/src/main.rs"))),
+            &root,
         );
         assert!(batch.git_changed);
         assert_eq!(batch.changed, [PathBuf::from("/repo/src/main.rs")]);
+    }
+
+    #[test]
+    fn nested_git_repo_does_not_flag_the_outer_repo() {
+        let root = PathBuf::from("/repo");
+        let mut batch = WatchBatch::default();
+        push_event(
+            &mut batch,
+            Ok(notify::Event::new(notify::EventKind::Any)
+                .add_path(PathBuf::from("/repo/vendor/lib/.git/HEAD"))),
+            &root,
+        );
+        assert!(!batch.git_changed, "a vendored nested .git is not ours");
+        assert!(batch.changed.is_empty());
+    }
+
+    #[test]
+    fn ignored_directory_events_only_invalidate_the_ignored_cache() {
+        let root = PathBuf::from("/repo");
+        let mut batch = WatchBatch::default();
+        push_event(
+            &mut batch,
+            Ok(notify::Event::new(notify::EventKind::Any)
+                .add_path(PathBuf::from("/repo/node_modules/pkg/index.js"))),
+            &root,
+        );
+        assert!(batch.ignored_touched);
+        assert!(batch.changed.is_empty());
+        assert!(!batch.git_changed);
     }
 }

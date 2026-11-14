@@ -315,9 +315,14 @@ struct SpoolState {
 }
 
 /// Textures the frontend still has to upload (or drop).
+///
+/// The queue is bounded by the session's graphics budget: only the active
+/// pane's draw drains it, so a background console producing kitty images
+/// would otherwise accumulate decoded RGBA without limit.
 #[derive(Default)]
 struct GraphicsQueue {
     images: Vec<KittyImage>,
+    bytes: usize,
     generation: u64,
 }
 
@@ -342,6 +347,10 @@ pub(crate) struct Shared {
     /// reader thread can pin it while history keeps growing.
     view_offset: AtomicUsize,
     graphics: Mutex<GraphicsQueue>,
+    /// Byte cap for the pending-kitty-image queue (`GraphicsQueue`). Only the
+    /// active pane drains that queue, so a background console producing
+    /// graphics needs its own admission limit beyond rio-vt's parser cache.
+    graphics_queue_bytes: usize,
     notifier: Option<Arc<dyn Notifier>>,
 }
 
@@ -375,6 +384,18 @@ impl Shared {
                             }
                         }
                         shared.timer_running.store(false, Ordering::Relaxed);
+                        // A reader can set `pending_notify` in the window
+                        // between the swap above and this `store(false)`: it
+                        // observed `timer_running == true` and did not arm a
+                        // new timer. This final drain keeps that trailing
+                        // frame from stranding; a reader that arrives after
+                        // the store re-arms normally.
+                        if shared.pending_notify.swap(false, Ordering::Relaxed) {
+                            shared.last_notify_ms.store(now_ms(), Ordering::Relaxed);
+                            if let Some(notifier) = &shared.notifier {
+                                notifier.notify();
+                            }
+                        }
                     });
             }
             return;
@@ -412,6 +433,7 @@ impl Proxy {
             return;
         }
         let mut queue = self.shared.graphics.lock();
+        let queue_cap = self.shared.graphics_queue_bytes;
         for (id, data) in queues.pending_images {
             let width = data.width;
             let height = data.height;
@@ -435,6 +457,7 @@ impl Proxy {
             }
             queue.generation += 1;
             let generation = queue.generation;
+            let bytes = rgba.len();
             queue.images.push(KittyImage {
                 id,
                 width,
@@ -442,6 +465,13 @@ impl Proxy {
                 rgba: Arc::from(rgba.into_boxed_slice()),
                 generation,
             });
+            queue.bytes += bytes;
+            // Only the active pane's draw drains this queue; drop the oldest
+            // payloads when a background console outruns the budget.
+            while queue.bytes > queue_cap && !queue.images.is_empty() {
+                let dropped = queue.images.remove(0);
+                queue.bytes = queue.bytes.saturating_sub(dropped.rgba.len());
+            }
         }
         self.shared.notify();
     }
@@ -851,19 +881,31 @@ pub struct BusyTarget {
     pub shell: String,
 }
 
+/// Whether `name` (a `ps comm` value) is the session's idle shell.
+///
+/// The app spawns login shells, and macOS `ps` reports a login shell with a
+/// leading dash (`-zsh`, `-/bin/zsh`) because that is `argv[0]`. A command
+/// that `exec`'d over the shell pid shows a plain name without the dash
+/// (`omp`, `fish`), so allow-list shell names only count as idle in their
+/// dash form — matching any shell name made `exec fish` look idle. An exact
+/// match of the configured shell stays idle either way; `exec <configured
+/// shell>` remains indistinguishable from the idle prompt by `ps` alone.
 fn is_shell_name(name: &str, shell: &str) -> bool {
-    let base = std::path::Path::new(name)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(name)
-        .trim_start_matches('-');
-    let configured = std::path::Path::new(shell)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(shell)
-        .trim_start_matches('-');
-    base == configured
-        || matches!(
+    let basename = |value: &str| {
+        std::path::Path::new(value)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(value)
+            .to_string()
+    };
+    let configured = basename(shell);
+    let raw_base = basename(name);
+    let base = raw_base.trim_start_matches('-');
+    if raw_base == configured || base == configured {
+        return true;
+    }
+    name.starts_with('-')
+        && matches!(
             base,
             "zsh" | "bash" | "sh" | "dash" | "ksh" | "fish" | "tcsh" | "csh" | "nu" | "pwsh"
         )
@@ -1543,7 +1585,13 @@ impl Session {
 
     /// Take newly decoded kitty images for texture upload.
     pub fn take_graphics_updates(&self) -> Vec<KittyImage> {
-        std::mem::take(&mut self.shared.graphics.lock().images)
+        let mut queue = self.shared.graphics.lock();
+        let images = std::mem::take(&mut queue.images);
+        // The byte counter must track the pending payloads only; leaving the
+        // taken images counted would make the cap evict live images after
+        // the next drain.
+        queue.bytes = 0;
+        images
     }
 
     /// Re-queue the pixels of every *placed* image; the frontend calls this
@@ -1759,6 +1807,7 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
             }
         })?;
 
+    let graphics_budget = options.graphics_bytes.clamp(256 * 1024, 320 * 1024 * 1024);
     let shared = Arc::new(Shared {
         title: Mutex::new(None),
         bell: AtomicU32::new(0),
@@ -1774,6 +1823,7 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
         size: Mutex::new((cols, rows)),
         view_offset: AtomicUsize::new(0),
         graphics: Mutex::new(GraphicsQueue::default()),
+        graphics_queue_bytes: graphics_budget,
         notifier: options.notifier.clone(),
     });
 
@@ -1813,7 +1863,7 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
         hot_cap + slack,
     );
     // Bound the decoded kitty image cache to the configured byte cap.
-    term.graphics.total_limit = options.graphics_bytes.clamp(256 * 1024, 320 * 1024 * 1024);
+    term.graphics.total_limit = graphics_budget;
     let term = Arc::new(FairMutex::new(term));
     let dirty_rows = Mutex::new(Vec::new());
 
@@ -2138,6 +2188,29 @@ mod tests {
         let exec = parse_busy_output("  100 omp\n", Some(100), "/bin/zsh");
         assert!(exec.busy);
         assert_eq!(exec.commands, ["omp"]);
+    }
+
+    #[test]
+    fn busy_parser_distinguishes_login_shell_from_exec_d_shell() {
+        // macOS reports the idle login shell with a dash (argv[0]); an exec'd
+        // command over the same pid has no dash. `exec fish` previously read
+        // as idle because any shell name matched.
+        assert!(
+            !parse_busy_output("  100 -zsh\n", Some(100), "/bin/zsh").busy,
+            "dash-form login shell is idle"
+        );
+        assert!(
+            !parse_busy_output("  100 -/bin/zsh\n", Some(100), "/bin/zsh").busy,
+            "dash-path login shell is idle"
+        );
+        let exec_fish = parse_busy_output("  100 fish\n", Some(100), "/bin/zsh");
+        assert!(exec_fish.busy, "exec'd fish over the shell pid is busy");
+        assert_eq!(exec_fish.commands, ["fish"]);
+        // A plain configured-shell name stays idle (non-login spawn forms).
+        assert!(!parse_busy_output("  100 /bin/zsh\n", Some(100), "/bin/zsh").busy);
+        // Documented residual: `exec zsh` over a zsh session is
+        // indistinguishable from the idle prompt by `ps` alone.
+        assert!(!parse_busy_output("  100 zsh\n", Some(100), "/bin/zsh").busy);
     }
 
     #[test]
@@ -2762,6 +2835,65 @@ mod tests {
         // The cap counts decoded pixel bytes.
         let total: usize = snap.graphics_images.len() * 200 * 200 * 4;
         assert!(total <= 256 * 1024);
+    }
+
+    #[test]
+    fn pending_graphics_queue_is_bounded_when_never_drained() {
+        // A background console is never drawn, so nothing calls
+        // `take_graphics_updates`. The pending queue must cap itself at the
+        // session's graphics budget instead of accumulating every decoded
+        // RGBA payload until the pane is finally viewed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut files = Vec::new();
+        for index in 1..=10u32 {
+            let path = dir.path().join(format!("img{index}.apc"));
+            std::fs::write(
+                &path,
+                kitty_apc("T", index, 200, 200, &vec![index as u8; 200 * 200 * 4]),
+            )
+            .expect("write");
+            files.push(path);
+        }
+        let mut command = String::from("cat");
+        for path in &files {
+            command.push_str(&format!(" '{}'", path.display()));
+        }
+        let options = SpawnOptions {
+            cwd: dir.path().to_path_buf(),
+            cols: 40,
+            rows: 8,
+            command: Some(command),
+            graphics_bytes: 256 * 1024,
+            ..Default::default()
+        };
+        let session = spawn(options).expect("spawn");
+        session.set_cell_size(8.0, 16.0);
+        let mut snap = Snapshot::default();
+        let parsed = wait_until(
+            || {
+                session.snapshot_into(&mut snap);
+                snap.graphics_images.contains(&10)
+            },
+            std::time::Duration::from_secs(10),
+        );
+        assert!(
+            parsed,
+            "tenth image never parsed: {:?}",
+            snap.graphics_images
+        );
+        // The pending queue holds at most one budget of the newest payloads.
+        let taken = session.take_graphics_updates();
+        let total: usize = taken.iter().map(|image| image.rgba.len()).sum();
+        assert!(
+            total <= 256 * 1024,
+            "pending queue exceeded the budget: {} bytes in {} images",
+            total,
+            taken.len()
+        );
+        assert!(
+            !taken.is_empty(),
+            "the newest image must still be delivered"
+        );
     }
 
     #[test]

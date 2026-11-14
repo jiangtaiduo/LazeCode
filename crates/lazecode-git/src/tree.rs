@@ -221,12 +221,11 @@ pub fn materialize_tree(repo: &gix::Repository, map: &TreeMap) -> Result<()> {
                 std::os::unix::fs::symlink(target_path, &target)?;
             }
             mode => {
-                let streamed =
-                    crate::filter::smudge_lfs_to_file_in(repo, &workdir, path, &data, &target)?;
+                let streamed = crate::filter::smudge_lfs_to_file_in(repo, path, &data, &target)?;
                 let data = if streamed {
                     Vec::new()
                 } else {
-                    crate::filter::smudge_in(repo, &workdir, path, &entry.oid.to_string(), data)?
+                    crate::filter::smudge_in(repo, path, &entry.oid.to_string(), data)?
                 };
                 let existing = if streamed {
                     None

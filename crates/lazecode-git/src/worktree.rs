@@ -21,7 +21,15 @@ fn canonical(path: &Path) -> PathBuf {
 }
 
 fn branch_of_worktree(base: &Path) -> Option<String> {
-    crate::snapshot(base).ok().and_then(|snap| snap.branch)
+    // Only HEAD matters here. A full snapshot (status + untracked walk +
+    // ignored dirwalk + per-file diff stats) per member made one
+    // `list_worktrees` call cost one full snapshot per worktree.
+    crate::discover(base)
+        .ok()?
+        .head()
+        .ok()?
+        .referent_name()
+        .map(|name| name.shorten().to_string())
 }
 
 /// Return the path of the repository's main worktree.

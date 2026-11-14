@@ -717,7 +717,7 @@ fn draw_image_tab(
         .extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gif"));
-    let (dims_str, texture, uri, image_error) = if is_gif {
+    let (dims_str, texture, uri, image_error, loading) = if is_gif {
         // The GIF loader animates frames, which the static decoder below
         // cannot reproduce. Its cache is flushed whenever the set of GIF tabs
         // changes (see `UiRuntime::prune_media_caches`).
@@ -730,13 +730,14 @@ fn draw_image_tab(
             None,
             Some(format!("file://{}", img.path.display())),
             None,
+            false,
         )
     } else {
         let loaded = rt
             .image_cache
             .get_or_load(ui.ctx(), &img.path, max_side, rt.frame_count);
         match loaded {
-            Ok(cached) => {
+            crate::image_cache::ImageLoad::Ready(cached) => {
                 let dims = cached.original_size;
                 let tex_size = cached.texture.size_vec2();
                 (
@@ -744,14 +745,22 @@ fn draw_image_tab(
                     Some((cached.texture.id(), tex_size)),
                     None,
                     None,
+                    false,
                 )
             }
-            Err(err) => {
+            crate::image_cache::ImageLoad::Loading => {
                 let dims = image::image_dimensions(&img.path)
                     .ok()
                     .map(|(w, h)| format!("{} × {} px", w, h))
                     .unwrap_or_default();
-                (dims, None, None, Some(err))
+                (dims, None, None, None, true)
+            }
+            crate::image_cache::ImageLoad::Failed(err) => {
+                let dims = image::image_dimensions(&img.path)
+                    .ok()
+                    .map(|(w, h)| format!("{} × {} px", w, h))
+                    .unwrap_or_default();
+                (dims, None, None, Some(err), false)
             }
         }
     };
@@ -810,6 +819,16 @@ fn draw_image_tab(
                                 crate::tr!(model, "Could not load image", "无法加载图片")
                             ))
                             .color(p.rose)
+                            .font(FontId::proportional(12.5)),
+                        );
+                    } else if loading {
+                        ui.label(
+                            egui::RichText::new(crate::tr!(
+                                model,
+                                "Loading image…",
+                                "正在加载图片…"
+                            ))
+                            .color(p.text3)
                             .font(FontId::proportional(12.5)),
                         );
                     }

@@ -92,7 +92,6 @@ fn write_map_tree(repo: &gix::Repository, map: &TreeMap) -> Result<ObjectId> {
 
 fn worktree_entry(
     repo: &gix::Repository,
-    root: &Path,
     path: &str,
     absolute: &Path,
     filters: &mut crate::filter::FilterContext<'_>,
@@ -108,7 +107,7 @@ fn worktree_entry(
             }))
         }
         Ok(metadata) if metadata.is_file() => {
-            let data = filters.clean_file(root, path, absolute)?;
+            let data = filters.clean_file(path, absolute)?;
             Ok(Some(TreeEntry {
                 oid: repo.write_blob(&data)?.detach(),
                 mode: if metadata.permissions().mode() & 0o111 != 0 {
@@ -154,7 +153,7 @@ pub fn stash_push(
             continue;
         }
         let absolute = safe_worktree_join(&workdir, &change.path)?;
-        let entry = worktree_entry(&repo, root, &change.path, &absolute, &mut filters)?;
+        let entry = worktree_entry(&repo, &change.path, &absolute, &mut filters)?;
         if change.untracked {
             if let Some(entry) = entry {
                 untracked_map.insert(change.path.clone(), entry);
@@ -352,7 +351,6 @@ fn read_worktree(path: &Path) -> Result<Option<(Vec<u8>, u32)>> {
 
 fn entry_worktree(
     repo: &gix::Repository,
-    root: &Path,
     path: &str,
     entry: &TreeEntry,
     filters: &mut crate::filter::FilterContext<'_>,
@@ -361,15 +359,25 @@ fn entry_worktree(
     if entry.mode == 0o120000 {
         Ok((data, entry.mode))
     } else {
-        let data = filters.smudge(root, path, &entry.oid.to_string(), data)?;
+        let data = filters.smudge(path, &entry.oid.to_string(), data)?;
         Ok((data, entry.mode))
     }
 }
 
 enum StashAction {
-    Write { mode: u32, data: Vec<u8> },
+    Write { mode: u32, payload: WritePayload },
     WriteLfs { mode: u32, pointer: Vec<u8> },
     Delete,
+}
+
+/// Bytes for a plain `Write` action. Plain writes store the blob id and are
+/// smudged at write time: a stash that also updates `.gitattributes` must
+/// apply the new attributes to the remaining files, matching checkout (which
+/// keeps per-file lookup for the same reason). Three-way merge output already
+/// carries conflict markers and cannot be re-derived, so it stays as-is.
+enum WritePayload {
+    Blob(gix::hash::ObjectId),
+    Merged(Vec<u8>),
 }
 
 fn lfs_entry(
@@ -423,7 +431,6 @@ fn file_matches_lfs(path: &Path, oid: &str, size: u64) -> bool {
 
 fn current_matches_entry(
     repo: &gix::Repository,
-    root: &Path,
     workdir: &Path,
     path: &str,
     entry: Option<&TreeEntry>,
@@ -436,7 +443,7 @@ fn current_matches_entry(
     if let Some((_, oid, size)) = lfs_entry(repo, filters, path, entry)? {
         return Ok(file_matches_lfs(&absolute, &oid, size));
     }
-    let expected = entry_worktree(repo, root, path, entry, filters)?;
+    let expected = entry_worktree(repo, path, entry, filters)?;
     Ok(read_worktree(&absolute)? == Some(expected))
 }
 
@@ -544,10 +551,9 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
             if file_matches_lfs(&absolute, &oid, size) {
                 continue;
             }
-            let old_matches =
-                current_matches_entry(&repo, root, &workdir, path, old, &mut filters)?;
+            let old_matches = current_matches_entry(&repo, &workdir, path, old, &mut filters)?;
             let index_matches =
-                current_matches_entry(&repo, root, &workdir, path, index.get(path), &mut filters)?;
+                current_matches_entry(&repo, &workdir, path, index.get(path), &mut filters)?;
             if old_matches || index_matches {
                 actions.push((
                     path.clone(),
@@ -568,14 +574,14 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
         }
         let current = read_worktree(&absolute)?;
         let old_data = old
-            .map(|entry| entry_worktree(&repo, root, path, entry, &mut filters))
+            .map(|entry| entry_worktree(&repo, path, entry, &mut filters))
             .transpose()?;
         let index_data = index
             .get(path)
-            .map(|entry| entry_worktree(&repo, root, path, entry, &mut filters))
+            .map(|entry| entry_worktree(&repo, path, entry, &mut filters))
             .transpose()?;
         let new_data = new_entry
-            .map(|entry| entry_worktree(&repo, root, path, entry, &mut filters))
+            .map(|entry| entry_worktree(&repo, path, entry, &mut filters))
             .transpose()?;
         if current == new_data {
             continue;
@@ -586,10 +592,7 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
                     path.clone(),
                     StashAction::Write {
                         mode: entry.mode,
-                        data: new_data
-                            .as_ref()
-                            .map(|(data, _)| data.clone())
-                            .unwrap_or_default(),
+                        payload: WritePayload::Blob(entry.oid),
                     },
                 )),
                 None => actions.push((path.clone(), StashAction::Delete)),
@@ -614,7 +617,7 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
                     (
                         StashAction::Write {
                             mode: entry.mode,
-                            data: merged,
+                            payload: WritePayload::Merged(merged),
                         },
                         conflict,
                     )
@@ -647,6 +650,7 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
     }
     let backup = CheckoutBackup::capture(&repo, &workdir, actions.iter().map(|(path, _)| path))?;
     let result = (|| -> Result<()> {
+        let mut filters = crate::filter::FilterContext::new(&repo)?;
         for (path, action) in actions {
             let absolute = safe_worktree_join(&workdir, &path)?;
             match action {
@@ -658,16 +662,24 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
                     if let Some(parent) = absolute.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
-                    if !crate::filter::smudge_lfs_to_file_in(
-                        &repo, &workdir, &path, &pointer, &absolute,
-                    )? {
+                    if !crate::filter::smudge_lfs_to_file_in(&repo, &path, &pointer, &absolute)? {
                         lazecode_fs::file::write_atomic(&absolute, &pointer)?;
                     }
                     use std::os::unix::fs::PermissionsExt;
                     let perms = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
                     std::fs::set_permissions(&absolute, std::fs::Permissions::from_mode(perms))?;
                 }
-                StashAction::Write { mode, data } => {
+                StashAction::Write { mode, payload } => {
+                    let data = match payload {
+                        WritePayload::Blob(oid) => {
+                            // Smudge with the attributes in effect *now* so a
+                            // `.gitattributes` updated earlier in this stash
+                            // governs the remaining files, like checkout.
+                            let blob = blob_bytes(&repo, oid)?;
+                            filters.smudge(&path, &oid.to_string(), blob)?
+                        }
+                        WritePayload::Merged(data) => data,
+                    };
                     if let Some(parent) = absolute.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
@@ -687,6 +699,12 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
                         )?;
                     }
                 }
+            }
+            // Materialising a `.gitattributes` file changes the semantics for
+            // every later file in this stash; rebuild the shared attribute
+            // session (checkout keeps per-file lookup for the same reason).
+            if path == ".gitattributes" || path.ends_with("/.gitattributes") {
+                filters = crate::filter::FilterContext::new(&repo)?;
             }
         }
         Ok(())
@@ -914,7 +932,7 @@ pub fn diff_patch_paths(root: &Path, paths: &[String]) -> Result<String> {
         let path = relative.to_string_lossy().replace('\\', "/");
         let absolute = safe_worktree_join(&workdir, &path)?;
         let old = head_map.get(&path).copied();
-        let new = worktree_entry(&repo, root, &path, &absolute, &mut filters)?;
+        let new = worktree_entry(&repo, &path, &absolute, &mut filters)?;
         if old == new {
             continue;
         }

@@ -312,6 +312,65 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
+/// Atomic write guarded by git's lock-file protocol: create `<path>.lock`
+/// exclusively first (failing when another writer already holds it), write
+/// into it, then rename it over the target.
+///
+/// [`write_atomic`] is last-writer-wins on purpose for ordinary files; the
+/// Git index instead expects `index.lock` semantics where a concurrent writer
+/// must be refused rather than silently dropped on the floor. Used by the
+/// rollback paths that overwrite the index outside `gix`'s own writer.
+pub fn write_atomic_locked(path: &Path, bytes: &[u8]) -> Result<()> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_string());
+    let lock_path = dir.join(format!("{file_name}.lock"));
+    let mut created = false;
+    let lock_result = (|| -> Result<()> {
+        let mut lock = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock_path)
+        {
+            Ok(file) => {
+                created = true;
+                file
+            }
+            Err(err) => {
+                return Err(FsError::Write {
+                    path: lock_path.clone(),
+                    source: err,
+                });
+            }
+        };
+        lock.write_all(bytes).map_err(|source| FsError::Write {
+            path: lock_path.clone(),
+            source,
+        })?;
+        lock.sync_all().map_err(|source| FsError::Write {
+            path: lock_path.clone(),
+            source,
+        })?;
+        drop(lock);
+        // Preserve the original mode when overwriting.
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let _ = std::fs::set_permissions(&lock_path, metadata.permissions());
+        }
+        std::fs::rename(&lock_path, path).map_err(|source| FsError::Write {
+            path: path.to_path_buf(),
+            source,
+        })
+    })();
+    // Only clean up when this call created the lock; removing a foreign
+    // writer's lock would break git's exclusion protocol.
+    if lock_result.is_err() && created {
+        let _ = std::fs::remove_file(&lock_path);
+    }
+    lock_result
+}
+
 /// Move a file or directory to the system trash instead of unlinking it.
 ///
 /// 稳定版的 Delete（未跟踪文件 / 项目树删除）全部走废纸篓（trash::delete），
@@ -327,6 +386,23 @@ pub fn move_to_trash(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locked_write_honors_an_existing_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index");
+        std::fs::write(&path, b"old").unwrap();
+        write_atomic_locked(&path, b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert!(!dir.path().join("index.lock").exists());
+
+        // A lock held by a concurrent writer must be refused, not overwritten.
+        let lock = dir.path().join("index.lock");
+        std::fs::write(&lock, b"held by another writer").unwrap();
+        assert!(write_atomic_locked(&path, b"clobber").is_err());
+        assert_eq!(std::fs::read(&lock).unwrap(), b"held by another writer");
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+    }
 
     #[test]
     fn round_trips_utf8_lf() {

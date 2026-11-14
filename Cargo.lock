@@ -3911,6 +3911,7 @@ dependencies = [
  "lazecode-terminal",
  "lazecode-text",
  "lazecode-ui",
+ "libc",
  "log",
  "muda",
  "objc2 0.6.5",

@@ -25,7 +25,21 @@ jobs:
         with:
           workspaces: . -> target
 
-      - run: cargo test --workspace --locked
+      - name: cargo test
+        shell: bash
+        run: |
+          set +e
+          cargo test --workspace --locked --no-fail-fast 2>&1 | tee /tmp/cargo-test.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            # Surface the failing test names through check-run annotations:
+            # raw logs need repository admin access, annotations do not.
+            grep -E "^(test .* FAILED|thread '.*' panicked|---- .* stdout ----|error: test failed|failures:)" \
+              /tmp/cargo-test.log | head -40 | while IFS= read -r line; do
+              echo "::error title=Cargo test failure::$line"
+            done
+            exit "$status"
+          fi
 
       - name: Build app bundle
         env:

@@ -100,51 +100,68 @@ impl Drop for LocalServer {
 }
 
 fn sign(manifest: &mut Manifest, dir: &Path) -> String {
-    // Use the system openssl keypair when available so the test also covers
-    // the release-script path; fall back to a ring-generated key otherwise.
-    let openssl_key = dir.join("signing.key");
+    // Prefer the system openssl so the test also covers the release-script
+    // path, but fall back to ring where `pkeyutl` cannot do Ed25519
+    // (OpenSSL 1.1.1, still the default on macOS CI runners).
+    if let Some(public) = try_openssl_sign(manifest, dir) {
+        return public;
+    }
+    ring_sign(manifest)
+}
+
+fn try_openssl_sign(manifest: &mut Manifest, dir: &Path) -> Option<String> {
+    let key = dir.join("signing.key");
     let generated = Command::new("openssl")
         .args(["genpkey", "-algorithm", "ed25519", "-out"])
-        .arg(&openssl_key)
+        .arg(&key)
         .output()
         .map(|out| out.status.success())
         .unwrap_or(false);
-    let public;
-    if generated {
-        let payload_path = dir.join("payload.bin");
-        std::fs::write(&payload_path, manifest.signing_payload()).unwrap();
-        let sig_path = dir.join("payload.sig");
-        let signed = Command::new("openssl")
-            .args(["pkeyutl", "-sign", "-inkey"])
-            .arg(&openssl_key)
-            .arg("-in")
-            .arg(&payload_path)
-            .arg("-out")
-            .arg(&sig_path)
-            .output()
-            .unwrap();
-        assert!(signed.status.success());
-        let der = Command::new("openssl")
-            .args(["pkey", "-in"])
-            .arg(&openssl_key)
-            .args(["-pubout", "-outform", "DER"])
-            .output()
-            .unwrap();
-        assert!(der.status.success());
-        public =
-            base64::engine::general_purpose::STANDARD.encode(&der.stdout[der.stdout.len() - 32..]);
-        manifest.signature =
-            base64::engine::general_purpose::STANDARD.encode(std::fs::read(&sig_path).unwrap());
-    } else {
-        eprintln!("openssl unavailable; signing with an in-process ring key");
-        let pkcs8 =
-            ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
-                .unwrap();
-        let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
-        public = base64::engine::general_purpose::STANDARD.encode(pair.public_key().as_ref());
-        let signature = pair.sign(&manifest.signing_payload());
-        manifest.signature = base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
+    if !generated {
+        eprintln!("openssl cannot generate Ed25519 keys; signing with ring");
+        return None;
     }
+    let payload = dir.join("payload.bin");
+    std::fs::write(&payload, manifest.signing_payload()).unwrap();
+    let signature = dir.join("payload.sig");
+    let signed = Command::new("openssl")
+        .args(["pkeyutl", "-sign", "-inkey"])
+        .arg(&key)
+        .arg("-in")
+        .arg(&payload)
+        .arg("-out")
+        .arg(&signature)
+        .output()
+        .unwrap();
+    if !signed.status.success() {
+        eprintln!(
+            "openssl cannot sign Ed25519 ({}); signing with ring",
+            String::from_utf8_lossy(&signed.stderr).trim()
+        );
+        return None;
+    }
+    let der = Command::new("openssl")
+        .args(["pkey", "-in"])
+        .arg(&key)
+        .args(["-pubout", "-outform", "DER"])
+        .output()
+        .unwrap();
+    if !der.status.success() || der.stdout.len() < 32 {
+        eprintln!("openssl cannot export the Ed25519 key; signing with ring");
+        return None;
+    }
+    manifest.signature =
+        base64::engine::general_purpose::STANDARD.encode(std::fs::read(&signature).unwrap());
+    Some(base64::engine::general_purpose::STANDARD.encode(&der.stdout[der.stdout.len() - 32..]))
+}
+
+fn ring_sign(manifest: &mut Manifest) -> String {
+    let pkcs8 =
+        ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+    let public = base64::engine::general_purpose::STANDARD.encode(pair.public_key().as_ref());
+    let signature = pair.sign(&manifest.signing_payload());
+    manifest.signature = base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
     public
 }
 

@@ -53,7 +53,7 @@ jobs:
           TARBALL="releases/LazeCode-${VERSION}-macos-aarch64.app.tar.gz"
           export VERSION TARBALL
           python3 - <<'PY'
-          import base64, hashlib, json, os, re, subprocess, sys, tarfile
+          import hashlib, json, os, sys, tarfile
 
           version = os.environ["VERSION"]
           tarball = os.environ["TARBALL"]
@@ -79,30 +79,11 @@ jobs:
           assert roots == {"LazeCode.app"}, f"unexpected archive roots: {sorted(roots)}"
           assert not metadata, f"archive carries AppleDouble metadata: {metadata[:3]}"
 
-          settings = open("crates/lazecode-core/src/settings.rs", encoding="utf-8").read()
-          key = re.search(r'update_public_key: "([^"]+)"', settings).group(1)
-          fields = ["version", "url", "sha256", "notes", "min_os", "arch", "kind"]
-          payload = json.dumps(
-              {field: manifest.get(field) or "" for field in fields},
-              separators=(",", ":"),
-              ensure_ascii=False,
-          ).encode()
-          open("payload.bin", "wb").write(payload)
-          raw = base64.b64decode(key + "=" * (-len(key) % 4))
-          open("manifest-public.der", "wb").write(bytes.fromhex("302a300506032b6570032100") + raw)
-          open("payload.sig", "wb").write(
-              base64.b64decode(manifest["signature"] + "=" * (-len(manifest["signature"]) % 4))
-          )
-          result = subprocess.run(
-              ["openssl", "pkeyutl", "-verify", "-pubin", "-keyform", "DER",
-               "-inkey", "manifest-public.der", "-in", "payload.bin",
-               "-sigfile", "payload.sig"],
-              capture_output=True, text=True,
-          )
-          if result.returncode != 0:
-              sys.exit("manifest signature does not verify:\n" + result.stdout + result.stderr)
-          print("updater manifest verified for", version)
+          print("manifest version and archive shape verified")
           PY
+          # Verify with the app's own ring-based verifier: the runner's
+          # default OpenSSL 1.1.1 cannot do Ed25519 through pkeyutl.
+          cargo run -q -p lazecode-core --example verify_update_manifest -- latest.json
 
           mkdir -p release-artifacts
           ditto -c -k --sequesterRsrc --keepParent \

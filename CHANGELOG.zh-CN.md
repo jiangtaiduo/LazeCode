@@ -6,6 +6,13 @@
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [0.4.5] - 2026-11-15
+
+### 修复
+
+- 当 macOS 的 `ps` 把可执行文件显示为带括号的名称（如 `(bash)`）时，
+  空闲 shell 不再被误判为忙碌；macOS 15 的 CI 环境就是这种输出。
+
 ## [0.4.4] - 2026-11-14
 
 ### 修复

@@ -6,6 +6,14 @@ All notable changes to LazeCode are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2026-11-15
+
+### Fixed
+
+- Console activity no longer reports an idle shell as busy when macOS
+  `ps` prints its executable as a parenthesised name such as `(bash)`,
+  which is how macOS 15 CI reports the spawned shell.
+
 ## [0.4.4] - 2026-11-14
 
 ### Fixed

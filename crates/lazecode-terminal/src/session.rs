@@ -900,7 +900,12 @@ fn is_shell_name(name: &str, shell: &str) -> bool {
     };
     let configured = basename(shell);
     let raw_base = basename(name);
-    let base = raw_base.trim_start_matches('-');
+    // macOS `ps` reports processes whose executable it cannot read with a
+    // parenthesised name, e.g. `(bash)`; strip both forms before comparing.
+    let base = raw_base
+        .trim_start_matches('-')
+        .trim_start_matches('(')
+        .trim_end_matches(')');
     if raw_base == configured || base == configured {
         return true;
     }
@@ -2208,6 +2213,9 @@ mod tests {
         assert_eq!(exec_fish.commands, ["fish"]);
         // A plain configured-shell name stays idle (non-login spawn forms).
         assert!(!parse_busy_output("  100 /bin/zsh\n", Some(100), "/bin/zsh").busy);
+        // macOS 15 `ps` can report the shell as `(bash)`.
+        let paren = parse_busy_output("  100 (bash)\n", Some(100), "/bin/bash");
+        assert!(!paren.busy, "parenthesised shell is idle: {paren:?}");
         // Documented residual: `exec zsh` over a zsh session is
         // indistinguishable from the idle prompt by `ps` alone.
         assert!(!parse_busy_output("  100 zsh\n", Some(100), "/bin/zsh").busy);

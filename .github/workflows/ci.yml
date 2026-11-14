@@ -36,12 +36,18 @@ jobs:
           cargo test --workspace --locked --no-fail-fast 2>&1 | tee /tmp/cargo-test.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
-            # Surface the failing test names through check-run annotations:
-            # raw logs need repository admin access, annotations do not.
-            grep -E "^(test .* FAILED|thread '.*' panicked|---- .* stdout ----|error: test failed|failures:)" \
-              /tmp/cargo-test.log | head -40 | while IFS= read -r line; do
+            # Surface failure details through check-run annotations: raw logs
+            # need repository admin access, annotations are public.
+            clean=$(mktemp)
+            sed -E 's/\x1b\[[0-9;]*[A-Za-z]//g' /tmp/cargo-test.log > "$clean"
+            {
+              grep -E "^(test .* FAILED|error: test failed|failures:)" "$clean"
+              awk '/panicked at/{count=8} count-->0' "$clean"
+            } | head -60 | while IFS= read -r line; do
               echo "::error title=Cargo test failure::$line"
             done
+            echo "::error title=Test environment::openssl=$(which openssl || true) $(openssl version 2>&1 || true)"
+            echo "::error title=Test environment::git=$(git --version 2>&1 || true) HOME=$HOME"
             exit "$status"
           fi
       - run: ./scripts/build-app.sh --debug

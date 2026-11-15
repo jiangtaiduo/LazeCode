@@ -48,6 +48,7 @@ cargo clippy --workspace --all-targets
 ```sh
 ./scripts/build-app.sh          # dist/LazeCode.app
 ./scripts/build-app.sh --debug  # 更快，未优化
+./scripts/build-dmg.sh          # dist/LazeCode_<version>_<arch>.dmg
 ```
 
 当前为 ad-hoc 签名；正式分发仍需 Developer ID 签名与公证。

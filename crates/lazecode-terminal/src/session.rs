@@ -248,6 +248,17 @@ pub struct KittyImage {
     pub generation: u64,
 }
 
+/// Hard sanity caps for a terminal geometry. A layout glitch (an absurd
+/// rectangle or a zero-sized font metric) must never turn into a gigantic
+/// grid or snapshot buffer; real terminals stay far below these limits.
+const MAX_COLS: u16 = 1_024;
+const MAX_ROWS: u16 = 512;
+
+/// Rebuild the snapshot buffer once its capacity is this many times the live
+/// cell count, so a one-off huge geometry does not keep gigabytes resident.
+const SNAPSHOT_SHRINK_FACTOR: usize = 4;
+const SNAPSHOT_MIN_CAPACITY: usize = 16_384;
+
 #[derive(Clone, Default)]
 pub struct Snapshot {
     pub cols: usize,
@@ -1204,6 +1215,8 @@ impl Session {
     }
 
     fn apply_geometry(&self, cols: u16, rows: u16, cell_w: u32, cell_h: u32) {
+        let cols = cols.clamp(10, MAX_COLS);
+        let rows = rows.clamp(2, MAX_ROWS);
         let mut geom = self.geom.lock();
         if *geom == (cols, rows, cell_w, cell_h) {
             return;
@@ -1283,7 +1296,16 @@ impl Session {
         snap.graphics_images
             .extend(term.graphics.kitty_images.keys().copied());
         snap.graphics_images.sort_unstable();
-        snap.cells.resize(cols * rows, CellData::default());
+        let needed = cols * rows;
+        let keep = needed
+            .saturating_mul(SNAPSHOT_SHRINK_FACTOR)
+            .max(SNAPSHOT_MIN_CAPACITY);
+        if snap.cells.capacity() > keep {
+            // `Vec::resize` never gives memory back; a transient huge geometry
+            // would otherwise pin gigabytes for the rest of the session.
+            snap.cells = Vec::with_capacity(needed);
+        }
+        snap.cells.resize(needed, CellData::default());
 
         let styles = grid.styles();
         let extras = &grid.extras_table;
@@ -2042,6 +2064,36 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         assert!(found, "terminal output not observed");
+    }
+
+    #[test]
+    fn absurd_geometry_is_clamped_and_snapshot_capacity_reclaimed() {
+        let session = spawn(SpawnOptions {
+            cwd: std::env::temp_dir(),
+            cols: 80,
+            rows: 12,
+            command: Some("printf 'hi\\n'".to_string()),
+            ..Default::default()
+        })
+        .expect("spawn");
+        // 47,599 x 1,600 cells x 32-byte CellData is the 2.38 GB single
+        // allocation observed in a long-running 0.4.5 process.
+        session.resize(47_599, 1_600);
+        let mut snap = Snapshot {
+            // Simulate a stale oversized buffer from an earlier geometry.
+            cells: Vec::with_capacity(1_000_000),
+            ..Snapshot::default()
+        };
+        session.snapshot_into(&mut snap);
+        assert!(snap.cols <= MAX_COLS as usize, "cols={}", snap.cols);
+        assert!(snap.rows <= MAX_ROWS as usize, "rows={}", snap.rows);
+        let needed = snap.cols * snap.rows;
+        assert_eq!(snap.cells.len(), needed);
+        assert!(
+            snap.cells.capacity() <= needed * SNAPSHOT_SHRINK_FACTOR,
+            "capacity {} for {needed} cells",
+            snap.cells.capacity()
+        );
     }
 
     #[test]

@@ -6,6 +6,21 @@
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)，版本号遵循
 [语义化版本](https://semver.org/spec/v2.0.0.html)。
 
+## [0.4.6] - 2026-11-15
+
+### 修复
+
+- 终端快照缓冲不再在异常几何尺寸后长期保留数 GB 容量：行列上限固定为
+  1024x512，且容量超过活跃单元格 4 倍时重建缓冲。长时间运行后出现的
+  1.4 GB 物理占用（单个 76,158,400 单元格缓冲）由此消除。
+- 应用包显示名称改为 **LazeCode**（`CFBundleDisplayName`），不再显示
+  "LazeCode Native"。
+
+### 新增
+
+- 标签发布重新附带压缩 DMG（`LazeCode_<version>_aarch64.dmg`），与 0.2.0
+  的发布形式一致，由新增的 `scripts/build-dmg.sh` 生成。
+
 ## [0.4.5] - 2026-11-15
 
 ### 修复

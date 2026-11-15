@@ -56,6 +56,7 @@ Build a launchable app bundle:
 ```sh
 ./scripts/build-app.sh          # dist/LazeCode.app
 ./scripts/build-app.sh --debug  # faster, unoptimised
+./scripts/build-dmg.sh          # dist/LazeCode_<version>_<arch>.dmg
 ```
 
 The bundle is ad-hoc signed. For distribution it still needs a Developer ID

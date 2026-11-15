@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>LazeCode Native</string>
+    <string>LazeCode</string>
     <key>CFBundleExecutable</key>
     <string>LazeCode</string>
     <key>CFBundleIconFile</key>

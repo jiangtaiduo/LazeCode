@@ -46,6 +46,9 @@ jobs:
           CODESIGN_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: ./scripts/build-app.sh
 
+      - name: Build DMG
+        run: ./scripts/build-dmg.sh
+
       - name: Collect and verify release artifacts
         run: |
           set -euo pipefail
@@ -90,6 +93,7 @@ jobs:
             dist/LazeCode.app \
             "release-artifacts/LazeCode-${VERSION}-macos-$(uname -m).app.zip"
           cp "$TARBALL" release-artifacts/
+          cp "dist/LazeCode_${VERSION}_"*.dmg release-artifacts/
           # Published under a native-specific name: the legacy Tauri updater
           # reads `latest.json` on the release it points at, and that schema
           # must stay untouched for users still on the 0.2.0 app.

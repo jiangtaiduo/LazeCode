@@ -1,9 +1,9 @@
 {
-  "version": "0.4.5",
-  "url": "https://raw.githubusercontent.com/jiangtaiduo/LazeCode/main/releases/LazeCode-0.4.5-macos-aarch64.app.tar.gz",
-  "sha256": "811a9b31dcd308c3f8c2e478e1be808109e710a39865255ef8889a085e52b905",
-  "signature": "ouQIbpx8IuGUZAP49VmJnLKu/gkK2a5UiNIjbRGNjexBCxB79imqvmm3m5Wum9fnTjuApTd+4JcYLFmrhDPwAw==",
-  "notes": "LazeCode 0.4.5",
+  "version": "0.4.6",
+  "url": "https://raw.githubusercontent.com/jiangtaiduo/LazeCode/main/releases/LazeCode-0.4.6-macos-aarch64.app.tar.gz",
+  "sha256": "50b6143a2ab8f07f7514ddcfa912975291fab564b84946219fddc81f770206e2",
+  "signature": "5W/HTq3ZrcTBNZ6s8Z/9TntyXsWt1Ucw4IPoIIlTcRMafQd3PFQ/lABlauGX0uDdL87vhD5Yma1Gdi8fJjjSDA==",
+  "notes": "LazeCode 0.4.6",
   "arch": "aarch64",
   "kind": "app-bundle"
 }

@@ -118,7 +118,7 @@ jobs:
           # must stay untouched for users still on the 0.2.0 app.
           cp latest.json release-artifacts/latest-native.json
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: release-artifacts/*
           generate_release_notes: true

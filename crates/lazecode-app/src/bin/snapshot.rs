@@ -263,7 +263,11 @@ fn main() -> anyhow::Result<()> {
     if let Some((tab_id, group)) = pending_jump {
         runtime.diff_scroll = Some((tab_id, group));
     }
-    if mode.starts_with("update") {
+    if mode == "update_failed" {
+        runtime.update_open = true;
+        runtime.update.error =
+            Some("network error: failed to fetch the signed manifest: connection refused".into());
+    } else if mode.starts_with("update") {
         runtime.update_open = true;
         let update_available = mode != "update_uptodate";
         runtime.update.available = Some(lazecode_core::updater::CheckOutcome {

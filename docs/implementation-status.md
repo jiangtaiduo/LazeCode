@@ -352,9 +352,8 @@ test against real `rust-analyzer`
   default to the repository's signed channel (raw `main/latest.json` plus the
   pinned release public key) with automatic checking on; pre-updater settings
   with empty strings are migrated to those defaults.
-- automatic checks run five seconds after launch and at most once per 24
-  hours (`last_update_check_time`); they only fetch the manifest and never
-  download or install. `ignored_update_version` suppresses the badge/toast
+- automatic checks run five seconds after each launch (`last_update_check_time`); they only
+  fetch the manifest and never download or install. `ignored_update_version` suppresses the badge/toast
   for one version while leaving manual checks available. Settings → Updates
   shows the last check, the ignored version, the endpoint/key and a manual
   check entry.

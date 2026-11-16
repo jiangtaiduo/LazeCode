@@ -19,9 +19,9 @@ use crate::runtime::{DialogState, UiRuntime};
 use crate::theme::Theme;
 use crate::widgets::{checkbox, primary_button, secondary_button_enabled};
 
-/// Automatic checks are throttled to one per day, matching the stable app.
-pub const AUTO_CHECK_INTERVAL_SECS: i64 = 24 * 60 * 60;
-/// Delay after launch before the first automatic check.
+/// Delay after launch before the automatic check. Each launch checks once;
+/// a manifest fetch is tiny and this keeps a newly published release visible
+/// immediately after the user restarts.
 pub const AUTO_CHECK_DELAY: Duration = Duration::from_secs(5);
 
 /// Phase of the background update task.
@@ -335,10 +335,7 @@ impl UpdateState {
 
         if !self.auto_checked {
             self.auto_checked = true;
-            if model.settings.auto_check_updates
-                && model.settings.updates_configured()
-                && check_is_due(unix_now(), model.settings.last_update_check_time)
-            {
+            if model.settings.auto_check_updates && model.settings.updates_configured() {
                 self.auto_check_at = Some(Instant::now() + AUTO_CHECK_DELAY);
             }
         }
@@ -608,12 +605,6 @@ impl UpdateState {
             },
         })
     }
-}
-
-/// The automatic check is due when it has never run, the clock moved
-/// backwards, or a full day elapsed.
-pub fn check_is_due(now: i64, last: i64) -> bool {
-    last <= 0 || now < last || now.saturating_sub(last) >= AUTO_CHECK_INTERVAL_SECS
 }
 
 /// Compare versions while tolerating a leading `v` on either side.
@@ -1346,14 +1337,6 @@ fn draw_footer(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn daily_throttle_handles_clock_skew_and_never_checked() {
-        assert!(check_is_due(1_000, 0));
-        assert!(check_is_due(1_000, 2_000));
-        assert!(!check_is_due(1_000 + AUTO_CHECK_INTERVAL_SECS - 1, 1_000));
-        assert!(check_is_due(1_000 + AUTO_CHECK_INTERVAL_SECS, 1_000));
-    }
 
     #[test]
     fn ignored_versions_tolerate_a_leading_v() {

@@ -1142,8 +1142,8 @@ fn updates(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme,
         Align2::LEFT_CENTER,
         crate::tr!(
             model,
-            "Five seconds after launch, then at most once per 24 hours (no download starts).",
-            "启动 5 秒后检查，24 小时内最多一次（不会自动下载）。"
+            "Five seconds after launch, once per launch (no download starts).",
+            "启动 5 秒后检查，每次启动一次（不会自动下载）。"
         ),
         FontId::proportional(10.5),
         p.text3,

@@ -17,8 +17,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   an ignore-this-version choice and a restart confirmation when editors have
   unsaved changes. The title bar shows an update pill for available,
   downloading and restart-ready builds. Automatic checks run five seconds
-  after launch at most once per day and never install without an explicit
-  click.
+  after each launch and never install without an explicit click.
 - Release manifests now carry changelog-derived release notes and an optional
   display date; tag releases verify the committed manifest against the
   artifact before packaging.

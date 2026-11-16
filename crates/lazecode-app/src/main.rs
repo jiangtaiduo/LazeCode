@@ -1471,6 +1471,13 @@ impl ApplicationHandler<AppEvent> for LazeApp {
         let mut deadline = now + self.repaint_after.min(std::time::Duration::from_secs(1));
         if frame_pending && !self.pacer.occluded {
             deadline = deadline.min(self.pacer.next);
+        } else if frame_pending {
+            // Do not turn an occluded window's pending frame into a zero-delay
+            // wait loop: just poll its state at a low cadence until visible.
+            deadline = deadline.max(now + std::time::Duration::from_millis(100));
+        }
+        if deadline <= now {
+            deadline = now + std::time::Duration::from_millis(1);
         }
         deadline = deadline.min(self.last_watch_poll + std::time::Duration::from_millis(600));
         deadline = deadline.min(self.last_vcs_poll + std::time::Duration::from_secs(2));

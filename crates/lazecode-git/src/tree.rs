@@ -50,9 +50,8 @@ pub fn collect_tree(
     Ok(())
 }
 
-/// True when the tree contains a submodule gitlink. Submodules are not
-/// materialised by this crate, so write paths must refuse rather than silently
-/// dropping them.
+/// True when the tree has a submodule gitlink; write paths must refuse since
+/// submodules are not materialised here.
 #[allow(clippy::only_used_in_recursion)]
 pub fn tree_has_gitlinks(repo: &gix::Repository, tree: gix::Tree<'_>) -> Result<bool> {
     for entry in tree.iter() {

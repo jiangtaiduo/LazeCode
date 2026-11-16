@@ -312,14 +312,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
-/// Atomic write guarded by git's lock-file protocol: create `<path>.lock`
-/// exclusively first (failing when another writer already holds it), write
-/// into it, then rename it over the target.
-///
-/// [`write_atomic`] is last-writer-wins on purpose for ordinary files; the
-/// Git index instead expects `index.lock` semantics where a concurrent writer
-/// must be refused rather than silently dropped on the floor. Used by the
-/// rollback paths that overwrite the index outside `gix`'s own writer.
+/// Atomic write with git's lock-file protocol: create `<path>.lock`
+/// exclusively, write, rename. Used where a concurrent writer must be refused
+/// rather than silently overwritten.
 pub fn write_atomic_locked(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let file_name = path
@@ -371,11 +366,7 @@ pub fn write_atomic_locked(path: &Path, bytes: &[u8]) -> Result<()> {
     lock_result
 }
 
-/// Move a file or directory to the system trash instead of unlinking it.
-///
-/// 稳定版的 Delete（未跟踪文件 / 项目树删除）全部走废纸篓（trash::delete），
-/// 这里保持同一语义：误删可从废纸篓找回，失败时把底层错误原样抛给调用方
-/// 提示（对齐稳定版 `移入废纸篓失败: {e}`）。
+/// Move a file or directory to the system trash; failures surface verbatim.
 pub fn move_to_trash(path: &Path) -> Result<()> {
     trash::delete(path).map_err(|err| FsError::Write {
         path: path.to_path_buf(),

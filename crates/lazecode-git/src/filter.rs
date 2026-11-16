@@ -1,10 +1,5 @@
-//! Git clean/smudge conversion pipeline.
-//!
-//! Git stores canonical bytes (LF, collapsed `$Id$`, LFS pointer, user filter
-//! output) and materialises worktree bytes on checkout. The pure-Rust write
-//! path must apply the same conversions or a file changes merely by being
-//! staged/checked out. User `filter.<driver>.clean|smudge` commands and hooks
-//! are user external processes; the `git` binary is not used.
+//! Git clean/smudge pipeline: worktree bytes must match what Git would
+//! materialise, without invoking the `git` binary.
 
 use std::io::{Read, Write};
 use std::path::Path;

@@ -131,9 +131,8 @@ pub struct UiState {
     pub tree_reveal: Option<(std::path::PathBuf, bool)>,
     /// 树定位闪烁的目标路径及触发时间（单次定位时高亮/闪烁）。
     pub locate_flash: Option<(std::path::PathBuf, std::time::Instant)>,
-    /// 分支比较会话（数据缓存 + 双侧 UI 状态）。稳定版的比较页是常驻
-    /// 标签（换 ref 不丢状态），对话框方案下挂在 UiState 以便后台任务
-    /// 回填，重开对话框保留上次比较。
+    /// Branch comparison session (data plus both UI sides), kept across
+    /// dialog openings so the last comparison survives.
     pub compare_branches: CompareBranchesState,
 }
 
@@ -211,9 +210,8 @@ impl Default for UiState {
             commit_width: 330.0,
             compare_width: 320.0,
             panel_visible: true,
-            // Consoles are opened explicitly. A restored workspace keeps its
-            // terminal tabs, but the initial home screen must not show the
-            // console toggle as active before any console exists.
+            // Consoles open explicitly; the home screen must not show the
+            // toggle as active before one exists.
             terminal_visible: false,
             branch_search_open: false,
             panel_tab: PanelTab::Console,
@@ -287,9 +285,8 @@ pub struct FileTab {
     pub md_mode: MarkdownViewMode,
     pub annotate: bool,
     pub blame: Option<Vec<lazecode_git::BlameLine>>,
-    /// Last observed disk metadata. A periodic fallback checks this so an
-    /// external editor cannot leave a stale buffer behind even if a native
-    /// watcher event is missed.
+    /// Last observed disk metadata, checked periodically so a missed watcher
+    /// event cannot leave a stale buffer.
     pub disk_stamp: Option<DiskStamp>,
 }
 
@@ -301,9 +298,8 @@ impl FileTab {
     pub fn disk_changed(&self) -> bool {
         match DiskStamp::read(&self.doc.path) {
             Some(stamp) => self.disk_stamp != Some(stamp),
-            // A file removed by another tool is also an external change; the
-            // reload attempt will surface the error instead of silently
-            // keeping the old buffer.
+            // A file removed elsewhere is an external change too; reload
+            // surfaces the error instead of keeping the old buffer.
             None => self.disk_stamp.is_some(),
         }
     }
@@ -770,10 +766,8 @@ pub struct ProjectState {
     pub branch_query: String,
     /// Expanded directory paths of the Git log branch tree.
     pub ref_dirs_expanded: std::collections::HashSet<String>,
-    /// Multi-selection of the branch tree (full ref names).
-    /// 分支树多选（**点击顺序**保留：多选恰两个时「比较分支」以第 1 个
-    /// 为 left、第 2 个为 right，对齐稳定版；HashSet 的随机序会导致左右
-    /// 随机互换）。
+    /// Branch-tree multi-selection in click order: comparing exactly two uses
+    /// the first as left and the second as right.
     pub ref_selection: Vec<String>,
     pub favorites: std::collections::HashSet<String>,
     /// Directories whose children are hidden in the commit-details file tree.
@@ -838,14 +832,11 @@ pub struct ProjectState {
 }
 
 impl ProjectState {
-    /// The singleton ad-hoc editor workspace used by "Open" when the user
-    /// selects files instead of a folder. It deliberately has no tree, Git
-    /// snapshot, branches or watcher: files can come from any directory, and
-    /// the console starts in the user's home directory.
+    /// Virtual "Single files" workspace for files chosen via Open: no tree,
+    /// Git state or watcher, consoles start in HOME.
     pub fn single_files() -> Self {
-        // A virtual checkout that groups ad-hoc files without turning the
-        // user's home directory into a project. It has no tree, Git, or
-        // watcher; consoles override their cwd to HOME.
+        // Virtual checkout for ad-hoc files: no tree, Git state or watcher;
+        // consoles override their cwd to HOME.
         let root = crate::settings::Settings::config_dir().join("Single files");
         let _ = std::fs::create_dir_all(&root);
         let name = "Single files".to_string();
@@ -979,9 +970,8 @@ impl ProjectState {
             (Vec::new(), Vec::new(), None)
         };
         let init_dirs = expanded_ref_dirs(&branches);
-        // Tags are part of the initial branch-menu inventory. The git-log
-        // refresh also reloads them later, but waiting for that job leaves the
-        // first menu without a Tags section.
+        // Tags belong to the initial branch menu; the log refresh reloads them
+        // later, but waiting for it would leave the first menu without Tags.
         let tags = if git.is_some() {
             lazecode_git::tags(&root).unwrap_or_default()
         } else {
@@ -1366,9 +1356,8 @@ impl ProjectState {
         self.change_anchor = None;
     }
 
-    /// Switch to an already attached worktree, or attach one that exists in
-    /// Git but is not yet loaded into the model. Returns `Ok(Some(()))` when
-    /// a new worktree was attached, `Ok(None)` when it was already loaded.
+    /// Switch to an attached worktree or attach an existing one; returns whether
+    /// it was newly attached.
     pub fn ensure_worktree(&mut self, name: &str) -> Result<Option<()>, String> {
         if let Some(index) = self.worktree_index(name) {
             self.focus_worktree(index);
@@ -1794,9 +1783,8 @@ impl ProjectState {
         self.open_terminal_in(cwd, command, title, kind, settings, notifier)
     }
 
-    /// Open a console tab with a single pane inside the active worktree
-    /// rooted at `cwd` (which differs for linked worktrees). Returns the pane
-    /// id, which is what every focus/close/restart API speaks.
+    /// Open a console tab with one pane rooted at `cwd`; returns the pane id
+    /// used by every focus/close/restart call.
     pub fn open_terminal_in(
         &mut self,
         cwd: PathBuf,
@@ -1835,9 +1823,7 @@ impl ProjectState {
         Ok(pane_id)
     }
 
-    /// Split the tab that owns `pane_id`, adding a fresh shell pane and
-    /// making it active. Mirrors stable `splitPane` (max 4 panes per tab,
-    /// plain shell in the same worktree directory).
+    /// Split the tab owning `pane_id`, adding a shell pane (max 4 per tab).
     pub fn split_terminal(
         &mut self,
         pane_id: u64,
@@ -2002,9 +1988,8 @@ fn spawn_pane(
         cols: 110,
         rows: 28,
         scrollback,
-        // Cold history extends the hot budget onto disk; image data uses the
-        // user-facing soft target, protected for visible placements in the
-        // terminal cache.
+        // Cold history extends the hot budget onto disk; the image soft target
+        // protects visible placements.
         cold_lines: scrollback.saturating_mul(8),
         cold_bytes: if is_agent {
             AGENT_COLD_BYTES
@@ -2280,9 +2265,8 @@ impl AppModel {
             )
     }
 
-    /// Open one or more files in the singleton "Single files" workspace.
-    /// Opening a directory always goes through `open_project`/`OpenProject`
-    /// instead and therefore switches to that real project.
+    /// Open files in the "Single files" workspace; directories always go
+    /// through `open_project` instead.
     pub fn open_files(&mut self, paths: Vec<PathBuf>) -> Result<usize, String> {
         if paths.is_empty() {
             return Err("no files selected".to_string());
@@ -2480,10 +2464,8 @@ impl AppModel {
         self.settle_single_files_workspace();
     }
 
-    /// If the active Single files checkout just lost its last file, leave it:
-    /// return to an open project, or go back to the empty home when there is
-    /// nothing else. An empty checkout is only kept when it owns consoles and
-    /// is the sole workspace (the hidden console host).
+    /// Leave an emptied "Single files" checkout: fall back to an open project
+    /// or the home screen, keeping it only when it owns consoles and is sole.
     pub fn settle_single_files_workspace(&mut self) {
         let Some(index) = self.active_project else {
             return;
@@ -2582,9 +2564,8 @@ impl AppModel {
         self.toasts.retain(|toast| toast.expires > now);
     }
 
-    /// Drive the optional language-server integration: apply protocol events,
-    /// start servers for open buffers, send debounced document changes and
-    /// close sessions whose files disappeared. Called once per rendered frame.
+    /// Drive the LSP integration once per frame: apply events, start servers,
+    /// send debounced changes, close disappeared files.
     pub fn sync_lsp(&mut self) {
         if self.lsp.enabled() != self.settings.lsp_enabled {
             self.lsp.set_enabled(self.settings.lsp_enabled);
@@ -2651,9 +2632,8 @@ impl AppModel {
             .map(|project| project.changes().len())
             .sum()
     }
-    /// 定位当前活动编辑器标签在文件树中的位置（对齐稳定版 locateActiveInTree 逻辑）。
-    /// quiet = true：切换标签时自动跟随（不产生刺眼闪烁，滚动到可见区域）；
-    /// quiet = false：手动点击定位按钮触发（中心对齐并带高亮闪烁动画）。
+    /// Reveal the active tab in the tree: `quiet` scrolls into view, otherwise
+    /// centre it with the highlight pulse.
     pub fn locate_active_file(&mut self, quiet: bool) {
         let Some(active_index) = self.active_project else {
             return;
@@ -2891,12 +2871,8 @@ fn unique_project_tone(
         .find(|tone| !used.contains(tone))
         .unwrap_or(fallback)
 }
-/// Language-server workspace root for one open file.
-///
-/// A linked worktree has its own checkout and therefore its own server; the
-/// longest matching worktree root wins. Single-file projects register their
-/// parent directory as the root, so files outside a project still get a valid
-/// server root (a file path as `current_dir` would fail at spawn).
+/// Longest matching worktree root wins; standalone files register their
+/// parent directory so `current_dir` is valid at spawn.
 fn lsp_root_for(project: &ProjectState, path: &Path) -> PathBuf {
     project
         .worktrees

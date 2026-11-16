@@ -242,14 +242,8 @@ pub fn flatten_file_tree(
     out
 }
 
-// ================= 页面渲染（稳定版 CompareBranchesView 的移植） =================
-//
-// 1:1 对齐稳定版 cb-* 视觉规格：
-//   上下两个 pane（grid split，8px 分隔条持久化 settings.compare_split），
-//   每个 pane = 28px 琥珀色 banner（方向语义 + 上侧 Swap）→ 30px 过滤工具行
-//   （搜索框内嵌 .*/Cc、⑂/User/Date/Paths、清除 ×、右侧 graph/refresh）→
-//   [26px 提交日志（DAG + 引用章 + 作者/日期）| 详情列（26px 头部 + 文件树
-//   + 元信息，宽度两侧共用 24-62%）]。
+// Page rendering: port of the stable CompareBranchesView (two panes, amber
+// banner, filter row, commit log + detail column).
 
 use crate::icons::{paint as paint_icon, Icon};
 use crate::runtime::UiRuntime;
@@ -905,6 +899,7 @@ fn draw_pane(
             input,
             TextEdit::singleline(&mut query)
                 .frame(egui::Frame::NONE)
+                .align(egui::Align2::LEFT_CENTER)
                 .hint_text(crate::tr!(model, "Text or hash", "搜索提交、哈希或作者"))
                 .font(FontId::proportional(12.5)),
         );
@@ -1485,6 +1480,7 @@ fn draw_pane(
             input.shrink2(Vec2::new(6.0, 2.0)),
             TextEdit::singleline(&mut edit)
                 .frame(egui::Frame::NONE)
+                .align(egui::Align2::LEFT_CENTER)
                 .hint_text(crate::tr!(model, "path", "路径"))
                 .font(FontId::proportional(12.5)),
         );
@@ -2222,10 +2218,9 @@ fn draw_chevron(painter: &egui::Painter, center: Pos2, open: bool, color: Color3
     }
 }
 
-/// 按稳定版规则打开文件 diff：
-/// - ⌘A 整侧：merge-base..side（无 merge-base 退化对侧端点）；
-/// - 多选：最老选中提交的父提交..最新选中提交（根提交用空树）；
-/// - 单选：该提交自身。
+/// File-diff source, stable rules: ⌘A whole side = merge-base..side; multi
+/// selection = parent of oldest..newest (empty tree for a root); else the
+/// commit itself.
 #[allow(clippy::too_many_arguments)]
 fn open_file_diff(
     model: &mut AppModel,

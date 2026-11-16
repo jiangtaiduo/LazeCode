@@ -1,9 +1,5 @@
-//! Unified-diff parsing and application.
-//!
-//! This replaces `git apply` for the patch viewer's apply/revert actions. It
-//! intentionally supports the textual subset Git emits for tracked text files:
-//! add, delete, modify, mode changes and multiple files. Binary/rename patches
-//! are rejected instead of being applied incorrectly.
+//! Unified-diff parsing/application for tracked text files (add, delete,
+//! modify, mode changes). Binary and rename patches are rejected.
 
 use anyhow::{anyhow, bail, Result};
 
@@ -118,9 +114,8 @@ pub fn parse(patch: &str) -> Result<Vec<FilePatch>> {
                 is_delete: false,
                 hunks: Vec::new(),
             });
-            // The ---/+++ headers carry the authoritative paths. Just record
-            // the b-side path so a patch with only `diff --git` still fails
-            // loudly instead of guessing from a quoted pair.
+            // The ---/+++ headers carry the authoritative paths; without a
+            // b-side path fail loudly instead of guessing from the diff header.
             let _ = rest;
             continue;
         }

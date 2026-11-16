@@ -1,8 +1,5 @@
-//! Single-file blame and file history, via the `git` porcelain (gix's blame
-//! implementation is still primitive in 0.90), plus submodule inventory and
-//! native LFS status/track (patterns and `.gitattributes` are handled here;
-//! remote LFS pull is explicitly unimplemented rather than shelling out to
-//! `git lfs`).
+//! Blame and file history via `git` (gix blame is primitive), plus submodule
+//! inventory and native LFS status/track.
 
 use std::path::Path;
 
@@ -383,12 +380,8 @@ fn run_args(root: &Path, args: &[&str], tail: &[String]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// 双向分支比较（对齐稳定版 git_compare_branches）：
-/// - 每侧提交 = `git log {other}..{side}`（topo 序），多取 1 条探测截断；
-/// - 每侧文件 = `git diff --no-renames {other}...{side}`（三点 =
-///   merge-base..side，只统计该侧独有变更；失败不拖垮提交列表，退化为空）；
-/// - `left_path`/`right_path` 同时作用于提交日志与文件清单；
-/// - `limit` 夹在 1..=10000。
+/// Two-sided branch comparison (`git log {other}..{side}` and
+/// `git diff {other}...{side}`); optional path filters, `limit` in 1..=10000.
 pub fn compare_branches(
     root: &Path,
     left: &str,

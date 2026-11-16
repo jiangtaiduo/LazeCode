@@ -33,9 +33,7 @@ pub trait Notifier: Send + Sync {
     fn notify(&self);
 }
 
-/// Fixed identifier for the single-window embed. `rio-vt` routes events by
-/// `WindowId`; LazeCode keeps one window per process, and sessions are
-/// addressed via the app's own session ids.
+/// Fixed id for the single-window embed; sessions are addressed by app ids.
 static WINDOW_ID: std::sync::LazyLock<WindowId> = std::sync::LazyLock::new(|| WindowId::from(0));
 const ROUTE_ID: usize = 0;
 
@@ -178,9 +176,8 @@ pub struct CellData {
 }
 
 impl Default for CellData {
-    /// A blank cell: transparent background, default foreground. (`ColorSpec`'s
-    /// own default is `DefaultFg`, which would paint the whole cell with the
-    /// text color if it were used for `bg`.)
+    /// Blank cell: transparent bg, default fg (`ColorSpec` defaults to
+    /// `DefaultFg`, which would paint the cell with the text colour).
     fn default() -> Self {
         Self {
             ch: '\0',
@@ -248,9 +245,8 @@ pub struct KittyImage {
     pub generation: u64,
 }
 
-/// Hard sanity caps for a terminal geometry. A layout glitch (an absurd
-/// rectangle or a zero-sized font metric) must never turn into a gigantic
-/// grid or snapshot buffer; real terminals stay far below these limits.
+/// Sanity caps for terminal geometry, so a layout glitch cannot allocate a
+/// gigantic grid or snapshot buffer.
 const MAX_COLS: u16 = 1_024;
 const MAX_ROWS: u16 = 512;
 
@@ -312,12 +308,8 @@ pub struct TerminalMatch {
     pub len: usize,
 }
 
-/// Hot/cold scrollback split state.
-///
-/// The VT grid keeps at most `hot_cap` history lines; anything older is
-/// written to `store`. `slack` is the transient headroom the ring may grow
-/// into between two observation points (one parser slice can scroll at most
-/// one line per byte), so no row can be evicted before it is spooled.
+/// Hot/cold split: `hot_cap` lines stay in RAM, older rows go to `store`;
+/// `slack` is headroom so no row is evicted before it is spooled.
 struct SpoolState {
     store: Option<ColdStore>,
     spooled_through: u64,
@@ -325,11 +317,8 @@ struct SpoolState {
     slack: usize,
 }
 
-/// Textures the frontend still has to upload (or drop).
-///
-/// The queue is bounded by the session's graphics budget: only the active
-/// pane's draw drains it, so a background console producing kitty images
-/// would otherwise accumulate decoded RGBA without limit.
+/// Textures awaiting upload/drop, bounded by the graphics budget (only the
+/// active pane drains it).
 #[derive(Default)]
 struct GraphicsQueue {
     images: Vec<KittyImage>,
@@ -358,28 +347,18 @@ pub(crate) struct Shared {
     /// reader thread can pin it while history keeps growing.
     view_offset: AtomicUsize,
     graphics: Mutex<GraphicsQueue>,
-    /// Soft target for decoded Kitty image bytes. Visible placements are
-    /// protected above this value; the parser only evicts used images when
-    /// the hard cap (4x the soft target) is reached.
+    /// Soft target for decoded Kitty image bytes; visible placements are
+    /// protected up to the hard cap (4x).
     graphics_soft_limit: usize,
-    /// Byte cap for the pending-kitty-image queue (`GraphicsQueue`). Only the
-    /// active pane drains that queue, so a background console producing
-    /// graphics needs its own admission limit beyond rio-vt's parser cache.
+    /// Byte cap for the pending-image queue; only the active pane drains it, so
+    /// background consoles need their own limit.
     graphics_queue_bytes: usize,
     notifier: Option<Arc<dyn Notifier>>,
 }
 
 impl Shared {
-    /// Wake the UI for output. High-throughput sessions can produce tens of
-    /// thousands of PTY reads per second; unthrottled wakes saturate the event
-    /// loop and starve input handling (the "long output freezes" symptom).
-    /// Reader-batch wakes are coalesced to at most one per 16ms — the frame
-    /// rate the UI repaints at anyway — while explicit state changes (swap-in
-    /// of a child exit, kill, scroll) always go through immediately.
-    ///
-    /// A trailing batch inside the window arms a one-shot timer so the final
-    /// frame is not lost when output stops (an unfocused console would
-    /// otherwise stay visually stale).
+    /// Coalesce reader wakes to one per 16ms; explicit state changes go
+    /// through immediately, and a trailing batch arms a one-shot timer.
     fn notify_output(self: &Arc<Self>) {
         self.wake.fetch_add(1, Ordering::Relaxed);
         let now = now_ms();
@@ -399,12 +378,8 @@ impl Shared {
                             }
                         }
                         shared.timer_running.store(false, Ordering::Relaxed);
-                        // A reader can set `pending_notify` in the window
-                        // between the swap above and this `store(false)`: it
-                        // observed `timer_running == true` and did not arm a
-                        // new timer. This final drain keeps that trailing
-                        // frame from stranding; a reader that arrives after
-                        // the store re-arms normally.
+                        // A reader that observed `timer_running` just before the
+                        // store above would strand its batch; drain once more.
                         if shared.pending_notify.swap(false, Ordering::Relaxed) {
                             shared.last_notify_ms.store(now_ms(), Ordering::Relaxed);
                             if let Some(notifier) = &shared.notifier {
@@ -777,9 +752,8 @@ fn fill_row(row: &Row<Square>, styles: &[Style], extras: &ExtrasTable, out: &mut
     }
 }
 
-/// Maximum number of bytes fed to the parser between two scrollback spool
-/// observations. One byte can scroll at most one line, so a slice this small
-/// can never overflow the ring's slack and lose a row before it is spooled.
+/// Max bytes fed to the parser between spool observations; one byte scrolls at
+/// most one line, so the ring's slack is never exceeded.
 const PARSE_SLICE: usize = 1024;
 
 /// Move history that fell out of the hot window into the disk spool and shrink
@@ -831,10 +805,9 @@ fn spool_scrollback(
         term.grid.update_history(spool.hot_cap);
         term.grid.update_history(spool.hot_cap + spool.slack);
     }
-    // Shrinking the ring leaves `evicted + history` (the absolute id of the
-    // first screen row) unchanged, so this only counts lines the slice pushed
-    // into history. A viewport scrolled back stays pinned to the same content
-    // by following that growth.
+    // `evicted + history` (the first screen row's id) is unchanged by
+    // shrinking, so this counts only lines pushed into history; a scrolled-back
+    // viewport follows that growth to stay pinned.
     let total_after = term.grid.lines_evicted() + term.history_size() as u64;
     if total_after > total_before && view_offset.load(Ordering::Relaxed) > 0 {
         view_offset.fetch_add((total_after - total_before) as usize, Ordering::Relaxed);
@@ -896,15 +869,8 @@ pub struct BusyTarget {
     pub shell: String,
 }
 
-/// Whether `name` (a `ps comm` value) is the session's idle shell.
-///
-/// The app spawns login shells, and macOS `ps` reports a login shell with a
-/// leading dash (`-zsh`, `-/bin/zsh`) because that is `argv[0]`. A command
-/// that `exec`'d over the shell pid shows a plain name without the dash
-/// (`omp`, `fish`), so allow-list shell names only count as idle in their
-/// dash form — matching any shell name made `exec fish` look idle. An exact
-/// match of the configured shell stays idle either way; `exec <configured
-/// shell>` remains indistinguishable from the idle prompt by `ps` alone.
+/// A login shell shows as `-zsh` in `ps comm`; only dash forms count as idle,
+/// otherwise `exec fish` over the shell pid would look idle.
 fn is_shell_name(name: &str, shell: &str) -> bool {
     let basename = |value: &str| {
         std::path::Path::new(value)
@@ -938,9 +904,8 @@ fn busy_from_entries(entries: &[(u32, String)], _shell_pid: Option<u32>, shell: 
         if name.is_empty() {
             continue;
         }
-        // Match by name, not pid: macOS can report the shell under a
-        // parenthesised name or hand the tty to a re-exec'd shell, and the
-        // pid recorded at spawn then no longer identifies it.
+        // Match by name, not pid: macOS may re-exec or rename the shell, and
+        // the recorded spawn pid no longer identifies it.
         if is_shell_name(name, shell) {
             continue;
         }
@@ -972,9 +937,8 @@ fn parse_busy_output(stdout: &str, shell_pid: Option<u32>, shell: &str) -> BusyI
     busy_from_entries(&entries, shell_pid, shell)
 }
 
-/// Probe all targets with one `ps` snapshot. A command is anything attached to
-/// the tty other than the idle shell itself. If `zsh -lc omp` exec'd the
-/// command, the shell PID now runs omp, so it is correctly reported as busy.
+/// Probe all targets with one `ps` snapshot: anything on the tty besides the
+/// idle shell is a command (`zsh -lc omp` exec'd omp over the shell pid).
 pub fn probe_busy_many(targets: &[BusyTarget]) -> Vec<BusyInfo> {
     #[cfg(unix)]
     {
@@ -1062,14 +1026,9 @@ fn modes_from(term: &Crosswords<Proxy>) -> Modes {
     }
 }
 
-/// Fill `out` with the visible kitty image placements in the snapshot's
-/// absolute line space. Reuses the caller's buffer so a repainting UI does not
-/// allocate per frame.
-/// Drop unused/inactive kitty images until the soft target is met. Images
-/// with a live placement (including omp's virtual placeholder chips) and
-/// images transmitted in the last two seconds are protected: a paste burst
-/// can temporarily exceed the soft target rather than blanking visible
-/// pictures. The parser's hard cap still bounds total memory at 4x.
+/// Drop unused/inactive kitty images until the soft target is met. Live
+/// placements and images from the last two seconds are protected; the parser's
+/// hard cap still bounds total memory at 4x.
 fn trim_graphics_to_soft(graphics: &mut Graphics, soft_limit: usize) {
     if graphics.total_bytes <= soft_limit {
         return;
@@ -1095,15 +1054,11 @@ fn trim_graphics_to_soft(graphics: &mut Graphics, soft_limit: usize) {
     let unused_bytes = graphics.total_bytes.saturating_sub(used_bytes);
     let need = (graphics.total_bytes - soft_limit).min(unused_bytes);
     if need > 0 {
-        // `evict_images` is a no-op while total + required fits under
-        // `total_limit`. Temporarily lower the limit to the soft target so
-        // the unused-image tier is actually trimmed; visible/recent images
-        // are in `used`, so the requested amount comes from unused data.
+        // Lower the limit to the soft target so the unused-image tier is
+        // trimmed; visible/recent images are in `used`.
         let hard_limit = graphics.total_limit;
-        // `evict_images` reserves `required_bytes` for an upcoming store and
-        // frees `total + required - limit`. Pass zero and lower the limit by
-        // exactly the excess we want to drop, so a large unused image does
-        // not cause an unnecessary second eviction.
+        // Pass zero required bytes and lower the limit by the excess to free,
+        // so one large unused image does not trigger a second eviction.
         graphics.total_limit = graphics.total_bytes.saturating_sub(need);
         graphics.evict_images(0, &used);
         graphics.total_limit = hard_limit;
@@ -1305,11 +1260,7 @@ impl Session {
         self.shared.notify();
     }
 
-    /// Read the grid, the spool and the visible viewport into `snap`.
-    ///
-    /// Rows older than the hot history are rehydrated from the disk spool, so
-    /// the UI addresses one continuous history space no matter where a line
-    /// lives.
+    /// Fill `snap` from the grid, spool and viewport so history is continuous.
     pub fn snapshot_into(&self, snap: &mut Snapshot) {
         let mut term = self.term.lock();
         trim_graphics_to_soft(&mut term.graphics, self.shared.graphics_soft_limit);
@@ -1473,12 +1424,8 @@ impl Session {
         self.store_view_offset(target);
     }
 
-    /// Case-insensitive search across hot scrollback + screen + cold spool.
-    ///
-    /// Walks the whole grid with rio-vt's DFAs (`regex_search_right` from
-    /// the topmost history line through the last screen line), then scans the
-    /// spooled rows. Every hit maps back to an absolute line index (negative =
-    /// history, including cold history) for the UI.
+    /// Case-insensitive search over hot grid plus cold spool; hits map to
+    /// absolute line indices (negative = history).
     pub fn search(&self, query: &str) -> Vec<TerminalMatch> {
         if query.is_empty() {
             return Vec::new();
@@ -1804,11 +1751,8 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
     command.env("TERM_PROGRAM", "LazeCode");
     command.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
     command.env("LAZECODE", "1");
-    // omp decides its inline-image protocol and Unicode-placeholder use from
-    // environment whitelists. It does not know LazeCode, so without these it
-    // falls back to a text `img` chip. The terminal now composites both direct
-    // Kitty placements and virtual Unicode placeholder runs (see
-    // `virtual_runs_into`).
+    // omp picks its image protocol from environment whitelists; advertise
+    // LazeCode so it uses kitty placements / virtual placeholders.
     command.env("PI_FORCE_IMAGE_PROTOCOL", "kitty");
     command.env("PI_KITTY_PLACEHOLDERS", "1");
     command.env("SHELL", &shell);
@@ -1851,10 +1795,9 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
                 std::io::Error::last_os_error()
             ));
         }
-        // NOTE: do not set O_NONBLOCK here. The reader fd shares its open file
-        // description with the PTY master (dup), so `O_NONBLOCK` would also
-        // apply to the writer and turn large writes into partial `EAGAIN`
-        // writes. Readiness comes from the `poll` below instead.
+        // NOTE: no O_NONBLOCK on the reader: it shares the open file
+        // description with the writer, which would turn large writes into
+        // `EAGAIN` partials. Readiness comes from `poll` below.
         dup
     };
     #[cfg(unix)]
@@ -2909,10 +2852,9 @@ mod tests {
         session.set_cell_size(8.0, 16.0);
         let mut snap = Snapshot::default();
         await_echo(&session, &mut snap);
-        // `f=100` is the PNG format code. Decoding compressed payloads needs
-        // rio-vt's `graphics` feature, and even with it this body is not an
-        // image: either way the request must be dropped without wedging the
-        // parser or the session.
+        // `f=100` is the PNG format code; without the `graphics` feature this
+        // payload cannot be decoded, so drop the request without wedging the
+        // parser.
         let apc = format!(
             "\x1b_Ga=T,q=2,f=100,i=22;{}\x1b\\",
             base64(b"definitely not a png")
@@ -3051,10 +2993,8 @@ mod tests {
 
     #[test]
     fn pending_graphics_queue_is_bounded_when_never_drained() {
-        // A background console is never drawn, so nothing calls
-        // `take_graphics_updates`. The pending queue must cap itself at the
-        // session's graphics budget instead of accumulating every decoded
-        // RGBA payload until the pane is finally viewed.
+        // A background console never drains `take_graphics_updates`, so the
+        // pending queue caps itself at the session's graphics budget.
         let dir = tempfile::tempdir().expect("tempdir");
         let mut files = Vec::new();
         for index in 1..=10u32 {

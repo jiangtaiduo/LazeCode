@@ -1,11 +1,5 @@
-//! Stable project rail: the narrow column under the titlebar lists every open
-//! project. The tool buttons that used to live here now live in the titlebar;
-//! the rail keeps its only footer action (open another project) plus the
-//! per-project console-activity ring.
-//!
-//! The rail is intentionally independent from the file/commit drawer: it is
-//! the fast project switcher, while the top-bar project card remains the
-//! affordance for the active project's menu (worktrees, close, open).
+//! Project rail: narrow project switcher under the titlebar with the open
+//! button and per-project console-activity ring.
 
 use egui::{pos2, vec2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2};
 use lazecode_core::{AppModel, Command};
@@ -193,9 +187,8 @@ fn paint_activity_border(
     }
     const RING_STROKE: f32 = 2.25;
     let ring_color = if activity.outputting {
-        // Stable draws a dim red frame while outputting; the moving dash is
-        // the only bright red element. A full-bright frame hides the dash and
-        // makes any path error look like a spike.
+        // Stable draws a dim red frame while outputting; only the moving dash
+        // is bright, so a path error does not look like a spike.
         p.rose.gamma_multiply(0.45)
     } else {
         p.running

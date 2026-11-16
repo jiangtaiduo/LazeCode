@@ -1,8 +1,5 @@
-//! Stash and shelves ("贮藏架"). Stash is native: stash/index/untracked
-//! commits, `refs/stash` reflog, apply/pop/drop, keep-index and untracked
-//! handling. Shelves are LazeCode-owned patch files under
-//! `.git/lazecode-shelves/`; save, full restore and path-filtered partial
-//! restore are all native (HEAD/worktree diff generation + patch applier).
+//! Stash (native commits/reflog) and shelves (patch files under
+//! `.git/lazecode-shelves/`, full or path-filtered restore).
 
 use std::path::Path;
 
@@ -370,11 +367,8 @@ enum StashAction {
     Delete,
 }
 
-/// Bytes for a plain `Write` action. Plain writes store the blob id and are
-/// smudged at write time: a stash that also updates `.gitattributes` must
-/// apply the new attributes to the remaining files, matching checkout (which
-/// keeps per-file lookup for the same reason). Three-way merge output already
-/// carries conflict markers and cannot be re-derived, so it stays as-is.
+/// Plain writes are smudged at write time so a stash touching
+/// `.gitattributes` applies the new attributes to the remaining files.
 enum WritePayload {
     Blob(gix::hash::ObjectId),
     Merged(Vec<u8>),
@@ -672,7 +666,7 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
                 StashAction::Write { mode, payload } => {
                     let data = match payload {
                         WritePayload::Blob(oid) => {
-                            // Smudge with the attributes in effect *now* so a
+                            // Smudge with current attributes so a
                             // `.gitattributes` updated earlier in this stash
                             // governs the remaining files, like checkout.
                             let blob = blob_bytes(&repo, oid)?;
@@ -700,9 +694,8 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
                     }
                 }
             }
-            // Materialising a `.gitattributes` file changes the semantics for
-            // every later file in this stash; rebuild the shared attribute
-            // session (checkout keeps per-file lookup for the same reason).
+            // Materialising `.gitattributes` changes later files' semantics;
+            // rebuild the shared attribute session.
             if path == ".gitattributes" || path.ends_with("/.gitattributes") {
                 filters = crate::filter::FilterContext::new(&repo)?;
             }
@@ -790,9 +783,8 @@ fn shelves_dir(root: &Path) -> std::path::PathBuf {
     }
 }
 
-/// Shelf names become file names under `.git/lazecode-shelves`. Reject path
-/// separators, `..`, control characters and the reserved `.`/`..` names so a
-/// rename/import cannot escape that directory.
+/// Shelf names become file names under `.git/lazecode-shelves`; reject
+/// separators, `..`, control chars and `.`/`..`.
 fn sanitize_shelf_name(name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty()
@@ -847,14 +839,8 @@ pub fn shelf_list(root: &Path) -> Result<Vec<ShelfEntry>> {
     Ok(out)
 }
 
-/// Shelve the current tracked/untracked changes as a named patch in the
-/// repo's private store; equivalent of IDE "shelve changes".
-///
-/// `paths` 为空时等价于「架藏全部已跟踪变更」（旧 `shelf_save` 语义）；
-/// 否则只生成并撤回这些路径的变更（含未跟踪文件，对齐稳定版「只架藏
-/// 勾选文件」的行为）。撤回复用 `discard_file_changes`：它对 HEAD 中存在
-/// 的文件走 `checkout HEAD --`（索引+工作区同时复位，避免只 `checkout --`
-/// 时暂存区残留），对新增文件删盘并清索引。
+/// Shelve tracked/untracked changes as a named patch; empty `paths` means all
+/// tracked changes. Restore reuses `discard_file_changes` (index + worktree).
 pub fn shelf_save(root: &Path, name: &str) -> Result<()> {
     shelf_save_paths(root, name, &[])
 }
@@ -886,9 +872,8 @@ pub fn shelf_save_paths(root: &Path, name: &str, paths: &[String]) -> Result<()>
     }
     lazecode_fs::file::write_atomic(&file, output.as_bytes())
         .map_err(|err| anyhow!("cannot write shelf: {err}"))?;
-    // Retract exactly the shelved paths (patch paths when shelving all) so
-    // the worktree no longer shows them. Reuse the single-file discard so
-    // staged-new files are removed from disk *and* index.
+    // Retract exactly the shelved paths; reuse single-file discard so
+    // staged-new files leave both disk and index.
     let retract: Vec<String> = if paths.is_empty() {
         patch_paths(&output)
     } else {
@@ -910,10 +895,8 @@ pub fn shelf_save_paths(root: &Path, name: &str, paths: &[String]) -> Result<()>
     Ok(())
 }
 
-/// Unified patch limited to `paths`: `git diff HEAD -- paths` for tracked
-/// entries plus a `--no-index` pseudo-diff against /dev/null for each
-/// untracked file (they never appear in `git diff`). Port of the stable
-/// version's patch builder used by shelve/copy-patch flows.
+/// Unified patch limited to `paths`: `git diff HEAD` for tracked files plus a
+/// `/dev/null` pseudo-diff per untracked file.
 pub fn diff_patch_paths(root: &Path, paths: &[String]) -> Result<String> {
     if paths.is_empty() {
         return Ok(String::new());
@@ -1040,10 +1023,8 @@ pub fn shelf_files(root: &Path, name: &str) -> Result<Vec<String>> {
     Ok(patch_paths(&patch))
 }
 
-/// Extract the new-side path of every file section from a unified patch.
-/// `--no-index` creation sections carry `--- /dev/null`; the `diff --git`
-/// header still names the real path on both sides, so the b-side parse
-/// covers them uniformly.
+/// New-side path of every file section; `--no-index` creation sections still
+/// name the real path in the `diff --git` header.
 fn patch_paths(patch: &str) -> Vec<String> {
     let mut paths = Vec::new();
     for line in patch.lines() {

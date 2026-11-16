@@ -1,10 +1,6 @@
-//! Verify a signed update manifest against the public key pinned in the app.
-//!
+//! Verify a signed update manifest with the pinned public key:
 //! `cargo run -p lazecode-core --example verify_update_manifest -- latest.json`
-//!
-//! Used by the release workflow: the macOS runner's default `openssl`
-//! (1.1.1w) cannot sign or verify Ed25519 through `pkeyutl`, while the app's
-//! own verifier uses ring and works everywhere.
+//! Used by the release workflow (macOS openssl 1.1.1w cannot do Ed25519).
 
 fn main() -> anyhow::Result<()> {
     let path = std::env::args()

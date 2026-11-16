@@ -1,9 +1,5 @@
-//! Installed-font discovery for the Settings → Font pickers.
-//!
-//! macOS keeps a few fonts (notably PingFang) inside `AssetsV2`, so hard-coded
-//! file paths are not reliable. `fontdb` uses CoreText's platform directories,
-//! including the asset fonts, and reports stable family names plus the face
-//! index inside `.ttc` collections.
+//! Installed-font discovery for the Settings pickers, via `fontdb` (covers
+//! fonts inside `AssetsV2` and `.ttc` faces).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -114,20 +110,16 @@ pub fn face(family: &str) -> Option<&'static FontFace> {
         .find(|face| face.family.eq_ignore_ascii_case(family))
 }
 
-/// Load a face for egui without copying the file into the heap.
+/// Load a face without copying it into the heap.
 ///
 /// # Safety
-/// The mapping is read-only; font files are system assets and are not
-/// modified while the app runs.
+/// Read-only mapping of system font assets.
 pub fn load(face: &FontFace) -> Option<FontData> {
     load_path(&face.path, face.index)
 }
 
-/// Load any font file without copying its bytes into the heap.
-///
-/// `FontData::from_blob` keeps the mapping alive for as long as egui uses the
-/// face, so fallback fonts (including the 184 MiB emoji collection) stay
-/// file-backed instead of inflating the dirty footprint.
+/// Load any font file via `FontData::from_blob`, keeping the mapping file-backed
+/// (the 184 MiB emoji collection stays out of the heap).
 pub fn load_path(path: &std::path::Path, index: u32) -> Option<FontData> {
     let file = std::fs::File::open(path).ok()?;
     let mmap = unsafe { memmap2::Mmap::map(&file).ok()? };

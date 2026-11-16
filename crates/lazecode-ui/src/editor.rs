@@ -718,9 +718,8 @@ fn draw_image_tab(
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gif"));
     let (dims_str, texture, uri, image_error, loading) = if is_gif {
-        // The GIF loader animates frames, which the static decoder below
-        // cannot reproduce. Its cache is flushed whenever the set of GIF tabs
-        // changes (see `UiRuntime::prune_media_caches`).
+        // The GIF loader animates frames; its cache is flushed whenever the set
+        // of GIF tabs changes.
         let dims = image::image_dimensions(&img.path)
             .ok()
             .map(|(w, h)| format!("{} × {} px", w, h))
@@ -1005,9 +1004,8 @@ fn draw_file_inner(
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(500));
     }
-    // A modal surface owns the keyboard even when it has no text field (e.g.
-    // settings or a confirmation dialog). Otherwise typing behind it would
-    // silently edit the focused buffer.
+    // A modal surface owns the keyboard even without a text field; otherwise
+    // typing would edit the focused buffer behind it.
     let overlays_open = rt.blocks_input(model);
     let mut pending: Vec<Command> = Vec::new();
     let mut hover_cursor: Option<Cursor> = None;
@@ -1052,8 +1050,7 @@ fn draw_file_inner(
                 .is_some_and(|pos| input_rect.contains(pos))
         {
             // `Response::hovered` can be shadowed by a transparent interaction
-            // layer on the same pass; containment is the authoritative test
-            // for the editor's I-beam cursor.
+            // layer; containment decides the I-beam cursor.
             ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
         }
         if response.clicked() || response.dragged() {
@@ -1130,9 +1127,8 @@ fn draw_file_inner(
             doc.scroll_line = (offset / line_h).clamp(0.0, (max_scroll / line_h).max(0.0));
         }
 
-        // Render visible lines. Text is clipped to the content column; the
-        // gutter (line numbers and blame) needs its own clip because it lives
-        // to the left of `content`.
+        // Text is clipped to the content column; the gutter needs its own clip
+        // because it lives to the left of `content`.
         let painter = ui.painter().with_clip_rect(content);
         let gutter_painter = ui.painter().with_clip_rect(gutter);
         let sel = doc.selection_char_range();
@@ -1587,9 +1583,7 @@ fn handle_editor_input(
     let _ = (tab_id, pending);
 }
 
-/// Handle keys while the completion popup is open. Returning `true` consumes
-/// the event; `Enter`/`Tab` insert the selected item, typing closes the popup
-/// and lets the character through.
+/// Keys while the completion popup is open; `true` consumes the event.
 fn handle_completion_event(
     doc: &mut Document,
     rt: &mut UiRuntime,
@@ -2857,6 +2851,7 @@ fn draw_find(
         query_rect,
         TextEdit::singleline(&mut rt.find.query)
             .frame(egui::Frame::NONE)
+            .align(egui::Align2::LEFT_CENTER)
             .hint_text(crate::i18n::t(lang, "Find", "查找"))
             .font(FontId::proportional(12.5)),
     );
@@ -2919,6 +2914,7 @@ fn draw_find(
         field,
         TextEdit::singleline(&mut rt.find.replacement)
             .frame(egui::Frame::NONE)
+            .align(egui::Align2::LEFT_CENTER)
             .hint_text(crate::i18n::t(lang, "Replace", "替换为"))
             .font(FontId::proportional(12.5)),
     );

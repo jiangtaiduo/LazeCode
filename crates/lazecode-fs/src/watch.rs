@@ -6,17 +6,11 @@ use std::time::Duration;
 #[derive(Clone, Debug, Default)]
 pub struct WatchBatch {
     pub changed: Vec<PathBuf>,
-    /// A change under the project's top-level `.git` (index, HEAD, refs,
-    /// worktree metadata) that must refresh the source-control snapshot even
-    /// when no working-tree file changed, e.g. a commit made by another tool.
-    /// A `.git` deeper inside the tree (a vendored nested repository) does
-    /// not affect this repo's status and must not trigger a refresh.
+    /// A change under the project's top-level `.git` that must refresh the
+    /// source-control snapshot (nested `.git` dirs do not count).
     pub git_changed: bool,
-    /// Events under a default-ignored directory (node_modules, .venv, ...)
-    /// never enter `changed`, but they still invalidate the Git ignored-file
-    /// cache so its listing cannot go stale. They do not trigger a full VCS
-    /// refresh; the next snapshot (watcher Git event or the periodic
-    /// fallback) picks the refreshed listing up.
+    /// Events under default-ignored dirs never enter `changed`, but they
+    /// invalidate the ignored-file cache.
     pub ignored_touched: bool,
 }
 
@@ -104,11 +98,8 @@ pub fn watch_project(root: &Path) -> anyhow::Result<ProjectWatcher> {
 fn push_event(batch: &mut WatchBatch, event: notify::Result<notify::Event>, root: &Path) {
     let Ok(event) = event else { return };
     use notify::EventKind;
-    // Git metadata events must be detected before dropping metadata/other
-    // events: ref updates and index rewrites commonly arrive as metadata or
-    // coalesced events. They refresh the Git snapshot without reloading the
-    // whole file tree. Only the watched root's own `.git` counts — a nested
-    // repository (vendor/lib/.git) does not change this repo's status.
+    // Git metadata events can arrive as metadata or coalesced events, so they
+    // are detected before dropping. Only the watched root's own `.git` counts.
     if event.paths.iter().any(|path| is_top_level_git(root, path)) {
         batch.git_changed = true;
     }

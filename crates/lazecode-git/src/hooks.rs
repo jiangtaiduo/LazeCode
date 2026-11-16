@@ -1,10 +1,5 @@
-//! Git hook discovery and execution.
-//!
-//! The pure-Rust write path must keep Git's observable hook semantics: a
-//! failing `pre-commit`/`commit-msg`/`pre-push` hook aborts the operation, and
-//! hooks may edit the commit message file or the worktree. Hooks are user
-//! external processes (the same trust class as the user's shell), not the
-//! `git` binary.
+//! Git hook discovery and execution: a failing hook aborts the operation and
+//! hooks are user processes, not the `git` binary.
 
 use std::path::Path;
 use std::process::{Command, Stdio};

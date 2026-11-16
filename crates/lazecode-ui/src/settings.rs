@@ -237,6 +237,7 @@ fn font_picker(
             ui.set_min_width(260.0);
             ui.add(
                 egui::TextEdit::singleline(&mut filter)
+                    .align(egui::Align2::LEFT_CENTER)
                     .hint_text(crate::tr!(model, "Search fonts", "搜索字体"))
                     .desired_width(f32::INFINITY),
             );
@@ -693,6 +694,7 @@ fn terminal(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         field.shrink2(Vec2::new(7.0, 3.0)),
         TextEdit::singleline(&mut shell)
             .frame(egui::Frame::NONE)
+            .align(egui::Align2::LEFT_CENTER)
             .hint_text("$SHELL")
             .font(FontId::monospace(10.5)),
     );
@@ -836,6 +838,7 @@ fn agents(ui: &mut Ui, model: &mut AppModel, theme: &Theme, rect: Rect) {
                         name_rect,
                         TextEdit::singleline(&mut option.name)
                             .frame(egui::Frame::NONE)
+                            .align(egui::Align2::LEFT_CENTER)
                             .font(FontId::proportional(11.5))
                             .hint_text(crate::tr!(model, "Agent name", "智能体名称")),
                     );
@@ -849,6 +852,7 @@ fn agents(ui: &mut Ui, model: &mut AppModel, theme: &Theme, rect: Rect) {
                         command_rect,
                         TextEdit::singleline(&mut option.command)
                             .frame(egui::Frame::NONE)
+                            .align(egui::Align2::LEFT_CENTER)
                             .font(FontId::monospace(11.0))
                             .hint_text(crate::tr!(model, "login shell", "登录 Shell")),
                     );
@@ -963,6 +967,7 @@ fn files(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, r
         input_field.shrink2(Vec2::new(7.0, 3.0)),
         TextEdit::singleline(&mut rt.new_ignore_pattern)
             .frame(egui::Frame::NONE)
+            .align(egui::Align2::LEFT_CENTER)
             .hint_text("e.g. .venv, build, *.log")
             .font(FontId::monospace(10.5)),
     );
@@ -1113,6 +1118,7 @@ fn labelled_input(
         input.shrink2(Vec2::new(7.0, 3.0)),
         TextEdit::singleline(value)
             .frame(egui::Frame::NONE)
+            .align(egui::Align2::LEFT_CENTER)
             .hint_text(hint)
             .font(FontId::monospace(10.5)),
     );

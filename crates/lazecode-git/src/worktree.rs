@@ -1,11 +1,5 @@
-//! Linked worktree management for one repository.
-//!
-//! Enumerating, creating and removing worktrees is implemented directly on
-//! `gix`, so the semantics (branch occupancy checks, registration on the
-//! common dir, reflog) match the Git CLI without an external binary.
-//!
-//! Listing is keyed by checkout path so the UI can attach consoles, tree
-//! views and watchers per worktree, with the main worktree always first.
+//! Linked worktree management on `gix`, keyed by checkout path with the main
+//! worktree first.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -21,9 +15,8 @@ fn canonical(path: &Path) -> PathBuf {
 }
 
 fn branch_of_worktree(base: &Path) -> Option<String> {
-    // Only HEAD matters here. A full snapshot (status + untracked walk +
-    // ignored dirwalk + per-file diff stats) per member made one
-    // `list_worktrees` call cost one full snapshot per worktree.
+    // Only HEAD is read here; a full snapshot per member made
+    // `list_worktrees` cost one snapshot per worktree.
     crate::discover(base)
         .ok()?
         .head()
@@ -43,10 +36,7 @@ pub fn main_worktree(root: &Path) -> Result<PathBuf> {
     Ok(canonical(&base))
 }
 
-/// List all worktrees of the repository containing `root`.
-///
-/// The main worktree is always first (even when called from a linked
-/// worktree); linked worktrees follow sorted by name.
+/// List the repository's worktrees: main first, linked ones sorted by name.
 pub fn list_worktrees(root: &Path) -> Result<Vec<WorktreeInfo>> {
     let repo = discover(root)?;
     let main = main_worktree(root)?;
@@ -85,11 +75,8 @@ pub fn is_linked_worktree(root: &Path) -> Result<bool> {
     Ok(discover(root)?.kind() == gix::repository::Kind::LinkedWorkTree)
 }
 
-/// Create a linked worktree at `destination` and check out `branch`.
-///
-/// Insists on the Git CLI semantics: the branch must exist and must not be
-/// checked out in any other worktree, and `destination` must be absent or an
-/// unregistered location. Any partial checkout is rolled back on failure.
+/// Create a linked worktree at `destination` for `branch`, which must exist
+/// and be unchecked out elsewhere; partial checkouts roll back.
 pub fn add_worktree(root: &Path, destination: &Path, branch: &str) -> Result<PathBuf> {
     let repo = discover(root)?;
     let full = format!("refs/heads/{branch}");
@@ -125,9 +112,7 @@ pub fn add_worktree_detached_at_head(root: &Path, destination: &Path) -> Result<
     ))
 }
 
-/// Remove a linked worktree.
-///
-/// Without `force` we mirror Git: a dirty or locked worktree is refused.
+/// Remove a linked worktree; without `force` a dirty or locked one is refused.
 pub fn remove_worktree(root: &Path, target: &Path, force: bool) -> Result<()> {
     let repo = discover(root)?;
     let level = if force {

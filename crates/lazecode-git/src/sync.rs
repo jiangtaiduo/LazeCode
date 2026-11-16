@@ -1,6 +1,5 @@
-//! Remote sync. Push, fetch, clone and fast-forward-only pull use native gix
-//! transport (push speaks receive-pack directly); pull merge/rebase still
-//! uses the `git` porcelain until the merge sequencer lands.
+//! Remote sync: push, fetch, clone and fast-forward-only pull use native gix
+//! transport; pull merge/rebase still uses `git`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -80,10 +79,9 @@ pub fn remote_set_url(root: &Path, name: &str, url: &str) -> Result<()> {
 
 // ---------------- sync operations ----------------
 
-/// Push the current branch to `remote` using the native receive-pack
-/// protocol. `force` bypasses the client-side fast-forward check; the command
-/// still carries the last known remote oid, so a changed remote is rejected by
-/// the server (force-with-lease semantics).
+/// Push the current branch via native receive-pack. `force` skips the local
+/// fast-forward check but still sends the last known remote oid
+/// (force-with-lease).
 pub fn push(
     root: &Path,
     remote: &str,
@@ -118,9 +116,8 @@ pub fn pending_commits(
     )
 }
 
-/// Delete a branch on the remote. `full_name` is the remote-tracking name
-/// shown by the UI, e.g. `origin/docs-only`. The local remote-tracking ref is
-/// removed after the remote confirms deletion.
+/// Delete a remote branch (`full_name` is e.g. `origin/docs-only`) and its
+/// tracking ref after the server confirms.
 pub fn delete_remote_branch(root: &Path, full_name: &str) -> Result<String> {
     let (remote, branch) = full_name
         .split_once('/')
@@ -195,9 +192,8 @@ pub fn fetch_all(root: &Path) -> Result<String> {
         .join("\n"))
 }
 
-/// Upper bound on one blocking fetch. gix's transport can hang on a dropped
-/// connection that never sends FIN; the watchdog then flips the interrupt
-/// flag so the job thread (and the UI toast waiting on it) is released.
+/// Upper bound on one blocking fetch: a dropped connection may never send FIN,
+/// so the watchdog flips the interrupt flag to release the job thread.
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 fn prune_remote_tracking(
@@ -238,9 +234,8 @@ fn fetch_remote(repo: &gix::Repository, name: &str) -> Result<()> {
         gix::remote::ref_map::Options::default(),
     )?;
     let interrupt = Arc::new(AtomicBool::new(false));
-    // The watchdog flips the interrupt flag when the fetch exceeds the
-    // timeout; `done_tx` releases it as soon as receive returns so the
-    // sleeping watchdog never accumulates.
+    // The watchdog flips the interrupt flag on timeout; `done_tx` releases it
+    // when receive returns, so sleeping watchdogs do not accumulate.
     let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
     {
         let interrupt = Arc::clone(&interrupt);
@@ -363,9 +358,7 @@ pub fn clone(url: &str, destination: &Path) -> Result<PathBuf> {
     Ok(destination.to_path_buf())
 }
 
-/// Commits on the current branch that no remote-tracking branch contains
-/// (rough `git log @{u}..` estimate — falls back to counting commits not on
-/// origin/<branch>).
+/// Commits not on any remote-tracking branch (`git log @{u}..` estimate).
 pub fn pending_count(root: &Path, branch: &str) -> Result<usize> {
     crate::status::pending_count(root, branch)
 }

@@ -32,11 +32,8 @@ impl FileTree {
 
 const DEFAULT_MAX_ENTRIES: usize = 20_000;
 
-/// Scan `root` into a nested tree.
-///
-/// Hidden files and git-ignored files are skipped. `.git` is always skipped.
-/// If the scan exceeds `max_entries` the result is marked `truncated`; the UI
-/// surfaces that instead of silently pretending the project is complete.
+/// Scan `root` into a nested tree (hidden, ignored and `.git` skipped).
+/// Exceeding `max_entries` marks the result `truncated`.
 pub fn load_tree(root: &Path) -> FileTree {
     load_tree_filtered(root, DEFAULT_MAX_ENTRIES, None)
 }

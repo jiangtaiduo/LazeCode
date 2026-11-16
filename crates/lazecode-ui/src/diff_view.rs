@@ -1,11 +1,5 @@
-//! Monaco DiffEditor replication — unified & side-by-side bodies.
-//!
-//! Stable renders the diff page through Monaco (`DiffEditor`) with the
-//! theme.css overrides `.line-insert #2c4134`, `.line-delete #482b2b`,
-//! `.char-insert #385542`, `.char-delete #5e3436`, ~20px rows, a two-column
-//! gutter, the current-change outline (`.diff-hunk-active-box`, 1px #3574f0 +
-//! glow) and the right-edge overview ruler. Rows measure
-//! `round(fontSize * 1.5)` with the default `editorFontSize: 13` → 20px.
+//! Monaco `DiffEditor` replication for unified and side-by-side diffs (stable
+//! colours, 20px rows, two-column gutter, active-hunk outline, overview ruler).
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, ScrollArea, Sense, Stroke, StrokeKind, Vec2};
 use lazecode_text::{count_change_groups, inline_diff, DiffHunk, DiffLineKind, InlineChunkKind};

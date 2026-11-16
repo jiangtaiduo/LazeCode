@@ -1,13 +1,5 @@
-//! Cold (disk-backed) scrollback spool.
-//!
-//! `rio-vt` keeps the last ``hot`` history lines in its in-memory grid. Lines
-//! that would roll out of that window are serialised here, keyed by the
-//! terminal's stable absolute row id (`grid.lines_evicted()` base), so the
-//! scrollback can grow past the RAM budget without unbounded memory use.
-//!
-//! The spool is an append-only file with an in-memory index; the oldest lines
-//! are evicted once either budget is exceeded and the file is compacted when
-//! the dead fraction grows, so disk usage stays bounded too.
+//! Disk-backed cold scrollback spool keyed by absolute row id: grows past the
+//! RAM budget without unbounded memory or disk use.
 
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
@@ -49,10 +41,8 @@ pub struct ColdStore {
 }
 
 impl ColdStore {
-    /// Create a spool in the system temp directory.
-    ///
-    /// `line_budget`/`byte_budget` bound the retained rows; both are clamped
-    /// to sane minimums so a misconfigured zero cannot make the spool useless.
+    /// Create a spool in temp; budgets bound retained rows and are clamped to
+    /// sane minimums.
     pub fn create(line_budget: usize, byte_budget: usize) -> std::io::Result<Self> {
         let line_budget = line_budget.max(1);
         let byte_budget = byte_budget.max(4096);
@@ -115,13 +105,8 @@ impl ColdStore {
         self.file_len
     }
 
-    /// Append a run of encoded rows whose ids start at `first_id`.
-    ///
-    /// Ids must increase: the index is ordered by id so a visible row can be
-    /// resolved with a binary search. A stale or replayed batch is dropped
-    /// instead of corrupting that order. Rows exceeding the byte budget are
-    /// recorded as zero-length placeholders so the id of every later row keeps
-    /// matching the grid's stable absolute row ids.
+    /// Append encoded rows starting at `first_id`. Ids must increase (the index
+    /// is binary-searched); oversized rows become zero-length placeholders.
     pub fn append_rows(&mut self, first_id: u64, rows: &[Vec<u8>]) {
         if rows.is_empty() {
             return;
@@ -187,20 +172,14 @@ impl ColdStore {
         if self.dead_bytes > COMPACT_MIN_BYTES && self.dead_bytes > self.live_bytes as u64 {
             if let Err(err) = self.compact() {
                 log::warn!("cold scrollback spool compaction failed: {err}");
-                // The store stays consistent (compact commits its new layout
-                // only on success), so retrying is safe. Halving instead of
-                // zeroing keeps the retry from firing on every eviction while
-                // still re-attempting after more evictions accumulate.
+                // The store stays consistent across a failed compact, so
+                // retrying is safe; halving avoids firing on every eviction.
                 self.dead_bytes /= 2;
             }
         }
     }
 
-    /// Rewrite the live rows into a fresh file so evicted payload is released.
-    ///
-    /// The layout (`entry.offset`) is committed only after the new file is in
-    /// place: a failure mid-copy must leave every entry pointing at the old,
-    /// still-valid file rather than half at the temp file.
+    /// Copy live rows into a fresh file; offsets switch only after success.
     fn compact(&mut self) -> std::io::Result<()> {
         let tmp_path = self.path.with_extension("compact");
         let mut tmp = OpenOptions::new()
@@ -271,21 +250,15 @@ impl ColdStore {
     }
 
     fn index_of(&self, id: u64) -> Option<usize> {
-        // Ids are ordered but not necessarily contiguous: resize/reflow
-        // self-eviction jumps the spool cursor forward and oversized rows
-        // leave placeholders, so a `id - first` subtraction would resolve
-        // into the wrong row after any gap. Binary search keeps the mapping
-        // exact; gaps resolve to "not found" instead of a shifted row.
+        // Ids are ordered but not contiguous (reflow jumps, placeholders), so
+        // binary-search instead of subtracting `first`.
         self.entries
             .binary_search_by_key(&id, |entry| entry.id)
             .ok()
     }
 
-    /// Case-insensitive scan over every retained row.
-    ///
-    /// `emit(id, column, len)` receives the row's stable absolute line id plus
-    /// a column-span hit; scanning stops after `limit` hits. The id (not the
-    /// index) is what the terminal maps back into viewport coordinates.
+    /// Case-insensitive scan over retained rows; `emit` gets the absolute row
+    /// id plus column span, stopping after `limit` hits.
     pub fn search(
         &mut self,
         needle_lower: &str,
@@ -350,10 +323,8 @@ impl Drop for ColdStore {
     }
 }
 
-/// Text + column map for one decoded row.
-///
-/// Continuation cells of wide glyphs are skipped, matching the rendering and
-/// selection code paths.
+/// Text plus column map for one decoded row; wide-glyph continuation cells are
+/// skipped.
 pub fn row_text(cells: &[CellData]) -> (String, Vec<usize>) {
     let mut text = String::with_capacity(cells.len());
     let mut columns = Vec::with_capacity(cells.len());
@@ -620,11 +591,8 @@ mod tests {
 
     #[test]
     fn ids_with_gaps_resolve_exactly_instead_of_shifting() {
-        // A resize/reflow burst makes the session jump the spool cursor
-        // forward (session.rs), leaving a hole in the id range. `get_by_id`
-        // must binary-search rather than subtract, or rows after the hole
-        // would decode as their pre-hole neighbours and later ids would hit
-        // shifted rows.
+        // Reflow leaves gaps in the id range; binary-search or later rows
+        // resolve to their pre-gap neighbours.
         let mut store = ColdStore::create(100, 1 << 20).expect("create");
         let before = vec![
             encode_row(&row("before-gap")),

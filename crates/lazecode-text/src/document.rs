@@ -257,9 +257,8 @@ impl Document {
             }
         }
 
-        // Keep the caret near its pre-edit logical position. Applying edits
-        // back-to-front invalidates raw offsets, so map the old caret against
-        // the ascending list first.
+        // Map the old caret against the ascending edit list before applying
+        // back-to-front, which invalidates raw offsets.
         let old_index = self.char_index(self.cursor);
         let mut mapped = old_index as isize;
         for (start, end, text) in &specs {
@@ -782,9 +781,8 @@ impl Document {
     /// discarded because the old rope no longer matches the file.
     pub fn reload(&mut self) -> anyhow::Result<()> {
         let file = lazecode_fs::file::read_text_file(&self.path)?;
-        // The watcher also reports our own atomic-save rename. If the decoded
-        // bytes are identical there is nothing to reload; preserving the rope
-        // and undo history here keeps Cmd+Z working after Cmd+S.
+        // The watcher reports our own atomic save; identical bytes keep the rope
+        // and undo history intact.
         if self.rope.chars().eq(file.text.chars()) {
             self.encoding = file.encoding;
             self.eol = file.eol;

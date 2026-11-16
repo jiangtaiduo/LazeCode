@@ -1,8 +1,5 @@
-//! Git commit DAG layout and long-span folding algorithms.
-//!
-//! Fully deterministic prefix allocation matching PyCharm and LazeCode stable edition.
-//! Computes node lanes, incoming/outgoing merge curves, and long-span straight line
-//! folding with jump arrows (▲ / ▼).
+//! Git DAG lane layout and long-span folding: deterministic prefix allocation,
+//! merge curves, jump arrows.
 
 use std::collections::{HashMap, HashSet};
 

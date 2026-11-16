@@ -1,8 +1,5 @@
-//! Filesystem primitives for LazeCode: project trees, text files, search and
-//! change notification.
-//!
-//! The crate deliberately has no UI or Git knowledge; callers compose it with
-//! `lazecode-git` and `lazecode-text`.
+//! Filesystem primitives: project trees, text files, search and change
+//! notification. No UI or Git knowledge.
 
 pub mod file;
 pub mod search;

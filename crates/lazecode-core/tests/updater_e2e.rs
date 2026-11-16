@@ -1,12 +1,6 @@
-//! End-to-end coverage for the in-app updater over a real HTTP transport.
-//!
-//! `updater.rs` unit tests use `file://` sources; these exercise the same
-//! public flow against an actual local TCP server so the request path the
-//! production app uses (reqwest blocking + rustls) is covered: manifest
-//! fetch → signature verify → artifact download with SHA-256 → bundle
-//! install with backup. The `real_published_manifest_check` case is
-//! `#[ignore]`d: it talks to the live update endpoint and runs only when
-//! explicitly requested (network + a published release are required).
+//! Updater end-to-end over real HTTP (reqwest + rustls): manifest fetch,
+//! signature verify, SHA-256 download, bundle install. The live-endpoint case
+//! is `#[ignore]`d.
 
 use ring::signature::KeyPair;
 use std::io::{Read, Write};

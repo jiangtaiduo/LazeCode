@@ -1,9 +1,5 @@
-//! Pure-Rust Git integration built on `gix`.
-//!
-//! Read paths (status, log, branches, diffs) are implemented from Git
-//! primitives; write paths (stage, unstage, commit, branch switch) respect the
-//! index lock and explicitly refuse index formats whose extensions `gix-index`
-//! cannot preserve.
+//! Pure-Rust Git integration on `gix`. Write paths respect the index lock and
+//! refuse index formats gix cannot preserve.
 
 pub mod changelists;
 pub mod dag;
@@ -93,13 +89,8 @@ pub type Result<T, E = anyhow::Error> = std::result::Result<T, E>;
 /// reported as binary/size-unavailable instead of being loaded into memory.
 pub const MAX_STAGE_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Open options shared by every repository this crate opens.
-///
-/// `git clone`/`fetch`/`pull` work on a machine with no `user.name`/`user.email`
-/// (a fresh CI runner, for instance), but gix refuses ref updates unless a
-/// committer is resolvable for the reflog. gix's own clone entry point installs
-/// an in-memory fallback, but the repository is reopened for the fetch, so the
-/// fallback has to live in the open options. Real user configuration still wins.
+/// Open options shared by every repository: an in-memory committer fallback so
+/// clone/fetch work without `user.name` (real config still wins).
 pub(crate) fn open_options() -> gix::open::Options {
     gix::open::Options::default().config_overrides([
         "gitoxide.committer.nameFallback=LazeCode",

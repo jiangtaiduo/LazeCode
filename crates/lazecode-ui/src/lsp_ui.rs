@@ -1,10 +1,5 @@
-//! UI glue for the optional LSP client.
-//!
-//! The protocol lives in `lazecode_core::lsp`; this module owns the
-//! cross-frame provider state (hover tooltip, completion popup, symbol picker)
-//! and turns completed JSON-RPC responses into editor/model changes. Requests
-//! are ids; responses are polled once per frame, so no callback touches egui
-//! state from a server thread.
+//! UI glue for the optional LSP client: provider popups plus once-per-frame
+//! polling of completed responses.
 
 use std::time::{Duration, Instant};
 

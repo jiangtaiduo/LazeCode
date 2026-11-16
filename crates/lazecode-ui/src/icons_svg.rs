@@ -1,16 +1,6 @@
-//! Stable-app icon sources + rasterization.
-//!
-//! Every SVG below is extracted verbatim from the stable frontend
-//! (`src/components/FileIcons.tsx` on branch `main`), so icon geometry is
-//! pixel-identical to the web version. Monochrome icons (the stable set
-//! parameterises colour via `currentColor`) are normalised to white strokes
-//! and rasterised once into an alpha texture; the draw site tints the
-//! texture with the active palette colour. Multicolour icons (brand file
-//! icons, folders) are rasterised as-is and never tinted.
-//!
-//! Rasterization uses `resvg` (pure Rust) at 2× (32×32 for a 16×16 viewBox)
-//! so @2x displays render crisply; drawing scales the texture down with a
-//! linear filter.
+//! Icon sources extracted verbatim from the stable frontend. Monochrome icons
+//! rasterise to an alpha texture and are tinted at draw time; brand icons
+//! render as-is. Rasterised at 2x for crisp @2x output.
 
 use egui::{Color32, Context, Pos2, Rect, TextureHandle, TextureOptions};
 

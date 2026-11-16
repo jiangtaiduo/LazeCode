@@ -72,9 +72,8 @@ pub enum Icon {
     Graph,
     UpdateArrow,
 }
-/// Map an icon to its stable-app SVG source ("icons_svg::SVGS").
-/// `bool` = multicolor (brand palette baked in, draw without tint).
-/// Icons without a stable counterpart fall back to the hand-drawn vectors.
+/// Stable SVG source for an icon; `bool` = multicolour (draw without tint).
+/// Icons without a stable counterpart use the hand-drawn vectors.
 fn svg_of(icon: Icon) -> Option<(&'static str, bool)> {
     Some(match icon {
         Icon::Files => ("project", false),

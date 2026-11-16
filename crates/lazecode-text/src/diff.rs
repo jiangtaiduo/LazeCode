@@ -299,9 +299,8 @@ mod tests {
     }
 }
 
-/// Contiguous change-group count (Monaco `getLineChanges()` semantics): a
-/// maximal run of adjacent non-context lines is one group. Runs never span a
-/// hunk boundary (hunks are separated by ≥1 elided context line).
+/// Change-group count (Monaco `getLineChanges()`): a maximal run of adjacent
+/// non-context lines; runs never cross a hunk boundary.
 pub fn count_change_groups(hunks: &[DiffHunk]) -> usize {
     let mut groups = 0;
     let mut prev_change = false;

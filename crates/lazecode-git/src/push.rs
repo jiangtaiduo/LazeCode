@@ -1,8 +1,5 @@
-//! Native `git push` transport.
-//!
-//! gix 0.90 has no send-pack driver, so this module speaks receive-pack
-//! directly over the gix blocking transport: handshake, update commands,
-//! a self-contained zlib pack, and `report-status` parsing.
+//! Native `git push` over the gix blocking transport (gix 0.90 has no
+//! send-pack driver).
 
 use std::collections::HashSet;
 use std::io::Write;

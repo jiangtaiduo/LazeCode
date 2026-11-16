@@ -1,10 +1,5 @@
-//! In-app updater UI and its background task state.
-//!
-//! The core updater owns manifest parsing, signature/checksum verification
-//! and bundle installation. This module owns the user-visible state machine:
-//! a background check never downloads anything, an explicit "Update and
-//! restart" click downloads and installs, and the window remains responsive
-//! while the worker runs.
+//! In-app updater UI: checks are background-only, installs happen on explicit
+//! click, and the worker never blocks the window.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

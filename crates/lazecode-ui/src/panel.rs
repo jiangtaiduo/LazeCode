@@ -637,9 +637,8 @@ pub fn draw_terminal_dock(
         worktree.active_terminal = Some(pane_id);
         rt.set_terminal_focus(pane_id);
     }
-    // OSC titles are intentionally not mapped onto tab names: stable keeps
-    // the user-visible console title stable (a shell alias must not rename
-    // the tab).
+    // OSC titles are not mapped onto tab names: a shell alias must not rename
+    // the user-visible console tab.
 }
 
 /// Equal-size pane areas with a 1px gutter between neighbours.
@@ -1134,6 +1133,7 @@ fn draw_git_log(
         field_rect,
         TextEdit::singleline(&mut query_value)
             .frame(egui::Frame::NONE)
+            .align(egui::Align2::LEFT_CENTER)
             .hint_text(crate::tr!(
                 model,
                 "Filter commits, authors, refs",

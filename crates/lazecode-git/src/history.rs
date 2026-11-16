@@ -1,9 +1,6 @@
-//! History rewrite (merge/rebase/cherry-pick/revert/reset/drop/squash) and
-//! sequencer-state introspection. Reset, merge, rebase, cherry-pick, revert
-//! and conflict resolution are native (gix refs/index/tree/merge); only the
-//! interactive-rebase todo shim, drop/squash and a few read-only helpers still
-//! invoke the `git` porcelain. Every rewrite rejects a dirty worktree first
-//! (matching main's safety model) unless the caller explicitly passes `force`.
+//! History rewrite and sequencer introspection. Rewrites are native except the
+//! interactive-rebase todo shim, drop/squash and a few read-only helpers; a
+//! dirty worktree is rejected unless `force` is passed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -251,10 +248,8 @@ pub fn merge_continue(root: &Path) -> Result<String> {
 
 // ---------------- rebase ----------------
 
-/// Native rebase state, stored under `.git/rebase-merge/`. The directory name
-/// matches Git's merge backend so [`sequencer_state`] and the UI banner see an
-/// in-flight rebase; the `lazecode` marker distinguishes it from a rebase that
-/// the interactive porcelain started.
+/// Native rebase state under `.git/rebase-merge/` (Git's merge backend, so
+/// `sequencer_state` sees it); the `lazecode` marker identifies its origin.
 #[derive(Clone, Debug)]
 struct RebaseMeta {
     dir: std::path::PathBuf,
@@ -553,10 +548,9 @@ pub struct RebaseStep {
     pub commit: String,
 }
 
-/// 执行交互式变基：把 UI 编排好的 todo 写进临时文件，再用
-/// GIT_SEQUENCE_EDITOR 让 `git rebase -i` 直接采用该清单（不弹外部
-/// 编辑器）。GIT_EDITOR=true 使 reword 保留原提交信息（UI 暂无消息
-/// 编辑框）；edit 会停在对应提交，由面板的 Continue/Abort 接管。
+/// Run an interactive rebase from the UI's todo, via `GIT_SEQUENCE_EDITOR`
+/// (no external editor). `GIT_EDITOR=true` keeps reword messages; edit stops
+/// at the commit for Continue/Abort.
 pub fn rebase_interactive(root: &Path, onto: &str, steps: &[RebaseStep]) -> Result<String> {
     require_clean(root)?;
     let onto = validated_ref(onto)?;
@@ -643,10 +637,9 @@ fn parent_tree_of(repo: &gix::Repository, commit: &gix::Commit<'_>) -> Result<Ob
     }
 }
 
-/// Write a merged, conflicted tree into the worktree and index: conflict
-/// markers land in the files and stages 1/2/3 land in the index. `base_map` is
-/// the tree that was checked out before the operation, used to delete paths the
-/// merge drops. Everything is rolled back when any step fails.
+/// Write a merged, conflicted tree into the worktree and index (markers in
+/// files, stages 1/2/3 in the index); `base_map` drives deletions. Rolls back
+/// on failure.
 fn write_conflict_state(
     repo: &gix::Repository,
     base_map: &TreeMap,
@@ -1390,10 +1383,8 @@ pub fn checkout_revision(root: &Path, revision: &str) -> Result<String> {
     Ok(format!("checked out revision {revision}"))
 }
 
-/// Checkout an arbitrary ref (tag, branch, commit) detached. Unlike
-/// `checkout_revision`, this accepts human-readable ref names but resolves
-/// them to a commit hash before invoking checkout, so option-like input can
-/// never reach the Git command line.
+/// Detached checkout of any ref name; resolved to a hash first so option-like
+/// input cannot reach the Git command line.
 pub fn checkout_ref(root: &Path, spec: &str) -> Result<String> {
     let spec = spec.trim();
     if spec.is_empty() || spec.starts_with('-') {

@@ -91,12 +91,8 @@ fn ignored_entries_cached(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
     Ok((files, dirs))
 }
 
-/// Query entries ignored by `.gitignore` rules.
-///
-/// Mirrors `git status --ignored=matching`: ignored directories are reported
-/// as directory entries (for example `target/`) while individual ignored files
-/// are reported by path. The walk is native (`gix-dir`), not a `git` process.
-/// Returns `(all_ignored, ignored_dirs)`.
+/// Ignored entries, mirroring `git status --ignored=matching`: ignored
+/// directories are reported as `dir/`. Returns `(all_ignored, ignored_dirs)`.
 pub fn ignored_entries(root: &Path) -> Result<(Vec<String>, Vec<String>)> {
     let repo = discover(root)?;
     let index = repo.index_or_empty()?;
@@ -179,9 +175,8 @@ pub(crate) fn collect_changes(
     let mut conflicted: HashSet<String> = HashSet::new();
     for entry in index_entries {
         if entry.stage() != gix::index::entry::Stage::Unconflicted {
-            // Unmerged stages are conflicts, not untracked files. Keep the
-            // path out of the unstaged walks so the UI can show the Merge
-            // Conflicts subgroup and offer Resolve.
+            // Unmerged stages are conflicts, not untracked files; keep them out
+            // of the unstaged walks so the UI can show Resolve.
             conflicted.insert(entry.path(&index).to_string());
             continue;
         }

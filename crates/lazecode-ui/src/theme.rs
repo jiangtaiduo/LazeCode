@@ -5,13 +5,8 @@ use egui::{
 
 use lazecode_core::ThemeMode;
 
-/// Design tokens ported verbatim from the stable app (branch `main`):
-/// `src/styles/theme.css` (structure) + `src/styles/variants/variant-1.css`
-/// (macOS Native dark, default) + `variant-2.css` (macOS Native light).
-/// Every colour used by the shell comes from here; views never hard-code
-/// RGB values. Panel fills carry the stable glass alpha — the window body
-/// paints the stable gradient underneath, so translucent panels read as
-/// Liquid Glass exactly like the web version.
+/// Design tokens ported from the stable app's theme CSS; views never
+/// hard-code colours.
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
     pub bg: Color32,
@@ -56,9 +51,8 @@ pub struct Palette {
     pub diff_add_strong: Color32,
     pub diff_del: Color32,
     pub diff_del_strong: Color32,
-    /// Monaco DiffEditor overrides in stable theme.css: `.line-insert` #2c4134,
-    /// `.line-delete` #482b2b, `.char-insert` #385542, `.char-delete` #5e3436.
-    /// Hard-coded (not theme vars) in stable — identical in both variants.
+    /// Monaco diff overrides from stable theme.css: insert #2c4134/#385542,
+    /// delete #482b2b/#5e3436 (hard-coded in both variants).
     pub diff_line_add: Color32,
     pub diff_line_del: Color32,
     pub diff_char_add: Color32,
@@ -416,12 +410,8 @@ impl Theme {
     }
 }
 
-/// Install the macOS system fonts so the shell matches the design instead of
-/// falling back to egui's bundled Ubuntu/Hack defaults. The default UI stack
-/// mirrors the stable `--font-ui` (SF Pro → PingFang SC → CJK fallbacks),
-/// but Chinese mode puts PingFang SC first so mixed CJK/Latin runs and
-/// punctuation share one set of metrics instead of switching fonts per glyph.
-/// Users can override the UI, editor and terminal families in Settings.
+/// Install macOS system fonts (SF Pro, PingFang SC and CJK fallbacks) so the
+/// shell matches the design; users can override families in Settings.
 pub fn install_fonts(ctx: &egui::Context, settings: &lazecode_core::Settings) {
     use std::sync::Arc;
 
@@ -631,10 +621,8 @@ pub fn mono_font(size: f32) -> FontId {
     FontId::monospace(size)
 }
 
-// ---------------------------------------------------------------------------
-// Stable layout rhythm (theme.css heights) — shared by every view so the
-// row/toolbar metrics stay consistent page to page.
-// ---------------------------------------------------------------------------
+// Stable layout rhythm (theme.css heights), shared so row and toolbar metrics
+// stay consistent.
 
 pub const TITLEBAR_H: f32 = 40.0;
 pub const TOOLBAR_H: f32 = 28.0;

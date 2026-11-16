@@ -1,10 +1,6 @@
-//! PTY-backed terminal sessions.
-//!
-//! `rio-vt` owns the VT grid and hot scrollback; this crate adds the PTY
-//! lifecycle, a reusable screen snapshot for the UI, key/paste encoding,
-//! scrollback search, a bounded disk spool for cold history and the kitty
-//! graphics/keyboard protocol state. Parsing runs on a dedicated reader thread
-//! while the UI only copies the visible grid.
+//! PTY-backed terminal sessions: VT grid and hot scrollback (`rio-vt`), PTY
+//! lifecycle, screen snapshots, input encoding, search, cold spool and kitty
+//! graphics/keyboard state.
 
 pub mod cold;
 pub mod input;

@@ -445,10 +445,8 @@ fn draw_project_menu(
     let recent_count = recents.len();
     let header_h = 36.0;
     let footer_h = 42.0;
-    // The body lays out sections and rows with the normal item spacing. Count
-    // it here as well, otherwise the content is a few pixels taller than the
-    // popover and egui shows a scrollbar even when the menu is far below the
-    // 80%-of-screen cap.
+    // Include item spacing or the popover is a few px short and shows a
+    // scrollbar.
     const ROW_GAP: f32 = 4.0;
     let widget_count = 2
         + open_count
@@ -3207,6 +3205,7 @@ fn draw_log_path_filter_menu(
         input_rect.shrink2(Vec2::new(6.0, 2.0)),
         TextEdit::singleline(&mut current_path)
             .frame(egui::Frame::NONE)
+            .align(egui::Align2::LEFT_CENTER)
             .hint_text(if zh {
                 "路径，如 src/main.rs"
             } else {
@@ -3576,10 +3575,9 @@ fn draw_editor_context_menu(
     }
 }
 
-/// 变更文件菜单条目：code 空间 0..10 通用动作，10+ Move to 列表，
-/// 20/21 未跟踪（Add to VCS / Delete…），22..24 新增功能项（与本地
-/// 前一版本比较 / 创建补丁 / 到此为止的历史），30..37 稳定版禁用占位
-/// （只展示不可点），SEP 画分隔线，100/101 变更列表头菜单专用。
+/// Change-file menu codes: 0..10 generic, 10+ move-to lists, 20/21 untracked,
+/// 22..24 new actions, 30..37 disabled placeholders, SEP divider, 100/101
+/// changelist headers.
 struct ChangeMenuItem {
     label: String,
     code: u8,
@@ -6950,6 +6948,7 @@ fn draw_clone_repo_dialog(
         url_rect.shrink2(Vec2::new(8.0, 4.0)),
         TextEdit::singleline(url)
             .frame(egui::Frame::NONE)
+            .align(egui::Align2::LEFT_CENTER)
             .hint_text("https://github.com/user/repo.git"),
     );
 
@@ -6963,6 +6962,7 @@ fn draw_clone_repo_dialog(
         dest_rect.shrink2(Vec2::new(8.0, 4.0)),
         TextEdit::singleline(dest)
             .frame(egui::Frame::NONE)
+            .align(egui::Align2::LEFT_CENTER)
             .hint_text(if zh {
                 "本地目标目录路径"
             } else {
@@ -8000,6 +8000,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 input.shrink2(Vec2::new(8.0, 4.0)),
                 TextEdit::singleline(value)
                     .frame(egui::Frame::NONE)
+                    .align(egui::Align2::LEFT_CENTER)
                     .hint_text("feat/new-branch")
                     .font(FontId::monospace(11.0)),
             );
@@ -8072,6 +8073,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 input_name.shrink2(Vec2::new(8.0, 4.0)),
                 TextEdit::singleline(name)
                     .frame(egui::Frame::NONE)
+                    .align(egui::Align2::LEFT_CENTER)
                     .hint_text("my-feature")
                     .font(FontId::monospace(11.5)),
             );
@@ -8126,6 +8128,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                     input.shrink2(Vec2::new(8.0, 4.0)),
                     TextEdit::singleline(branch)
                         .frame(egui::Frame::NONE)
+                        .align(egui::Align2::LEFT_CENTER)
                         .hint_text("feat/my-branch")
                         .font(FontId::monospace(11.5)),
                 );
@@ -8140,10 +8143,14 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 } else {
                     branch.clone()
                 };
-                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(
-                    Pos2::new(left, y),
-                    Vec2::new(width, 28.0),
-                )));
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(Rect::from_min_size(
+                            Pos2::new(left, y),
+                            Vec2::new(width, 28.0),
+                        ))
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
                 egui::ComboBox::from_id_salt("worktree-branch-picker")
                     .width(width - 8.0)
                     .selected_text(egui::RichText::new(selected_branch_label).color(p.text))
@@ -8235,6 +8242,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 loc_input.shrink2(Vec2::new(8.0, 4.0)),
                 TextEdit::singleline(location)
                     .frame(egui::Frame::NONE)
+                    .align(egui::Align2::LEFT_CENTER)
                     .font(FontId::monospace(11.0)),
             );
 
@@ -8292,6 +8300,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 input.shrink2(Vec2::new(8.0, 4.0)),
                 TextEdit::singleline(value)
                     .frame(egui::Frame::NONE)
+                    .align(egui::Align2::LEFT_CENTER)
                     .hint_text("v1.0.0 or commit hash or branch")
                     .font(FontId::monospace(11.0)),
             );
@@ -8378,6 +8387,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 input.shrink2(Vec2::new(8.0, 4.0)),
                 TextEdit::singleline(value)
                     .frame(egui::Frame::NONE)
+                    .align(egui::Align2::LEFT_CENTER)
                     .hint_text(from.clone())
                     .font(FontId::monospace(11.0)),
             );
@@ -8477,21 +8487,29 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                     p.text,
                 );
             } else {
-                ui.scope_builder(egui::UiBuilder::new().max_rect(remote_rect), |ui| {
-                    egui::ComboBox::from_id_salt("push-remote")
-                        .width(remotes_width(remotes, remote_rect.width()))
-                        .selected_text(egui::RichText::new(remote.as_str()).color(p.text))
-                        .show_ui(ui, |ui| {
-                            for candidate in remotes.iter() {
-                                if ui
-                                    .selectable_label(remote == &candidate.name, &candidate.name)
-                                    .clicked()
-                                {
-                                    *remote = candidate.name.clone();
+                ui.scope_builder(
+                    egui::UiBuilder::new()
+                        .max_rect(remote_rect)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                    |ui| {
+                        egui::ComboBox::from_id_salt("push-remote")
+                            .width(remotes_width(remotes, remote_rect.width()))
+                            .selected_text(egui::RichText::new(remote.as_str()).color(p.text))
+                            .show_ui(ui, |ui| {
+                                for candidate in remotes.iter() {
+                                    if ui
+                                        .selectable_label(
+                                            remote == &candidate.name,
+                                            &candidate.name,
+                                        )
+                                        .clicked()
+                                    {
+                                        *remote = candidate.name.clone();
+                                    }
                                 }
-                            }
-                        });
-                });
+                            });
+                    },
+                );
             }
             ui.painter().text(
                 Pos2::new(rect.left() + 22.0, rect.top() + 124.0),
@@ -8801,6 +8819,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 name_rect.shrink2(Vec2::new(6.0, 3.0)),
                 TextEdit::singleline(new_name)
                     .frame(egui::Frame::NONE)
+                    .align(egui::Align2::LEFT_CENTER)
                     .hint_text(crate::tr!(model, "name", "名称"))
                     .font(FontId::monospace(10.0)),
             );
@@ -8815,6 +8834,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 url_rect.shrink2(Vec2::new(6.0, 3.0)),
                 TextEdit::singleline(new_url)
                     .frame(egui::Frame::NONE)
+                    .align(egui::Align2::LEFT_CENTER)
                     .hint_text("https://github.com/user/repo.git")
                     .font(FontId::monospace(9.5)),
             );
@@ -8935,6 +8955,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 input.shrink2(Vec2::new(8.0, 4.0)),
                 TextEdit::singleline(value)
                     .frame(egui::Frame::NONE)
+                    .align(egui::Align2::LEFT_CENTER)
                     .hint_text("v0.1.0")
                     .font(FontId::monospace(11.0)),
             );
@@ -8989,6 +9010,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 input.shrink2(Vec2::new(8.0, 4.0)),
                 TextEdit::singleline(value)
                     .frame(egui::Frame::NONE)
+                    .align(egui::Align2::LEFT_CENTER)
                     .font(FontId::monospace(11.0)),
             );
             response.request_focus();
@@ -9072,6 +9094,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 input.shrink2(Vec2::new(8.0, 4.0)),
                 TextEdit::singleline(message)
                     .frame(egui::Frame::NONE)
+                    .align(egui::Align2::LEFT_CENTER)
                     .hint_text(crate::tr!(
                         model,
                         "Stash message (optional)",
@@ -9315,6 +9338,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 name_input.shrink2(Vec2::new(6.0, 3.0)),
                 TextEdit::singleline(new_name)
                     .frame(egui::Frame::NONE)
+                    .align(egui::Align2::LEFT_CENTER)
                     .hint_text(crate::tr!(model, "Name", "名称"))
                     .font(FontId::monospace(10.5)),
             );

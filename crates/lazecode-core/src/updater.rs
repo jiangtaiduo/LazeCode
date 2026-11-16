@@ -1,47 +1,16 @@
-//! Signed in-app updater for LazeCode.
+//! Signed in-app updater.
 //!
-//! Release flow:
+//! Release: publish a manifest ([`Manifest`]), upload the artifact, and sign
+//! the canonical payload ([`Manifest::signing_payload`]) with Ed25519; the
+//! public key is pinned in settings (`update_public_key`). The canonical JSON
+//! uses declaration order, empty strings for absent optional fields, and
+//! excludes `date` so existing signatures stay valid.
 //!
-//! 1. Publish a JSON manifest (see [`Manifest`]) at a static endpoint.
-//! 2. Upload the platform artifact (a single executable or a gzipped
-//!    `.app` bundle) somewhere the manifest points to.
-//! 3. Sign the *canonical* manifest payload with an Ed25519 key; the
-//!    corresponding 32-byte public key is pinned in the user settings
-//!    (`update_public_key`, base64 or hex).
-//!
-//! The canonical payload is compact JSON with the fields
-//!
-//! ```json
-//! {"version":"…","url":"…","sha256":"…","notes":"…","min_os":"…","arch":"…","kind":"…"}
-//! ```
-//!
-//! in that exact order, with `min_os`/`arch`/`kind` as `""` when absent and
-//! `sha256` lower-case hex. [`Manifest::signing_payload`] produces exactly
-//! these bytes, so a release script can sign its output verbatim. The
-//! optional `date` field is display-only and deliberately outside this
-//! payload, so existing signatures stay valid.
-//!
-//! Checking and downloading use `reqwest`'s blocking client with rustls;
-//! a plain filesystem path or `file://` URL is accepted instead of HTTP,
-//! which keeps updates testable offline and lets an administrator ship a
-//! manifest from a local share.
-//!
-//! Installation comes in two shapes, selected by the manifest's `kind`
-//! field: `executable` (the default) replaces the running binary in place —
-//! the current file is renamed to a `.bak` sibling, the staged binary is
-//! moved into place, and any failure restores the backup. `app-bundle`
-//! artifacts are gzipped tar archives of a `*.app` directory: the archive is
-//! extracted into the staging area under a strict safety policy (no
-//! absolute paths, no `..` components, no link entries, unpacked-size and
-//! entry caps), sanity-checked, and then swapped over the running bundle
-//! with the same backup-and-rollback discipline. Swapping the whole bundle
-//! keeps `Info.plist`, resources and the ad-hoc signature consistent with
-//! the new binary, which a bare executable replacement inside a signed
-//! bundle cannot do.
-//!
-//! [`relaunch`] starts the freshly installed build: on macOS a bundle is
-//! started through `open -n <bundle>`, anything else spawns the binary
-//! directly with the original command-line arguments.
+//! Fetching accepts HTTPS or `file://`. Installation follows the manifest's
+//! `kind`: `executable` replaces the binary in place (`.bak` + rollback);
+//! `app-bundle` unpacks a gzipped `*.app` archive under a strict path/size
+//! policy and swaps the whole bundle so `Info.plist`, resources and signature
+//! stay consistent. [`relaunch`] starts the new build.
 
 use std::cmp::Ordering;
 use std::io::{Read, Write};
@@ -80,9 +49,8 @@ pub struct Manifest {
     /// Human-readable release notes shown in the update dialog.
     #[serde(default)]
     pub notes: String,
-    /// Optional human-readable release date (`YYYY-MM-DD`). Cosmetic only:
-    /// it is deliberately not part of [`Manifest::signing_payload`], so old
-    /// signatures stay valid and a tampered date cannot influence updates.
+    /// Display-only release date (`YYYY-MM-DD`); deliberately outside
+    /// [`Manifest::signing_payload`] so old signatures stay valid.
     #[serde(default)]
     pub date: Option<String>,
     /// Minimum OS version, compared against the running OS when known.
@@ -401,18 +369,12 @@ pub struct InstallReport {
     pub backup: Option<PathBuf>,
 }
 
-/// Atomically replace `target` with the verified `staged` executable.
+/// Replace `target` with the verified `staged` executable, restoring the
+/// `.bak` sibling on failure. `target` is a parameter so tests and custom
+/// install locations work.
 ///
-/// The previous file is moved to a `.bak` sibling first. If the replacement
-/// or the post-install sanity check fails, the backup is restored.
-///
-/// `target` is an explicit parameter (rather than always
-/// `std::env::current_exe`) so callers and tests can install into a sandbox
-/// and so a front-end can offer a custom install location.
-///
-/// macOS note: this replaces one executable inside the bundle. It does not
-/// update `Info.plist`, resources or the code signature; full `.app`
-/// bundle replacement needs a signed installer/archive.
+/// Replaces the executable only; `Info.plist`, resources and the code
+/// signature are untouched (use [`install_app_bundle`] for that).
 pub fn install(staged: &Path, target: &Path) -> Result<InstallReport, UpdateError> {
     install_with(staged, target, replace_file)
 }
@@ -509,17 +471,10 @@ pub fn install_artifact(
     }
 }
 
-/// Swap the running `.app` bundle with the bundle packaged in `staged`
-/// (a gzipped tar archive containing one `*.app` directory).
-///
-/// The archive is extracted into the staging area under a strict policy
-/// (single `*.app` root, regular files only, no absolute or `..` paths,
-/// unpacked-size and entry caps), sanity-checked, moved onto the target
-/// volume, and then swapped: the current bundle is renamed to a hidden
-/// `.bak-<nanos>` sibling first and restored if anything fails. Swapping the
-/// whole bundle keeps `Info.plist`, resources and the ad-hoc signature
-/// consistent — replacing only `Contents/MacOS/<binary>` would invalidate
-/// the bundle seal.
+/// Swap the running `.app` bundle with the one in `staged` (gzipped tar, one
+/// `*.app` root, strict extraction policy), restoring the backup on failure.
+/// Swapping the whole bundle keeps `Info.plist`, resources and signature
+/// consistent.
 pub fn install_app_bundle(staged: &Path, target: &Path) -> Result<InstallReport, UpdateError> {
     let target_bundle = bundle_root(target).ok_or_else(|| {
         UpdateError::Install(format!(
@@ -636,10 +591,8 @@ fn extract_app_bundle(archive: &Path) -> Result<ExtractedBundle, UpdateError> {
                     path.display()
                 )));
             }
-            // macOS tar/zip writers emit AppleDouble sidecars (`._*`) and
-            // `.DS_Store` for extended attributes and Finder state. They are
-            // not part of the bundle and must not be treated as extra `.app`
-            // roots; every real path still goes through the checks below.
+            // macOS tar/zip writers add AppleDouble (`._*`) and `.DS_Store`
+            // sidecars; they are not extra `.app` roots.
             let metadata = path.components().any(|component| {
                 let name = component.as_os_str().to_string_lossy();
                 name == ".DS_Store" || name.starts_with("._")
@@ -752,9 +705,8 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Start the freshly installed build. On macOS a bundle is started through
-/// `open -n <bundle>`; a bare binary is spawned directly with the original
-/// command-line arguments. The caller exits afterwards.
+/// Start the freshly installed build: `open -n <bundle>` on macOS, otherwise
+/// spawn the binary with the original arguments. The caller exits afterwards.
 pub fn relaunch(target: &Path) -> Result<(), UpdateError> {
     #[cfg(target_os = "macos")]
     {
@@ -1035,10 +987,8 @@ fn to_hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Compare two version strings (`major[.minor[.patch]][-pre][+build]`).
-///
-/// Returns the ordering of `left` relative to `right`. Missing minor/patch
-/// components default to zero; a release sorts above any of its pre-releases.
+/// Compare version strings (`major[.minor[.patch]][-pre][+build]`); missing
+/// components are zero and a release sorts above its pre-releases.
 pub fn compare_versions(left: &str, right: &str) -> Result<Ordering, UpdateError> {
     Ok(Version::parse(left)?.cmp_parsed(&Version::parse(right)?))
 }

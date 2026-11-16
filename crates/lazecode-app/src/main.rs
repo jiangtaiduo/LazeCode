@@ -38,16 +38,10 @@ use std::sync::OnceLock;
 
 use jobs::JobQueue;
 
-/// Cheap signature of the `.git` metadata that determines source-control
-/// state: every top-level dot-git file (index, HEAD, packed-refs,
-/// MERGE_HEAD, FETCH_HEAD, ...), the whole `refs/` tree and the sequencer
-/// state dirs (`rebase-merge/`, `rebase-apply/`, `sequencer/`). `objects/`,
-/// `logs/` and `hooks/` are deliberately excluded — a status result is a
-/// function of index + refs + HEAD, reflogs mirror refs, and walking the
-/// object store would dominate the poll cost. Returns `None` when there is
-/// no cheap signature (`.git` missing, or a linked worktree whose `.git` is
-/// a pointer file); the caller then falls back to the slow full-refresh
-/// backstop.
+/// Cheap fingerprint of the `.git` files that determine status: top-level
+/// metadata files, `refs/`, and the sequencer dirs. `objects/`, `logs/` and
+/// `hooks/` are excluded because they never change a status result.
+/// `None` = no cheap signature (missing `.git`, linked-worktree pointer).
 fn git_fingerprint(root: &std::path::Path) -> Option<Vec<(std::path::PathBuf, u64, u64)>> {
     const BUDGET: usize = 800;
     let dot_git = root.join(".git");
@@ -179,10 +173,8 @@ struct Gfx {
 #[cfg(target_os = "macos")]
 type ZoomImp = unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject);
 
-/// AppKit calls `-[NSWindow zoom:]` for the system titlebar double-click
-/// gesture before the content view gets a chance to reject it. Keep the
-/// original implementation, but discard it when the gesture lands on one of
-/// the titlebar controls.
+/// AppKit calls `zoom:` before the content view can reject it; discard it when
+/// the double-click lands on a titlebar control.
 #[cfg(target_os = "macos")]
 static ORIGINAL_ZOOM: OnceLock<ZoomImp> = OnceLock::new();
 #[cfg(target_os = "macos")]
@@ -232,14 +224,8 @@ unsafe fn suppress_control_zoom(window: *mut AnyObject) -> bool {
     // AppKit window coordinates have their origin at the bottom-left; the
     // egui titlebar rects are top-left based.
     let top_y = (frame.size.height - point.y) as f32;
-    // The window is a full-size content view with a custom 40px titlebar.
-    // AppKit would otherwise zoom when a double-click lands on any titlebar
-    // control (or before the control rects have been published); suppress the
-    // native gesture for the whole strip and let the egui titlebar decide.
-    // Checking every left-mouse event, not only `clickCount == 2`, also covers
-    // macOS's slower double-click gesture recognition.
-    // Allow for the native titlebar offset as well: full-size content views
-    // and the transparent titlebar can disagree by one bar height.
+    // Full-size content view with a custom titlebar: suppress AppKit's
+    // whole-titlebar double-click zoom and let the egui titlebar handle it.
     if top_y <= lazecode_ui::app_ui::TITLEBAR_H * 2.0 {
         return true;
     }
@@ -292,11 +278,8 @@ fn install_titlebar_zoom_guard(window: &Window) {
 #[cfg(target_os = "macos")]
 static DOUBLE_CLICK_MONITOR_INSTALLED: OnceLock<()> = OnceLock::new();
 
-/// Native double-click action for the custom titlebar. AppKit's own titlebar
-/// gesture never reaches here because the window uses a full-size content
-/// view; a local monitor consumes the second click and runs the same action
-/// native apps run. This also prevents a second, AppKit-initiated `zoom:`
-/// from racing our call (the stretch-and-snap the old implementation had).
+/// Native double-click action for the custom titlebar; AppKit's own gesture
+/// never reaches a full-size content view.
 #[cfg(target_os = "macos")]
 unsafe fn perform_standard_titlebar_double_click(ns_window: *mut AnyObject) {
     let defaults: *mut AnyObject =
@@ -404,11 +387,8 @@ fn install_titlebar_double_click_monitor(window: &Window) {
     }
 }
 
-/// Coalesces every paint request into a bounded frame budget. egui itself can
-/// ask for an immediate repaint from animations and terminal output; without
-/// a single gate those requests can drive the compositor at its native refresh
-/// rate even when the UI is merely streaming text. Background windows get a
-/// much lower budget, and fully occluded windows do not paint at all.
+/// Coalesces paint requests into one bounded frame budget; background and
+/// occluded windows get fewer (or no) frames.
 struct FramePacer {
     next: Instant,
     focused: bool,
@@ -925,10 +905,8 @@ impl LazeApp {
             };
             let had_paths = !paths.is_empty();
             if had_paths {
-                // The tree scan runs as a background job: it walks the whole
-                // worktree and would stall the frame during a busy build.
-                // Custom ignore patterns must match the ones the tree was
-                // loaded with (ProjectState::open), not the walker defaults.
+                // Tree scans run as a background job; custom ignore patterns
+                // must match the ones the tree was loaded with.
                 let worktree_path = self.model.projects[position].worktrees[wt_index]
                     .path
                     .clone();
@@ -947,10 +925,9 @@ impl LazeApp {
                 };
                 if let lazecode_core::TabKind::File(file) = &mut tab.kind {
                     if file.doc.dirty {
-                        // Our own atomic save also produces a watcher event.
-                        // Do not report it as a foreign modification. Stamp the
-                        // new metadata either way so the fallback poll does
-                        // not report the same event again.
+                        // Our own atomic save also fires a watcher event; do
+                        // not report it, but stamp the metadata so the
+                        // fallback poll does not repeat it.
                         if !self.jobs.is_saving(&canonical) {
                             warnings.push(format!(
                                 "{} changed on disk; save or reload it",
@@ -1000,17 +977,9 @@ impl LazeApp {
         had_changes
     }
 
-    /// PyCharm-style VCS refresh fallback. Watchers are best effort; polling
-    /// the active checkout keeps the changelist and commit graph correct after
-    /// another Git tool rewrites `.git` atomically.
-    ///
-    /// A full `snapshot()` costs a HEAD-tree walk plus untracked/ignored
-    /// directory walks, so it must not run unconditionally every 2 s. The fast
-    /// path fingerprints the `.git` metadata that actually drives status
-    /// (index + HEAD + refs + sequencer files) and only refreshes when that
-    /// signature moved. A slow unconditional backstop covers everything the
-    /// fingerprint cannot see (linked worktree gitdirs, missed worktree
-    /// edits, watchers that died entirely).
+    /// PyCharm-style VCS fallback: watchers are best effort, so poll the
+    /// active checkout. A cheap `.git` fingerprint gates the expensive full
+    /// `snapshot()`; a slow unconditional backstop covers missed cases.
     fn poll_vcs(&mut self) -> bool {
         if self.last_vcs_poll.elapsed() < std::time::Duration::from_secs(2) {
             return false;
@@ -1160,12 +1129,8 @@ impl LazeApp {
         self.busy_in_flight = true;
         let tx = self.busy_tx.clone();
         std::thread::spawn(move || {
-            // One `ps` snapshot for every pane. Spawning a probe per pane made
-            // a 200-console workspace fork 200 processes every two seconds.
-            // The completion send must happen even if the probe panics: the
-            // in-flight gate is only cleared when a row batch arrives, and a
-            // dropped send would freeze console activity for the rest of the
-            // run (matching JobQueue::spawn's catch_unwind discipline).
+            // One `ps` snapshot for all panes; the completion send must run
+            // even on panic or the in-flight gate never clears.
             let rows = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 let probes: Vec<BusyTarget> =
                     targets.iter().map(|target| target.target.clone()).collect();
@@ -1195,11 +1160,8 @@ impl LazeApp {
     }
 
     fn request_quit(&mut self, _event_loop: &ActiveEventLoop) {
-        // The busy probe runs off-thread; `poll_quit_probe` decides between
-        // the Quit dialog and `should_quit` once it lands. The actual exit
-        // (workspace/settings save, LSP shutdown) happens where
-        // `model.should_quit` is consumed, which is the same path the Quit
-        // dialog's confirm button takes.
+        // The probe runs off-thread; `poll_quit_probe` resolves it, and exit
+        // happens where `model.should_quit` is consumed.
         self.runtime.request_quit_probe(&self.model);
         if let Some(gfx) = &self.gfx {
             gfx.window.request_redraw();
@@ -1515,10 +1477,8 @@ impl ApplicationHandler<AppEvent> for LazeApp {
     }
 }
 
-/// Remove cold-scrollback spool files left behind by processes that died
-/// without running their `Drop` (crash, SIGKILL, power loss). Each spool file
-/// embeds the owning pid: files of live processes are kept (another LazeCode
-/// window is an independent process), everything else is debris.
+/// Remove spool files of dead processes; each embeds its owner pid, and files
+/// of live processes (other LazeCode windows) are kept.
 fn cleanup_stale_cold_spools() {
     let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
         return;
@@ -1704,10 +1664,8 @@ fn build_menu(zh: bool) -> Option<Menu> {
                 true,
                 accel_shift(Code::KeyZ),
             ),
-            // Clipboard is handled by egui-winit's `Event::Copy`/`Paste`.
-            // Predefined AppKit clipboard items install Cmd+C/V equivalents
-            // that consume the key event before the terminal/editor sees it,
-            // so they must not live in the native menu.
+            // Clipboard stays with egui-winit's Copy/Paste: predefined AppKit
+            // items consume the key before the terminal/editor sees it.
         ],
     )
     .ok()?;

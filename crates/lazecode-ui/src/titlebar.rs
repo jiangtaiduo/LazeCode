@@ -13,10 +13,8 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     let painter = ui.painter().clone();
     let top = rect.top();
 
-    // Window dragging on the empty titlebar surface. The full surface is
-    // registered first (below every control); controls therefore win hit
-    // testing, and `titlebar_control_hovered` guards drag/maximize when the
-    // pointer is over one of them. Traffic lights own the left 78px.
+    // Empty titlebar surface drags the window; controls win hit testing and
+    // `titlebar_control_hovered` guards drag/zoom. Traffic lights own 78px.
     let drag_rect = Rect::from_min_max(Pos2::new(rect.left() + 78.0, rect.top()), rect.max);
     let drag = ui.interact(
         drag_rect,
@@ -785,10 +783,8 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         model.ui.command_palette_open = true;
     }
 
-    // Update badge: the stable app keeps this between the search button and
-    // the caption controls. Native settings occupies the far right, so the
-    // pill sits immediately left of search. It is the persistent entry point
-    // after a background check finds a release.
+    // Update badge sits left of search; the native settings button owns the
+    // far right.
     if let Some(badge) = rt.update.badge(&model.settings) {
         let galley =
             ui.painter()

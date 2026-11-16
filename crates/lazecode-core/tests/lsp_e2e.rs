@@ -1,9 +1,6 @@
-//! Optional end-to-end check against a real language server. Run with:
+//! Optional end-to-end check against a real language server:
 //! `cargo test -p lazecode-core --test lsp_e2e -- --ignored --nocapture`
-//!
-//! This is not part of CI: it requires `rust-analyzer` and `cargo` on PATH and
-//! a few seconds of indexing. It proves the framing, initialize handshake,
-//! document sync and a provider request against the real binary.
+//! (needs `rust-analyzer`; not part of CI).
 
 use std::time::{Duration, Instant};
 

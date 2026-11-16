@@ -1,17 +1,5 @@
-//! Bounded, process-local cache for image tabs.
-//!
-//! `egui_extras` keeps decoded images alive in its global loader cache until a
-//! texture is explicitly forgotten; closing a tab only drops the texture
-//! handle. Large photos therefore stayed resident after their projects were
-//! closed. Image tabs use this cache instead: pixels are downscaled to the
-//! visible viewport, the retained bytes are capped, and entries are dropped as
-//! soon as no tab references them.
-//!
-//! Decoding runs on a worker thread because a 64 MP decode allocates up to
-//! 256 MiB and can take hundreds of milliseconds — synchronous decoding in the
-//! draw path stalled the frame on first open and on every resize-triggered
-//! regeneration. Failed decodes are negatively cached for a short window so a
-//! corrupt or half-written file cannot re-attempt a decode on every frame.
+//! Bounded, process-local cache for image tabs: downscaled to the viewport,
+//! dropped when unreferenced, decoded off-thread, failures cached briefly.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -22,9 +10,8 @@ use egui::{ColorImage, Context, TextureHandle, TextureOptions};
 
 /// Keep at most four average 4K thumbnails or many smaller images.
 const DEFAULT_BUDGET: usize = 64 * 1024 * 1024;
-/// Refuse pathological decodes before `image` allocates the full RGBA buffer.
-/// 64 MP is 256 MiB for the temporary decode; the retained thumbnail is much
-/// smaller.
+/// Refuse pathological decodes before `image` allocates the RGBA buffer
+/// (64 MP is 256 MiB for the temporary decode).
 const MAX_DECODE_PIXELS: u64 = 64 * 1024 * 1024;
 const MIN_SIDE: usize = 256;
 const MAX_SIDE: usize = 4096;
@@ -108,9 +95,8 @@ impl ImageCache {
         self.bytes = 0;
     }
 
-    /// Drop entries for images that no longer have an open tab. Pending
-    /// decodes for closed tabs are dropped too; their worker finishes and
-    /// sends into a closed channel, which ends it cleanly.
+    /// Drop entries whose tab closed; pending decodes are dropped too and their
+    /// worker ends on a closed channel.
     pub fn retain_paths(&mut self, open: &std::collections::HashSet<PathBuf>) {
         let before = self.entries.len();
         self.entries.retain(|path, _| open.contains(path));
@@ -119,9 +105,7 @@ impl ImageCache {
         }
     }
 
-    /// Recompute `bytes` from the Ready entries. The counter tracks only
-    /// decoded-and-uploaded textures; Pending and Failed entries hold no
-    /// texture yet.
+    /// Recompute `bytes` from Ready entries; Pending/Failed hold no texture.
     fn recount_bytes(&mut self) {
         self.bytes = self
             .entries
@@ -133,12 +117,8 @@ impl ImageCache {
             .sum();
     }
 
-    /// Return a texture sized for the current viewport, decoding on first use.
-    ///
-    /// `max_side` is in physical pixels. Once the window grows by more than
-    /// 25%, the thumbnail is regenerated; shrinking keeps the existing texture
-    /// to avoid resize churn. The first call (and every regeneration) returns
-    /// [`ImageLoad::Loading`] until the worker thread finishes.
+    /// Texture sized for the viewport (`max_side` in physical px), decoded on
+    /// first use and regenerated after a >25% growth; `Loading` until then.
     pub fn get_or_load(
         &mut self,
         ctx: &Context,
@@ -223,9 +203,8 @@ impl ImageCache {
         }
     }
 
-    /// Replace whatever the path holds with a Pending decode. Any Ready
-    /// texture being replaced is subtracted from `bytes` first so the budget
-    /// accounting never double-counts across reloads.
+    /// Replace the path's entry with a Pending decode, subtracting any Ready
+    /// texture so the budget never double-counts.
     fn start_decode(&mut self, path: &Path, target: usize, frame: u64) {
         if let Some(Entry::Ready(old)) = self.entries.get(path) {
             self.bytes = self.bytes.saturating_sub(old.bytes);

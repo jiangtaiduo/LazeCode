@@ -16,10 +16,8 @@ pub(crate) fn open_index(repo: &gix::Repository) -> Result<gix::index::File> {
     open_index_impl(repo, false)
 }
 
-/// Like [`open_index`], but also accepts unmerged stages. Conflict resolution
-/// needs to read and rewrite exactly the index that a merge/rebase/cherry-pick
-/// left behind, so the unresolved-stage guard is skipped while the checks for
-/// on-disk formats we cannot round-trip still apply.
+/// Like [`open_index`], but allows unmerged stages (conflict resolution);
+/// on-disk format guards still apply.
 pub(crate) fn open_conflicted_index(repo: &gix::Repository) -> Result<gix::index::File> {
     open_index_impl(repo, true)
 }
@@ -48,12 +46,8 @@ fn open_index_impl(repo: &gix::Repository, allow_unmerged: bool) -> Result<gix::
     if file.fs_monitor().is_some() {
         anyhow::bail!("FSMonitor extension is present; refusing to rewrite .git/index");
     }
-    // `REUC` (resolve-undo) is an optional optimization Git keeps for
-    // `git checkout --merge`; it is not part of the committed tree. gix has
-    // no serializer for it, so writing the index would otherwise drop it
-    // silently. Drop it explicitly here: staging/committing remains correct,
-    // while split-index / untracked-cache / FSMonitor are still refused
-    // because losing those changes index semantics or correctness.
+    // `REUC` is optional resolve-undo state; gix cannot serialize it, so drop
+    // it rather than lose it silently.
     if file.resolve_undo().is_some() {
         file.remove_resolve_undo();
     }
@@ -71,10 +65,8 @@ fn open_index_impl(repo: &gix::Repository, allow_unmerged: bool) -> Result<gix::
     Ok(file)
 }
 
-/// Reject absolute paths, `..`, and other non-normal components before joining
-/// them onto the worktree. Git tree/index paths are always `/`-separated. On
-/// Unix a backslash is a legal filename character, so it is intentionally not
-/// treated as a separator here.
+/// Reject absolute, `..` and other non-normal components before joining onto
+/// the worktree. Git paths use `/`; on Unix `\` is a legal filename char.
 pub(crate) fn validate_repo_path(path: &str) -> Result<PathBuf> {
     let relative = Path::new(path);
     if relative.as_os_str().is_empty() || relative.is_absolute() {
@@ -966,10 +958,9 @@ pub fn checkout_branch(root: &Path, name: &str) -> Result<()> {
         }
     }
 
-    // Delete stale paths first, then prune empty directories. This handles
-    // file↔directory type changes without ever removing untracked content.
-    // Snapshot every worktree path the checkout can touch so a mid-checkout
-    // failure restores the pre-checkout tree instead of leaving a hybrid.
+    // Delete stale paths, then prune empty dirs; this handles file↔directory
+    // changes without removing untracked content. Paths touched are recorded
+    // so a failure restores the pre-checkout tree.
     let backup = CheckoutBackup::capture(&repo, &workdir, old_map.keys().chain(target_map.keys()))?;
     let old_index_bytes = std::fs::read(repo.index_path()).ok();
     let old_head = repo
@@ -1134,10 +1125,8 @@ pub fn delete_tag(root: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Apply a unified patch to the worktree (or the index with `cached`).
-/// Runs `git apply --check` first so a dry-run failure never half-applies.
-/// The porcelain binary is the compatibility surface for `add -p`-style
-/// hunk staging, which gix does not expose.
+/// Apply a unified patch to the worktree (or index with `cached`) after a
+/// `git apply --check` dry run. `git` is used for `add -p`-style hunk staging.
 pub fn apply_patch(root: &Path, patch: &str, cached: bool, reverse: bool) -> Result<()> {
     if patch.trim().is_empty() {
         anyhow::bail!("patch is empty");

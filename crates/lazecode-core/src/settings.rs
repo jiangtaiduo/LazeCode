@@ -159,22 +159,15 @@ pub struct Settings {
     /// useCommitMessageHistory：提交成功后入史、历史项可回填可清除）。
     pub commit_history: Vec<String>,
     pub ignored_patterns: Vec<String>,
-    /// Update manifest endpoint (HTTPS URL, `file://` URL or local path).
-    /// Defaults to the signed `latest.json` published on the repository's
-    /// main branch; the manifest is signature-verified before anything is
-    /// downloaded.
+    /// Update manifest endpoint (HTTPS, `file://` or local path). Defaults to
+    /// the signed `latest.json`; the manifest is verified before downloading.
     pub update_endpoint: String,
-    /// Pinned Ed25519 public key for the update manifest, base64 or hex.
-    /// Shipped with the release signing key's public half so updates verify
-    /// out of the box; operators can repin their own key.
+    /// Pinned Ed25519 public key for update manifests (base64 or hex).
     pub update_public_key: String,
-    /// Check the endpoint once shortly after startup (the check is one small
-    /// manifest fetch; download and install always need the user's click in
-    /// the update dialog).
+    /// Check the endpoint once after startup; installing always needs a click.
     pub auto_check_updates: bool,
-    /// Unix timestamp (seconds) of the last update check attempt. `0` means
-    /// this install has never checked; it also throttles the automatic check
-    /// to once per day.
+    /// Unix timestamp (seconds) of the last check attempt; `0` = never, also
+    /// throttles the automatic check to once per day.
     pub last_update_check_time: i64,
     /// Version the user explicitly ignored. Background checks keep finding
     /// it, but no badge or toast is shown. Empty means no ignored version.
@@ -230,12 +223,8 @@ impl Settings {
         self.commit_history.truncate(10);
     }
 
-    /// Ship the updater to existing installs: settings written before the
-    /// updater had a working default carry explicit empty strings for the
-    /// endpoint and key, which serde keeps as-is. Fill them from the current
-    /// defaults so the signed-update channel works without a hand edit. An
-    /// operator who wants the updater off clears `auto_check_updates`
-    /// instead (a check can always be triggered manually).
+    /// Fill endpoint/key defaults left empty by older settings so signed
+    /// updates work without a hand edit.
     fn migrate_updater_defaults(&mut self) {
         if self.update_endpoint.trim().is_empty() {
             self.update_endpoint = Self::default().update_endpoint;
@@ -403,9 +392,8 @@ mod tests {
     #[test]
     fn updater_settings_default_on_and_round_trip() {
         let settings = Settings::default();
-        // Updates ship configured: the signed manifest lives next to the
-        // repository and the release signing key's public half is pinned, so
-        // the updater works out of the box.
+        // Updates ship configured: signed manifest endpoint plus pinned key,
+        // so the updater works out of the box.
         assert!(settings.update_endpoint.starts_with("https://"));
         assert!(!settings.update_public_key.is_empty());
         assert!(settings.auto_check_updates);
@@ -431,9 +419,7 @@ mod tests {
 
     #[test]
     fn empty_updater_fields_migrate_to_defaults() {
-        // Pre-updater installs saved explicit empty strings; loading must
-        // promote them to the shipped defaults so the update channel works
-        // without a hand edit.
+        // Pre-updater installs saved empty strings; promote them to defaults.
         let mut settings: Settings = toml::from_str(
             "update_endpoint = \"\"
 update_public_key = \"\"\n",

@@ -279,11 +279,8 @@ fn split_message(raw: &str) -> (String, String) {
     (subject, body)
 }
 
-/// Assign lanes across a commit list with an optional page `seed`: the
-/// previous page's final lane state (each entry = the commit id the lane is
-/// still expecting). Re-running with the same prefix plus more rows yields
-/// identical lanes for the shared prefix, so pagination doesn't renumber the
-/// lanes mid-graph.
+/// Assign lanes across a commit list, resuming from a previous page's final
+/// lane state so pagination keeps lanes stable.
 pub fn assign_lanes_seeded(commits: &mut [CommitInfo], seed: &[Option<String>]) {
     let mut lanes: Vec<Option<String>> = seed.to_vec();
     for commit in commits.iter_mut() {

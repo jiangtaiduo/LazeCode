@@ -160,6 +160,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             rep_field_rect,
             TextEdit::singleline(&mut state.replacement)
                 .frame(egui::Frame::NONE)
+                .align(egui::Align2::LEFT_CENTER)
                 .hint_text(crate::tr!(model, "Replace with…", "替换为…"))
                 .font(FontId::proportional(12.5)),
         );
@@ -172,6 +173,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             mask_field_rect,
             TextEdit::singleline(&mut state.file_mask)
                 .frame(egui::Frame::NONE)
+                .align(egui::Align2::LEFT_CENTER)
                 .hint_text(crate::tr!(
                     model,
                     "File mask (e.g. *.rs, *.ts)",
@@ -211,9 +213,8 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         }
     }
 
-    // Stable Find in Files searches while you type (160ms debounce), rather
-    // than waiting for Enter. Invalidate old results as soon as the query or
-    // one of its flags changes so stale rows can never be clicked.
+    // Find in Files searches while you type (160ms debounce); invalidate old
+    // results as soon as the query or a flag changes.
     let project_root = model
         .active_project()
         .map(|project| project.active_root().display().to_string())

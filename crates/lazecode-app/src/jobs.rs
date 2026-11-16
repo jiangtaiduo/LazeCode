@@ -13,9 +13,8 @@ use lazecode_git::{BranchInfo, CommitDetails, CommitInfo, FileDiff, LogOptions, 
 use lazecode_terminal::Notifier;
 use lazecode_ui::UiRuntime;
 
-/// Mixed file/folder picker used by "Open". AppKit's NSOpenPanel is the only
-/// native chooser that lets one dialog return either a directory or several
-/// files; rfd's wrappers split those into separate dialogs.
+/// Mixed file/folder picker for "Open": NSOpenPanel is the only chooser that
+/// returns either a directory or several files.
 #[cfg(target_os = "macos")]
 fn pick_open_paths() -> Vec<PathBuf> {
     use objc2::msg_send;
@@ -77,9 +76,8 @@ fn pick_open_paths() -> Vec<PathBuf> {
 /// big enough that a repo rarely needs more than a couple of pages.
 const LOG_PAGE_SIZE: usize = 300;
 
-/// Build the `gix`-crate options for one page of a filtered log query. The
-/// query keeps semantic filters; `offset` is this page's start index, which
-/// always re-walks from the same tips so layout stays prefix-stable.
+/// Build `gix` options for one page of a filtered log; `offset` re-walks from
+/// the same tips so layout stays prefix-stable.
 fn log_options_from_query(
     query: &lazecode_core::LogQuery,
     job_root: &std::path::Path,
@@ -265,14 +263,11 @@ pub struct JobQueue {
     notifier: Arc<dyn Notifier>,
     in_flight: HashSet<String>,
     pending_git: HashSet<PathBuf>,
-    /// Worktrees whose tree reload was requested while a scan was already in
-    /// flight; re-queued when the running scan completes so bursts of watcher
-    /// events coalesce into one scan instead of queueing scans per batch.
+    /// Worktrees whose reload was requested mid-scan; re-queued when the running
+    /// scan completes so watcher bursts coalesce.
     pending_trees: HashSet<PathBuf>,
-    /// Cancel flags for the latest in-flight find-in-files per worktree,
-    /// paired with that search's request id. A newer search revokes the
-    /// older one so rapid typing cannot pile up a thread per keystroke,
-    /// each scanning the whole tree to completion.
+    /// Cancel flags for the latest find-in-files per worktree, so rapid typing
+    /// cannot leave a full-tree scan per keystroke running.
     search_cancels: HashMap<PathBuf, (u64, Arc<AtomicBool>)>,
 }
 
@@ -361,9 +356,8 @@ impl JobQueue {
         });
     }
 
-    /// Rescan one worktree's file tree off the UI thread. Watcher bursts ask
-    /// for the same tree repeatedly; `pending_trees` coalesces them into the
-    /// next scan after the in-flight one lands.
+    /// Rescan one worktree's tree off the UI thread; watcher bursts coalesce
+    /// via `pending_trees`.
     pub fn refresh_tree(&mut self, root: PathBuf, ignored_patterns: Arc<Vec<String>>) {
         let key = format!("tree:{}", root.display());
         if self.in_flight.contains(&key) {
@@ -615,9 +609,8 @@ impl JobQueue {
                         ToastKind::Warning,
                     );
                 } else {
-                    // Same async close probe as the direct path: the panes'
-                    // busy state is checked off-thread and the project closes
-                    // (or the confirmation dialog opens) on a later frame.
+                    // Busy state is probed off-thread; the project closes (or a
+                    // confirmation opens) on a later frame.
                     runtime.request_terminal_close(
                         model,
                         lazecode_ui::runtime::TerminalCloseAction::Project(index),
@@ -2020,9 +2013,8 @@ impl JobQueue {
                     .unwrap_or_default();
                 let paths = paths.clone();
                 self.spawn("discard", format!("disc:{root:?}:{paths:?}"), move || {
-                    // 逐文件回滚（对齐稳定版 git_discard_file_changes）；
-                    // 结果走 Discarded 变体：回滚的新增文件需要关闭其
-                    // 编辑器标签（文件已不存在，reload 无意义）。
+                    // Roll back per file; newly added files are gone, so their
+                    // tabs must be closed too.
                     let mut first_error: Option<anyhow::Error> = None;
                     for path in &paths {
                         if let Err(err) = lazecode_git::discard_file_changes(&root, path) {
@@ -2543,9 +2535,8 @@ impl JobQueue {
                     "shelf-restore",
                     format!("shelf-r:{root:?}:{name}"),
                     move || {
-                        // paths=Some 走部分恢复（只应用勾选文件，对齐稳定
-                        // 版 Unshelve）；target_list 在恢复成功后把文件归
-                        // 入该变更列表（不存在则创建）。
+                        // `paths` restores only selected files; `target_list`
+                        // assigns them to that changelist (created if absent).
                         let result = shelf_restore_scoped(
                             &root,
                             &name,
@@ -2836,10 +2827,8 @@ impl JobQueue {
             } => {
                 if let Some(project) = model.active_project() {
                     let root = project.active_root().to_path_buf();
-                    // Revoke the previous scan for this worktree before
-                    // spawning the new one; `search_in_files` polls the flag
-                    // between files, so the superseded thread unwinds quickly
-                    // instead of finishing a full-tree scan per keystroke.
+                    // Revoke the previous scan; `search_in_files` polls the flag
+                    // between files and unwinds quickly.
                     if let Some((_, stale)) = self.search_cancels.remove(&root) {
                         stale.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
@@ -2986,8 +2975,7 @@ impl JobQueue {
                 let settings = model.settings.clone();
                 let notifier = model.notifier.clone();
                 // With nothing open the console belongs to the hidden virtual
-                // Single files checkout; it must not register HOME as a
-                // project or change the titlebar's project card.
+                // "Single files" checkout; it must not register HOME.
                 let index = model
                     .active_project
                     .unwrap_or_else(|| model.ensure_single_files());
@@ -3172,9 +3160,8 @@ impl JobQueue {
                     );
                     return;
                 }
-                // A stale dialog can miss changes made since it was opened.
-                // Recheck right before removal and turn the failure into an
-                // explicit force-confirmation prompt instead of a toast.
+                // Recheck right before removal; turn the failure into a
+                // force-confirmation prompt instead of a toast.
                 if !force {
                     if let Ok(snapshot) = lazecode_git::snapshot(&worktree_path) {
                         if !snapshot.changes.is_empty() {
@@ -3273,10 +3260,8 @@ impl JobQueue {
                 }
             }
             JobResult::TreeLoaded { root, tree } => {
-                // Mirror poll_watchers' assignment: the main worktree also
-                // feeds the project-level tree. If more watcher events queued
-                // while this scan ran, re-queue once with the fresher disk
-                // state instead of leaving the tree stale.
+                // The main worktree also feeds the project-level tree; re-queue
+                // once with fresher disk state if events arrived mid-scan.
                 let position =
                     model
                         .projects
@@ -3360,9 +3345,8 @@ impl JobQueue {
                             project.log_reached_end = commits.len() < LOG_PAGE_SIZE;
                             project.log = commits;
                         } else {
-                            // Dedupe the page against everything already shown:
-                            // the options always re-walk from the tips, so the
-                            // page's commits repeat the already-loaded prefix.
+                            // Pages re-walk from the tips, so drop commits
+                            // already shown.
                             let seen: std::collections::HashSet<&str> = project
                                 .log
                                 .iter()
@@ -3444,9 +3428,8 @@ impl JobQueue {
                 query,
                 result,
             } => {
-                // Drop the registry entry only when the completed search is
-                // still the newest one for this worktree; a newer search has
-                // already replaced it and must keep its own flag.
+                // Drop the registry entry only if this is still the newest search
+                // for the worktree.
                 if self
                     .search_cancels
                     .get(&root)
@@ -3569,9 +3552,8 @@ impl JobQueue {
                 model.toast(message, ToastKind::Success);
                 if !root.as_os_str().is_empty() {
                     if let Some(project) = model.project_mut_for_git_root(&root) {
-                        // 关闭已回滚文件（尤其是新增文件，磁盘上已删除）
-                        // 的标签页：无论是否 dirty——文件已不存在，保留
-                        // 标签只会让用户对着幽灵缓冲编辑。
+                        // Close tabs of rolled-back files (even dirty): the
+                        // file is gone, a tab would be a ghost buffer.
                         let mut closed: Vec<u64> = Vec::new();
                         for path in &paths {
                             let absolute = root.join(path);
@@ -3799,9 +3781,8 @@ struct SaveData {
     bom: bool,
 }
 
-/// 恢复 shelf（整只或部分恢复）并把恢复出的文件归入目标变更列表。
-/// `paths=Some` 只应用这些文件（部分恢复）；`target_list` 不存在时创建；
-/// `delete_after` 在成功后删除 shelf 条目。
+/// Restore a shelf (all or `paths` only) into `target_list` (created if
+/// absent); `delete_after` removes the shelf entry on success.
 fn shelf_restore_scoped(
     root: &std::path::Path,
     name: &str,

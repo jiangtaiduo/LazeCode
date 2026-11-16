@@ -235,9 +235,8 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     crate::theme::body_gradient(&painter, layout.full, theme.dark);
     painter.rect_filled(layout.titlebar, 0.0, p.titlebar);
     painter.rect_filled(layout.strip, 0.0, p.rail);
-    // The activity rail is part of the shell chrome; its edge must not read
-    // as a second window divider. Keep the sidebar/stage divider below at
-    // `border`, which is the deliberate pane separator.
+    // The activity rail's edge must not read as a window divider; the
+    // sidebar/stage divider below stays at `border`.
     painter.vline(
         layout.strip.right() - 0.5,
         layout.strip.y_range(),
@@ -326,10 +325,8 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     crate::statusbar::draw(ui, model, rt, &theme, layout.status);
     crate::lsp_ui::draw_popups(ui, model, rt, &theme);
 
-    // Egui resolves clicks against the previous pass' widget list, so a
-    // full-screen blocker registered here is above the whole shell but below
-    // every overlay drawn after it. Without it the translucent scrims let
-    // clicks reach the editor, sidebar, splitters and titlebar underneath.
+    // Full-screen hit-test blocker: above the shell chrome, below every
+    // overlay drawn after it.
     if rt.blocks_input(model) {
         ui.interact(
             layout.full,

@@ -1,19 +1,9 @@
 //! Minimal Language Server Protocol client.
 //!
-//! The stable Tauri build delegated the protocol to Monaco and only kept a
-//! process registry in Rust. The native rewrite has to own the client state
-//! machine: one server per `(workspace root, language)`, JSON-RPC framing over
-//! stdio, document synchronisation, diagnostics aggregation and the provider
-//! requests the editor consumes (hover, definition, completion, formatting,
-//! rename and document symbols).
-//!
-//! Design rules:
-//! - the UI thread never blocks on a server: reads happen on a per-server
-//!   thread and writes go through a bounded queue to a writer thread;
-//! - every queue is bounded and every pending request has a deadline;
-//! - a missing or crashing server degrades to a plain editor (no error dialog,
-//!   one log line), matching the stable behaviour;
-//! - no `unwrap` on protocol data; malformed frames are dropped or reported.
+//! One server per `(workspace root, language)`: JSON-RPC over stdio, document
+//! sync, diagnostics and the provider requests the editor uses. The UI thread
+//! never blocks (reads/writes run on per-server threads, every queue bounded,
+//! every request with a deadline); a missing server degrades to a plain editor.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};

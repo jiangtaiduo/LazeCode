@@ -1,12 +1,7 @@
 //! Native clipboard file/image discovery for terminal paste.
 //!
-//! Finder puts only the POSIX path in the pasteboard's file-URL/NSFilenames
-//! flavors; a browser's `File` object never exposes it. Screenshots and
-//! "copy image" put PNG/TIFF data with no file flavor at all. Both are
-//! materialized as absolute paths and written to the PTY, matching the stable
-//! app and letting `omp` render its own image chips.
-//!
-//! Only macOS implements this; other platforms let the normal text path run.
+//! Finder exposes file paths, screenshots expose raw PNG/TIFF; both become
+//! absolute paths written to the PTY (macOS only).
 
 use std::path::{Path, PathBuf};
 
@@ -88,11 +83,8 @@ fn cleanup_stale_paste_files() {
     }
 }
 
-/// Absolute paths represented by the current system clipboard.
-///
-/// Finder files are returned as-is. A screenshot / copied image is written
-/// to `$TMPDIR/lazecode-paste-<nanos>.png|tiff` and that path is returned.
-/// Empty means "no file or image flavor" (normal text paste).
+/// Absolute paths from the clipboard: Finder files as-is, images written to
+/// `$TMPDIR/lazecode-paste-<nanos>.png|tiff`. Empty = normal text paste.
 pub fn file_paths() -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     {

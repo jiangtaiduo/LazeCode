@@ -244,12 +244,8 @@ fn modify_keys_sequence(stroke: KeyStroke, level: u8) -> Option<String> {
     Some(format!("\x1b[27;{};{code}~", modifier_code(stroke)))
 }
 
-/// Encode a key press for the PTY. Command (meta) combinations are handled by
-/// the application shell and never reach the terminal.
-///
-/// When the program enabled the kitty keyboard protocol (or xterm's
-/// `modifyOtherKeys`) the modified/released keys are reported in that
-/// protocol's form; otherwise the legacy xterm bytes are used unchanged.
+/// Encode a key press for the PTY (kitty protocol when enabled, else legacy
+/// xterm bytes). Command/meta combos never reach the terminal.
 pub fn encode_key(stroke: KeyStroke, modes: &Modes) -> Option<Vec<u8>> {
     if uses_kitty(stroke, modes.kitty) {
         return kitty_sequence(stroke, modes.kitty).map(String::into_bytes);
@@ -355,9 +351,8 @@ pub fn encode_key(stroke: KeyStroke, modes: &Modes) -> Option<Vec<u8>> {
     }
 }
 
-/// Paste encoding honours DEC bracketed paste so shells do not execute the
-/// pasted text. Control bytes are neutralised so a pasted `ESC[201~` cannot
-/// terminate the paste state machine early and inject keystrokes.
+/// Paste encoding honours DEC bracketed paste; control bytes are neutralised so
+/// a pasted `ESC[201~` cannot end the paste and inject keys.
 pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
     let text = sanitize_paste(text, bracketed);
     let mut out = String::with_capacity(text.len() + 16);

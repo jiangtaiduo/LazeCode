@@ -1,10 +1,5 @@
-//! LSP text primitives shared by the editor and the language-server client.
-//!
-//! The language server protocol addresses text with zero-based line numbers
-//! and UTF-16 code-unit columns. The editor stores Unicode scalar columns, so
-//! every request/response has to cross this boundary exactly once. Keeping the
-//! conversion here (instead of in the UI) makes it testable without egui and
-//! keeps both directions symmetric.
+//! LSP text primitives: UTF-16 columns (protocol) vs Unicode scalar columns
+//! (editor), converted in one place and covered without egui.
 
 /// One LSP text edit. Lines are zero-based; columns are UTF-16 code units.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,11 +42,8 @@ pub fn line_starts(text: &str) -> Vec<usize> {
     starts
 }
 
-/// Unicode scalar column for a UTF-16 code-unit column inside one line.
-///
-/// A column that points inside a surrogate pair clamps to the character that
-/// starts the pair; servers must not send such positions, but clamping keeps a
-/// malformed edit from panicking or splitting a character.
+/// Scalar column for a UTF-16 column; a column inside a surrogate pair clamps
+/// to the character start.
 pub fn char_col_for_utf16(line: &str, utf16: u32) -> usize {
     let mut units = 0u32;
     for (index, ch) in line.chars().enumerate() {

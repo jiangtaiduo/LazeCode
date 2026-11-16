@@ -16,11 +16,8 @@ const HEAD_H: f32 = 36.0;
 const FOOT_H: f32 = 25.0;
 const ROW_H: f32 = 25.0;
 
-/// The sidebar is only drawn while a project is open (`compute_layout`
-/// gates on `has_project`), so `active_project` is an invariant rather than
-/// a per-frame branch. Route every access through these helpers so the
-/// assumption is stated (and its panic message meaningful) in exactly one
-/// place instead of 21 bare unwraps.
+/// The sidebar only draws when a project is open, so `active_project` is an
+/// invariant; route accesses through these helpers for one clear panic site.
 fn active(model: &AppModel) -> &lazecode_core::ProjectState {
     model
         .active_project()
@@ -264,6 +261,7 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
             field,
             TextEdit::singleline(&mut filter_value)
                 .frame(egui::Frame::NONE)
+                .align(egui::Align2::LEFT_CENTER)
                 .hint_text(crate::tr!(model, "Filter files", "过滤文件"))
                 .font(FontId::proportional(12.5)),
         );
@@ -287,17 +285,15 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
             })
         });
     let target_reveal = model.ui.tree_reveal.clone();
-    // `show_rows` only builds visible rows, so a row outside the viewport can
-    // never call `scroll_to_me`. Move the scroll offset before virtualization
+    // `show_rows` only builds visible rows, so scroll before virtualization
     // and clear the request after the frame.
     let reveal_offset = target_reveal
         .as_ref()
         .and_then(|(rel, _)| rows.iter().position(|row| &row.path == rel))
         .map(|index| (index as f32 * ROW_H - list_rect.height() * 0.5 + ROW_H * 0.5).max(0.0));
     super::app_ui::region(ui, list_rect, "tree-scroll", |ui| {
-        // `show_rows` adds the Ui item spacing between virtual rows. The tree
-        // rows already have a fixed height; leaving that gap wastes ~4px per
-        // row and shows fewer files in the same viewport.
+        // `show_rows` adds item spacing between virtual rows; the rows already
+        // have a fixed height, so drop the gap.
         ui.spacing_mut().item_spacing.y = 0.0;
         let mut area = egui::ScrollArea::vertical()
             .id_salt("tree")
@@ -650,9 +646,9 @@ fn collect_matches(
     }
 }
 
-/// 源控列表文件行（稳定版 `.change-file-row` 22px 单行：勾选框 + 文件
-/// 图标 + 状态色文件名 + 右对齐目录提示 + hover 回滚）。返回
-/// (勾选翻转, 单击, 双击, 右键, hover-Rollback 点击)。
+/// Source-control file row (22px: checkbox, icon, coloured name, right-aligned
+/// dir hint, hover rollback). Returns (toggle, click, double-click, context,
+/// rollback).
 #[allow(clippy::too_many_arguments)]
 fn change_row(
     ui: &mut Ui,

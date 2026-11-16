@@ -64,14 +64,9 @@ pub const OUTPUT_ACTIVE_MS: u64 = 2_000;
 pub const INPUT_ECHO_GRACE_MS: u64 = 200;
 pub const UI_REDRAW_GRACE_MS: u64 = 500;
 
-/// Whether recent PTY output should light the project marquee.
-///
-/// `last_output_ms`, `last_input_ms` and `last_resize_ms` are ages sampled at
-/// the same instant. Output produced just after a user keypress (shell/TUI
-/// echo) or just after a PTY resize (SIGWINCH repaint) is interaction
-/// feedback, not command output. If the console was already outputting when
-/// a resize happened, keep it hot: switching onto a live console must not
-/// blank its marquee for one poll cycle.
+/// Whether recent PTY output lights the project marquee: echo right after
+/// input or a resize does not count, and a console already outputting stays
+/// hot across a resize.
 pub fn console_outputting(
     busy: bool,
     last_output_ms: Option<u64>,
@@ -567,10 +562,8 @@ pub struct UiRuntime {
     pub find: FindState,
     pub menu: Option<MenuState>,
     pub dialog: DialogState,
-    /// One-off close/quit busy probes running off-thread; the event loop
-    /// drains them via `poll_pending_close_probe`/`poll_quit_probe`. They
-    /// replaced a synchronous `ps` fork in the draw path (visible hitch when
-    /// closing a console or quitting).
+    /// One-off close/quit `ps` probes running off-thread, drained by the
+    /// `poll_*_probe` helpers.
     pending_close_probe: Option<PendingCloseProbe>,
     pending_quit_probe: Option<PendingQuitProbe>,
     pub terminal_snapshots: HashMap<u64, Snapshot>,
@@ -969,10 +962,8 @@ impl UiRuntime {
             || markdown != self.media_markdown_paths
             || gifs != self.media_gif_paths
         {
-            // `CommonMarkCache` and the image loaders both retain decoded
-            // pixels/textures. Project or Markdown-tab changes are the only
-            // times they need to be flushed; doing it per-frame would reload
-            // visible images continuously.
+            // Flush the markdown/image caches on project or Markdown-tab
+            // changes; per-frame flushing would reload visible images.
             ctx.forget_all_images();
             self.md_cache = egui_commonmark::CommonMarkCache::default();
             self.media_project_roots = roots;
@@ -1032,11 +1023,7 @@ impl UiRuntime {
         commands
     }
 
-    /// Probe the requested panes off-thread, bypassing the 2s cache. Used
-    /// when the user closes a console or quits, so a just-started command is
-    /// still detected without forking `ps` synchronously in the draw path.
-    /// The result lands on the UI thread through `poll_pending_close_probe`
-    /// / `poll_quit_probe`.
+    /// Probe panes off-thread, bypassing the 2s cache (used on close/quit).
     fn spawn_busy_probe(
         &self,
         model: &AppModel,
@@ -1374,10 +1361,8 @@ impl UiRuntime {
     }
 
     pub fn clear_terminal_cache(&mut self) {
-        // Cache entries are keyed by globally unique session ids. Keeping a
-        // stale focus id from another project makes the new project's active
-        // console appear dead until it is clicked, so drop it and let the
-        // panel latch the new active session.
+        // Drop a stale focus id from another project or its console looks
+        // dead until clicked; the panel latches the new active session.
         self.terminal_snapshots.clear();
         self.terminal_selections.clear();
         self.terminal_search.clear();

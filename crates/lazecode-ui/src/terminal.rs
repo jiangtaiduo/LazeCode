@@ -23,11 +23,8 @@ pub struct TerminalOutput {
     pub focus_requested: bool,
 }
 
-/// Per-pane cache of egui textures for kitty graphics images.
-///
-/// Pixels are uploaded once per generation and dropped when the terminal
-/// evicts or deletes an image, so the cache mirrors the terminal's own byte
-/// cap instead of growing on its own.
+/// Per-pane egui texture cache for kitty images, mirroring the terminal's own
+/// byte cap.
 #[derive(Default)]
 pub struct GraphicsCache {
     images: HashMap<u32, CachedImage>,
@@ -133,10 +130,8 @@ impl GraphicsCache {
             let uv = source_uv(placement, size);
             painter.image(cached.texture.id(), rect, uv, Color32::WHITE);
         }
-        // Kitty Unicode placeholders (omp's image chips). Each run carries
-        // the exact sub-cell rect and normalised source slice computed by
-        // rio-vt; painting it here replaces the placeholder glyphs with the
-        // actual image.
+        // Kitty placeholder runs: rio-vt supplies the sub-cell rect and source
+        // slice; painting replaces the placeholder glyphs with the image.
         for run in &snapshot.virtual_graphics {
             let Some(cached) = self.images.get(&run.image_id) else {
                 continue;
@@ -214,10 +209,8 @@ pub fn draw(
     if refresh {
         session.snapshot_into(snapshot);
     }
-    // A session keeps producing output; only repaint while output is recent.
-    // Sustained stream output gets a 30 fps budget, typing keeps 60 fps, and a
-    // background window is deliberately slow. This keeps a chatty TUI from
-    // driving a full-window repaint on every chunk it emits.
+    // Repaint only while output is recent: 30 fps for streamed output, 60 fps
+    // for typing, slow when unfocused.
     if focus && session.last_output_ms().is_some_and(|age| age < 120) {
         let recent_input = session.last_input_ms().is_some_and(|age| age < 500);
         ui.ctx()
@@ -337,11 +330,8 @@ pub fn draw(
         } else if response.is_pointer_button_down_on()
             && ui.input(|input| input.pointer.primary_down())
         {
-            // Start on press, not on click: `Response::clicked` only fires on
-            // release, so a fresh press-and-drag previously never created an
-            // anchor and the drag branch had nothing to extend.  `dragged`
-            // also waits for the click-vs-drag threshold, which made short
-            // selections feel dead.
+            // Start on press: `clicked` fires on release, so press-and-drag
+            // never created an anchor and short selections felt dead.
             let point = selection_end(pos);
             let pressed = ui.input(|input| input.pointer.primary_pressed());
             if pressed || selection.is_none() {
@@ -498,10 +488,8 @@ pub fn draw(
             if attrs & ATTR_SPACER != 0 || attrs & ATTR_LEADING_SPACER != 0 {
                 continue;
             }
-            // Kitty virtual-placeholder cells carry combining diacritics in
-            // `text`. They must never reach the font: the image overlay paints
-            // that rectangle. Flush any preceding run and resume after the
-            // placeholder cell.
+            // Placeholder cells carry combining diacritics; flush the text run
+            // and let the image overlay paint that rectangle.
             if cell.ch == '\u{10EEEE}' {
                 flush_run(
                     &painter,
@@ -728,9 +716,8 @@ pub fn draw(
         if crate::widgets::scrollbar(ui, track, content_h, viewport_h, &mut offset, theme) {
             let target = (offset / line_h).round() as i32;
             let current = history.saturating_sub(snapshot.display_offset) as i32;
-            // `Scroll::Delta` is positive-up: dragging the thumb toward the
-            // top must increase display_offset, i.e. decrease the offset from
-            // the top.
+            // `Scroll::Delta` is positive-up: dragging the thumb up increases
+            // display_offset (distance from the top).
             session.scroll_delta(current - target);
             session.snapshot_into(snapshot);
         }
@@ -1169,6 +1156,7 @@ fn draw_search(
         field,
         TextEdit::singleline(&mut state.query)
             .frame(egui::Frame::NONE)
+            .align(egui::Align2::LEFT_CENTER)
             .hint_text("Find in terminal")
             .font(FontId::proportional(11.0)),
     );
@@ -1263,10 +1251,7 @@ pub struct A11yMirror {
     pub selection: String,
 }
 
-/// Build the screen-reader view of the terminal.
-///
-/// Only the visible viewport is walked: no scrollback is cloned, so the cost
-/// is the same order as one rendered frame.
+/// Screen-reader view of the visible viewport (no scrollback clone).
 pub fn a11y_mirror(
     snapshot: &Snapshot,
     selection: Option<&TermSelection>,
@@ -1328,12 +1313,8 @@ pub fn a11y_text(snapshot: &Snapshot) -> String {
     out
 }
 
-/// Repaint budget for a terminal that is actively producing output.
-///
-/// Typing must feel immediate, so input keeps the full 60 fps budget. Plain
-/// streamed output does not need it: 30 fps cuts the full-window repaint cost
-/// in half without changing text content. A background window is throttled
-/// further because the user cannot see the result.
+/// Repaint budget for an output-producing terminal: 30 fps when visible,
+/// slower when the window is not focused.
 pub(crate) fn output_repaint_delay(
     window_focused: bool,
     recent_input: bool,

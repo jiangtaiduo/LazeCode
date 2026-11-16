@@ -775,18 +775,83 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         rt.settings_open = !rt.settings_open;
         rt.about_open = false;
     }
-    let search_resp = icon_button(
-        ui,
-        Rect::from_center_size(Pos2::new(rx - 44.0, rect.center().y), Vec2::splat(28.0)),
-        Icon::Search,
-        false,
-        theme,
-    );
+    let search_rect =
+        Rect::from_center_size(Pos2::new(rx - 44.0, rect.center().y), Vec2::splat(28.0));
+    let search_resp = icon_button(ui, search_rect, Icon::Search, false, theme);
     titlebar_control_hovered |= search_resp.hovered();
     control_rects.push(search_resp.rect);
     if search_resp.clicked() {
         rt.open_palette();
         model.ui.command_palette_open = true;
+    }
+
+    // Update badge: the stable app keeps this between the search button and
+    // the caption controls. Native settings occupies the far right, so the
+    // pill sits immediately left of search. It is the persistent entry point
+    // after a background check finds a release.
+    if let Some(badge) = rt.update.badge(&model.settings) {
+        let galley =
+            ui.painter()
+                .layout_no_wrap(badge.text.clone(), FontId::proportional(11.0), p.green);
+        let width = (galley.size().x + 34.0).clamp(88.0, 170.0);
+        let badge_rect = Rect::from_center_size(
+            Pos2::new(search_rect.left() - 8.0 - width / 2.0, rect.center().y),
+            Vec2::new(width, 24.0),
+        );
+        // Do not let the pill run into the project/branch cluster on narrow
+        // windows; the update remains reachable from Settings.
+        if badge_rect.left() > rect.left() + 360.0 {
+            let response = ui.interact(
+                badge_rect,
+                ui.scope_id().with("title-update"),
+                Sense::click(),
+            );
+            titlebar_control_hovered |= response.hovered();
+            control_rects.push(response.rect);
+            let fill = if response.hovered() {
+                p.green.gamma_multiply(0.22)
+            } else {
+                p.green.gamma_multiply(0.12)
+            };
+            let border = p
+                .green
+                .gamma_multiply(if response.hovered() { 0.85 } else { 0.55 });
+            ui.painter()
+                .rect_filled(badge_rect, egui::CornerRadius::same(12), fill);
+            ui.painter().rect_stroke(
+                badge_rect,
+                egui::CornerRadius::same(12),
+                Stroke::new(1.0, border),
+                StrokeKind::Inside,
+            );
+            paint_icon(
+                ui.painter(),
+                Rect::from_center_size(
+                    Pos2::new(badge_rect.left() + 13.0, badge_rect.center().y),
+                    Vec2::splat(12.0),
+                ),
+                Icon::UpdateArrow,
+                p.green,
+            );
+            text_clipped(
+                ui.painter(),
+                Rect::from_min_max(
+                    Pos2::new(badge_rect.left() + 24.0, badge_rect.top()),
+                    Pos2::new(badge_rect.right() - 7.0, badge_rect.bottom()),
+                ),
+                &badge.text,
+                FontId::proportional(11.0),
+                p.green,
+                Align2::LEFT_CENTER,
+            );
+            let response = response.on_hover_text(badge.tooltip);
+            if response.clicked() {
+                rt.update_open = true;
+                rt.settings_open = false;
+                rt.about_open = false;
+                model.ui.command_palette_open = false;
+            }
+        }
     }
     if !titlebar_control_hovered && drag.dragged() {
         ui.ctx().send_viewport_cmd(ViewportCommand::StartDrag);

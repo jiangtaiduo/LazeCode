@@ -350,14 +350,28 @@ test against real `rust-analyzer`
   effect immediately after "Restart now";
 - settings: `update_endpoint`, `update_public_key`, `auto_check_updates`
   default to the repository's signed channel (raw `main/latest.json` plus the
-  pinned release public key) with startup checking on; pre-updater settings
-  with empty strings are migrated to those defaults. Settings → Updates and
-  the progress dialog expose the manual check.
+  pinned release public key) with automatic checking on; pre-updater settings
+  with empty strings are migrated to those defaults.
+- automatic checks run five seconds after launch and at most once per 24
+  hours (`last_update_check_time`); they only fetch the manifest and never
+  download or install. `ignored_update_version` suppresses the badge/toast
+  for one version while leaving manual checks available. Settings → Updates
+  shows the last check, the ignored version, the endpoint/key and a manual
+  check entry.
+- the update page is a state machine (`checking`, `up-to-date`, `available`,
+  `downloading`, `installing`, `ready`, `error`) with Markdown release notes
+  (scrollable), release date, an ignore-this-version choice, one
+  "Update and restart" action, restart-later/restart-now, and a dirty-buffer
+  confirmation before relaunch. The title bar shows a green
+  `vX available` pill (also progress/restart states) that opens the same
+  page. Background checks never install anything.
 - `scripts/release-update.sh` builds, packs, hashes and signs a release
-  (`releases/*.app.tar.gz` + root `latest.json`); the signing key stays
-  outside the repository. Tag releases mirror the committed artifact and a
-  `latest-native.json` copy on the release page, while the legacy Tauri
-  `latest.json` asset on older releases is left untouched.
+  (`releases/*.app.tar.gz` + root `latest.json`); release notes are extracted
+  from both changelogs and `date` is added as a display-only manifest field.
+  The signing key stays outside the repository. Tag releases mirror the
+  committed artifact and a `latest-native.json` copy on the release page,
+  while the legacy Tauri `latest.json` asset on older releases is left
+  untouched.
 
 ### Packaging
 

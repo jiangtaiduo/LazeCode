@@ -212,6 +212,7 @@ fn full_update_flow_over_real_http_installs_the_bundle() {
         sha256,
         signature: String::new(),
         notes: "E2E bundle update".into(),
+        date: None,
         min_os: None,
         arch: None, // no gate: the test must run on any CI arch
         kind: "app-bundle".into(),

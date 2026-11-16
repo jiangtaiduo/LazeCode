@@ -3,8 +3,8 @@
 //! Release flow:
 //!
 //! 1. Publish a JSON manifest (see [`Manifest`]) at a static endpoint.
-//! 2. Upload the platform artifact (a single executable) somewhere the
-//!    manifest points to.
+//! 2. Upload the platform artifact (a single executable or a gzipped
+//!    `.app` bundle) somewhere the manifest points to.
 //! 3. Sign the *canonical* manifest payload with an Ed25519 key; the
 //!    corresponding 32-byte public key is pinned in the user settings
 //!    (`update_public_key`, base64 or hex).
@@ -12,12 +12,14 @@
 //! The canonical payload is compact JSON with the fields
 //!
 //! ```json
-//! {"version":"…","url":"…","sha256":"…","notes":"…","min_os":"…","arch":"…"}
+//! {"version":"…","url":"…","sha256":"…","notes":"…","min_os":"…","arch":"…","kind":"…"}
 //! ```
 //!
-//! in that exact order, with `min_os`/`arch` as `""` when absent and
+//! in that exact order, with `min_os`/`arch`/`kind` as `""` when absent and
 //! `sha256` lower-case hex. [`Manifest::signing_payload`] produces exactly
-//! these bytes, so a release script can sign its output verbatim.
+//! these bytes, so a release script can sign its output verbatim. The
+//! optional `date` field is display-only and deliberately outside this
+//! payload, so existing signatures stay valid.
 //!
 //! Checking and downloading use `reqwest`'s blocking client with rustls;
 //! a plain filesystem path or `file://` URL is accepted instead of HTTP,
@@ -78,6 +80,11 @@ pub struct Manifest {
     /// Human-readable release notes shown in the update dialog.
     #[serde(default)]
     pub notes: String,
+    /// Optional human-readable release date (`YYYY-MM-DD`). Cosmetic only:
+    /// it is deliberately not part of [`Manifest::signing_payload`], so old
+    /// signatures stay valid and a tampered date cannot influence updates.
+    #[serde(default)]
+    pub date: Option<String>,
     /// Minimum OS version, compared against the running OS when known.
     #[serde(default, alias = "min_os_version")]
     pub min_os: Option<String>,
@@ -136,13 +143,22 @@ impl Manifest {
         }
     }
 
-    /// Release notes, or a placeholder when the publisher left them out.
-    pub fn release_notes(&self) -> &str {
-        if self.notes.trim().is_empty() {
-            "No release notes were published."
+    /// Release notes, or `None` when the publisher left them out.
+    pub fn release_notes(&self) -> Option<&str> {
+        let notes = self.notes.trim();
+        if notes.is_empty() {
+            None
         } else {
-            self.notes.as_str()
+            Some(notes)
         }
+    }
+
+    /// Optional release date, trimmed and ignored when empty.
+    pub fn release_date(&self) -> Option<&str> {
+        self.date
+            .as_deref()
+            .map(str::trim)
+            .filter(|date| !date.is_empty())
     }
 }
 
@@ -218,6 +234,10 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest, UpdateError> {
     manifest.version = manifest.version.trim().to_string();
     manifest.url = manifest.url.trim().to_string();
     manifest.signature = manifest.signature.trim().to_string();
+    manifest.date = manifest
+        .date
+        .map(|date| date.trim().to_string())
+        .filter(|date| !date.is_empty());
     manifest.sha256 = normalise_sha256(&manifest.sha256)?;
     if manifest.version.is_empty() {
         return Err(UpdateError::Manifest("version is empty".into()));
@@ -1149,6 +1169,7 @@ mod tests {
             sha256,
             signature: String::new(),
             notes: "Fixed the updater".into(),
+            date: None,
             min_os: None,
             arch: None,
             kind: String::new(),
@@ -1217,6 +1238,28 @@ mod tests {
     }
 
     #[test]
+    fn release_date_is_display_only_and_not_signed() {
+        let mut manifest = Manifest {
+            version: "1.2.3".into(),
+            url: "https://updates.example.test/LazeCode".into(),
+            sha256: "aa".repeat(32),
+            signature: String::new(),
+            notes: "Notes".into(),
+            date: None,
+            min_os: None,
+            arch: None,
+            kind: String::new(),
+        };
+        let signature = keypair().sign(&manifest.signing_payload());
+        manifest.signature = base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
+        let payload = manifest.signing_payload();
+        manifest.date = Some(" 2026-11-16 ".into());
+        assert_eq!(manifest.signing_payload(), payload);
+        assert!(verify_manifest_signature(&manifest, &public_key_base64()).is_ok());
+        assert_eq!(manifest.release_date(), Some("2026-11-16"));
+    }
+
+    #[test]
     fn signing_payload_is_stable_and_excludes_the_signature() {
         let mut manifest = Manifest {
             version: " 1.2.3 ".into(),
@@ -1224,6 +1267,7 @@ mod tests {
             sha256: "aa".repeat(32),
             signature: "first".into(),
             notes: "line one\nline two".into(),
+            date: None,
             min_os: None,
             arch: Some("arm64".into()),
             kind: String::new(),
@@ -1287,7 +1331,7 @@ mod tests {
         .unwrap();
         assert!(outcome.update_available);
         assert_eq!(outcome.available_version(), "0.5.0");
-        assert_eq!(outcome.manifest.release_notes(), "Fixed the updater");
+        assert_eq!(outcome.manifest.release_notes(), Some("Fixed the updater"));
 
         // Same version is not an update; older manifest is not either.
         let outcome = check_platform(
@@ -1727,6 +1771,7 @@ mod tests {
             sha256: "bb".repeat(32),
             signature: String::new(),
             notes: "openssl cross-sign".into(),
+            date: None,
             min_os: None,
             arch: None,
             kind: "app-bundle".into(),

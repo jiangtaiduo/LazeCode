@@ -24,6 +24,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
+      - name: Verify the signed update manifest
+        run: |
+          python3 - "$GITHUB_REF_NAME" <<'PY'
+          import hashlib
+          import json
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1].removeprefix("v")
+          manifest = json.loads(Path("latest.json").read_text(encoding="utf-8"))
+          if manifest.get("version") != version:
+              sys.exit(f"latest.json version {manifest.get('version')!r} != tag {version!r}")
+          artifact = Path("releases") / manifest["url"].rsplit("/", 1)[-1]
+          if not artifact.is_file():
+              sys.exit(f"missing update artifact: {artifact}")
+          digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+          if digest != manifest.get("sha256"):
+              sys.exit(f"latest.json sha256 {manifest.get('sha256')} != artifact {digest}")
+          PY
 
       - name: cargo test
         shell: bash

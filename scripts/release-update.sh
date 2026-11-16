@@ -76,37 +76,81 @@ if roots != {"LazeCode.app"} or metadata:
     sys.exit(f"bad bundle archive: roots={sorted(roots)} metadata={metadata[:3]}")
 PY
 
-# 3. Hash and sign the canonical manifest payload. The updater's
-#    Manifest::signing_payload() is compact JSON in exactly this field
-#    order; sign those bytes verbatim.
+# 3. Hash the artifact and gather readable release notes from the
+#    changelogs. Both the notes and the date are part of the manifest; the
+#    notes are signed, the date is display-only.
 SHA256="$(shasum -a 256 "$ARTIFACT" | awk '{print $1}')"
-NOTES="LazeCode $VERSION"
-# UPDATE_BASE_URL overrides the publish root (local E2E tests point it at a
-# scratch HTTP server); MANIFEST_OUT redirects the manifest path.
+DATE="$(date -u +%Y-%m-%d)"
+if [[ -n "${UPDATE_NOTES:-}" ]]; then
+  NOTES="$UPDATE_NOTES"
+else
+  NOTES="$(python3 - "$VERSION" "$ROOT/CHANGELOG.md" "$ROOT/CHANGELOG.zh-CN.md" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+version = sys.argv[1]
+sections = []
+for path in sys.argv[2:]:
+    text = Path(path).read_text(encoding="utf-8")
+    match = re.search(r"^## \[" + re.escape(version) + r"\][^\n]*$", text, re.MULTILINE)
+    if not match:
+        continue
+    start = match.end()
+    following = re.search(r"^## \[", text[start:], re.MULTILINE)
+    body = (text[start:start + following.start()] if following else text[start:]).strip()
+    if body:
+        sections.append(body)
+print("\n\n---\n\n".join(sections) if sections else f"LazeCode {version}")
+PY
+)"
+fi
+
 BASE_URL="${UPDATE_BASE_URL:-https://raw.githubusercontent.com/jiangtaiduo/LazeCode/main}"
 URL="${BASE_URL%/}/releases/$(basename "$ARTIFACT")"
-PAYLOAD="$(printf '{"version":"%s","url":"%s","sha256":"%s","notes":"%s","min_os":"","arch":"%s","kind":"app-bundle"}' \
-  "$VERSION" "$URL" "$SHA256" "$NOTES" "$UPDATER_ARCH")"
 PAYLOAD_FILE="$(mktemp)"
-printf '%s' "$PAYLOAD" > "$PAYLOAD_FILE"
+python3 - "$VERSION" "$URL" "$SHA256" "$NOTES" "$UPDATER_ARCH" > "$PAYLOAD_FILE" <<'PY'
+import json
+import sys
+
+version, url, sha256, notes, arch = sys.argv[1:6]
+print(
+    json.dumps(
+        {
+            "version": version,
+            "url": url,
+            "sha256": sha256,
+            "notes": notes,
+            "min_os": "",
+            "arch": arch,
+            "kind": "app-bundle",
+        },
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ),
+    end="",
+)
+PY
 # No `-rawin`: OpenSSL 1.1.1 does not know it, while Ed25519 signs the
 # input bytes as the raw message in every supported version.
 SIGNATURE="$(openssl pkeyutl -sign -inkey "$KEY" -in "$PAYLOAD_FILE" | base64)"
+MANIFEST_OUT_PATH="${MANIFEST_OUT:-$ROOT/latest.json}"
+python3 - "$PAYLOAD_FILE" "$SIGNATURE" "$DATE" "$MANIFEST_OUT_PATH" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+payload["signature"] = sys.argv[2]
+payload["date"] = sys.argv[3]
+Path(sys.argv[4]).write_text(
+    json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    encoding="utf-8",
+)
+PY
 rm -f "$PAYLOAD_FILE"
 
-# 4. Emit the manifest.
-cat > "${MANIFEST_OUT:-$ROOT/latest.json}" <<EOF
-{
-  "version": "$VERSION",
-  "url": "$URL",
-  "sha256": "$SHA256",
-  "signature": "$SIGNATURE",
-  "notes": "$NOTES",
-  "arch": "$UPDATER_ARCH",
-  "kind": "app-bundle"
-}
-EOF
-
+# 4. Emit the manifest (already written above) and report the publish paths.
 echo
 echo "Staged release $VERSION:"
 echo "  artifact : releases/$(basename "$ARTIFACT")"

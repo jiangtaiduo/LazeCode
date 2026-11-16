@@ -167,6 +167,13 @@ pub struct Settings {
     /// manifest fetch; download and install always need the user's click in
     /// the update dialog).
     pub auto_check_updates: bool,
+    /// Unix timestamp (seconds) of the last update check attempt. `0` means
+    /// this install has never checked; it also throttles the automatic check
+    /// to once per day.
+    pub last_update_check_time: i64,
+    /// Version the user explicitly ignored. Background checks keep finding
+    /// it, but no badge or toast is shown. Empty means no ignored version.
+    pub ignored_update_version: String,
 }
 
 impl Default for Settings {
@@ -200,6 +207,8 @@ impl Default for Settings {
                     .to_string(),
             update_public_key: "QpmhblRgWl9yUHzvNbbRcffNYA/qKNO4g1aBSVU18b0=".to_string(),
             auto_check_updates: true,
+            last_update_check_time: 0,
+            ignored_update_version: String::new(),
         }
     }
 }
@@ -298,6 +307,7 @@ impl Settings {
         self.compare_details_width = self.compare_details_width.clamp(24.0, 62.0);
         self.update_endpoint = self.update_endpoint.trim().to_string();
         self.update_public_key = self.update_public_key.trim().to_string();
+        self.ignored_update_version = self.ignored_update_version.trim().to_string();
         for option in &mut self.agents.options {
             option.name = option.name.trim().to_string();
             option.description = option.description.trim().to_string();
@@ -432,6 +442,23 @@ update_public_key = \"\"\n",
             toml::from_str("update_endpoint = \"https://example.test/m.json\"\n").unwrap();
         settings.migrate_updater_defaults();
         assert_eq!(settings.update_endpoint, "https://example.test/m.json");
+    }
+
+    #[test]
+    fn updater_check_metadata_round_trips_and_defaults() {
+        let back: Settings = toml::from_str("theme = \"light\"\n").unwrap();
+        assert_eq!(back.last_update_check_time, 0);
+        assert!(back.ignored_update_version.is_empty());
+
+        let settings = Settings {
+            last_update_check_time: 1_700_000_000,
+            ignored_update_version: "0.4.7".into(),
+            ..Settings::default()
+        };
+        let text = toml::to_string_pretty(&settings).unwrap();
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(back.last_update_check_time, 1_700_000_000);
+        assert_eq!(back.ignored_update_version, "0.4.7");
     }
 
     #[test]

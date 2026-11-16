@@ -263,6 +263,25 @@ fn main() -> anyhow::Result<()> {
     if let Some((tab_id, group)) = pending_jump {
         runtime.diff_scroll = Some((tab_id, group));
     }
+    if mode.starts_with("update") {
+        runtime.update_open = true;
+        let update_available = mode != "update_uptodate";
+        runtime.update.available = Some(lazecode_core::updater::CheckOutcome {
+            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            manifest: lazecode_core::updater::Manifest {
+                version: if update_available { "9.9.9".into() } else { env!("CARGO_PKG_VERSION").into() },
+                url: "https://updates.example.test/LazeCode-9.9.9.app.tar.gz".into(),
+                sha256: "aa".repeat(32),
+                signature: String::new(),
+                notes: "### Added\n\n- A proper update page with **Markdown** release notes.\n- The title-bar badge links here.\n\n### Fixed\n\n- Long notes scroll instead of clipping.\n\n---\n\n### 新增\n\n- 带 **Markdown** 发布说明的更新页面。\n- 顶栏提示直接打开本页。".into(),
+                date: Some("2026-11-16".into()),
+                min_os: None,
+                arch: None,
+                kind: "app-bundle".into(),
+            },
+            update_available,
+        });
+    }
     match mode.as_str() {
         "settings" => runtime.settings_open = true,
         "settings-editor" => {
@@ -276,6 +295,12 @@ fn main() -> anyhow::Result<()> {
         "settings-agents" => {
             runtime.settings_open = true;
             model.ui.settings_section = 3;
+        }
+        "settings-updates" => {
+            runtime.settings_open = true;
+            model.ui.settings_section = 5;
+            model.settings.last_update_check_time = 1_763_260_000;
+            model.settings.ignored_update_version = "0.4.5".into();
         }
         "agent_menu" => {
             runtime.open_agent_menu(egui::Rect::from_min_size(

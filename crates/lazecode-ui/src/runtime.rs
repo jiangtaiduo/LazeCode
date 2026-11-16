@@ -8,7 +8,7 @@ use lazecode_terminal::{probe_busy_many, BusyTarget, Snapshot};
 use lazecode_text::Cursor;
 
 use crate::icons::Icon;
-use crate::overlays::UpdateState;
+use crate::update_ui::UpdateState;
 
 #[derive(Clone, Copy, Debug)]
 pub struct TermSelection {
@@ -446,6 +446,10 @@ pub enum DialogState {
     },
     Quit {
         commands: Vec<String>,
+        /// Set when quitting is the last step of applying an update; the
+        /// confirmation handler relaunches the installed build instead of
+        /// only exiting.
+        restart_update: bool,
     },
 }
 
@@ -812,7 +816,14 @@ impl UiRuntime {
             model.ui.command_palette_open = false;
             self.palette.focus_requested = false;
         } else if self.update_open {
-            if !self.update.busy() {
+            // Checking may be dismissed; its worker keeps running and a found
+            // release reappears as the title-bar badge. Downloading and
+            // installing must stay visible until they finish.
+            if !matches!(
+                self.update.view(&model.settings),
+                crate::update_ui::UpdateView::Downloading { .. }
+                    | crate::update_ui::UpdateView::Installing
+            ) {
                 self.update_open = false;
             }
         } else if !matches!(self.dialog, DialogState::None) {
@@ -1352,7 +1363,10 @@ impl UiRuntime {
             .iter()
             .any(|project| project.tabs.iter().any(|tab| tab.is_dirty()));
         if unsaved || !commands.is_empty() {
-            self.dialog = DialogState::Quit { commands };
+            self.dialog = DialogState::Quit {
+                commands,
+                restart_update: false,
+            };
         } else {
             model.should_quit = true;
         }
@@ -1407,6 +1421,7 @@ pub enum PaletteAction {
     ToggleSidebar,
     ToggleConsole,
     OpenSettings,
+    CheckUpdates,
     ToggleTheme,
     OpenProject,
     NewTerminal,

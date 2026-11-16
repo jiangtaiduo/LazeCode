@@ -1,19 +1,15 @@
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use egui::{
     Align2, Color32, FontId, Key, Pos2, Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2,
 };
-use lazecode_core::updater::{self, CheckOutcome};
 use lazecode_core::{AppModel, Command, TabKind, ToastKind};
 
 use crate::icons::{paint as paint_icon, Icon};
 use crate::runtime::{DialogState, MenuKind, MenuState, UiRuntime};
 use crate::theme::Theme;
-use crate::widgets::{
-    checkbox, primary_button, secondary_button, secondary_button_enabled, text_clipped,
-};
+use crate::widgets::{checkbox, primary_button, secondary_button, text_clipped};
 
 /// Shared constructor for the Push dialog so every entry point sees the
 /// project's remotes and pending commits.
@@ -51,284 +47,19 @@ pub fn push_dialog_state(
     }
 }
 
-/// Phase of the background update task.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UpdatePhase {
-    Checking,
-    Downloading,
-    Installing,
-}
-
-impl UpdatePhase {
-    fn label(self, zh: bool) -> &'static str {
-        match (self, zh) {
-            (UpdatePhase::Checking, true) => "正在检查更新…",
-            (UpdatePhase::Checking, false) => "Checking for updates…",
-            (UpdatePhase::Downloading, true) => "正在下载并校验…",
-            (UpdatePhase::Downloading, false) => "Downloading and verifying…",
-            (UpdatePhase::Installing, true) => "正在安装…",
-            (UpdatePhase::Installing, false) => "Installing…",
-        }
-    }
-}
-
-/// Snapshot of the background updater task, polled by the UI thread.
-#[derive(Clone, Debug, Default)]
-pub struct UpdateProgress {
-    pub phase: Option<UpdatePhase>,
-    pub downloaded: u64,
-    pub total: Option<u64>,
-    pub done: bool,
-    pub error: Option<String>,
-    pub outcome: Option<CheckOutcome>,
-    pub staged: Option<PathBuf>,
-    pub installed: Option<String>,
-    /// Where the new build was installed (bundle or executable), so the
-    /// dialog can relaunch exactly what was replaced.
-    pub installed_target: Option<PathBuf>,
-}
-
-/// Shared handle a worker thread writes and the UI polls once per frame.
-#[derive(Default)]
-pub struct UpdateJob {
-    progress: Mutex<UpdateProgress>,
-}
-
-impl UpdateJob {
-    fn snapshot(&self) -> UpdateProgress {
-        self.progress
-            .lock()
-            .map(|progress| progress.clone())
-            .unwrap_or_default()
-    }
-
-    fn with(&self, update: impl FnOnce(&mut UpdateProgress)) {
-        if let Ok(mut progress) = self.progress.lock() {
-            update(&mut progress);
-        }
-    }
-}
-
-/// Everything the update window needs across frames. Lives in `UiRuntime`
-/// so progress and auto-check results survive closing the window.
-#[derive(Default)]
-pub struct UpdateState {
-    /// Last successful check, including "already up to date".
-    pub available: Option<CheckOutcome>,
-    /// Verified artifact waiting to be installed.
-    pub staged: Option<PathBuf>,
-    /// Running background task.
-    pub job: Option<Arc<UpdateJob>>,
-    /// Error from the most recent task.
-    pub error: Option<String>,
-    /// Version installed in this session (restart required).
-    pub installed: Option<String>,
-    /// Install location of that version (bundle or executable).
-    pub installed_target: Option<PathBuf>,
-    /// Auto-check already attempted for this session.
-    pub auto_checked: bool,
-    /// Version already announced in a toast, so it is not repeated.
-    notified: Option<String>,
-}
-
-impl UpdateState {
-    pub(crate) fn busy(&self) -> bool {
-        self.job
-            .as_ref()
-            .map(|job| job.snapshot())
-            .is_some_and(|progress| progress.phase.is_some() && !progress.done)
-    }
-
-    fn poll(&mut self) {
-        let Some(job) = self.job.clone() else {
-            return;
-        };
-        let progress = job.snapshot();
-        if progress.phase.is_none() || !progress.done {
-            return;
-        }
-        self.error = progress.error;
-        if let Some(outcome) = progress.outcome {
-            let version = outcome.available_version().to_string();
-            if self
-                .available
-                .as_ref()
-                .map(|current| current.available_version())
-                != Some(version.as_str())
-            {
-                self.staged = None;
-            }
-            self.available = Some(outcome);
-        }
-        if let Some(staged) = progress.staged {
-            self.staged = Some(staged);
-        }
-        if let Some(version) = progress.installed {
-            self.installed = Some(version);
-            self.staged = None;
-        }
-        if let Some(target) = progress.installed_target {
-            self.installed_target = Some(target);
-        }
-        self.job = None;
-    }
-
-    fn start(&mut self, phase: UpdatePhase, task: impl FnOnce(&UpdateJob) + Send + 'static) {
-        let job = Arc::new(UpdateJob::default());
-        job.with(|progress| progress.phase = Some(phase));
-        self.error = None;
-        self.job = Some(job.clone());
-        if let Err(err) = std::thread::Builder::new()
-            .name("lazecode-update".into())
-            .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task(&job)));
-                if result.is_err() {
-                    job.with(|progress| {
-                        progress.error = Some("internal updater task failed".into());
-                    });
-                }
-                job.with(|progress| progress.done = true);
-            })
-        {
-            self.error = Some(err.to_string());
-            self.job = None;
-        }
-    }
-
-    /// Fetch and verify the manifest; runs off the UI thread.
-    pub fn check(&mut self, endpoint: &str, current_version: &str, public_key: &str) {
-        if self.busy() {
-            return;
-        }
-        let endpoint = endpoint.to_string();
-        let current_version = current_version.to_string();
-        let public_key = public_key.to_string();
-        self.start(UpdatePhase::Checking, move |job| {
-            match updater::check(&endpoint, &current_version, &public_key) {
-                Ok(outcome) => job.with(|progress| progress.outcome = Some(outcome)),
-                Err(err) => job.with(|progress| progress.error = Some(err.to_string())),
-            }
-        });
-    }
-
-    /// Download the announced artifact, verifying hash and signature.
-    pub fn download(&mut self, manifest: updater::Manifest, public_key: &str, dest: PathBuf) {
-        if self.busy() {
-            return;
-        }
-        let public_key = public_key.to_string();
-        self.start(UpdatePhase::Downloading, move |job| {
-            let result = updater::download_and_verify(
-                &manifest,
-                &public_key,
-                &dest,
-                &mut |downloaded, total| {
-                    job.with(|progress| {
-                        progress.downloaded = downloaded;
-                        progress.total = total;
-                    });
-                },
-            );
-            match result {
-                Ok(()) => job.with(|progress| progress.staged = Some(dest.clone())),
-                Err(err) => job.with(|progress| progress.error = Some(err.to_string())),
-            }
-        });
-    }
-
-    /// Replace the running build with the verified staged artifact, using
-    /// the manifest's announced shape (single executable or `.app` bundle).
-    pub fn install_staged(&mut self) {
-        if self.busy() {
-            return;
-        }
-        let Some(staged) = self.staged.clone() else {
-            return;
-        };
-        let kind = self
-            .available
-            .as_ref()
-            .map(|outcome| outcome.manifest.artifact_kind())
-            .unwrap_or(updater::ArtifactKind::Executable);
-        let version = self
-            .available
-            .as_ref()
-            .map(|outcome| outcome.manifest.version.clone());
-        self.start(UpdatePhase::Installing, move |job| {
-            let target = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("LazeCode"));
-            match updater::install_artifact(&staged, &target, kind) {
-                Ok(report) => {
-                    if let Some(backup) = &report.backup {
-                        log::info!("previous build kept at {}", backup.display());
-                    }
-                    job.with(|progress| {
-                        progress.installed = version.clone();
-                        progress.installed_target = Some(report.target.clone());
-                    });
-                }
-                Err(err) => job.with(|progress| progress.error = Some(err.to_string())),
-            }
-        });
-    }
-
-    /// Start the freshly installed build and quit so it takes over.
-    pub fn relaunch_installed(&mut self) -> Result<(), String> {
-        if self.busy() {
-            return Err("an update task is still running".into());
-        }
-        let target = self
-            .installed_target
-            .clone()
-            .ok_or_else(|| "nothing was installed yet".to_string())?;
-        updater::relaunch(&target).map_err(|err| err.to_string())
-    }
-}
-
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme) {
     let screen = ui.max_rect();
 
-    // Poll the updater even while its window is closed so an automatic check
-    // can raise a toast. The worker never touches egui state directly.
+    // Keep the updater worker polled even while its window is closed so an
+    // automatic check can surface as the title-bar badge/toast.
+    let update_changed = rt.update.tick(model);
     if rt.update.job.is_some() {
-        rt.update.poll();
         ui.ctx().request_repaint_after(Duration::from_millis(150));
-    }
-    if model.settings.auto_check_updates
-        && model.settings.updates_configured()
-        && !rt.update.auto_checked
-        && rt.update.job.is_none()
-    {
-        rt.update.auto_checked = true;
-        rt.update.check(
-            &model.settings.update_endpoint,
-            model.version,
-            &model.settings.update_public_key,
-        );
-    }
-    let noticed = rt
-        .update
-        .available
-        .as_ref()
-        .filter(|outcome| outcome.update_available)
-        .map(|outcome| {
-            (
-                outcome.available_version().to_string(),
-                outcome.current_version.clone(),
-            )
-        });
-    if let Some((version, current)) = noticed {
-        if rt.update.notified.as_deref() != Some(version.as_str()) {
-            rt.update.notified = Some(version.clone());
-            let zh = model.settings.language.is_zh();
-            model.toast(
-                if zh {
-                    format!("发现新版本 {version}（当前 {current}），可在 设置 → 更新 中下载")
-                } else {
-                    format!("Version {version} is available (current {current}); open Settings → Updates")
-                },
-                ToastKind::Info,
-            );
-        }
+    } else if let Some(delay) = rt.update.next_wakeup() {
+        ui.ctx()
+            .request_repaint_after(delay.max(Duration::from_millis(16)));
+    } else if update_changed {
+        ui.ctx().request_repaint();
     }
     if let Some(menu) = rt.menu.take() {
         match menu.kind {
@@ -538,7 +269,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         draw_dialog(ui, model, rt, theme, screen);
     }
     if rt.update_open {
-        draw_update_window(ui, model, rt, theme, screen);
+        crate::update_ui::draw(ui, model, rt, theme, screen);
     }
 }
 
@@ -569,7 +300,7 @@ fn popover_rect(screen: Rect, anchor: Rect, width: f32, height: f32) -> Rect {
 
 /// Stable `.py-dialog-window` material: opaque dialog surface, radius 12,
 /// hairline border, heavy drop shadow.
-fn frame(ui: &Ui, rect: Rect, theme: &Theme) {
+pub(crate) fn frame(ui: &Ui, rect: Rect, theme: &Theme) {
     let p = theme.palette;
     dialog_shadow(ui.painter(), rect, 24.0, 80.0, 153);
     ui.painter()
@@ -580,384 +311,6 @@ fn frame(ui: &Ui, rect: Rect, theme: &Theme) {
         Stroke::new(1.0, p.menu_border),
         StrokeKind::Inside,
     );
-}
-
-/// Format a byte count for the download progress line.
-fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
-    let mut value = bytes as f64;
-    let mut index = 0;
-    while value >= 1024.0 && index + 1 < UNITS.len() {
-        value /= 1024.0;
-        index += 1;
-    }
-    if index == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[index])
-    }
-}
-
-fn paint_wrapped(ui: &Ui, rect: Rect, text: &str, font: FontId, color: Color32) {
-    if rect.width() <= 1.0 || rect.height() <= 1.0 {
-        return;
-    }
-    let galley = ui
-        .painter()
-        .layout(text.to_string(), font, color, rect.width());
-    ui.painter()
-        .with_clip_rect(rect)
-        .galley(rect.min, galley, color);
-}
-
-/// Software-update window: current/available version, release notes,
-/// Check / Download / Install and progress or error feedback.
-fn draw_update_window(
-    ui: &mut Ui,
-    model: &mut AppModel,
-    rt: &mut UiRuntime,
-    theme: &Theme,
-    screen: Rect,
-) {
-    let p = theme.palette;
-    let zh = model.settings.language.is_zh();
-    let progress = rt.update.job.as_ref().map(|job| job.snapshot());
-    let busy = rt.update.busy();
-
-    if !busy && ui.input(|input| input.key_pressed(Key::Escape)) {
-        rt.update_open = false;
-        return;
-    }
-
-    ui.painter()
-        .rect_filled(screen, 0.0, Color32::from_black_alpha(150));
-    let rect = Rect::from_center_size(screen.center(), Vec2::new(600.0, 440.0));
-    frame(ui, rect, theme);
-
-    let close = Rect::from_center_size(
-        Pos2::new(rect.right() - 20.0, rect.top() + 20.0),
-        Vec2::splat(22.0),
-    );
-    let close_response = ui.interact(close, ui.scope_id().with("update-close"), Sense::click());
-    paint_icon(
-        ui.painter(),
-        close.shrink(4.0),
-        Icon::X,
-        if close_response.hovered() && !busy {
-            p.text
-        } else {
-            p.text3
-        },
-    );
-    if close_response.clicked() && !busy {
-        rt.update_open = false;
-    }
-
-    ui.painter().text(
-        Pos2::new(rect.left() + 22.0, rect.top() + 26.0),
-        Align2::LEFT_CENTER,
-        crate::tr!(model, "Software Update", "软件更新"),
-        FontId::proportional(16.0),
-        p.text,
-    );
-    ui.painter().text(
-        Pos2::new(rect.left() + 22.0, rect.top() + 48.0),
-        Align2::LEFT_CENTER,
-        format!(
-            "{} {}",
-            crate::tr!(model, "Current version", "当前版本"),
-            model.version
-        ),
-        FontId::proportional(11.0),
-        p.text3,
-    );
-    ui.painter().hline(
-        rect.x_range(),
-        rect.top() + 64.5,
-        Stroke::new(1.0, p.border_soft),
-    );
-
-    let content = Rect::from_min_max(
-        Pos2::new(rect.left() + 22.0, rect.top() + 78.0),
-        Pos2::new(rect.right() - 22.0, rect.bottom() - 58.0),
-    );
-    let configured = model.settings.updates_configured();
-    let error = rt
-        .update
-        .error
-        .clone()
-        .or_else(|| progress.as_ref().and_then(|p| p.error.clone()));
-
-    if !configured {
-        paint_wrapped(
-            ui,
-            content,
-            crate::tr!(
-                model,
-                "Updates are disabled. Set the update endpoint and the pinned public key in Settings → Updates.",
-                "更新功能未启用。请在 设置 → 更新 中填写更新地址与固定的公钥。"
-            ),
-            FontId::proportional(12.0),
-            p.text2,
-        );
-    } else if let Some(progress) = &progress {
-        let phase = progress.phase.unwrap_or(UpdatePhase::Checking);
-        ui.painter().text(
-            Pos2::new(content.left(), content.top() + 12.0),
-            Align2::LEFT_CENTER,
-            phase.label(zh),
-            FontId::proportional(12.5),
-            p.text,
-        );
-        if phase == UpdatePhase::Downloading {
-            let bar = Rect::from_min_size(
-                Pos2::new(content.left(), content.top() + 34.0),
-                Vec2::new(content.width(), 8.0),
-            );
-            ui.painter()
-                .rect_filled(bar, egui::CornerRadius::same(4), p.panel2);
-            let ratio = progress
-                .total
-                .filter(|total| *total > 0)
-                .map(|total| (progress.downloaded as f32 / total as f32).clamp(0.0, 1.0))
-                .unwrap_or(0.0);
-            ui.painter().rect_filled(
-                Rect::from_min_size(bar.min, Vec2::new(bar.width() * ratio, bar.height())),
-                egui::CornerRadius::same(4),
-                p.accent,
-            );
-            let bytes = match progress.total {
-                Some(total) => format!(
-                    "{} / {}",
-                    human_bytes(progress.downloaded),
-                    human_bytes(total)
-                ),
-                None => human_bytes(progress.downloaded),
-            };
-            ui.painter().text(
-                Pos2::new(content.left(), content.top() + 56.0),
-                Align2::LEFT_CENTER,
-                bytes,
-                FontId::monospace(10.5),
-                p.text3,
-            );
-        }
-    } else if let Some(installed) = &rt.update.installed {
-        paint_wrapped(
-            ui,
-            content,
-            &if zh {
-                format!("已安装 {installed}。旧版本保留为备份（.bak）。")
-            } else {
-                format!("Installed {installed}. The previous build is kept as a .bak backup.")
-            },
-            FontId::proportional(12.0),
-            p.green,
-        );
-        let restart_rect = Rect::from_min_size(
-            Pos2::new(content.left(), content.top() + 40.0),
-            Vec2::new(150.0, 30.0),
-        );
-        if primary_button(
-            ui,
-            restart_rect,
-            crate::tr!(model, "Restart now", "立即重启"),
-            None,
-            true,
-            theme,
-        )
-        .clicked()
-        {
-            match rt.update.relaunch_installed() {
-                Ok(()) => model.should_quit = true,
-                Err(err) => rt.update.error = Some(err),
-            }
-        }
-    } else if let Some(outcome) = &rt.update.available {
-        if outcome.update_available {
-            ui.painter().text(
-                Pos2::new(content.left(), content.top() + 12.0),
-                Align2::LEFT_CENTER,
-                if zh {
-                    format!(
-                        "发现新版本 {}（当前 {}）",
-                        outcome.available_version(),
-                        outcome.current_version
-                    )
-                } else {
-                    format!(
-                        "Version {} is available (current {}).",
-                        outcome.available_version(),
-                        outcome.current_version
-                    )
-                },
-                FontId::proportional(12.5),
-                p.green,
-            );
-            let notes_rect = Rect::from_min_max(
-                Pos2::new(content.left(), content.top() + 30.0),
-                Pos2::new(content.right(), content.bottom() - 22.0),
-            );
-            paint_wrapped(
-                ui,
-                notes_rect,
-                outcome.manifest.release_notes(),
-                FontId::proportional(11.5),
-                p.text2,
-            );
-            if let Some(staged) = &rt.update.staged {
-                text_clipped(
-                    ui.painter(),
-                    Rect::from_min_max(
-                        Pos2::new(content.left(), content.bottom() - 18.0),
-                        Pos2::new(content.right(), content.bottom() - 2.0),
-                    ),
-                    &format!(
-                        "{} {}",
-                        crate::tr!(model, "Verified artifact:", "已校验的文件："),
-                        staged.display()
-                    ),
-                    FontId::monospace(10.0),
-                    p.text3,
-                    Align2::LEFT_CENTER,
-                );
-            }
-        } else {
-            paint_wrapped(
-                ui,
-                content,
-                &if zh {
-                    format!("已是最新版本（{}）。", outcome.current_version)
-                } else {
-                    format!("LazeCode is up to date ({}).", outcome.current_version)
-                },
-                FontId::proportional(12.5),
-                p.text2,
-            );
-        }
-    } else {
-        paint_wrapped(
-            ui,
-            content,
-            &if zh {
-                format!(
-                    "更新地址：{}
-点击“检查更新”获取发布清单。签名与 SHA-256 校验通过后才会下载。",
-                    model.settings.update_endpoint
-                )
-            } else {
-                format!(
-                    "Endpoint: {}
-Choose “Check for updates”. The manifest signature and the artifact SHA-256 are verified before anything is installed.",
-                    model.settings.update_endpoint
-                )
-            },
-            FontId::proportional(11.5),
-            p.text2,
-        );
-    }
-
-    if let Some(error) = &error {
-        paint_wrapped(
-            ui,
-            Rect::from_min_max(
-                Pos2::new(content.left(), content.bottom() - 34.0),
-                Pos2::new(content.right(), content.bottom()),
-            ),
-            error,
-            FontId::proportional(10.5),
-            p.rose,
-        );
-    }
-
-    let button_y = rect.bottom() - 44.0;
-    let check_rect = Rect::from_min_size(
-        Pos2::new(rect.left() + 22.0, button_y),
-        Vec2::new(134.0, 30.0),
-    );
-    if secondary_button_enabled(
-        ui,
-        check_rect,
-        crate::tr!(model, "Check for updates", "检查更新"),
-        None,
-        configured && !busy,
-        theme,
-    )
-    .clicked()
-    {
-        rt.update.error = None;
-        rt.update.check(
-            &model.settings.update_endpoint,
-            model.version,
-            &model.settings.update_public_key,
-        );
-    }
-
-    let download_rect = Rect::from_min_size(
-        Pos2::new(check_rect.right() + 8.0, button_y),
-        Vec2::new(112.0, 30.0),
-    );
-    let can_download = configured
-        && !busy
-        && rt.update.staged.is_none()
-        && rt.update.installed.is_none()
-        && rt
-            .update
-            .available
-            .as_ref()
-            .is_some_and(|outcome| outcome.update_available);
-    if secondary_button_enabled(
-        ui,
-        download_rect,
-        crate::tr!(model, "Download", "下载"),
-        None,
-        can_download,
-        theme,
-    )
-    .clicked()
-    {
-        if let Some(outcome) = rt.update.available.clone() {
-            let dest = updater::staged_path(outcome.available_version());
-            rt.update
-                .download(outcome.manifest, &model.settings.update_public_key, dest);
-        }
-    }
-
-    let install_rect = Rect::from_min_size(
-        Pos2::new(download_rect.right() + 8.0, button_y),
-        Vec2::new(96.0, 30.0),
-    );
-    let can_install = configured && !busy && rt.update.staged.is_some();
-    if primary_button(
-        ui,
-        install_rect,
-        crate::tr!(model, "Install", "安装"),
-        None,
-        can_install,
-        theme,
-    )
-    .clicked()
-        && can_install
-    {
-        rt.update.install_staged();
-    }
-
-    let close_rect = Rect::from_min_size(
-        Pos2::new(rect.right() - 102.0, button_y),
-        Vec2::new(80.0, 30.0),
-    );
-    if secondary_button_enabled(
-        ui,
-        close_rect,
-        crate::tr!(model, "Close", "关闭"),
-        None,
-        !busy,
-        theme,
-    )
-    .clicked()
-    {
-        rt.update_open = false;
-    }
 }
 
 /// Stable `.branch-ctx-menu` material: `--menu-bg` glass at 0.96, radius 8,
@@ -8343,9 +7696,19 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             520.0,
             230.0,
         ),
-        DialogState::Quit { .. } => (
-            crate::tr!(model, "Quit LazeCode?", "退出 LazeCode？"),
-            crate::tr!(model, "Tabs with unsaved changes will lose their edits unless you cancel and save them first.", "未保存的标签页将丢失更改，请取消并先保存。"),
+        DialogState::Quit {
+            restart_update, ..
+        } => (
+            if *restart_update {
+                crate::tr!(model, "Restart to finish updating?", "重启以完成更新？")
+            } else {
+                crate::tr!(model, "Quit LazeCode?", "退出 LazeCode？")
+            },
+            if *restart_update {
+                crate::tr!(model, "The new version is installed. Restarting closes all windows; save any open files first.", "新版本已安装。重启会关闭所有窗口，请先保存打开的文件。")
+            } else {
+                crate::tr!(model, "Tabs with unsaved changes will lose their edits unless you cancel and save them first.", "未保存的标签页将丢失更改，请取消并先保存。")
+            },
             460.0,
             240.0,
         ),
@@ -8538,8 +7901,18 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 )
             }
         }
-        DialogState::Quit { commands } => {
+        DialogState::Quit {
+            commands,
+            restart_update,
+        } => {
             let mut lines = Vec::new();
+            if *restart_update {
+                lines.push(if model.settings.language.is_zh() {
+                    "更新将在重启后生效。".to_string()
+                } else {
+                    "The installed update takes effect after the restart.".to_string()
+                });
+            }
             if model
                 .projects
                 .iter()
@@ -10026,7 +9399,13 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         DialogState::Remotes { .. } => crate::tr!(model, "Done", "完成"),
         DialogState::Reset { .. } => crate::tr!(model, "Reset", "重置"),
         DialogState::NewTag { .. } => crate::tr!(model, "Create", "创建"),
-        DialogState::Quit { .. } => crate::tr!(model, "Quit", "退出"),
+        DialogState::Quit { restart_update, .. } => {
+            if *restart_update {
+                crate::tr!(model, "Restart now", "立即重启")
+            } else {
+                crate::tr!(model, "Quit", "退出")
+            }
+        }
         DialogState::CloseDirtyTab { .. } => crate::tr!(model, "Discard", "放弃修改"),
         DialogState::ConfirmTerminalClose { .. } => {
             crate::tr!(model, "Close anyway", "确定关闭")
@@ -10232,8 +9611,18 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 rt.apply_terminal_close(model, action);
                 close = true;
             }
-            DialogState::Quit { .. } => {
-                model.should_quit = true;
+            DialogState::Quit { restart_update, .. } => {
+                if *restart_update {
+                    match rt.update.relaunch_installed() {
+                        Ok(()) => model.should_quit = true,
+                        Err(err) => {
+                            rt.update.error = Some(err);
+                            rt.update_open = true;
+                        }
+                    }
+                } else {
+                    model.should_quit = true;
+                }
                 close = true;
             }
             DialogState::Push {

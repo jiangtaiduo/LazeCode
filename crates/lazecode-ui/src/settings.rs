@@ -4,7 +4,9 @@ use lazecode_core::{AppModel, Language, ThemeMode};
 use crate::icons::{paint as paint_icon, Icon};
 use crate::runtime::UiRuntime;
 use crate::theme::Theme;
-use crate::widgets::{checkbox, icon_button, primary_button, secondary_button, text_clipped};
+use crate::widgets::{
+    checkbox, icon_button, primary_button, secondary_button, secondary_button_enabled, text_clipped,
+};
 
 const SECTIONS_EN: [&str; 7] = [
     "Appearance",
@@ -1099,7 +1101,7 @@ fn updates(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme,
     );
     let endpoint_label = crate::tr!(model, "Endpoint", "更新地址");
     let key_label = crate::tr!(model, "Public key", "公钥");
-    let auto_label = crate::tr!(model, "Check at startup", "启动时检查");
+    let auto_label = crate::tr!(model, "Check automatically", "自动检查更新");
     let mut changed = false;
     let mut y = rect.top() + 74.0;
     changed |= labelled_input(
@@ -1140,28 +1142,87 @@ fn updates(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme,
         Align2::LEFT_CENTER,
         crate::tr!(
             model,
-            "Fetch the manifest once shortly after launch (no download starts).",
-            "启动后自动获取一次清单（不会自动下载）。"
+            "Five seconds after launch, then at most once per 24 hours (no download starts).",
+            "启动 5 秒后检查，24 小时内最多一次（不会自动下载）。"
         ),
         FontId::proportional(10.5),
         p.text3,
     );
 
-    y += 44.0;
+    y += 30.0;
+    let checked = if model.settings.last_update_check_time > 0 {
+        crate::update_ui::checked_label(
+            Some(model.settings.last_update_check_time),
+            model.settings.language.is_zh(),
+        )
+    } else {
+        crate::tr!(model, "never", "从未").to_string()
+    };
+    ui.painter().text(
+        Pos2::new(rect.left(), y),
+        Align2::LEFT_CENTER,
+        if model.settings.language.is_zh() {
+            format!("上次检查：{checked}")
+        } else {
+            format!("Last checked: {checked}")
+        },
+        FontId::proportional(10.5),
+        p.text3,
+    );
+
+    if !model.settings.ignored_update_version.is_empty() {
+        y += 24.0;
+        let ignored = model.settings.ignored_update_version.clone();
+        ui.painter().text(
+            Pos2::new(rect.left(), y),
+            Align2::LEFT_CENTER,
+            if model.settings.language.is_zh() {
+                format!("已忽略版本：v{ignored}")
+            } else {
+                format!("Ignored version: v{ignored}")
+            },
+            FontId::proportional(10.5),
+            p.text3,
+        );
+        let clear_rect = Rect::from_min_size(
+            Pos2::new(rect.left() + 160.0, y - 11.0),
+            Vec2::new(56.0, 22.0),
+        );
+        if secondary_button(
+            ui,
+            clear_rect,
+            crate::tr!(model, "Clear", "清除"),
+            None,
+            theme,
+        )
+        .clicked()
+        {
+            model.settings.ignored_update_version.clear();
+            rt.update.ignore_checked = false;
+            model.save_settings();
+        }
+    }
+
+    y += 36.0;
     let open_rect = Rect::from_min_size(
         Pos2::new(rect.left() + 160.0, y - 13.0),
-        Vec2::new(150.0, 26.0),
+        Vec2::new(170.0, 26.0),
     );
-    if secondary_button(
+    if secondary_button_enabled(
         ui,
         open_rect,
-        crate::tr!(model, "Open update dialog", "打开更新窗口"),
+        crate::tr!(model, "Check for updates…", "检查更新…"),
         None,
+        !rt.update.busy(),
         theme,
     )
     .clicked()
     {
         rt.update_open = true;
+        let version = model.version;
+        if rt.update.begin_check(&mut model.settings, version, false) {
+            model.save_settings();
+        }
     }
 
     y += 34.0;

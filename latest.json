@@ -5,5 +5,6 @@
   "signature": "5W/HTq3ZrcTBNZ6s8Z/9TntyXsWt1Ucw4IPoIIlTcRMafQd3PFQ/lABlauGX0uDdL87vhD5Yma1Gdi8fJjjSDA==",
   "notes": "LazeCode 0.4.6",
   "arch": "aarch64",
-  "kind": "app-bundle"
+  "kind": "app-bundle",
+  "date": "2026-11-15"
 }

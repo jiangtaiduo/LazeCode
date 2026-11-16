@@ -444,6 +444,17 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
         PaletteAction::OpenSettings,
     );
     action(
+        Icon::UpdateArrow,
+        crate::tr!(model, "Check for updates…", "检查更新…"),
+        crate::tr!(
+            model,
+            "Fetch the signed release manifest",
+            "获取签名发布清单"
+        ),
+        None,
+        PaletteAction::CheckUpdates,
+    );
+    action(
         Icon::Sun,
         crate::tr!(model, "Toggle theme", "切换主题"),
         crate::tr!(
@@ -841,6 +852,15 @@ fn execute(action: PaletteAction, model: &mut AppModel, rt: &mut UiRuntime) {
             });
             if let Some((tab_id, cursor)) = info {
                 rt.lsp.goto_request = Some((tab_id, cursor));
+            }
+        }
+        PaletteAction::CheckUpdates => {
+            rt.update_open = true;
+            rt.settings_open = false;
+            rt.about_open = false;
+            let version = model.version;
+            if rt.update.begin_check(&mut model.settings, version, false) {
+                model.save_settings();
             }
         }
         PaletteAction::About => {

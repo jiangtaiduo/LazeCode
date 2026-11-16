@@ -631,6 +631,7 @@ impl LazeApp {
                 action,
                 "settings"
                     | "about"
+                    | "check-updates"
                     | "quit"
                     | "new-window"
                     | "palette"
@@ -645,6 +646,20 @@ impl LazeApp {
                         self.model.ui.settings_section = 3;
                         self.model.ui.command_palette_open = false;
                         self.runtime.search.open = false;
+                    }
+                    "check-updates" => {
+                        self.runtime.update_open = true;
+                        self.runtime.settings_open = false;
+                        self.runtime.about_open = false;
+                        self.model.ui.command_palette_open = false;
+                        let version = self.model.version;
+                        if self
+                            .runtime
+                            .update
+                            .begin_check(&mut self.model.settings, version, false)
+                        {
+                            self.model.save_settings();
+                        }
                     }
                     "settings" => {
                         self.runtime.settings_open = true;
@@ -1585,6 +1600,12 @@ fn build_menu(zh: bool) -> Option<Menu> {
             &MenuItem::with_id(
                 "about",
                 pick(zh, "About LazeCode", "关于 LazeCode"),
+                true,
+                None,
+            ),
+            &MenuItem::with_id(
+                "check-updates",
+                pick(zh, "Check for Updates…", "检查更新…"),
                 true,
                 None,
             ),

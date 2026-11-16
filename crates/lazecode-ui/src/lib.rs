@@ -24,6 +24,7 @@ pub mod terminal;
 pub mod theme;
 pub mod titlebar;
 pub mod toast;
+pub mod update_ui;
 pub mod widgets;
 
 pub use app_ui::draw;

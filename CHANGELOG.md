@@ -6,6 +6,19 @@ All notable changes to LazeCode are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Centralized frame pacing: foreground windows paint at most at 60 fps,
+  background windows at 10 fps, and occluded windows stop painting entirely.
+  Terminal stream output runs at 30 fps while typing keeps the 60 fps budget;
+  the project activity ring and git-log paging are also capped at 30 fps.
+  This removes compositor-rate full-window repaints from chatty terminals.
+- Diff pages render only the visible row range and merge adjacent overview
+  ruler marks. A large diff no longer paints every line or recomputes
+  off-screen inline diffs on each repaint.
+
 ## [0.4.6] - 2026-11-15
 
 ### Fixed

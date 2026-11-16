@@ -247,14 +247,16 @@ pub fn draw_unified(
     if let Some(offset) = jump_offset {
         scroll_area = scroll_area.vertical_scroll_offset(offset);
     }
-    let scroll = scroll_area.show(&mut child, |ui| {
+    child.spacing_mut().item_spacing.y = 0.0;
+    let scroll = scroll_area.show_rows(&mut child, ROW_H, ctx.rows.len(), |ui, range| {
         let mut rollback_clicked = None;
-        let total_h = ctx.rows.len() as f32 * ROW_H;
-        let (_, inner) = ui.allocate_exact_size(Vec2::new(body.width(), total_h), Sense::hover());
-        let content_top = inner.rect.top();
+        // `show_rows` positions the viewport Ui at `range.start`; recover the
+        // row-zero origin so content-space overlays stay stable while scrolling.
+        let content_top = ui.max_rect().top() - range.start as f32 * ROW_H;
         let num_font = FontId::monospace(12.0);
         let starts = group_starts(ctx.rows, ctx.groups);
-        for (i, row) in ctx.rows.iter().enumerate() {
+        for i in range {
+            let row = &ctx.rows[i];
             let row_rect = Rect::from_min_size(
                 Pos2::new(body.left(), content_top + i as f32 * ROW_H),
                 Vec2::new(body.width(), ROW_H),
@@ -360,31 +362,36 @@ pub fn draw_unified(
     );
     let painter = ui.painter();
     let total = ctx.rows.len().max(1);
+    let total_f = total as f32;
+    let y_of = |i: usize| body.top() + (i as f32 + 0.5) / total_f * body.height();
+    let draw_run = |start: usize, end: usize, kind: RowKind| {
+        let (y0, y1) = (y_of(start) - 1.0, y_of(end - 1) + 1.0);
+        let (x0, x1, color) = match kind {
+            RowKind::Del => (ruler.left() + 1.0, ruler.center().x, p.rose),
+            RowKind::Add => (ruler.center().x, ruler.right() - 1.0, p.green),
+            RowKind::Context => return,
+        };
+        painter.rect_filled(
+            Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)),
+            1.0,
+            color,
+        );
+    };
+    // Merge adjacent changed rows into one bar: a large diff would otherwise
+    // emit one rect per changed line on every frame.
+    let mut run_kind = RowKind::Context;
+    let mut run_start = 0usize;
     for (i, row) in ctx.rows.iter().enumerate() {
-        let y = body.top() + (i as f32 + 0.5) / total as f32 * body.height();
-        match row.kind {
-            RowKind::Del => {
-                painter.rect_filled(
-                    Rect::from_min_max(
-                        Pos2::new(ruler.left() + 1.0, y - 1.0),
-                        Pos2::new(ruler.center().x, y + 1.0),
-                    ),
-                    1.0,
-                    p.rose,
-                );
+        if row.kind != run_kind {
+            if run_kind != RowKind::Context {
+                draw_run(run_start, i, run_kind);
             }
-            RowKind::Add => {
-                painter.rect_filled(
-                    Rect::from_min_max(
-                        Pos2::new(ruler.center().x, y - 1.0),
-                        Pos2::new(ruler.right() - 1.0, y + 1.0),
-                    ),
-                    1.0,
-                    p.green,
-                );
-            }
-            RowKind::Context => {}
+            run_kind = row.kind;
+            run_start = i;
         }
+    }
+    if run_kind != RowKind::Context {
+        draw_run(run_start, ctx.rows.len(), run_kind);
     }
     let band = current_group_band(&ctx, body, total);
     if let Some((y0, y1)) = band {
@@ -623,13 +630,24 @@ pub fn draw_split(
     if let Some(offset) = jump_offset {
         scroll_area = scroll_area.vertical_scroll_offset(offset);
     }
-    let scroll = scroll_area.show(&mut child, |ui| {
+    child.spacing_mut().item_spacing.y = 0.0;
+    let mut first_pair_for_group: std::collections::HashMap<u32, usize> =
+        std::collections::HashMap::new();
+    for (i, (left, right)) in pairs.iter().enumerate() {
+        let gi = left
+            .map(|li| ctx.rows[li].group)
+            .or_else(|| right.map(|ri| ctx.rows[ri].group))
+            .unwrap_or(u32::MAX);
+        if gi != u32::MAX {
+            first_pair_for_group.entry(gi).or_insert(i);
+        }
+    }
+    let scroll = scroll_area.show_rows(&mut child, ROW_H, pairs.len(), |ui, range| {
         let mut rollback_clicked = None;
-        let total_h = pairs.len() as f32 * ROW_H;
-        let (_, inner) = ui.allocate_exact_size(Vec2::new(body.width(), total_h), Sense::hover());
-        let content_top = inner.rect.top();
+        let content_top = ui.max_rect().top() - range.start as f32 * ROW_H;
         let num_font = FontId::monospace(12.0);
-        for (i, (left, right)) in pairs.iter().enumerate() {
+        for i in range {
+            let (left, right) = &pairs[i];
             let y_top = content_top + i as f32 * ROW_H;
             let y = y_top + ROW_H / 2.0;
             if ctx.can_rollback {
@@ -637,40 +655,25 @@ pub fn draw_split(
                     .map(|li| ctx.rows[li].group)
                     .or_else(|| right.map(|ri| ctx.rows[ri].group))
                     .unwrap_or(u32::MAX);
-                if gi != u32::MAX {
-                    let is_start = pairs.iter().position(|(l, r)| {
-                        l.map(|idx| ctx.rows[idx].group) == Some(gi)
-                            || r.map(|idx| ctx.rows[idx].group) == Some(gi)
-                    }) == Some(i);
-                    if is_start {
-                        let btn_rect = Rect::from_center_size(Pos2::new(mid, y), Vec2::splat(18.0));
-                        let resp = ui.interact(
-                            btn_rect,
-                            ui.scope_id().with(("rb-split", ctx.tab_id, gi)),
-                            Sense::click(),
-                        );
-                        let icon_color = if resp.hovered() {
-                            ui.painter().rect_filled(
-                                btn_rect,
-                                egui::CornerRadius::same(3),
-                                p.hover,
-                            );
-                            resp.show_tooltip_text("回滚此变更块 (Rollback this change)");
-                            p.rose
-                        } else {
-                            p.text2
-                        };
-                        let icon_rect =
-                            Rect::from_center_size(btn_rect.center(), Vec2::splat(14.0));
-                        crate::icons_svg::paint_svg(
-                            ui.painter(),
-                            icon_rect,
-                            "rollback",
-                            icon_color,
-                        );
-                        if resp.clicked() {
-                            rollback_clicked = Some(gi as usize);
-                        }
+                if gi != u32::MAX && first_pair_for_group.get(&gi) == Some(&i) {
+                    let btn_rect = Rect::from_center_size(Pos2::new(mid, y), Vec2::splat(18.0));
+                    let resp = ui.interact(
+                        btn_rect,
+                        ui.scope_id().with(("rb-split", ctx.tab_id, gi)),
+                        Sense::click(),
+                    );
+                    let icon_color = if resp.hovered() {
+                        ui.painter()
+                            .rect_filled(btn_rect, egui::CornerRadius::same(3), p.hover);
+                        resp.show_tooltip_text("回滚此变更块 (Rollback this change)");
+                        p.rose
+                    } else {
+                        p.text2
+                    };
+                    let icon_rect = Rect::from_center_size(btn_rect.center(), Vec2::splat(14.0));
+                    crate::icons_svg::paint_svg(ui.painter(), icon_rect, "rollback", icon_color);
+                    if resp.clicked() {
+                        rollback_clicked = Some(gi as usize);
                     }
                 }
             }
@@ -782,30 +785,48 @@ pub fn draw_split(
     );
     let painter = ui.painter();
     let total = pairs.len().max(1);
+    let total_f = total as f32;
+    let y_of = |i: usize| body.top() + (i as f32 + 0.5) / total_f * body.height();
+    let draw_run = |start: usize, end: usize, del: bool| {
+        let (y0, y1) = (y_of(start) - 1.0, y_of(end - 1) + 1.0);
+        let (x0, x1, color) = if del {
+            (ruler.left() + 1.0, ruler.center().x, p.rose)
+        } else {
+            (ruler.center().x, ruler.right() - 1.0, p.green)
+        };
+        painter.rect_filled(
+            Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1)),
+            1.0,
+            color,
+        );
+    };
+    // Merge adjacent marks instead of emitting one rect per diff row.
+    let (mut del_start, mut add_start) = (None::<usize>, None::<usize>);
     for (i, (left, right)) in pairs.iter().enumerate() {
-        let y = body.top() + (i as f32 + 0.5) / total as f32 * body.height();
         let is_del = (*left).is_some_and(|li| ctx.rows[li].kind == RowKind::Del);
         let is_add = (*right).is_some_and(|ri| ctx.rows[ri].kind == RowKind::Add);
-        if is_del {
-            painter.rect_filled(
-                Rect::from_min_max(
-                    Pos2::new(ruler.left() + 1.0, y - 1.0),
-                    Pos2::new(ruler.center().x, y + 1.0),
-                ),
-                1.0,
-                p.rose,
-            );
+        match (is_del, del_start) {
+            (true, None) => del_start = Some(i),
+            (false, Some(start)) => {
+                draw_run(start, i, true);
+                del_start = None;
+            }
+            _ => {}
         }
-        if is_add {
-            painter.rect_filled(
-                Rect::from_min_max(
-                    Pos2::new(ruler.center().x, y - 1.0),
-                    Pos2::new(ruler.right() - 1.0, y + 1.0),
-                ),
-                1.0,
-                p.green,
-            );
+        match (is_add, add_start) {
+            (true, None) => add_start = Some(i),
+            (false, Some(start)) => {
+                draw_run(start, i, false);
+                add_start = None;
+            }
+            _ => {}
         }
+    }
+    if let Some(start) = del_start {
+        draw_run(start, pairs.len(), true);
+    }
+    if let Some(start) = add_start {
+        draw_run(start, pairs.len(), false);
     }
     if ctx.current_group < ctx.groups {
         if let Some((y0, y1)) = split_group_band(&ctx, &pairs) {

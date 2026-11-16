@@ -404,6 +404,60 @@ fn install_titlebar_double_click_monitor(window: &Window) {
     }
 }
 
+/// Coalesces every paint request into a bounded frame budget. egui itself can
+/// ask for an immediate repaint from animations and terminal output; without
+/// a single gate those requests can drive the compositor at its native refresh
+/// rate even when the UI is merely streaming text. Background windows get a
+/// much lower budget, and fully occluded windows do not paint at all.
+struct FramePacer {
+    next: Instant,
+    focused: bool,
+    occluded: bool,
+}
+
+impl FramePacer {
+    const ACTIVE_INTERVAL: Duration = Duration::from_micros(16_667);
+    const BACKGROUND_INTERVAL: Duration = Duration::from_millis(100);
+
+    fn new() -> Self {
+        Self {
+            next: Instant::now(),
+            focused: true,
+            occluded: false,
+        }
+    }
+
+    fn interval(&self) -> Duration {
+        if self.focused {
+            Self::ACTIVE_INTERVAL
+        } else {
+            Self::BACKGROUND_INTERVAL
+        }
+    }
+
+    fn due(&self, now: Instant) -> bool {
+        !self.occluded && now >= self.next
+    }
+
+    fn note_frame(&mut self, now: Instant) {
+        self.next = now + self.interval();
+    }
+
+    fn set_focused(&mut self, focused: bool, now: Instant) {
+        self.focused = focused;
+        // Re-evaluate immediately on focus gain so the first frame is not
+        // delayed by a background-length interval.
+        self.next = self.next.min(now);
+    }
+
+    fn set_occluded(&mut self, occluded: bool, now: Instant) {
+        self.occluded = occluded;
+        if !occluded {
+            self.next = self.next.min(now);
+        }
+    }
+}
+
 struct LazeApp {
     model: AppModel,
     runtime: UiRuntime,
@@ -422,6 +476,8 @@ struct LazeApp {
     last_workspace_save: std::time::Instant,
     last_autosave: std::time::Instant,
     repaint_after: std::time::Duration,
+    pacer: FramePacer,
+    wants_frame: bool,
     last_shift_press: Option<Instant>,
     #[cfg(target_os = "macos")]
     menu: Option<Menu>,
@@ -462,6 +518,8 @@ impl LazeApp {
             last_workspace_save: std::time::Instant::now(),
             last_autosave: std::time::Instant::now(),
             repaint_after: std::time::Duration::MAX,
+            pacer: FramePacer::new(),
+            wants_frame: false,
             last_shift_press: None,
             #[cfg(target_os = "macos")]
             menu: None,
@@ -1143,9 +1201,14 @@ impl LazeApp {
         had_commands
     }
 
-    fn render(&mut self) {
+    fn render(&mut self) -> bool {
+        let now = Instant::now();
+        if !self.pacer.due(now) {
+            return false;
+        }
+        self.pacer.note_frame(now);
         let Some(gfx) = self.gfx.as_mut() else {
-            return;
+            return false;
         };
         let window = gfx.window.clone();
         let raw_input = gfx.egui_state.take_egui_input(&window);
@@ -1198,6 +1261,7 @@ impl LazeApp {
             vec![],
             &window,
         );
+        true
     }
 }
 
@@ -1211,7 +1275,11 @@ impl ApplicationHandler<AppEvent> for LazeApp {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: AppEvent) {
         if let Some(gfx) = &self.gfx {
-            gfx.window.request_redraw();
+            if self.pacer.due(Instant::now()) {
+                gfx.window.request_redraw();
+            } else {
+                self.wants_frame = true;
+            }
         }
     }
 
@@ -1246,9 +1314,27 @@ impl ApplicationHandler<AppEvent> for LazeApp {
         let window = Arc::clone(&gfx.window);
         let response = gfx.egui_state.on_window_event(&gfx.window, &event);
         if response.repaint {
-            gfx.window.request_redraw();
+            if self.pacer.due(Instant::now()) {
+                gfx.window.request_redraw();
+            } else {
+                self.wants_frame = true;
+            }
         }
         match event {
+            WindowEvent::Focused(focused) => {
+                let now = Instant::now();
+                self.pacer.set_focused(focused, now);
+                if focused {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::Occluded(occluded) => {
+                let now = Instant::now();
+                self.pacer.set_occluded(occluded, now);
+                if !occluded {
+                    window.request_redraw();
+                }
+            }
             WindowEvent::CloseRequested => {
                 self.request_quit(event_loop);
             }
@@ -1328,9 +1414,11 @@ impl ApplicationHandler<AppEvent> for LazeApp {
                 }
                 self.model.tick();
                 self.autosave();
-                self.render();
+                let rendered = self.render();
                 #[cfg(target_os = "macos")]
-                self.publish_titlebar_controls();
+                if rendered {
+                    self.publish_titlebar_controls();
+                }
                 let had_commands = self.process_commands();
                 self.poll_jobs();
                 if self.model.should_quit {
@@ -1340,7 +1428,11 @@ impl ApplicationHandler<AppEvent> for LazeApp {
                     event_loop.exit();
                 }
                 if had_commands || self.repaint_after.is_zero() {
-                    window.request_redraw();
+                    if self.pacer.due(Instant::now()) {
+                        window.request_redraw();
+                    } else {
+                        self.wants_frame = true;
+                    }
                 }
             }
             _ => {}
@@ -1368,7 +1460,18 @@ impl ApplicationHandler<AppEvent> for LazeApp {
         }
 
         let now = std::time::Instant::now();
+        let frame_pending = self.wants_frame
+            || had_jobs
+            || had_watcher_changes
+            || had_vcs_poll
+            || had_busy
+            || had_close_probe
+            || had_quit_probe
+            || self.repaint_after.is_zero();
         let mut deadline = now + self.repaint_after.min(std::time::Duration::from_secs(1));
+        if frame_pending && !self.pacer.occluded {
+            deadline = deadline.min(self.pacer.next);
+        }
         deadline = deadline.min(self.last_watch_poll + std::time::Duration::from_millis(600));
         deadline = deadline.min(self.last_vcs_poll + std::time::Duration::from_secs(2));
         deadline = deadline.min(self.last_busy_poll + std::time::Duration::from_secs(2));
@@ -1378,17 +1481,14 @@ impl ApplicationHandler<AppEvent> for LazeApp {
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
 
-        if had_jobs
-            || had_watcher_changes
-            || had_vcs_poll
-            || had_busy
-            || had_close_probe
-            || had_quit_probe
-            || self.repaint_after.is_zero()
-        {
+        if frame_pending && self.pacer.due(now) {
+            self.wants_frame = false;
             if let Some(gfx) = &self.gfx {
                 gfx.window.request_redraw();
             }
+        } else if frame_pending {
+            // The budget deadline above will wake us for the next frame.
+            self.wants_frame = true;
         }
     }
 }

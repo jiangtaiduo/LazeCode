@@ -2228,7 +2228,8 @@ fn draw_git_log(
         log::debug!("git log tail paged at {}", model.projects[index].log.len());
     }
     if model.projects[index].log_paging {
-        ui.ctx().request_repaint();
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(33));
     }
 }
 

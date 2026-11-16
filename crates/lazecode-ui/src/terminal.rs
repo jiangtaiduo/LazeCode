@@ -202,9 +202,11 @@ pub fn draw(
     font_size: f32,
 ) -> TerminalOutput {
     let p = theme.palette;
+    let window_focused = ui.ctx().input(|input| input.focused);
     if focus {
+        let blink = if window_focused { 500 } else { 1000 };
         ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(500));
+            .request_repaint_after(std::time::Duration::from_millis(blink));
     } else {
         preedit.clear();
     }
@@ -212,11 +214,14 @@ pub fn draw(
     if refresh {
         session.snapshot_into(snapshot);
     }
-    // A session keeps producing output; only request a capped 60 fps while
-    // output is actually recent. `last_output_ms` is an age, not a timestamp.
+    // A session keeps producing output; only repaint while output is recent.
+    // Sustained stream output gets a 30 fps budget, typing keeps 60 fps, and a
+    // background window is deliberately slow. This keeps a chatty TUI from
+    // driving a full-window repaint on every chunk it emits.
     if focus && session.last_output_ms().is_some_and(|age| age < 120) {
+        let recent_input = session.last_input_ms().is_some_and(|age| age < 500);
         ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(16));
+            .request_repaint_after(output_repaint_delay(window_focused, recent_input));
     }
     let line_h = (font_size * 1.36).round().max(12.0);
     let char_w = char_width(ui.ctx(), crate::theme::terminal_font(font_size)).max(5.0);
@@ -1323,6 +1328,25 @@ pub fn a11y_text(snapshot: &Snapshot) -> String {
     out
 }
 
+/// Repaint budget for a terminal that is actively producing output.
+///
+/// Typing must feel immediate, so input keeps the full 60 fps budget. Plain
+/// streamed output does not need it: 30 fps cuts the full-window repaint cost
+/// in half without changing text content. A background window is throttled
+/// further because the user cannot see the result.
+pub(crate) fn output_repaint_delay(
+    window_focused: bool,
+    recent_input: bool,
+) -> std::time::Duration {
+    if !window_focused {
+        std::time::Duration::from_millis(100)
+    } else if recent_input {
+        std::time::Duration::from_millis(16)
+    } else {
+        std::time::Duration::from_millis(33)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use lazecode_terminal::CellData;
@@ -1567,5 +1591,20 @@ mod tests {
             egui::Color32::from_rgb(8, 8, 8)
         );
         assert_eq!(indexed_color(15, &palette), palette.ansi[15]);
+    }
+
+    #[test]
+    fn terminal_output_repaint_budget_is_adaptive() {
+        use std::time::Duration;
+        assert_eq!(
+            output_repaint_delay(false, false),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            output_repaint_delay(false, true),
+            Duration::from_millis(100)
+        );
+        assert_eq!(output_repaint_delay(true, true), Duration::from_millis(16));
+        assert_eq!(output_repaint_delay(true, false), Duration::from_millis(33));
     }
 }

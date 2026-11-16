@@ -209,9 +209,10 @@ fn paint_activity_border(
     if !activity.outputting {
         return;
     }
-    // Match the compositor's presentation cadence so the dash advances once
-    // per visible frame instead of on a separate fixed timer.
-    ui.ctx().request_repaint();
+    // The ring is decorative; cap it at 30 fps so a busy console does not
+    // force the whole window onto the compositor's native refresh cadence.
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(33));
     let time = ui.ctx().input(|input| input.time) as f32;
 
     // The ring is stroked inside the rect. Put the dash centerline on the

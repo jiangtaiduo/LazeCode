@@ -23,7 +23,6 @@ const MAX_TERMINALS_PER_WORKTREE: usize = 12;
 /// even when many projects/worktrees are open.
 const AGENT_SCROLLBACK_LINES: usize = 4_000;
 const AGENT_COLD_BYTES: usize = 16 * 1024 * 1024;
-const AGENT_GRAPHICS_BYTES: usize = 8 * 1024 * 1024;
 /// Stable `MAX_PANES_PER_TAB`: a tab splits into at most four panes.
 pub const MAX_PANES_PER_TAB: usize = 4;
 
@@ -2003,21 +2002,19 @@ fn spawn_pane(
         cols: 110,
         rows: 28,
         scrollback,
-        // Cold history extends the hot budget onto disk; both the spool and
-        // the kitty image cache stay bounded by these caps. Agent consoles
-        // keep a much smaller per-session cache because their process memory
-        // already dominates a large workspace.
+        // Cold history extends the hot budget onto disk; image data uses the
+        // user-facing soft target, protected for visible placements in the
+        // terminal cache.
         cold_lines: scrollback.saturating_mul(8),
         cold_bytes: if is_agent {
             AGENT_COLD_BYTES
         } else {
             64 * 1024 * 1024
         },
-        graphics_bytes: if is_agent {
-            AGENT_GRAPHICS_BYTES
-        } else {
-            32 * 1024 * 1024
-        },
+        graphics_bytes: settings
+            .terminal
+            .graphics_cache_mb
+            .saturating_mul(1024 * 1024),
         notifier,
         kind,
     })

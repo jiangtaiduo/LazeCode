@@ -9,7 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crossbeam_channel::Sender;
 use parking_lot::{FairMutex, Mutex};
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize};
-use rio_vt::ansi::graphics::UpdateQueues;
+use rio_vt::ansi::graphics::{Graphics, UpdateQueues};
 use rio_vt::ansi::kitty_virtual::{
     compute_run_geometry, resolve_virtual_placement, IncompletePlacement, PLACEHOLDER,
 };
@@ -120,7 +120,7 @@ impl Default for SpawnOptions {
             scrollback: 10_000,
             cold_lines: 500_000,
             cold_bytes: 64 * 1024 * 1024,
-            graphics_bytes: 32 * 1024 * 1024,
+            graphics_bytes: 64 * 1024 * 1024,
             notifier: None,
             kind: SessionKind::Shell,
         }
@@ -358,6 +358,10 @@ pub(crate) struct Shared {
     /// reader thread can pin it while history keeps growing.
     view_offset: AtomicUsize,
     graphics: Mutex<GraphicsQueue>,
+    /// Soft target for decoded Kitty image bytes. Visible placements are
+    /// protected above this value; the parser only evicts used images when
+    /// the hard cap (4x the soft target) is reached.
+    graphics_soft_limit: usize,
     /// Byte cap for the pending-kitty-image queue (`GraphicsQueue`). Only the
     /// active pane drains that queue, so a background console producing
     /// graphics needs its own admission limit beyond rio-vt's parser cache.
@@ -1061,6 +1065,47 @@ fn modes_from(term: &Crosswords<Proxy>) -> Modes {
 /// Fill `out` with the visible kitty image placements in the snapshot's
 /// absolute line space. Reuses the caller's buffer so a repainting UI does not
 /// allocate per frame.
+/// Drop unused/inactive kitty images until the soft target is met. Images
+/// with a live placement (including omp's virtual placeholder chips) and
+/// images transmitted in the last two seconds are protected: a paste burst
+/// can temporarily exceed the soft target rather than blanking visible
+/// pictures. The parser's hard cap still bounds total memory at 4x.
+fn trim_graphics_to_soft(graphics: &mut Graphics, soft_limit: usize) {
+    if graphics.total_bytes <= soft_limit {
+        return;
+    }
+    let now = rio_vt::time::Instant::now();
+    let mut used: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    for placement in graphics.kitty_placements.values() {
+        used.insert(placement.image_id as u64);
+    }
+    for (image_id, _) in graphics.kitty_virtual_placements.keys() {
+        used.insert(*image_id as u64);
+    }
+    for (image_id, stored) in &graphics.kitty_images {
+        if now.duration_since(stored.transmission_time) < std::time::Duration::from_secs(2) {
+            used.insert(*image_id as u64);
+        }
+    }
+    let used_bytes: usize = used
+        .iter()
+        .filter_map(|id| graphics.kitty_images.get(&(*id as u32)))
+        .map(|stored| stored.data.pixels.len())
+        .sum();
+    let unused_bytes = graphics.total_bytes.saturating_sub(used_bytes);
+    let need = (graphics.total_bytes - soft_limit).min(unused_bytes);
+    if need > 0 {
+        // `evict_images` is a no-op while total + required fits under
+        // `total_limit`. Temporarily lower the limit to the soft target so
+        // the unused-image tier is actually trimmed; visible/recent images
+        // are in `used`, so the requested amount comes from unused data.
+        let hard_limit = graphics.total_limit;
+        graphics.total_limit = soft_limit;
+        graphics.evict_images(need, &used);
+        graphics.total_limit = hard_limit;
+    }
+}
+
 fn graphics_placements_into(term: &Crosswords<Proxy>, out: &mut Vec<ImagePlacement>) {
     let base = term.grid.lines_evicted() as i64 + term.history_size() as i64;
     out.clear();
@@ -1262,7 +1307,8 @@ impl Session {
     /// the UI addresses one continuous history space no matter where a line
     /// lives.
     pub fn snapshot_into(&self, snap: &mut Snapshot) {
-        let term = self.term.lock();
+        let mut term = self.term.lock();
+        trim_graphics_to_soft(&mut term.graphics, self.shared.graphics_soft_limit);
         let grid = &term.grid;
         let cols = grid.columns();
         let rows = grid.screen_lines();
@@ -1837,7 +1883,10 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
             }
         })?;
 
-    let graphics_budget = options.graphics_bytes.clamp(256 * 1024, 320 * 1024 * 1024);
+    let graphics_soft = options.graphics_bytes.clamp(256 * 1024, 512 * 1024 * 1024);
+    let graphics_hard = graphics_soft
+        .saturating_mul(4)
+        .clamp(graphics_soft, 512 * 1024 * 1024);
     let shared = Arc::new(Shared {
         title: Mutex::new(None),
         bell: AtomicU32::new(0),
@@ -1853,7 +1902,8 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
         size: Mutex::new((cols, rows)),
         view_offset: AtomicUsize::new(0),
         graphics: Mutex::new(GraphicsQueue::default()),
-        graphics_queue_bytes: graphics_budget,
+        graphics_soft_limit: graphics_soft,
+        graphics_queue_bytes: graphics_soft,
         notifier: options.notifier.clone(),
     });
 
@@ -1892,8 +1942,10 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
         ROUTE_ID,
         hot_cap + slack,
     );
-    // Bound the decoded kitty image cache to the configured byte cap.
-    term.graphics.total_limit = graphics_budget;
+    // The parser hard cap protects visible images from the oldest-first
+    // eviction until the hard ceiling; snapshot-time trimming brings unused
+    // images back under the user's soft target.
+    term.graphics.total_limit = graphics_hard;
     let term = Arc::new(FairMutex::new(term));
     let dirty_rows = Mutex::new(Vec::new());
 
@@ -2335,6 +2387,76 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         panic!("marker not found");
+    }
+
+    fn test_image(bytes: usize, age_secs: u64) -> rio_vt::ansi::graphics::StoredImage {
+        rio_vt::ansi::graphics::StoredImage {
+            data: rio_graphics::GraphicData {
+                id: rio_graphics::GraphicId(1),
+                width: 1,
+                height: 1,
+                color_type: rio_graphics::ColorType::Rgba,
+                pixels: vec![0; bytes],
+                is_opaque: true,
+                resize: None,
+                display_width: None,
+                display_height: None,
+                transmit_time: rio_vt::time::Instant::now(),
+            },
+            transmission_time: rio_vt::time::Instant::now()
+                - std::time::Duration::from_secs(age_secs),
+        }
+    }
+
+    fn test_virtual_placement(image_id: u32) -> rio_vt::ansi::graphics::VirtualPlacement {
+        rio_vt::ansi::graphics::VirtualPlacement {
+            image_id,
+            placement_id: 1,
+            columns: 1,
+            rows: 1,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+        }
+    }
+
+    #[test]
+    fn graphics_trim_keeps_visible_and_recent_images() {
+        let mut graphics = Graphics::default();
+        graphics.kitty_images.insert(1, test_image(60_000, 10));
+        graphics
+            .kitty_virtual_placements
+            .insert((1, 1), test_virtual_placement(1));
+        graphics.kitty_images.insert(2, test_image(60_000, 10));
+        graphics.total_bytes = 120_000;
+
+        trim_graphics_to_soft(&mut graphics, 100_000);
+        assert!(graphics.kitty_images.contains_key(&1));
+        assert!(!graphics.kitty_images.contains_key(&2));
+        assert!(graphics.total_bytes <= 100_000);
+
+        // A just-transmitted image with no placement yet must survive a
+        // snapshot between transmission and placement.
+        graphics.kitty_images.insert(2, test_image(60_000, 0));
+        graphics.total_bytes = 120_000;
+        trim_graphics_to_soft(&mut graphics, 100_000);
+        assert!(graphics.kitty_images.contains_key(&1));
+        assert!(graphics.kitty_images.contains_key(&2));
+    }
+
+    #[test]
+    fn graphics_trim_leaves_visible_images_over_the_soft_target() {
+        let mut graphics = Graphics::default();
+        graphics.kitty_images.insert(1, test_image(120_000, 10));
+        graphics
+            .kitty_virtual_placements
+            .insert((1, 1), test_virtual_placement(1));
+        graphics.total_bytes = 120_000;
+
+        trim_graphics_to_soft(&mut graphics, 100_000);
+        assert!(graphics.kitty_images.contains_key(&1));
+        assert_eq!(graphics.total_bytes, 120_000);
     }
 
     fn snapshot_text(snap: &Snapshot) -> String {
@@ -2893,14 +3015,15 @@ mod tests {
             std::time::Duration::from_secs(10),
         );
         assert!(bounded, "second image missing: {:?}", snap.graphics_images);
+        // Visible placements are protected above the soft target; both
+        // images stay until the hard cap (4x the soft target) is reached.
         assert!(
-            !snap.graphics_images.contains(&1),
-            "the oldest image should be evicted: {:?}",
+            snap.graphics_images.contains(&1),
+            "visible image should not be evicted: {:?}",
             snap.graphics_images
         );
-        // The cap counts decoded pixel bytes.
         let total: usize = snap.graphics_images.len() * 200 * 200 * 4;
-        assert!(total <= 256 * 1024);
+        assert!(total <= 4 * 256 * 1024);
     }
 
     #[test]

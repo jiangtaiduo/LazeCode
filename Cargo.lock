@@ -3893,7 +3893,7 @@ dependencies = [
 
 [[package]]
 name = "lazecode-app"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "block2 0.6.2",
@@ -3930,7 +3930,7 @@ dependencies = [
 
 [[package]]
 name = "lazecode-core"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3956,7 +3956,7 @@ dependencies = [
 
 [[package]]
 name = "lazecode-fs"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "chardetng",
@@ -3974,7 +3974,7 @@ dependencies = [
 
 [[package]]
 name = "lazecode-git"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "flate2",
@@ -3995,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "lazecode-terminal"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -4014,7 +4014,7 @@ dependencies = [
 
 [[package]]
 name = "lazecode-text"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "encoding_rs",
@@ -4031,7 +4031,7 @@ dependencies = [
 
 [[package]]
 name = "lazecode-ui"
-version = "0.4.7"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "dirs",

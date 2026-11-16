@@ -8,6 +8,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-11-16
+
+### Fixed
+
+- Kitty images in a console no longer blank the oldest visible pasted
+  screenshots once several large images are on screen. Each console now has a
+  configurable soft image-cache target (default 64 MiB); visible placements
+  and images transmitted in the last two seconds are protected, and total
+  image memory is still hard-capped at four times the soft target. Settings →
+  Terminal → Image cache exposes 32/64/128/256 MiB presets.
+
 ## [0.4.7] - 2026-11-16
 
 ### Changed

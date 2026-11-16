@@ -1,11 +1,11 @@
 {
-  "version": "0.4.7",
-  "url": "https://raw.githubusercontent.com/jiangtaiduo/LazeCode/main/releases/LazeCode-0.4.7-macos-aarch64.app.tar.gz",
-  "sha256": "2673c5fe28b579342edefafffce228bc8644d590746b020ee3a12e9129298051",
-  "notes": "### Changed\n\n- The updater now has a full update page (checking, up to date, available,\n  downloading, installing, ready and error states), Markdown release notes,\n  an ignore-this-version choice and a restart confirmation when editors have\n  unsaved changes. The title bar shows an update pill for available,\n  downloading and restart-ready builds. Automatic checks run five seconds\n  after each launch and never install without an explicit click.\n- Release manifests now carry changelog-derived release notes and an optional\n  display date; tag releases verify the committed manifest against the\n  artifact before packaging.\n- Centralized frame pacing: foreground windows paint at most at 60 fps,\n  background windows at 10 fps, and occluded windows stop painting entirely.\n  Terminal stream output runs at 30 fps while typing keeps the 60 fps budget;\n  the project activity ring and git-log paging are also capped at 30 fps.\n  This removes compositor-rate full-window repaints from chatty terminals.\n- Diff pages render only the visible row range and merge adjacent overview\n  ruler marks. A large diff no longer paints every line or recomputes\n  off-screen inline diffs on each repaint.\n\n---\n\n### 变更\n\n- 更新器新增完整更新页面（检查中、已是最新、发现新版本、下载中、安装中、\n  已就绪、失败），支持 Markdown 发布说明、忽略此版本，以及存在未保存文件\n  时的重启确认。顶栏新增更新 pill，覆盖可更新、下载中和待重启状态。自动\n  检查在启动 5 秒后进行，每次启动一次，且不会在后台自动安装。\n- 发布清单现在从中英文 CHANGELOG 提取发布说明，并增加仅用于显示的日期；\n  Tag 发布前会校验已提交的清单与安装包。\n- 统一帧预算：前台窗口最多 60fps，后台窗口 10fps，窗口被遮挡时完全停止绘制。\n  终端持续输出时使用 30fps，键盘输入期间保持 60fps；项目活动环和 git log\n  分页动画也限制在 30fps。这样终端刷屏不会再按合成器刷新率重绘整个窗口。\n- Diff 页面只渲染可见行范围，并合并总览标尺上的相邻标记。大 diff 不再每帧\n  绘制全部行或计算屏幕外的行内差异。",
+  "version": "0.4.8",
+  "url": "https://raw.githubusercontent.com/jiangtaiduo/LazeCode/main/releases/LazeCode-0.4.8-macos-aarch64.app.tar.gz",
+  "sha256": "90b382818c74724f70b99d92ab5e5b11b66a85f5d2861662101b31eb8e017fc1",
+  "notes": "### Fixed\n\n- Kitty images in a console no longer blank the oldest visible pasted\n  screenshots once several large images are on screen. Each console now has a\n  configurable soft image-cache target (default 64 MiB); visible placements\n  and images transmitted in the last two seconds are protected, and total\n  image memory is still hard-capped at four times the soft target. Settings →\n  Terminal → Image cache exposes 32/64/128/256 MiB presets.\n\n---\n\n### 修复\n\n- 控制台中粘贴多张较大的截图后，最早的可视图片不再变成空框。每个控制台\n  新增可配置的图像缓存软上限（默认 64 MiB）；仍被 placement 引用以及最近\n  两秒内传输的图片受保护，总内存仍按软上限的 4 倍硬性封顶。设置 → 终端 →\n  图像缓存提供 32/64/128/256 MiB 预设。",
   "min_os": "",
   "arch": "aarch64",
   "kind": "app-bundle",
-  "signature": "eJ0oZsLYMUl6BrFrkfeJ9LBYp0aZZ6oMirI5fvFYeBM7HZ+JrI75umQgWKCqp1bQxjxCnaIgYGzcpojxL64FBg==",
+  "signature": "HKk/c/PHb7FUsrS5w5iliD3VwqnhZvI1ffskWZSRGBR8Gl8Da0FxYMHaZ0TCnU1rOdRvdra8+p1yRj7wG6wuAQ==",
   "date": "2026-11-16"
 }

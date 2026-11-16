@@ -273,15 +273,13 @@ Not implemented (explicit):
   binary search. Hot memory plateaus at the configured history.
 - Kitty graphics: rio-vt parses APC transmit/place/delete with chunking,
   base64 payloads, ids, z/columns/rows/source rects; decoded RGBA images are
-  byte-capped (parser cache and the pending-upload queue are bounded by the
-  session graphics budget) and rendered as egui textures above the cell
-  grid. The
-- Kitty graphics: rio-vt parses APC transmit/place/delete with chunking,
-  base64 payloads, ids, z/columns/rows/source rects; decoded RGBA images are
-  byte-capped and rendered as egui textures above the cell grid. The
-  `rio-vt/graphics` is enabled for PNG/JPEG payload decoding and Unicode
-  virtual placeholder runs are composited above the grid; strip/frame
-  animations remain out of scope.
+  rendered as egui textures above the cell grid. `rio-vt/graphics` is enabled
+  for PNG/JPEG payload decoding and Unicode virtual placeholder runs are
+  composited above the grid. Each console has a configurable soft cache target
+  (Settings → Terminal → Image cache, default 64 MiB); visible placements and
+  images transmitted in the last two seconds are protected above it, while a
+  4× soft-target hard cap still bounds memory. Strip/frame animations remain
+  out of scope.
 - Kitty keyboard and modifyOtherKeys: protocol flag stack, key codes, event
   types (release/repeat), associated text, and xterm `CSI 27;…~` are encoded
   in `input.rs`; legacy bytes remain when disabled.

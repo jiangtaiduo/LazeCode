@@ -65,6 +65,10 @@ pub struct TerminalSettings {
     /// worktree. OMP sessions are large (hundreds of MB each); the cap keeps
     /// a multi-worktree workspace from exhausting physical memory.
     pub max_agent_consoles: usize,
+    /// Soft per-console Kitty image cache target in MiB. Visible images are
+    /// protected beyond this target up to four times the value, so a burst
+    /// of pasted screenshots does not blank the oldest visible ones.
+    pub graphics_cache_mb: usize,
     /// `None` means use `$SHELL` (or /bin/zsh).
     pub shell: Option<String>,
 }
@@ -76,6 +80,7 @@ impl Default for TerminalSettings {
             font_size: 13.0,
             scrollback: 10_000,
             max_agent_consoles: 20,
+            graphics_cache_mb: 64,
             shell: None,
         }
     }
@@ -299,6 +304,7 @@ impl Settings {
         self.terminal.font_size = self.terminal.font_size.clamp(9.0, 24.0);
         self.terminal.scrollback = self.terminal.scrollback.clamp(1_000, 200_000);
         self.terminal.max_agent_consoles = self.terminal.max_agent_consoles.clamp(1, 100);
+        self.terminal.graphics_cache_mb = self.terminal.graphics_cache_mb.clamp(8, 512);
         self.sidebar_width = self.sidebar_width.clamp(180.0, 520.0);
         self.commit_drawer_width = self.commit_drawer_width.clamp(240.0, 640.0);
         self.compare_drawer_width = self.compare_drawer_width.clamp(240.0, 640.0);
@@ -468,6 +474,7 @@ update_public_key = \"\"\n",
         assert!(back.editor.font_family.is_empty());
         assert!(back.terminal.font_family.is_empty());
         assert_eq!(back.terminal.max_agent_consoles, 20);
+        assert_eq!(back.terminal.graphics_cache_mb, 64);
         assert!(back.update_endpoint.starts_with("https://"));
         assert!(back.auto_check_updates);
         assert!(back.updates_configured());
@@ -480,6 +487,7 @@ update_public_key = \"\"\n",
         settings.editor.font_family = "Menlo".into();
         settings.terminal.font_family = "SF Mono".into();
         settings.terminal.max_agent_consoles = 40;
+        settings.terminal.graphics_cache_mb = 128;
         settings.ui_font = "PingFang SC".into();
         settings.theme = ThemeMode::Light;
         let text = toml::to_string_pretty(&settings).unwrap();
@@ -488,6 +496,7 @@ update_public_key = \"\"\n",
         assert_eq!(back.editor.font_family, "Menlo");
         assert_eq!(back.terminal.font_family, "SF Mono");
         assert_eq!(back.terminal.max_agent_consoles, 40);
+        assert_eq!(back.terminal.graphics_cache_mb, 128);
         assert_eq!(back.ui_font, "PingFang SC");
         assert_eq!(back.theme, ThemeMode::Light);
     }

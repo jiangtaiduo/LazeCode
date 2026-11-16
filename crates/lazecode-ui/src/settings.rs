@@ -638,6 +638,40 @@ fn terminal(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     ui.painter().text(
         Pos2::new(rect.left(), y),
         Align2::LEFT_CENTER,
+        crate::tr!(model, "Image cache", "图像缓存"),
+        FontId::proportional(11.5),
+        p.text2,
+    );
+    let mut x = rect.left() + 160.0;
+    for value in [32usize, 64, 128, 256] {
+        let button = Rect::from_min_size(Pos2::new(x, y - 13.0), Vec2::new(60.0, 26.0));
+        let selected = model.settings.terminal.graphics_cache_mb == value;
+        let response = if selected {
+            primary_button(ui, button, &format!("{value} MB"), None, true, theme)
+        } else {
+            secondary_button(ui, button, &format!("{value} MB"), None, theme)
+        };
+        if response.clicked() {
+            model.settings.terminal.graphics_cache_mb = value;
+            model.save_settings();
+        }
+        x += 65.0;
+    }
+    ui.painter().text(
+        Pos2::new(rect.left(), y + 20.0),
+        Align2::LEFT_CENTER,
+        crate::tr!(
+            model,
+            "Soft per-console limit; visible images may temporarily use up to 4×.",
+            "每个控制台的软上限；可见图片最多可临时占用 4 倍。"
+        ),
+        FontId::proportional(10.0),
+        p.text3,
+    );
+    y += 54.0;
+    ui.painter().text(
+        Pos2::new(rect.left(), y),
+        Align2::LEFT_CENTER,
         crate::tr!(model, "Shell", "Shell"),
         FontId::proportional(11.5),
         p.text2,

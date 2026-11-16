@@ -1,11 +1,11 @@
 {
-  "version": "0.4.8",
-  "url": "https://raw.githubusercontent.com/jiangtaiduo/LazeCode/main/releases/LazeCode-0.4.8-macos-aarch64.app.tar.gz",
-  "sha256": "90b382818c74724f70b99d92ab5e5b11b66a85f5d2861662101b31eb8e017fc1",
-  "notes": "### Fixed\n\n- Kitty images in a console no longer blank the oldest visible pasted\n  screenshots once several large images are on screen. Each console now has a\n  configurable soft image-cache target (default 64 MiB); visible placements\n  and images transmitted in the last two seconds are protected, and total\n  image memory is still hard-capped at four times the soft target. Settings →\n  Terminal → Image cache exposes 32/64/128/256 MiB presets.\n\n---\n\n### 修复\n\n- 控制台中粘贴多张较大的截图后，最早的可视图片不再变成空框。每个控制台\n  新增可配置的图像缓存软上限（默认 64 MiB）；仍被 placement 引用以及最近\n  两秒内传输的图片受保护，总内存仍按软上限的 4 倍硬性封顶。设置 → 终端 →\n  图像缓存提供 32/64/128/256 MiB 预设。",
+  "version": "0.4.9",
+  "url": "https://raw.githubusercontent.com/jiangtaiduo/LazeCode/main/releases/LazeCode-0.4.9-macos-aarch64.app.tar.gz",
+  "sha256": "e70cc0c4758cb7810dccbbdbfc02dce53f5f460baf69b4e4841514828f8bcf69",
+  "notes": "### Fixed\n\n- Kitty image-cache trimming now removes exactly the excess unused bytes\n  instead of reserving an extra image-sized slot, so a burst above the soft\n  target cannot evict a visible placement through an eviction overshoot.\n\n---\n\n### 修复\n\n- 图像缓存裁剪现在只释放精确的超额未使用字节，不再预留额外一张图片的\n  空间；超过软上限时不会再因淘汰量过大而误删可见图片。",
   "min_os": "",
   "arch": "aarch64",
   "kind": "app-bundle",
-  "signature": "HKk/c/PHb7FUsrS5w5iliD3VwqnhZvI1ffskWZSRGBR8Gl8Da0FxYMHaZ0TCnU1rOdRvdra8+p1yRj7wG6wuAQ==",
+  "signature": "1+XE2NsUbkj3qTW00NWlaFyxAIp2ehj/GhxHQpX8Z2i6T50b+lJAN9HawTV+cy4rWCD87C9O4Wz+xd958/4LAQ==",
   "date": "2026-11-16"
 }

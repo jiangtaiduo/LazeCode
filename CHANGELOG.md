@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-11-16
+
+### Fixed
+
+- Kitty image-cache trimming now removes exactly the excess unused bytes
+  instead of reserving an extra image-sized slot, so a burst above the soft
+  target cannot evict a visible placement through an eviction overshoot.
+
 ## [0.4.8] - 2026-11-16
 
 ### Fixed

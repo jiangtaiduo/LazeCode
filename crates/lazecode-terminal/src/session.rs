@@ -1100,8 +1100,12 @@ fn trim_graphics_to_soft(graphics: &mut Graphics, soft_limit: usize) {
         // the unused-image tier is actually trimmed; visible/recent images
         // are in `used`, so the requested amount comes from unused data.
         let hard_limit = graphics.total_limit;
-        graphics.total_limit = soft_limit;
-        graphics.evict_images(need, &used);
+        // `evict_images` reserves `required_bytes` for an upcoming store and
+        // frees `total + required - limit`. Pass zero and lower the limit by
+        // exactly the excess we want to drop, so a large unused image does
+        // not cause an unnecessary second eviction.
+        graphics.total_limit = graphics.total_bytes.saturating_sub(need);
+        graphics.evict_images(0, &used);
         graphics.total_limit = hard_limit;
     }
 }
@@ -2443,6 +2447,25 @@ mod tests {
         trim_graphics_to_soft(&mut graphics, 100_000);
         assert!(graphics.kitty_images.contains_key(&1));
         assert!(graphics.kitty_images.contains_key(&2));
+    }
+
+    #[test]
+    fn graphics_trim_does_not_overshoot_into_visible_images() {
+        let mut graphics = Graphics::default();
+        graphics.kitty_images.insert(1, test_image(100_000, 10));
+        graphics
+            .kitty_virtual_placements
+            .insert((1, 1), test_virtual_placement(1));
+        graphics.kitty_images.insert(2, test_image(30_000, 10));
+        graphics.kitty_images.insert(3, test_image(30_000, 10));
+        graphics.total_bytes = 160_000;
+
+        trim_graphics_to_soft(&mut graphics, 110_000);
+        assert!(
+            graphics.kitty_images.contains_key(&1),
+            "the visible image must survive trimming"
+        );
+        assert!(graphics.total_bytes <= 110_000);
     }
 
     #[test]

@@ -1,10 +1,11 @@
 {
-  "version": "0.4.6",
-  "url": "https://raw.githubusercontent.com/jiangtaiduo/LazeCode/main/releases/LazeCode-0.4.6-macos-aarch64.app.tar.gz",
-  "sha256": "50b6143a2ab8f07f7514ddcfa912975291fab564b84946219fddc81f770206e2",
-  "signature": "5W/HTq3ZrcTBNZ6s8Z/9TntyXsWt1Ucw4IPoIIlTcRMafQd3PFQ/lABlauGX0uDdL87vhD5Yma1Gdi8fJjjSDA==",
-  "notes": "LazeCode 0.4.6",
+  "version": "0.4.7",
+  "url": "https://raw.githubusercontent.com/jiangtaiduo/LazeCode/main/releases/LazeCode-0.4.7-macos-aarch64.app.tar.gz",
+  "sha256": "9b19c1e7401b15b21b9f7632191b1fb12a09107be90b84780a844c4860be1750",
+  "notes": "### Changed\n\n- The updater now has a full update page (checking, up to date, available,\n  downloading, installing, ready and error states), Markdown release notes,\n  an ignore-this-version choice and a restart confirmation when editors have\n  unsaved changes. The title bar shows an update pill for available,\n  downloading and restart-ready builds. Automatic checks run five seconds\n  after launch at most once per day and never install without an explicit\n  click.\n- Release manifests now carry changelog-derived release notes and an optional\n  display date; tag releases verify the committed manifest against the\n  artifact before packaging.\n- Centralized frame pacing: foreground windows paint at most at 60 fps,\n  background windows at 10 fps, and occluded windows stop painting entirely.\n  Terminal stream output runs at 30 fps while typing keeps the 60 fps budget;\n  the project activity ring and git-log paging are also capped at 30 fps.\n  This removes compositor-rate full-window repaints from chatty terminals.\n- Diff pages render only the visible row range and merge adjacent overview\n  ruler marks. A large diff no longer paints every line or recomputes\n  off-screen inline diffs on each repaint.\n\n---\n\n### 变更\n\n- 更新器新增完整更新页面（检查中、已是最新、发现新版本、下载中、安装中、\n  已就绪、失败），支持 Markdown 发布说明、忽略此版本，以及存在未保存文件\n  时的重启确认。顶栏新增更新 pill，覆盖可更新、下载中和待重启状态。自动\n  检查在启动 5 秒后进行，24 小时内最多一次，且不会在后台自动安装。\n- 发布清单现在从中英文 CHANGELOG 提取发布说明，并增加仅用于显示的日期；\n  Tag 发布前会校验已提交的清单与安装包。\n- 统一帧预算：前台窗口最多 60fps，后台窗口 10fps，窗口被遮挡时完全停止绘制。\n  终端持续输出时使用 30fps，键盘输入期间保持 60fps；项目活动环和 git log\n  分页动画也限制在 30fps。这样终端刷屏不会再按合成器刷新率重绘整个窗口。\n- Diff 页面只渲染可见行范围，并合并总览标尺上的相邻标记。大 diff 不再每帧\n  绘制全部行或计算屏幕外的行内差异。",
+  "min_os": "",
   "arch": "aarch64",
   "kind": "app-bundle",
-  "date": "2026-11-15"
+  "signature": "ewIoplSJMjigbVMrOW6LAHbSOBbDZpkn8YpoiCPwSbbs0CnbLO6X+n9LgWeRgrXdW5LKZihj5ROXGySLln2MAg==",
+  "date": "2026-11-16"
 }

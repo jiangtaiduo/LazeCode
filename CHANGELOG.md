@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-11-16
+
 ### Changed
 
 - The updater now has a full update page (checking, up to date, available,

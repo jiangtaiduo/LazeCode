@@ -345,6 +345,10 @@ pub fn draw(
         }
     }
 
+    // A press without movement places focus; only a drag selects. Leaving the
+    // press anchor behind painted a permanent one-cell blue block.
+    clear_selection_on_click(selection, response.clicked());
+
     if focus && !search.open && !ui.ctx().egui_wants_keyboard_input() {
         handle_input(
             ui,
@@ -394,11 +398,9 @@ pub fn draw(
     // Backgrounds, selection and text.
     let painter = ui.painter().with_clip_rect(rect);
     painter.rect_filled(rect, 0.0, p.terminal_bg);
-    let (sel_start, sel_end) = if let Some(sel) = selection.as_ref() {
-        let (start, end) = sel.normalised();
-        (Some(start), Some(end))
-    } else {
-        (None, None)
+    let (sel_start, sel_end) = match selection_bounds(selection.as_ref()) {
+        Some((start, end)) => (Some(start), Some(end)),
+        None => (None, None),
     };
     let search_match = search.matches.get(search.index).copied();
     let default_fg = p.text;
@@ -1011,8 +1013,24 @@ fn key_char(key: Key) -> Option<char> {
     })
 }
 
+fn clear_selection_on_click(selection: &mut Option<TermSelection>, clicked: bool) {
+    if clicked {
+        *selection = None;
+    }
+}
+
+/// A press anchor is not a selection until the pointer moves to another cell.
+/// This keeps a plain click from painting a one-cell block.
+fn selection_bounds(selection: Option<&TermSelection>) -> Option<((i32, usize), (i32, usize))> {
+    let (start, end) = selection?.normalised();
+    (start != end).then_some((start, end))
+}
+
 fn selection_text(snapshot: &Snapshot, selection: &TermSelection) -> String {
-    let ((start_line, start_col), (end_line, end_col)) = selection.normalised();
+    let Some(((start_line, start_col), (end_line, end_col))) = selection_bounds(Some(selection))
+    else {
+        return String::new();
+    };
     let mut out = String::new();
     for line in start_line..=end_line {
         let row = line - snapshot.absolute_line(0);
@@ -1347,6 +1365,31 @@ mod tests {
             }
         }
         snapshot
+    }
+
+    #[test]
+    fn collapsed_terminal_selection_is_not_visible() {
+        let snapshot = text_snapshot(&["$ ls"], 8);
+        let collapsed = TermSelection {
+            start: (0, 2),
+            end: (0, 2),
+        };
+        assert!(selection_bounds(None).is_none());
+        assert!(selection_bounds(Some(&collapsed)).is_none());
+        assert!(selection_text(&snapshot, &collapsed).is_empty());
+
+        let mut selection = Some(collapsed);
+        clear_selection_on_click(&mut selection, false);
+        assert!(selection.is_some(), "press anchor stays until release");
+        clear_selection_on_click(&mut selection, true);
+        assert!(selection.is_none(), "a completed click clears the anchor");
+
+        let range = TermSelection {
+            start: (0, 0),
+            end: (0, 3),
+        };
+        assert_eq!(selection_bounds(Some(&range)), Some(((0, 0), (0, 3))));
+        assert_eq!(selection_text(&snapshot, &range), "$ ls");
     }
 
     #[test]

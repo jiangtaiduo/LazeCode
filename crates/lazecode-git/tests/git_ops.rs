@@ -578,3 +578,46 @@ fn commit_checked_accepts_resolve_undo_index() {
         .expect("commit must tolerate REUC instead of refusing the index");
     assert_eq!(git(dir.path(), &["status", "--porcelain"]), "");
 }
+
+#[test]
+fn index_only_divergence_matching_disk_is_hidden() {
+    let dir = init();
+    std::fs::write(dir.path().join("a.txt"), "new\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "kept\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into(), "b.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "base", false).unwrap();
+
+    // Stage stale content, then restore the disk file to HEAD: the staged and
+    // unstaged halves cancel out, so JetBrains-style semantics list nothing.
+    std::fs::write(dir.path().join("a.txt"), "old\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap();
+    std::fs::write(dir.path().join("a.txt"), "new\n").unwrap();
+    let snap = lazecode_git::snapshot(dir.path()).unwrap();
+    assert!(
+        snap.changes.is_empty(),
+        "phantom staged entry listed: {:?}",
+        snap.changes.iter().map(|c| c.path.clone()).collect::<Vec<_>>()
+    );
+    let diff = lazecode_git::file_diff(dir.path(), "a.txt").unwrap();
+    assert_eq!(diff.diff.additions, 0);
+
+    // Index-only deletion with the disk file still at HEAD stays hidden too,
+    // including the untracked walk.
+    git(dir.path(), &["rm", "--cached", "-qf", "a.txt"]);
+    let snap = lazecode_git::snapshot(dir.path()).unwrap();
+    assert!(
+        snap.changes.is_empty(),
+        "phantom staged deletion listed: {:?}",
+        snap.changes.iter().map(|c| c.path.clone()).collect::<Vec<_>>()
+    );
+
+    // Real net changes still list, staged or not.
+    std::fs::write(dir.path().join("b.txt"), "kept\nedited\n").unwrap();
+    let snap = lazecode_git::snapshot(dir.path()).unwrap();
+    assert_eq!(snap.changes.len(), 1);
+    assert!(snap.changes[0].unstaged.is_some() && snap.changes[0].staged.is_none());
+    lazecode_git::stage(dir.path(), &["b.txt".into()]).unwrap();
+    let snap = lazecode_git::snapshot(dir.path()).unwrap();
+    assert_eq!(snap.changes.len(), 1);
+    assert!(snap.changes[0].staged.is_some() && snap.changes[0].unstaged.is_none());
+}

@@ -314,7 +314,7 @@ impl UpdateState {
         updater::relaunch(&target).map_err(|err| err.to_string())
     }
 
-    /// Poll the worker, schedule the daily check and raise the one-time
+    /// Poll the worker, schedule the post-launch check and raise the one-time
     /// "new version" toast for automatic checks.
     pub fn tick(&mut self, model: &mut AppModel) -> bool {
         let had_job = self.job.is_some();

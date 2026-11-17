@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lazecode_fs::tree::{load_tree, FileTree};
+use lazecode_fs::tree::FileTree;
 use lazecode_fs::ProjectWatcher;
 use lazecode_git::{BranchInfo, CommitDetails, CommitInfo, FileDiff, LogOptions, RepoSnapshot};
 use lazecode_terminal::{Notifier, Session, SessionKind, SpawnOptions};
@@ -584,7 +584,6 @@ pub struct WorktreeState {
     /// Last active editor tab while this checkout was focused.
     pub active_editor_tab: Option<u64>,
     pub watcher: Option<ProjectWatcher>,
-    pub last_watch_poll: Instant,
     pub git_loading: bool,
     /// UI-side branch filter for the Git log view (per worktree).
     pub log_branch: Option<String>,
@@ -645,9 +644,9 @@ impl WorktreeState {
 
     /// Load the tree/git/watcher state of one checkout without spawning a
     /// console. Callers attach consoles afterwards via `open_terminal_in`.
-    pub fn load(name: String, path: PathBuf, is_main: bool) -> Self {
-        let tree = load_tree(&path);
-        let watcher = lazecode_fs::watch_project(&path).ok();
+    pub fn load(name: String, path: PathBuf, is_main: bool, ignored_patterns: &[String]) -> Self {
+        let tree = lazecode_fs::tree::load_tree_filtered(&path, 20_000, Some(ignored_patterns));
+        let watcher = lazecode_fs::watch_project(&path, ignored_patterns).ok();
         let (git, git_error) = match lazecode_git::snapshot(&path) {
             Ok(snapshot) => (Some(snapshot), None),
             Err(err) => {
@@ -659,6 +658,22 @@ impl WorktreeState {
                 }
             }
         };
+        Self::from_loaded(name, path, is_main, tree, watcher, git, git_error)
+    }
+
+    /// Build a worktree from already-loaded state. Used for the main checkout,
+    /// whose watcher/tree/snapshot are owned by [`ProjectState`], so opening a
+    /// project does not scan or watch the same root twice.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_loaded(
+        name: String,
+        path: PathBuf,
+        is_main: bool,
+        tree: FileTree,
+        watcher: Option<ProjectWatcher>,
+        git: Option<lazecode_git::RepoSnapshot>,
+        git_error: Option<String>,
+    ) -> Self {
         Self {
             name,
             path,
@@ -670,7 +685,6 @@ impl WorktreeState {
             active_terminal: None,
             active_editor_tab: None,
             watcher,
-            last_watch_poll: Instant::now(),
             git_loading: false,
             log_branch: None,
         }
@@ -843,7 +857,6 @@ pub struct ProjectState {
     /// Index into `worktrees` of the console/tree pane target.
     pub active_worktree: usize,
     pub watcher: Option<ProjectWatcher>,
-    pub last_watch_poll: Instant,
     pub git_loading: bool,
     pub log_loading: bool,
     /// Compare Versions 会话（稳定版 CompareDrawer）。
@@ -872,7 +885,6 @@ impl ProjectState {
             active_terminal: None,
             active_editor_tab: None,
             watcher: None,
-            last_watch_poll: Instant::now(),
             git_loading: false,
             log_branch: None,
         };
@@ -924,7 +936,6 @@ impl ProjectState {
             worktrees: vec![worktree],
             active_worktree: 0,
             watcher: None,
-            last_watch_poll: Instant::now(),
             git_loading: false,
             log_loading: false,
             compare_session: None,
@@ -953,7 +964,7 @@ impl ProjectState {
         let tone = tone_for(&root);
         let tree =
             lazecode_fs::tree::load_tree_filtered(&root, 20_000, Some(&settings.ignored_patterns));
-        let watcher = lazecode_fs::watch_project(&root).ok();
+        let watcher = lazecode_fs::watch_project(&root, &settings.ignored_patterns).ok();
         let (git, git_error) = match lazecode_git::snapshot(&root) {
             Ok(snapshot) => (Some(snapshot), None),
             Err(err) => {
@@ -1046,18 +1057,25 @@ impl ProjectState {
             worktrees: Vec::new(),
             active_worktree: 0,
             watcher,
-            last_watch_poll: Instant::now(),
             git_loading: false,
             log_loading: false,
             compare_session: None,
         };
         // The worktree projection must exist before branch/changes accessors
         // are used (refresh_branches reads the active branch for pending count).
-        project.worktrees.push(WorktreeState::load(
+        // The project owns the main checkout's watcher/tree/snapshot; creating
+        // another WorktreeState::load here would duplicate all three and leave
+        // an unread watcher channel growing in the background.
+        let main_worktree = WorktreeState::from_loaded(
             "main".to_string(),
             project.root.clone(),
             true,
-        ));
+            project.tree.clone(),
+            None,
+            project.git.clone(),
+            project.git_error.clone(),
+        );
+        project.worktrees.push(main_worktree);
         // Populate remotes/tags/ahead-behind in the initial frame so the
         // branch menu, Push dialog and Remotes dialog are usable immediately.
         project.refresh_branches();
@@ -1086,13 +1104,24 @@ impl ProjectState {
             return;
         }
         let root = self.active_root().to_path_buf();
-        let tree = lazecode_fs::tree::load_tree_with_expanded(
-            &root,
-            Some(&self.expanded),
-            20_000,
-            Some(&settings.ignored_patterns),
-        );
+        // Keep children for collapsed folders loaded. Expansion is then a
+        // presentation-only change and cannot trigger a synchronous rescan.
+        let tree =
+            lazecode_fs::tree::load_tree_filtered(&root, 20_000, Some(&settings.ignored_patterns));
         self.active_worktree_mut().tree = tree;
+    }
+
+    /// Recreate watchers after the ignore list changed. Watchers keep a
+    /// snapshot of the patterns, so a settings edit must rebuild them.
+    pub fn rebuild_watchers(&mut self, settings: &Settings) {
+        if self.is_single_file {
+            return;
+        }
+        self.watcher = lazecode_fs::watch_project(&self.root, &settings.ignored_patterns).ok();
+        for worktree in self.worktrees.iter_mut().skip(1) {
+            worktree.watcher =
+                lazecode_fs::watch_project(&worktree.path, &settings.ignored_patterns).ok();
+        }
     }
 
     /// Root of the checkout currently shown in the editor/source-control pane.
@@ -1428,7 +1457,11 @@ impl ProjectState {
 
     /// Switch to an attached worktree or attach an existing one; returns whether
     /// it was newly attached.
-    pub fn ensure_worktree(&mut self, name: &str) -> Result<Option<()>, String> {
+    pub fn ensure_worktree(
+        &mut self,
+        name: &str,
+        ignored_patterns: &[String],
+    ) -> Result<Option<()>, String> {
         if let Some(index) = self.worktree_index(name) {
             self.focus_worktree(index);
             return Ok(None);
@@ -1439,7 +1472,7 @@ impl ProjectState {
         let Some(info) = all.into_iter().find(|worktree| worktree.name == name) else {
             return Err(format!("worktree '{name}' does not exist"));
         };
-        let worktree = WorktreeState::load(info.name, info.path, false);
+        let worktree = WorktreeState::load(info.name, info.path, false, ignored_patterns);
         let index = self.worktrees.len();
         self.worktrees.push(worktree);
         self.focus_worktree(index);
@@ -1453,7 +1486,7 @@ impl ProjectState {
         name: &str,
         settings: &Settings,
     ) -> Result<Option<()>, String> {
-        let attached = self.ensure_worktree(name)?;
+        let attached = self.ensure_worktree(name, &settings.ignored_patterns)?;
         self.reload_tree(settings);
         Ok(attached)
     }
@@ -2290,6 +2323,7 @@ impl AppModel {
                 self.active_project = Some(*index);
             }
         }
+        let ignored_patterns = self.settings.ignored_patterns.clone();
         for (index, path) in &restored {
             let project = &mut self.projects[*index];
             // Attach saved linked worktrees before opening tabs: open_file
@@ -2297,12 +2331,12 @@ impl AppModel {
             if let Some(names) = workspace.open_worktrees.get(path) {
                 for name in names {
                     if name != "main" {
-                        let _ = project.ensure_worktree(name);
+                        let _ = project.ensure_worktree(name, &ignored_patterns);
                     }
                 }
             }
             if let Some(name) = workspace.active_worktrees.get(path) {
-                let _ = project.ensure_worktree(name);
+                let _ = project.ensure_worktree(name, &ignored_patterns);
             }
             if let Some(tabs) = workspace.open_tabs.get(path) {
                 for tab_path in tabs {
@@ -2385,23 +2419,6 @@ impl AppModel {
         self.active_project
             .and_then(|index| self.projects.get_mut(index))
     }
-    pub fn reload_active_tree(&mut self) {
-        let Some(active) = self.active_project else {
-            return;
-        };
-        let ignored = self.settings.ignored_patterns.clone();
-        if let Some(project) = self.projects.get_mut(active) {
-            let root = project.active_root().to_path_buf();
-            let tree = lazecode_fs::tree::load_tree_with_expanded(
-                &root,
-                Some(&project.expanded),
-                20_000,
-                Some(&ignored),
-            );
-            project.active_worktree_mut().tree = tree;
-        }
-    }
-
     pub fn project_at(&self, index: usize) -> Option<&ProjectState> {
         self.projects.get(index)
     }

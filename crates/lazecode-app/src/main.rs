@@ -41,14 +41,43 @@ use jobs::JobQueue;
 /// Cheap fingerprint of the `.git` files that determine status: top-level
 /// metadata files, `refs/`, and the sequencer dirs. `objects/`, `logs/` and
 /// `hooks/` are excluded because they never change a status result.
-/// `None` = no cheap signature (missing `.git`, linked-worktree pointer).
+/// `None` = missing `.git` or an unreadable linked-worktree pointer.
 fn git_fingerprint(root: &std::path::Path) -> Option<Vec<(std::path::PathBuf, u64, u64)>> {
     const BUDGET: usize = 800;
     let dot_git = root.join(".git");
     let meta = std::fs::symlink_metadata(&dot_git).ok()?;
-    if !meta.is_dir() {
+    let (git_dir, common_dir) = if meta.is_dir() {
+        (dot_git.clone(), dot_git)
+    } else if meta.is_file() {
+        // Linked worktree: `.git` is `gitdir: /repo/.git/worktrees/<name>`.
+        let text = std::fs::read_to_string(&dot_git).ok()?;
+        let raw = text
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("gitdir:").map(str::trim))?;
+        let pointer = std::path::PathBuf::from(raw);
+        let git_dir = if pointer.is_absolute() {
+            pointer
+        } else {
+            root.join(pointer)
+        };
+        let git_dir = std::fs::canonicalize(git_dir).ok()?;
+        // Status also depends on shared refs in the common git dir.
+        let common_dir = std::fs::read_to_string(git_dir.join("commondir"))
+            .ok()
+            .map(|text| {
+                let path = std::path::PathBuf::from(text.trim());
+                if path.is_absolute() {
+                    path
+                } else {
+                    git_dir.join(path)
+                }
+            })
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .unwrap_or_else(|| git_dir.clone());
+        (git_dir, common_dir)
+    } else {
         return None;
-    }
+    };
     let mut entries: Vec<(std::path::PathBuf, u64, u64)> = Vec::new();
     fn push_file(
         path: &std::path::Path,
@@ -98,32 +127,50 @@ fn git_fingerprint(root: &std::path::Path) -> Option<Vec<(std::path::PathBuf, u6
             }
         }
     }
-    let mut budget = BUDGET;
-    // Top-level files only; directories (objects/, logs/, hooks/, ...) are
-    // walked below only when they carry state the status depends on.
-    if let Ok(read_dir) = std::fs::read_dir(&dot_git) {
-        for entry in read_dir.flatten() {
-            if budget == 0 {
-                break;
+    fn collect_dir(
+        dir: &std::path::Path,
+        prefix: &std::path::Path,
+        entries: &mut Vec<(std::path::PathBuf, u64, u64)>,
+        budget: &mut usize,
+    ) {
+        // Top-level files only; directories (objects/, logs/, hooks/, ...) are
+        // walked below only when they carry state the status depends on.
+        if let Ok(read_dir) = std::fs::read_dir(dir) {
+            for entry in read_dir.flatten() {
+                if *budget == 0 {
+                    break;
+                }
+                let Ok(meta) = entry.metadata() else {
+                    continue;
+                };
+                if meta.is_dir() {
+                    continue;
+                }
+                *budget -= 1;
+                push_file(&entry.path(), &prefix.join(entry.file_name()), entries);
             }
-            let Ok(meta) = entry.metadata() else {
-                continue;
-            };
-            if meta.is_dir() {
-                continue;
-            }
-            budget -= 1;
-            push_file(
-                &entry.path(),
-                &std::path::PathBuf::from(entry.file_name()),
-                &mut entries,
-            );
+        }
+        for tracked in ["refs", "rebase-merge", "rebase-apply", "sequencer"] {
+            walk_dir(&dir.join(tracked), &prefix.join(tracked), entries, budget);
         }
     }
-    for tracked in ["refs", "rebase-merge", "rebase-apply", "sequencer"] {
-        walk_dir(
-            &dot_git.join(tracked),
-            std::path::Path::new(tracked),
+
+    let mut budget = BUDGET;
+    let linked = common_dir != git_dir;
+    collect_dir(
+        &git_dir,
+        if linked {
+            std::path::Path::new("worktree")
+        } else {
+            std::path::Path::new("")
+        },
+        &mut entries,
+        &mut budget,
+    );
+    if linked {
+        collect_dir(
+            &common_dir,
+            std::path::Path::new("common"),
             &mut entries,
             &mut budget,
         );
@@ -855,28 +902,50 @@ impl LazeApp {
             return false;
         }
         self.last_watch_poll = std::time::Instant::now();
-        let mut changed: Vec<(std::path::PathBuf, Vec<std::path::PathBuf>, bool)> = Vec::new();
+        let mut changed: Vec<(
+            std::path::PathBuf,
+            Vec<std::path::PathBuf>,
+            bool,
+            bool,
+            bool,
+        )> = Vec::new();
         for project in &mut self.model.projects {
             // The main worktree watcher lives on the project itself; linked
             // worktrees carry their own.
             if let Some(watcher) = project.watcher.as_ref() {
                 if let Some(batch) = watcher.poll() {
-                    lazecode_git::invalidate_ignored_cache(&project.root);
-                    changed.push((project.root.clone(), batch.changed, batch.git_changed));
+                    if batch.ignored_touched || batch.structure_changed {
+                        lazecode_git::invalidate_ignored_cache(&project.root);
+                    }
+                    changed.push((
+                        project.root.clone(),
+                        batch.changed,
+                        batch.git_changed,
+                        batch.structure_changed,
+                        batch.ignored_touched,
+                    ));
                 }
             }
             for worktree in project.worktrees.iter().skip(1) {
                 if let Some(watcher) = worktree.watcher.as_ref() {
                     if let Some(batch) = watcher.poll() {
-                        lazecode_git::invalidate_ignored_cache(&worktree.path);
-                        changed.push((worktree.path.clone(), batch.changed, batch.git_changed));
+                        if batch.ignored_touched || batch.structure_changed {
+                            lazecode_git::invalidate_ignored_cache(&worktree.path);
+                        }
+                        changed.push((
+                            worktree.path.clone(),
+                            batch.changed,
+                            batch.git_changed,
+                            batch.structure_changed,
+                            batch.ignored_touched,
+                        ));
                     }
                 }
             }
         }
         let mut had_changes = !changed.is_empty();
         let mut warnings = Vec::new();
-        for (root, paths, git_changed) in changed {
+        for (root, paths, git_changed, structure_changed, _ignored_touched) in changed {
             // Find the worktree (its path) whose watcher fired.
             let Some((position, wt_index)) =
                 self.model
@@ -904,7 +973,7 @@ impl LazeApp {
                 continue;
             };
             let had_paths = !paths.is_empty();
-            if had_paths {
+            if structure_changed {
                 // Tree scans run as a background job; custom ignore patterns
                 // must match the ones the tree was loaded with.
                 let worktree_path = self.model.projects[position].worktrees[wt_index]
@@ -915,31 +984,33 @@ impl LazeApp {
                     Arc::new(self.model.settings.ignored_patterns.clone()),
                 );
             }
+            let canonical_paths: std::collections::HashSet<std::path::PathBuf> = paths
+                .into_iter()
+                .map(|path| path.canonicalize().unwrap_or(path))
+                .collect();
             let project = &mut self.model.projects[position];
-            for path in paths {
-                let canonical = path.canonicalize().unwrap_or(path);
-                let Some(tab) = project.tabs.iter_mut().find(|tab| {
-                    matches!(&tab.kind, lazecode_core::TabKind::File(file) if file.doc.path == canonical)
-                }) else {
+            for tab in &mut project.tabs {
+                let lazecode_core::TabKind::File(file) = &mut tab.kind else {
                     continue;
                 };
-                if let lazecode_core::TabKind::File(file) = &mut tab.kind {
-                    if file.doc.dirty {
-                        // Our own atomic save also fires a watcher event; do
-                        // not report it, but stamp the metadata so the
-                        // fallback poll does not repeat it.
-                        if !self.jobs.is_saving(&canonical) {
-                            warnings.push(format!(
-                                "{} changed on disk; save or reload it",
-                                file.doc.title()
-                            ));
-                        }
-                        file.stamp_disk();
-                    } else if let Err(err) = file.doc.reload() {
-                        warnings.push(format!("Cannot reload {}: {err}", file.doc.title()));
-                    } else {
-                        file.stamp_disk();
+                if !canonical_paths.contains(&file.doc.path) {
+                    continue;
+                }
+                if file.doc.dirty {
+                    // Our own atomic save also fires a watcher event; do not
+                    // report it, but stamp the metadata so the fallback poll
+                    // does not repeat it.
+                    if !self.jobs.is_saving(&file.doc.path) {
+                        warnings.push(format!(
+                            "{} changed on disk; save or reload it",
+                            file.doc.title()
+                        ));
                     }
+                    file.stamp_disk();
+                } else if let Err(err) = file.doc.reload() {
+                    warnings.push(format!("Cannot reload {}: {err}", file.doc.title()));
+                } else {
+                    file.stamp_disk();
                 }
             }
             if git_changed || had_paths {
@@ -1835,7 +1906,41 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_none_for_pointer_file_or_missing_git() {
+    fn fingerprint_follows_linked_worktree_pointer_and_common_refs() {
+        let root = fake_dot_git("linked");
+        let worktree_git = root.join(".git/worktrees/feature");
+        std::fs::create_dir_all(&worktree_git).unwrap();
+        std::fs::write(worktree_git.join("commondir"), "../..\n").unwrap();
+        std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").unwrap();
+        std::fs::write(worktree_git.join("index"), "index").unwrap();
+
+        let linked = root.join("feature");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", worktree_git.display()),
+        )
+        .unwrap();
+
+        let before = git_fingerprint(&linked).expect("linked worktree has a signature");
+        assert!(before.iter().any(|(rel, _, _)| rel == "worktree/HEAD"));
+        assert!(before
+            .iter()
+            .any(|(rel, _, _)| rel == "common/refs/heads/main"));
+
+        let fp = root.join(".git/refs/heads/main");
+        std::fs::write(&fp, "bbb\n").unwrap();
+        let after = git_fingerprint(&linked).unwrap();
+        assert_ne!(
+            before, after,
+            "shared refs must invalidate the linked checkout"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fingerprint_none_for_bad_pointer_or_missing_git() {
         let root = fake_dot_git("pointer");
         std::fs::remove_dir_all(root.join(".git")).unwrap();
         std::fs::write(root.join(".git"), "gitdir: /elsewhere/.git\n").unwrap();

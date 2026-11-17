@@ -86,6 +86,7 @@ fn worktree_create_console_remove_round_trip() {
         "feature-wt".to_string(),
         created.clone(),
         false,
+        &settings.ignored_patterns,
     ));
     let worktree_index = repo.worktree_index("feature-wt").unwrap();
     repo.active_worktree = worktree_index;
@@ -160,7 +161,9 @@ fn ensure_worktree_attaches_only_git_registered_checkouts() {
     assert_eq!(entry.worktrees.len(), 1);
 
     // Unknown name errors.
-    let err = entry.ensure_worktree("does-not-exist").unwrap_err();
+    let err = entry
+        .ensure_worktree("does-not-exist", &settings.ignored_patterns)
+        .unwrap_err();
     assert!(err.contains("does not exist"));
 
     // Registered git worktree is attached lazily by name.
@@ -169,9 +172,16 @@ fn ensure_worktree_attaches_only_git_registered_checkouts() {
         .into_iter()
         .find(|worktree| worktree.name == "wt")
         .expect("git registered worktree should be listed");
-    entry.attach_worktree(WorktreeState::load(linked.name, linked.path, false));
+    entry.attach_worktree(WorktreeState::load(
+        linked.name,
+        linked.path,
+        false,
+        &settings.ignored_patterns,
+    ));
     assert!(entry.worktree_index("wt").is_some());
-    entry.ensure_worktree("wt").unwrap();
+    entry
+        .ensure_worktree("wt", &settings.ignored_patterns)
+        .unwrap();
     assert_eq!(entry.active_worktree, entry.worktree_index("wt").unwrap());
 }
 

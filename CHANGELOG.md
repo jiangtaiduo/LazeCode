@@ -8,6 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The main checkout no longer registers a second recursive watcher, tree scan
+  and Git snapshot that were never read, and the file tree now applies the
+  configured ignore list immediately on open.
+- Filesystem events under configured ignores, `target/` and `dist/` no longer
+  trigger tree or Git refreshes. Content-only saves no longer rescan the whole
+  tree, collapsed folders stay loaded, and manual tree refresh runs off the UI
+  thread.
+- Linked worktrees now have a cheap `.git` fingerprint that follows the
+  `gitdir:` pointer and shared refs instead of falling back to the 30-second
+  full Git refresh.
+
 ## [0.4.9] - 2026-11-16
 
 ### Fixed

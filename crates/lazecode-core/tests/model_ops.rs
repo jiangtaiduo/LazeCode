@@ -57,6 +57,10 @@ fn project_lifecycle_opens_files_and_terminals() {
     let settings = Settings::default();
     let mut project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
     assert_eq!(project.tree.file_count, 2);
+    assert!(
+        project.worktrees[0].watcher.is_none(),
+        "the main checkout watcher is owned by ProjectState"
+    );
     assert_eq!(project.active_worktree().terminals.len(), 1);
     let terminal_id = project.active_worktree().active_terminal.unwrap();
 
@@ -104,6 +108,26 @@ fn app_model_adds_projects_and_switches() {
     model.ui.panel_tab = PanelTab::Git;
     assert_eq!(model.ui.sidebar_view, SidebarView::Git);
     assert_eq!(model.ui.panel_tab, PanelTab::Git);
+}
+
+#[test]
+fn open_applies_ignore_patterns_to_the_main_worktree_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("generated")).unwrap();
+    std::fs::write(dir.path().join("generated/secret.txt"), "ignored\n").unwrap();
+    std::fs::write(dir.path().join("keep.txt"), "keep\n").unwrap();
+    let mut settings = Settings::default();
+    settings.ignored_patterns.push("generated".to_string());
+
+    let project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
+    let names: Vec<&str> = project
+        .active_tree()
+        .nodes
+        .iter()
+        .map(|node| node.name.as_str())
+        .collect();
+    assert!(names.contains(&"keep.txt"));
+    assert!(!names.contains(&"generated"));
 }
 
 #[test]
@@ -666,7 +690,9 @@ fn switching_worktrees_switches_branch_changes_and_tree() {
         .find(|worktree| worktree.name != "main")
         .map(|worktree| worktree.name)
         .unwrap();
-    project.ensure_worktree(&side_name).unwrap();
+    project
+        .ensure_worktree(&side_name, &settings.ignored_patterns)
+        .unwrap();
     project.refresh_git_for(&linked);
     project.reload_tree(&settings);
 
@@ -689,7 +715,9 @@ fn switching_worktrees_switches_branch_changes_and_tree() {
         .iter()
         .any(|node| node.name == "side-only.txt"));
 
-    project.ensure_worktree("main").unwrap();
+    project
+        .ensure_worktree("main", &settings.ignored_patterns)
+        .unwrap();
     project.refresh_git_for(root);
     assert_eq!(project.branch(), "main");
     assert!(project

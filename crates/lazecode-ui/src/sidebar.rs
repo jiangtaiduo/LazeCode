@@ -167,7 +167,6 @@ fn explorer(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                 if let Some(project) = model.active_project_mut() {
                     project.expanded.clear();
                 }
-                model.reload_active_tree();
             }
             3 => {
                 if let Some(folder) = rfd::FileDialog::new().pick_folder() {
@@ -553,7 +552,6 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
                                 } else {
                                     project.expanded.insert(row.path.clone());
                                 }
-                                model.reload_active_tree();
                             }
                         }
                         NodeKind::File => {
@@ -610,7 +608,6 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
                                 } else {
                                     project.expanded.insert(row.path.clone());
                                 }
-                                model.reload_active_tree();
                             }
                         }
                     }

@@ -626,7 +626,13 @@ impl JobQueue {
             Command::ReloadTree => {
                 let settings = model.settings.clone();
                 if let Some(project) = model.active_project_mut() {
-                    project.reload_tree(&settings);
+                    if !project.is_single_file {
+                        // Watchers cache the ignore list; a settings edit must
+                        // rebuild them before the tree scan starts.
+                        project.rebuild_watchers(&settings);
+                        let root = project.active_root().to_path_buf();
+                        self.refresh_tree(root, Arc::new(settings.ignored_patterns.clone()));
+                    }
                 }
             }
             Command::Stage(paths) => {
@@ -3701,6 +3707,7 @@ impl JobQueue {
                 result,
             } => match result {
                 Ok(path) => {
+                    let ignored_patterns = model.settings.ignored_patterns.clone();
                     if let Some(project) = model
                         .projects
                         .iter_mut()
@@ -3710,6 +3717,7 @@ impl JobQueue {
                             name.clone(),
                             path.clone(),
                             false,
+                            &ignored_patterns,
                         ));
                         project.log_loading = true;
                     }
@@ -4058,7 +4066,10 @@ mod tests {
             .find(|wt| wt.name != "main")
             .map(|wt| wt.name)
             .unwrap();
-        model.projects[0].ensure_worktree(&worktree_name).unwrap();
+        let ignored_patterns = model.settings.ignored_patterns.clone();
+        model.projects[0]
+            .ensure_worktree(&worktree_name, &ignored_patterns)
+            .unwrap();
         assert_eq!(model.projects[0].worktrees.len(), 2);
 
         run_command(

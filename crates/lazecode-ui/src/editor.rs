@@ -27,7 +27,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         draw_welcome(ui, model, rt, theme, rect, None);
         return;
     };
-    let tab_count = model.projects[index].tabs.len();
+    let tab_count = model.projects[index].active_worktree_tabs().count();
     if tab_count == 0 {
         // The virtual Single files checkout may exist only to host a console
         // opened from the empty home screen. Keep the home screen intact.
@@ -163,8 +163,7 @@ fn draw_tabbar(
     /// (tab id, title, path, dirty, badge label)
     type TabBadge = (u64, String, Option<String>, bool, Option<&'static str>);
     let tabs: Vec<TabBadge> = project
-        .tabs
-        .iter()
+        .active_worktree_tabs()
         .map(|tab| {
             let path = tab.path().map(|path| path.to_string());
             let badge = match &tab.kind {
@@ -320,7 +319,7 @@ fn draw_tabbar(
                     if close_response.clicked() || response.middle_clicked() {
                         close = Some(id);
                     } else if response.clicked() {
-                        model.projects[index].active_tab = Some(id);
+                        model.projects[index].activate_tab(id);
                         rt.set_editor_focus(id);
                         if model.ui.auto_locate {
                             model.locate_active_file(true);
@@ -3362,8 +3361,7 @@ fn draw_welcome(
     };
     let left_items: Vec<(PathBuf, bool)> = if let Some(index) = index {
         model.projects[index]
-            .tabs
-            .iter()
+            .active_worktree_tabs()
             .filter_map(|tab| match &tab.kind {
                 TabKind::File(file) => Some((file.doc.path.clone(), false)),
                 TabKind::Image(img) => Some((img.path.clone(), false)),

@@ -26,6 +26,29 @@ fn model() -> AppModel {
 }
 
 #[test]
+fn opening_editor_hides_only_a_maximized_console() {
+    let mut ui = UiState {
+        terminal_visible: true,
+        terminal_maximised: true,
+        ..UiState::default()
+    };
+    ui.reveal_editor_area();
+    assert!(!ui.terminal_visible, "maximized console must be hidden");
+    assert!(
+        ui.terminal_maximised,
+        "re-opening the console keeps the user's full-height preference"
+    );
+
+    ui.terminal_visible = true;
+    ui.terminal_maximised = false;
+    ui.reveal_editor_area();
+    assert!(
+        ui.terminal_visible,
+        "a normal docked console must not be closed"
+    );
+}
+
+#[test]
 fn project_lifecycle_opens_files_and_terminals() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();
@@ -41,6 +64,7 @@ fn project_lifecycle_opens_files_and_terminals() {
         .open_file(dir.path().join("src/main.rs"), &settings)
         .unwrap();
     assert_eq!(project.tabs.len(), 1);
+    assert_eq!(project.active_worktree_tabs().count(), 1);
     assert!(matches!(
         project.tab_by_id(tab).unwrap().kind,
         TabKind::File(_)
@@ -109,6 +133,8 @@ fn single_file_session_open_and_persistence() {
     assert_eq!(model.active_project, Some(index));
     // Single-file project does not pollute recent projects
     assert!(model.recent.is_empty());
+    assert_eq!(model.projects[index].active_worktree_tabs().count(), 1);
+    assert!(model.projects[index].active_tab.is_some());
 
     // Saving workspace does not persist single-file project
     model.save_workspace();
@@ -236,7 +262,9 @@ fn diff_tabs_reuse_one_window_like_stable() {
     assert_eq!(project.tabs.len(), 2);
 
     // 完全同源只激活，不重置加载态。
+    let active_root = project.active_root().to_path_buf();
     project.set_diff_for_source(
+        &active_root,
         &lazecode_core::DiffSource::Commit {
             commit: "abc1234def".into(),
             path: "a.rs".into(),
@@ -680,6 +708,91 @@ fn switching_worktrees_switches_branch_changes_and_tree() {
 }
 
 #[test]
+fn editor_tabs_and_tree_are_scoped_to_the_active_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().to_path_buf();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(&root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Tester"]);
+    git(&["config", "user.email", "tester@example.com"]);
+    std::fs::write(root.join("main.txt"), "main\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-q", "-m", "main"]);
+    git(&["branch", "side"]);
+    let linked = root.with_extension("side-worktree");
+    lazecode_git::add_worktree(&root, &linked, "side").unwrap();
+    let linked = linked.canonicalize().unwrap();
+
+    let settings = Settings::default();
+    let mut project = ProjectState::open(root.clone(), &settings, None).unwrap();
+    let main_tab = project.open_file(root.join("main.txt"), &settings).unwrap();
+    assert_eq!(project.active_tab, Some(main_tab));
+
+    let side_name = lazecode_git::list_worktrees(&root)
+        .unwrap()
+        .into_iter()
+        .find(|worktree| worktree.name != "main")
+        .map(|worktree| worktree.name)
+        .unwrap();
+    project.switch_worktree(&side_name, &settings).unwrap();
+
+    assert_eq!(project.active_root(), linked.as_path());
+    assert_ne!(
+        project.active_tab,
+        Some(main_tab),
+        "a file opened in main must not stay active in the linked worktree"
+    );
+    assert!(project.active_tab.is_none());
+    assert_eq!(project.active_worktree_tabs().count(), 0);
+
+    // A file created after the linked worktree was first attached must be
+    // visible when switching back to it.
+    std::fs::write(linked.join("side-fresh.txt"), "fresh\n").unwrap();
+    project.switch_worktree("main", &settings).unwrap();
+    project.switch_worktree(&side_name, &settings).unwrap();
+    assert!(
+        project
+            .active_tree()
+            .nodes
+            .iter()
+            .any(|node| node.name == "side-fresh.txt"),
+        "switching worktrees must rescan the tree"
+    );
+
+    let side_tab = project
+        .open_file(linked.join("side-fresh.txt"), &settings)
+        .unwrap();
+    assert_eq!(project.active_tab, Some(side_tab));
+
+    project.switch_worktree("main", &settings).unwrap();
+    assert_eq!(
+        project.active_tab,
+        Some(main_tab),
+        "each worktree must remember its own active editor tab"
+    );
+    project.switch_worktree(&side_name, &settings).unwrap();
+    assert_eq!(
+        project.active_tab,
+        Some(side_tab),
+        "returning to a worktree must restore its own active editor tab"
+    );
+
+    let _ = std::fs::remove_dir_all(&linked);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn single_files_workspace_is_singleton_and_switches_back() {
     let files = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -729,6 +842,10 @@ fn last_single_tab_falls_back_to_an_open_project() {
     let single_index = model.open_files(vec![ad_hoc]).unwrap();
     assert_eq!(model.active_project, Some(single_index));
     let tab = model.projects[single_index].tabs[0].id;
+    assert_eq!(
+        model.projects[single_index].active_worktree_tabs().count(),
+        1
+    );
     let TabKind::File(file) = &model.projects[single_index].tabs[0].kind else {
         panic!("expected a file tab");
     };

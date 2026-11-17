@@ -3111,8 +3111,9 @@ impl JobQueue {
             }
             Command::SwitchWorktree(name) => {
                 let mut switched = None;
+                let settings = model.settings.clone();
                 if let Some(project) = model.active_project_mut() {
-                    match project.ensure_worktree(&name) {
+                    match project.switch_worktree(&name, &settings) {
                         Ok(_) => {
                             switched = Some((
                                 project.active_root().to_path_buf(),
@@ -3419,7 +3420,7 @@ impl JobQueue {
                 result,
             } => {
                 if let Some(project) = model.project_mut_for_git_root(&root) {
-                    project.set_diff_for_source(&source, result);
+                    project.set_diff_for_source(&root, &source, result);
                 }
             }
             JobResult::SearchDone {
@@ -4185,11 +4186,15 @@ mod tests {
             .unwrap();
 
         let (mut model, mut runtime, mut queue) = open_command_model(&root);
+        let settings = model.settings.clone();
+        let main_tab = model.projects[0]
+            .open_file(root.join("a.txt"), &settings)
+            .unwrap();
         run_command(
             &mut queue,
             &mut model,
             &mut runtime,
-            Command::SwitchWorktree(side_name),
+            Command::SwitchWorktree(side_name.clone()),
         );
         assert_eq!(model.projects[0].branch(), "side");
         assert_eq!(
@@ -4200,6 +4205,30 @@ mod tests {
             .changes()
             .iter()
             .any(|change| change.path == "side-only.txt"));
+        assert_eq!(model.projects[0].active_worktree_tabs().count(), 0);
+        assert_ne!(model.projects[0].active_tab, Some(main_tab));
+
+        // A file created while the worktree is attached but not focused must
+        // appear after switching back.
+        std::fs::write(linked.join("side-later.txt"), "later\n").unwrap();
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::SwitchWorktree("main".into()),
+        );
+        assert_eq!(model.projects[0].active_tab, Some(main_tab));
+        run_command(
+            &mut queue,
+            &mut model,
+            &mut runtime,
+            Command::SwitchWorktree(side_name),
+        );
+        assert!(model.projects[0]
+            .active_tree()
+            .nodes
+            .iter()
+            .any(|node| node.name == "side-later.txt"));
 
         run_command(
             &mut queue,

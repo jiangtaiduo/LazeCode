@@ -331,7 +331,7 @@ pub(crate) fn menu_frame(ui: &Ui, rect: Rect, theme: &Theme) {
 
 /// Approximate a CSS drop shadow `0 {dy}px {blur}px rgba(0,0,0,a/255)` with
 /// a blurred rect edge (epaint's linear edge blur).
-fn dialog_shadow(painter: &egui::Painter, rect: Rect, dy: f32, blur: f32, alpha: u8) {
+pub(crate) fn dialog_shadow(painter: &egui::Painter, rect: Rect, dy: f32, blur: f32, alpha: u8) {
     let shape = egui::epaint::RectShape {
         rect: rect.translate(egui::vec2(0.0, dy)).expand(blur * 0.4),
         corner_radius: egui::CornerRadius::same(16),
@@ -2423,8 +2423,10 @@ fn draw_editor_tab_context_menu(
         .projects
         .get(project_idx)
         .map(|project| {
-            let count = project.tabs.len();
-            let pos = project.tabs.iter().position(|tab| tab.id == tab_id);
+            let count = project.active_worktree_tabs().count();
+            let pos = project
+                .active_worktree_tabs()
+                .position(|tab| tab.id == tab_id);
             (pos == Some(0), pos == Some(count.saturating_sub(1)))
         })
         .unwrap_or((false, false));

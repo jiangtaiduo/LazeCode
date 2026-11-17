@@ -330,6 +330,9 @@ pub struct WorkspaceFile {
     pub single_files_active: bool,
     /// Focused worktree name per project root.
     pub active_worktrees: std::collections::BTreeMap<PathBuf, String>,
+    /// Attached linked worktree names per project root. Needed before restoring
+    /// open tabs so a side-worktree file is filed under the right checkout.
+    pub open_worktrees: std::collections::BTreeMap<PathBuf, Vec<String>>,
     pub sidebar_view: Option<String>,
     pub sidebar_visible: Option<bool>,
     pub sidebar_width: Option<f32>,

@@ -569,7 +569,7 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
     }
 
     if let Some(project) = model.active_project() {
-        for tab in &project.tabs {
+        for tab in project.active_worktree_tabs() {
             if let TabKind::File(file) = &tab.kind {
                 let name = file.doc.title();
                 let path = file.doc.path.display().to_string();
@@ -872,8 +872,9 @@ fn execute(action: PaletteAction, model: &mut AppModel, rt: &mut UiRuntime) {
             rt.clear_terminal_cache();
         }
         PaletteAction::SwitchWorktree { project, name } => {
+            let settings = model.settings.clone();
             if let Some(project_state) = model.projects.get_mut(project) {
-                if let Err(err) = project_state.ensure_worktree(&name) {
+                if let Err(err) = project_state.switch_worktree(&name, &settings) {
                     model.toast(err, ToastKind::Error);
                 }
             }

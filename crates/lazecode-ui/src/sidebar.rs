@@ -559,7 +559,10 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
                         NodeKind::File => {
                             let path = model.projects[active_index].active_root().join(&row.path);
                             match model.open_file_in(active_index, path) {
-                                Ok(id) => rt.set_editor_focus(id),
+                                Ok(id) => {
+                                    model.ui.reveal_editor_area();
+                                    rt.set_editor_focus(id);
+                                }
                                 Err(err) => model.toast(err, ToastKind::Error),
                             }
                         }
@@ -2014,6 +2017,7 @@ fn source_control(
         rt.dialog = crate::runtime::DialogState::ConfirmDiscard { paths };
     }
     if let Some(path) = open_diff {
+        model.ui.reveal_editor_area();
         model.queue(Command::OpenDiff(path));
     }
     if let Some((kind, anchor_rect, payload)) = menu_open {
@@ -3344,6 +3348,7 @@ pub fn compare_drawer(
                     }
                     if response.double_clicked() {
                         let target = row.path.clone();
+                        model.ui.reveal_editor_area();
                         model.queue(Command::OpenCompareCommitsDiff {
                             from: session.from.clone(),
                             to: session.to.clone(),

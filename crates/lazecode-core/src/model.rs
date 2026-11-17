@@ -255,6 +255,18 @@ impl Default for UiState {
     }
 }
 
+impl UiState {
+    /// A user opened an editor target by double-clicking a file or change.
+    /// If the console is covering the whole stage, get it out of the way.
+    /// Keep `terminal_maximised` so re-opening the console later still uses
+    /// the user's chosen full-height layout.
+    pub fn reveal_editor_area(&mut self) {
+        if self.terminal_visible && self.terminal_maximised {
+            self.terminal_visible = false;
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MarkdownViewMode {
     #[default]
@@ -446,6 +458,10 @@ pub struct CompareTab {
 
 pub struct Tab {
     pub id: u64,
+    /// Checkout this editor tab belongs to. Tabs are kept in one project-wide
+    /// registry so background jobs and save-all can still reach an inactive
+    /// worktree, but only the active checkout's tabs are rendered.
+    pub worktree: PathBuf,
     pub kind: TabKind,
 }
 
@@ -565,6 +581,8 @@ pub struct WorktreeState {
     /// Active **pane** id (the pane that owns focus). Stable's
     /// `activeTabByProject` is derived from the tab that owns this pane.
     pub active_terminal: Option<u64>,
+    /// Last active editor tab while this checkout was focused.
+    pub active_editor_tab: Option<u64>,
     pub watcher: Option<ProjectWatcher>,
     pub last_watch_poll: Instant,
     pub git_loading: bool,
@@ -650,6 +668,7 @@ impl WorktreeState {
             git_error,
             terminals: Vec::new(),
             active_terminal: None,
+            active_editor_tab: None,
             watcher,
             last_watch_poll: Instant::now(),
             git_loading: false,
@@ -851,6 +870,7 @@ impl ProjectState {
             git_error: None,
             terminals: Vec::new(),
             active_terminal: None,
+            active_editor_tab: None,
             watcher: None,
             last_watch_poll: Instant::now(),
             git_loading: false,
@@ -1317,7 +1337,7 @@ impl ProjectState {
 
     pub fn active_tab_index(&self) -> Option<usize> {
         let id = self.active_tab?;
-        self.tabs.iter().position(|tab| tab.id == id)
+        self.active_worktree_tabs().position(|tab| tab.id == id)
     }
 
     /// The worktree whose tree/consoles/gits are shown in the pane.
@@ -1342,12 +1362,62 @@ impl ProjectState {
         &mut self.worktrees[index]
     }
 
+    /// Editor tabs of the checkout currently shown in the tab bar.
+    pub fn active_worktree_tabs(&self) -> impl Iterator<Item = &Tab> + '_ {
+        let root = self.active_root();
+        self.tabs.iter().filter(move |tab| tab.worktree == root)
+    }
+
+    /// Activate an editor tab only when it belongs to the focused checkout.
+    pub fn activate_tab(&mut self, id: u64) {
+        let Some(tab) = self.tab_by_id(id) else {
+            return;
+        };
+        if tab.worktree != self.active_root() {
+            return;
+        }
+        self.set_active_tab(id);
+    }
+
+    fn set_active_tab(&mut self, id: u64) {
+        self.active_tab = Some(id);
+        let index = self
+            .active_worktree
+            .min(self.worktrees.len().saturating_sub(1));
+        if let Some(worktree) = self.worktrees.get_mut(index) {
+            worktree.active_editor_tab = Some(id);
+        }
+    }
+
     pub fn worktree_index(&self, name: &str) -> Option<usize> {
         self.worktrees.iter().position(|wt| wt.name == name)
     }
 
     fn focus_worktree(&mut self, index: usize) {
+        let index = index.min(self.worktrees.len().saturating_sub(1));
+        // Remember the tab the user was looking at before leaving the old
+        // checkout, then restore the target's own tab. Tabs stay in one
+        // registry for background jobs, but only the active checkout renders.
+        if let Some(previous) = self.worktrees.get_mut(self.active_worktree) {
+            previous.active_editor_tab = self.active_tab;
+        }
         self.active_worktree = index;
+        let target_path = self.worktrees[index].path.clone();
+        self.active_tab = self.worktrees[index]
+            .active_editor_tab
+            .filter(|id| {
+                self.tabs
+                    .iter()
+                    .any(|tab| tab.id == *id && tab.worktree == target_path)
+            })
+            .or_else(|| {
+                self.tabs
+                    .iter()
+                    .rev()
+                    .find(|tab| tab.worktree == target_path)
+                    .map(|tab| tab.id)
+            });
+        self.worktrees[index].active_editor_tab = self.active_tab;
         // Checked paths, multi-selection and anchors are repo-relative but
         // belong to the previously visible checkout. Carrying them across a
         // switch would commit/stage files in the wrong worktree.
@@ -1376,6 +1446,18 @@ impl ProjectState {
         Ok(Some(()))
     }
 
+    /// Switch to an attached worktree and rescan its tree from disk. The scan
+    /// is intentional: a checkout can change while another one is focused.
+    pub fn switch_worktree(
+        &mut self,
+        name: &str,
+        settings: &Settings,
+    ) -> Result<Option<()>, String> {
+        let attached = self.ensure_worktree(name)?;
+        self.reload_tree(settings);
+        Ok(attached)
+    }
+
     /// Register a freshly created worktree and focus it.
     pub fn attach_worktree(&mut self, worktree: WorktreeState) {
         // A worktree with the same path may already exist.
@@ -1397,11 +1479,23 @@ impl ProjectState {
         let Some(index) = self.worktrees.iter().position(|wt| wt.name == name) else {
             return;
         };
+        let removed_path = self.worktrees[index].path.clone();
         self.worktrees.remove(index);
+        self.tabs.retain(|tab| tab.worktree != removed_path);
         if self.active_worktree >= self.worktrees.len() {
             self.active_worktree = self.worktrees.len().saturating_sub(1);
         } else if self.active_worktree > index {
             self.active_worktree -= 1;
+        }
+        let active_root = self.active_root().to_path_buf();
+        self.active_tab = self
+            .tabs
+            .iter()
+            .rev()
+            .find(|tab| tab.worktree == active_root)
+            .map(|tab| tab.id);
+        if let Some(worktree) = self.worktrees.get_mut(self.active_worktree) {
+            worktree.active_editor_tab = self.active_tab;
         }
         self.checked_paths.clear();
         self.change_selection.clear();
@@ -1424,34 +1518,58 @@ impl ProjectState {
                 .unwrap_or_else(|| self.root.clone())
                 .join(path)
         } else {
-            self.root.join(path)
+            self.active_root().join(path)
         };
         // macOS temp paths (/var) are symlinked to /private/var; compare the
         // canonical form so the same file never opens twice.
         let path = path.canonicalize().unwrap_or(path);
-        if let Some(tab) = self.tabs.iter().find(|tab| match &tab.kind {
-            TabKind::File(file) => file.doc.path == path,
-            TabKind::Image(img) => img.path == path,
-            _ => false,
-        }) {
-            self.active_tab = Some(tab.id);
-            return Ok(tab.id);
+        // A file belongs to the checkout that contains it; files outside every
+        // attached checkout belong to the focused one. This keeps restored
+        // linked-worktree files from being filed under main.
+        let worktree_root = self
+            .worktrees
+            .iter()
+            .filter(|worktree| path.starts_with(&worktree.path))
+            .max_by_key(|worktree| worktree.path.components().count())
+            .map(|worktree| worktree.path.clone())
+            .unwrap_or_else(|| self.active_root().to_path_buf());
+        let visible = worktree_root == self.active_root();
+        let existing = self
+            .tabs
+            .iter()
+            .find(|tab| {
+                tab.worktree == worktree_root
+                    && match &tab.kind {
+                        TabKind::File(file) => file.doc.path == path,
+                        TabKind::Image(img) => img.path == path,
+                        _ => false,
+                    }
+            })
+            .map(|tab| tab.id);
+        if let Some(id) = existing {
+            if visible {
+                self.set_active_tab(id);
+            }
+            return Ok(id);
         }
         let id = NEXT_TAB.fetch_add(1, Ordering::Relaxed);
         // The Single files checkout is virtual: every ad-hoc file lives
         // outside its metadata root by design. Only real projects use the
         // "diff" badge for files opened from outside the checkout.
-        let external = !self.is_single_file && !path.starts_with(&self.root);
+        let external = !self.is_single_file && !path.starts_with(&worktree_root);
         if is_image_path(&path) {
             self.tabs.push(Tab {
                 id,
+                worktree: worktree_root,
                 kind: TabKind::Image(ImageTab {
                     path: path.clone(),
                     external,
                 }),
             });
-            self.active_tab = Some(id);
-            self.expand_parents(&path);
+            if visible {
+                self.set_active_tab(id);
+                self.expand_parents(&path);
+            }
             return Ok(id);
         }
         let doc = Document::open(&path, settings.editor.tab_width, settings.editor.use_spaces)
@@ -1464,6 +1582,7 @@ impl ProjectState {
             });
         self.tabs.push(Tab {
             id,
+            worktree: worktree_root,
             kind: TabKind::File(FileTab {
                 doc,
                 external,
@@ -1477,12 +1596,15 @@ impl ProjectState {
                 disk_stamp: DiskStamp::read(&path),
             }),
         });
-        self.active_tab = Some(id);
-        self.expand_parents(&path);
+        if visible {
+            self.set_active_tab(id);
+            self.expand_parents(&path);
+        }
         Ok(id)
     }
 
     pub fn open_diff_source(&mut self, source: DiffSource) -> u64 {
+        let worktree_root = self.active_root().to_path_buf();
         let is_img = match &source {
             DiffSource::Worktree { path }
             | DiffSource::Commit { path, .. }
@@ -1495,7 +1617,7 @@ impl ProjectState {
                 DiffSource::Worktree { path }
                 | DiffSource::Commit { path, .. }
                 | DiffSource::CompareWithLocal { path, .. }
-                | DiffSource::CompareCommits { path, .. } => self.root.join(path),
+                | DiffSource::CompareCommits { path, .. } => worktree_root.join(path),
                 DiffSource::Files { new_path, .. } => new_path.clone(),
             };
             if let Ok(id) = self.open_file(path_buf, &Settings::default()) {
@@ -1503,13 +1625,19 @@ impl ProjectState {
             }
         }
         // 完全同源（同提交同文件）：只激活不重置，避免重复加载与后台任务
-        // 去重（同 key 会被丢弃）竞争导致永远转圈。
-        if let Some(tab) = self.tabs.iter().find(|tab| match &tab.kind {
-            TabKind::Diff(diff) => diff.source == source,
-            _ => false,
-        }) {
-            self.active_tab = Some(tab.id);
-            return tab.id;
+        // 去重（同 key 会被丢弃）竞争导致永远转圈。DiffSource paths are
+        // repo-relative, so the owning checkout is part of the identity.
+        let existing = self
+            .tabs
+            .iter()
+            .find(|tab| {
+                tab.worktree == worktree_root
+                    && matches!(&tab.kind, TabKind::Diff(diff) if diff.source == source)
+            })
+            .map(|tab| tab.id);
+        if let Some(id) = existing {
+            self.set_active_tab(id);
+            return id;
         }
         let path = match &source {
             DiffSource::Worktree { path }
@@ -1532,10 +1660,11 @@ impl ProjectState {
         // 换提交/换来源只换内容不新开标签；任两文件互比（Files）不参与。
         if !matches!(source, DiffSource::Files { .. }) {
             let reuse = self.tabs.iter().position(|tab| {
-                matches!(
-                    &tab.kind,
-                    TabKind::Diff(diff) if !matches!(diff.source, DiffSource::Files { .. })
-                )
+                tab.worktree == worktree_root
+                    && matches!(
+                        &tab.kind,
+                        TabKind::Diff(diff) if !matches!(diff.source, DiffSource::Files { .. })
+                    )
             });
             if let Some(index) = reuse {
                 if let TabKind::Diff(diff) = &mut self.tabs[index].kind {
@@ -1548,13 +1677,15 @@ impl ProjectState {
                     diff.edge_pending = 0;
                     diff.revealed = false;
                 }
-                self.active_tab = Some(self.tabs[index].id);
-                return self.tabs[index].id;
+                let id = self.tabs[index].id;
+                self.set_active_tab(id);
+                return id;
             }
         }
         let id = NEXT_TAB.fetch_add(1, Ordering::Relaxed);
         self.tabs.push(Tab {
             id,
+            worktree: worktree_root,
             kind: TabKind::Diff(DiffTab {
                 source,
                 path,
@@ -1567,7 +1698,7 @@ impl ProjectState {
                 revealed: false,
             }),
         });
-        self.active_tab = Some(id);
+        self.set_active_tab(id);
         id
     }
 
@@ -1594,10 +1725,11 @@ impl ProjectState {
     /// 打开分支比较页（单实例，对齐稳定版：再开同一功能只是更新方向并
     /// 激活既有标签页；标题在 UI 层填充为 i18n 文案）。
     pub fn open_compare_branches(&mut self, left: String, right: String, title: String) -> u64 {
+        let worktree_root = self.active_root().to_path_buf();
         if let Some(tab) = self
             .tabs
             .iter_mut()
-            .find(|tab| matches!(tab.kind, TabKind::Compare(_)))
+            .find(|tab| tab.worktree == worktree_root && matches!(tab.kind, TabKind::Compare(_)))
         {
             if let TabKind::Compare(compare) = &mut tab.kind {
                 if compare.left != left || compare.right != right {
@@ -1606,22 +1738,31 @@ impl ProjectState {
                     compare.title = title;
                 }
             }
-            self.active_tab = Some(tab.id);
-            return tab.id;
+            let id = tab.id;
+            self.set_active_tab(id);
+            return id;
         }
         let id = NEXT_TAB.fetch_add(1, Ordering::Relaxed);
         self.tabs.push(Tab {
             id,
+            worktree: worktree_root,
             kind: TabKind::Compare(CompareTab { left, right, title }),
         });
-        self.active_tab = Some(id);
+        self.set_active_tab(id);
         id
     }
 
-    pub fn set_diff_for_source(&mut self, source: &DiffSource, result: Result<FileDiff, String>) {
-        if let Some(tab) = self.tabs.iter_mut().find(|tab| match &tab.kind {
-            TabKind::Diff(diff) => &diff.source == source,
-            _ => false,
+    /// Apply a background diff result to the tab owned by `root`, even if the
+    /// user has switched to another checkout in the meantime.
+    pub fn set_diff_for_source(
+        &mut self,
+        root: &Path,
+        source: &DiffSource,
+        result: Result<FileDiff, String>,
+    ) {
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| {
+            tab.worktree == root
+                && matches!(&tab.kind, TabKind::Diff(diff) if &diff.source == source)
         }) {
             if let TabKind::Diff(diff) = &mut tab.kind {
                 diff.loading = false;
@@ -1640,11 +1781,10 @@ impl ProjectState {
     }
 
     pub fn set_diff(&mut self, path: &str, result: Result<FileDiff, String>) {
-        if let Some(tab) = self
-            .tabs
-            .iter_mut()
-            .find(|tab| matches!(&tab.kind, TabKind::Diff(diff) if diff.path == path))
-        {
+        let root = self.active_root().to_path_buf();
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| {
+            tab.worktree == root && matches!(&tab.kind, TabKind::Diff(diff) if diff.path == path)
+        }) {
             if let TabKind::Diff(diff) = &mut tab.kind {
                 diff.loading = false;
                 match result {
@@ -1665,31 +1805,72 @@ impl ProjectState {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return;
         };
+        let worktree = self.tabs[index].worktree.clone();
         self.tabs.remove(index);
         if self.active_tab == Some(id) {
-            self.active_tab = self
+            let next = self
                 .tabs
-                .get(index.saturating_sub(1))
-                .or_else(|| self.tabs.first())
+                .iter()
+                .take(index)
+                .rev()
+                .find(|tab| tab.worktree == worktree)
+                .or_else(|| {
+                    self.tabs
+                        .iter()
+                        .skip(index)
+                        .find(|tab| tab.worktree == worktree)
+                })
                 .map(|tab| tab.id);
+            self.active_tab = next;
+            if worktree == self.active_root() {
+                let wt_index = self
+                    .active_worktree
+                    .min(self.worktrees.len().saturating_sub(1));
+                if let Some(worktree) = self.worktrees.get_mut(wt_index) {
+                    worktree.active_editor_tab = next;
+                }
+            }
         }
     }
 
     pub fn close_other_tabs(&mut self, id: u64) {
-        self.tabs.retain(|tab| tab.id == id);
-        self.active_tab = Some(id);
+        let Some(tab) = self.tab_by_id(id) else {
+            return;
+        };
+        let worktree = tab.worktree.clone();
+        self.tabs
+            .retain(|tab| tab.worktree != worktree || tab.id == id);
+        if worktree == self.active_root() {
+            self.set_active_tab(id);
+        }
     }
 
     pub fn close_all_tabs(&mut self) {
-        self.tabs.clear();
+        let worktree = self.active_root().to_path_buf();
+        self.tabs.retain(|tab| tab.worktree != worktree);
         self.active_tab = None;
+        let wt_index = self
+            .active_worktree
+            .min(self.worktrees.len().saturating_sub(1));
+        if let Some(active) = self.worktrees.get_mut(wt_index) {
+            active.active_editor_tab = None;
+        }
     }
 
     pub fn close_tabs_to_right(&mut self, id: u64) {
         if let Some(pos) = self.tabs.iter().position(|tab| tab.id == id) {
-            self.tabs.truncate(pos + 1);
-            if !self.tabs.iter().any(|tab| Some(tab.id) == self.active_tab) {
-                self.active_tab = Some(id);
+            let worktree = self.tabs[pos].worktree.clone();
+            let mut index = 0usize;
+            self.tabs.retain(|tab| {
+                let keep = tab.worktree != worktree || index <= pos;
+                index += 1;
+                keep
+            });
+            if !self
+                .active_worktree_tabs()
+                .any(|tab| Some(tab.id) == self.active_tab)
+            {
+                self.set_active_tab(id);
             }
         }
     }
@@ -1697,17 +1878,38 @@ impl ProjectState {
     /// 关闭目标标签左侧的所有标签（稳定版「关闭左侧标签」，首标签禁用）。
     pub fn close_tabs_to_left(&mut self, id: u64) {
         if let Some(pos) = self.tabs.iter().position(|tab| tab.id == id) {
-            self.tabs.drain(..pos);
-            if !self.tabs.iter().any(|tab| Some(tab.id) == self.active_tab) {
-                self.active_tab = Some(id);
+            let worktree = self.tabs[pos].worktree.clone();
+            let mut index = 0usize;
+            self.tabs.retain(|tab| {
+                let keep = tab.worktree != worktree || index >= pos;
+                index += 1;
+                keep
+            });
+            if !self
+                .active_worktree_tabs()
+                .any(|tab| Some(tab.id) == self.active_tab)
+            {
+                self.set_active_tab(id);
             }
         }
     }
 
     pub fn close_unmodified_tabs(&mut self) {
-        self.tabs.retain(|tab| tab.is_dirty());
-        if !self.tabs.iter().any(|tab| Some(tab.id) == self.active_tab) {
-            self.active_tab = self.tabs.first().map(|tab| tab.id);
+        let worktree = self.active_root().to_path_buf();
+        self.tabs
+            .retain(|tab| tab.worktree != worktree || tab.is_dirty());
+        if !self
+            .active_worktree_tabs()
+            .any(|tab| Some(tab.id) == self.active_tab)
+        {
+            let next = self.active_worktree_tabs().last().map(|tab| tab.id);
+            self.active_tab = next;
+            let wt_index = self
+                .active_worktree
+                .min(self.worktrees.len().saturating_sub(1));
+            if let Some(worktree) = self.worktrees.get_mut(wt_index) {
+                worktree.active_editor_tab = next;
+            }
         }
     }
 
@@ -1731,7 +1933,7 @@ impl ProjectState {
     }
 
     pub fn expand_parents(&mut self, path: &Path) {
-        let Ok(rel) = path.strip_prefix(&self.root) else {
+        let Ok(rel) = path.strip_prefix(self.active_root()) else {
             return;
         };
         let mut current = PathBuf::new();
@@ -2089,25 +2291,45 @@ impl AppModel {
             }
         }
         for (index, path) in &restored {
-            if let Some(tabs) = workspace.open_tabs.get(path) {
-                for tab_path in tabs {
-                    let _ = self.projects[*index].open_file(tab_path.clone(), &self.settings);
-                }
-            }
-            if let Some(active_tab) = workspace.active_tabs.get(path) {
-                if let Some(tab) = self.projects[*index].tabs.iter().find(
-                    |tab| matches!(&tab.kind, TabKind::File(file) if &file.doc.path == active_tab),
-                ) {
-                    self.projects[*index].active_tab = Some(tab.id);
+            let project = &mut self.projects[*index];
+            // Attach saved linked worktrees before opening tabs: open_file
+            // assigns each path to its owning checkout.
+            if let Some(names) = workspace.open_worktrees.get(path) {
+                for name in names {
+                    if name != "main" {
+                        let _ = project.ensure_worktree(name);
+                    }
                 }
             }
             if let Some(name) = workspace.active_worktrees.get(path) {
-                if let Some(worktree_index) = self.projects[*index].worktree_index(name) {
-                    self.projects[*index].active_worktree = worktree_index;
+                let _ = project.ensure_worktree(name);
+            }
+            if let Some(tabs) = workspace.open_tabs.get(path) {
+                for tab_path in tabs {
+                    let _ = project.open_file(tab_path.clone(), &self.settings);
+                }
+            }
+            if let Some(active_tab) = workspace.active_tabs.get(path) {
+                let target = project
+                    .tabs
+                    .iter()
+                    .find(|tab| {
+                        matches!(&tab.kind, TabKind::File(file) if &file.doc.path == active_tab)
+                    })
+                    .map(|tab| (tab.id, tab.worktree.clone()));
+                if let Some((tab_id, worktree)) = target {
+                    if let Some(worktree_index) = project
+                        .worktrees
+                        .iter()
+                        .position(|candidate| candidate.path == worktree)
+                    {
+                        project.focus_worktree(worktree_index);
+                        project.activate_tab(tab_id);
+                    }
                 }
             }
             if let Some(draft) = workspace.commit_drafts.get(path) {
-                self.projects[*index].commit_message = draft.clone();
+                project.commit_message = draft.clone();
             }
         }
         let active_before_single = self.active_project;
@@ -2123,17 +2345,19 @@ impl AppModel {
                 self.active_project = active_before_single;
             } else {
                 if let Some(active) = &workspace.active_single_file {
-                    if let Some(tab) =
-                        self.projects[index]
-                            .tabs
-                            .iter()
-                            .find(|tab| match &tab.kind {
-                                TabKind::File(file) => &file.doc.path == active,
-                                TabKind::Image(img) => &img.path == active,
-                                _ => false,
-                            })
-                    {
-                        self.projects[index].active_tab = Some(tab.id);
+                    let active_id = self.projects[index]
+                        .tabs
+                        .iter()
+                        .find(|tab| match &tab.kind {
+                            TabKind::File(file) => &file.doc.path == active,
+                            TabKind::Image(img) => &img.path == active,
+                            _ => false,
+                        })
+                        .map(|tab| tab.id);
+                    if let Some(active_id) = active_id {
+                        let project = &mut self.projects[index];
+                        project.active_tab = Some(active_id);
+                        project.active_worktree_mut().active_editor_tab = Some(active_id);
                     }
                 }
                 if workspace.single_files_active {
@@ -2167,12 +2391,14 @@ impl AppModel {
         };
         let ignored = self.settings.ignored_patterns.clone();
         if let Some(project) = self.projects.get_mut(active) {
-            project.tree = lazecode_fs::tree::load_tree_with_expanded(
-                &project.root,
+            let root = project.active_root().to_path_buf();
+            let tree = lazecode_fs::tree::load_tree_with_expanded(
+                &root,
                 Some(&project.expanded),
                 20_000,
                 Some(&ignored),
             );
+            project.active_worktree_mut().tree = tree;
         }
     }
 
@@ -2344,10 +2570,21 @@ impl AppModel {
         if project.is_single_file {
             let index = self.ensure_single_files();
             let active = project.active_tab;
-            let tabs = std::mem::take(&mut project.tabs);
+            let target_root = self.projects[index].active_root().to_path_buf();
+            let mut tabs = std::mem::take(&mut project.tabs);
+            // A file opened via ProjectState::open(file) starts with the file's
+            // parent as a temporary worktree. The singleton ad-hoc workspace
+            // owns all such tabs, so re-home them before inserting.
+            for tab in &mut tabs {
+                tab.worktree = target_root.clone();
+            }
+            for tab in &mut self.projects[index].tabs {
+                tab.worktree = target_root.clone();
+            }
             self.projects[index].tabs.extend(tabs);
-            if active.is_some() {
-                self.projects[index].active_tab = active;
+            if let Some(active) = active {
+                self.projects[index].active_tab = Some(active);
+                self.projects[index].active_worktree_mut().active_editor_tab = Some(active);
             }
             return index;
         }
@@ -2752,6 +2989,7 @@ impl AppModel {
             open_tabs: BTreeMap::new(),
             active_tabs: BTreeMap::new(),
             active_worktrees: BTreeMap::new(),
+            open_worktrees: BTreeMap::new(),
             favorite_branches: self.favorite_branches.iter().cloned().collect(),
             commit_drafts: BTreeMap::new(),
         };
@@ -2790,6 +3028,15 @@ impl AppModel {
             }
             file.active_worktrees
                 .insert(project.root.clone(), project.active_worktree().name.clone());
+            file.open_worktrees.insert(
+                project.root.clone(),
+                project
+                    .worktrees
+                    .iter()
+                    .skip(1)
+                    .map(|worktree| worktree.name.clone())
+                    .collect(),
+            );
         }
         if let Err(err) = file.save() {
             log::warn!("cannot save workspace: {err}");

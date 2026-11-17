@@ -130,7 +130,7 @@ fn main() -> anyhow::Result<()> {
                     &to,
                     "crates/lazecode-ui/src/app_ui.rs",
                 ) {
-                    project.set_diff_for_source(&source, Ok(fd));
+                    project.set_diff_for_source(&project_root, &source, Ok(fd));
                 }
                 if let Some(diff_tab) =
                     project.tabs.iter_mut().find_map(|tab| match &mut tab.kind {
@@ -156,7 +156,7 @@ fn main() -> anyhow::Result<()> {
                 if let Ok(fd) =
                     lazecode_git::commit_file_diff(&project_root, "e338822", "images.py")
                 {
-                    project.set_diff_for_source(&source, Ok(fd));
+                    project.set_diff_for_source(&project_root, &source, Ok(fd));
                 }
             }
         }

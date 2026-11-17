@@ -857,6 +857,68 @@ fn draw_git_console(ui: &mut Ui, model: &AppModel, theme: &Theme, body: Rect) {
     });
 }
 
+/// Apply a plain or Cmd/Ctrl click to the Git-log selection.
+///
+/// Returns the commit whose details now need loading. A Cmd-click that
+/// removes a non-active row must not reload it, and removing the active row
+/// moves the active marker to the nearest remaining selection instead of
+/// leaving the removed row visually selected.
+fn apply_log_click(
+    visible: &[CommitInfo],
+    selected: &mut Vec<String>,
+    active: &mut Option<String>,
+    id: &str,
+    command_click: bool,
+) -> Option<String> {
+    let id = id.to_string();
+    if !command_click {
+        *selected = vec![id.clone()];
+        *active = Some(id.clone());
+        return Some(id);
+    }
+
+    if let Some(position) = selected.iter().position(|selected| selected == &id) {
+        // Keep one current commit, matching Compare's multi-select semantics.
+        if selected.len() <= 1 {
+            return None;
+        }
+        selected.remove(position);
+        let active_missing = active
+            .as_ref()
+            .is_none_or(|active| !selected.contains(active));
+        if active_missing {
+            let current = visible
+                .iter()
+                .position(|commit| commit.id == id)
+                .unwrap_or(usize::MAX);
+            let next = selected
+                .iter()
+                .filter_map(|selected| {
+                    visible
+                        .iter()
+                        .position(|commit| &commit.id == selected)
+                        .map(|row| (row, selected))
+                })
+                .min_by_key(|(row, _)| {
+                    if current == usize::MAX {
+                        0
+                    } else {
+                        row.abs_diff(current)
+                    }
+                })
+                .map(|(_, selected)| selected.clone())
+                .or_else(|| selected.last().cloned());
+            *active = next.clone();
+            return next;
+        }
+        return None;
+    }
+
+    selected.push(id.clone());
+    *active = Some(id.clone());
+    Some(id)
+}
+
 fn draw_git_log(
     ui: &mut Ui,
     model: &mut AppModel,
@@ -2150,16 +2212,17 @@ fn draw_git_log(
                     let cmd_ctrl = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
                     let shift = ui.input(|i| i.modifiers.shift);
                     if cmd_ctrl {
-                        if model.projects[index].selected_commits.contains(&commit.id) {
-                            model.projects[index]
-                                .selected_commits
-                                .retain(|c| c != &commit.id);
-                        } else {
-                            model.projects[index]
-                                .selected_commits
-                                .push(commit.id.clone());
+                        let project = &mut model.projects[index];
+                        let active = apply_log_click(
+                            &filtered,
+                            &mut project.selected_commits,
+                            &mut project.selected_commit,
+                            &commit.id,
+                            true,
+                        );
+                        if active.is_some() {
+                            select_commit = active;
                         }
-                        select_commit = Some(commit.id.clone());
                     } else if shift && !model.projects[index].selected_commits.is_empty() {
                         let anchor = model.projects[index].selected_commits[0].clone();
                         let pos_anchor = model.projects[index]
@@ -2181,8 +2244,14 @@ fn draw_git_log(
                             .collect();
                         select_commit = Some(commit.id.clone());
                     } else {
-                        model.projects[index].selected_commits = vec![commit.id.clone()];
-                        select_commit = Some(commit.id.clone());
+                        let project = &mut model.projects[index];
+                        select_commit = apply_log_click(
+                            &filtered,
+                            &mut project.selected_commits,
+                            &mut project.selected_commit,
+                            &commit.id,
+                            false,
+                        );
                     }
                 }
                 if response.double_clicked() {
@@ -3257,5 +3326,93 @@ pub(crate) fn time_ago(seconds: i64, zh: bool) -> String {
         format!("{}mo ago", delta / (86_400 * 30))
     } else {
         format!("{}y ago", delta / (86_400 * 365))
+    }
+}
+
+#[cfg(test)]
+mod log_click_tests {
+    use super::*;
+
+    fn commit(id: &str) -> CommitInfo {
+        CommitInfo {
+            id: id.to_string(),
+            short: id.to_string(),
+            message: id.to_string(),
+            body: String::new(),
+            author: "test".to_string(),
+            email: "test@example.com".to_string(),
+            time: 0,
+            parents: Vec::new(),
+            in_head: None,
+            refs: Vec::new(),
+            lane: 0,
+            lane_count: 0,
+            edges: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn removing_the_active_commit_moves_the_marker_to_the_nearest_selection() {
+        let visible = [commit("a"), commit("b"), commit("c"), commit("d")];
+        let mut selected = vec!["a".to_string(), "c".to_string(), "d".to_string()];
+        let mut active = Some("c".to_string());
+
+        let reload = apply_log_click(&visible, &mut selected, &mut active, "c", true);
+
+        assert_eq!(selected, ["a", "d"]);
+        assert_eq!(active.as_deref(), Some("d"));
+        assert_eq!(reload.as_deref(), Some("d"));
+    }
+
+    #[test]
+    fn removing_an_inactive_commit_keeps_the_active_details() {
+        let visible = [commit("c"), commit("b"), commit("a")];
+        let mut selected = vec!["c".to_string(), "b".to_string()];
+        let mut active = Some("c".to_string());
+
+        let reload = apply_log_click(&visible, &mut selected, &mut active, "b", true);
+
+        assert_eq!(selected, ["c"]);
+        assert_eq!(active.as_deref(), Some("c"));
+        assert_eq!(reload, None);
+    }
+
+    #[test]
+    fn removing_the_only_selection_is_a_noop() {
+        let visible = [commit("a")];
+        let mut selected = vec!["a".to_string()];
+        let mut active = Some("a".to_string());
+
+        let reload = apply_log_click(&visible, &mut selected, &mut active, "a", true);
+
+        assert_eq!(selected, ["a"]);
+        assert_eq!(active.as_deref(), Some("a"));
+        assert_eq!(reload, None);
+    }
+
+    #[test]
+    fn command_click_adds_and_activates_a_commit() {
+        let visible = [commit("c"), commit("b"), commit("a")];
+        let mut selected = vec!["c".to_string()];
+        let mut active = Some("c".to_string());
+
+        let reload = apply_log_click(&visible, &mut selected, &mut active, "a", true);
+
+        assert_eq!(selected, ["c", "a"]);
+        assert_eq!(active.as_deref(), Some("a"));
+        assert_eq!(reload.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn plain_click_replaces_the_whole_selection() {
+        let visible = [commit("c"), commit("b"), commit("a")];
+        let mut selected = vec!["c".to_string(), "a".to_string()];
+        let mut active = Some("a".to_string());
+
+        let reload = apply_log_click(&visible, &mut selected, &mut active, "b", false);
+
+        assert_eq!(selected, ["b"]);
+        assert_eq!(active.as_deref(), Some("b"));
+        assert_eq!(reload.as_deref(), Some("b"));
     }
 }

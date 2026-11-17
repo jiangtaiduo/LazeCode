@@ -33,6 +33,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Cmd/Ctrl-clicking an already selected Git Log commit now removes only that
+  row and moves the active details to the nearest remaining selection. The
+  deselected commit no longer stays highlighted or keeps the details panel.
 - The commit panel now lists the net HEAD ↔ worktree difference (JetBrains
   semantics) instead of raw `git status`: a path whose staged and unstaged
   changes cancel out — index diverged from HEAD while the disk file matches

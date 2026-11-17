@@ -17,6 +17,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The commit panel now lists the net HEAD ↔ worktree difference (JetBrains
+  semantics) instead of raw `git status`: a path whose staged and unstaged
+  changes cancel out — index diverged from HEAD while the disk file matches
+  HEAD — no longer appears in the list with an empty diff.
 - The main checkout no longer registers a second recursive watcher, tree scan
   and Git snapshot that were never read, and the file tree now applies the
   configured ignore list immediately on open.

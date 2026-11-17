@@ -228,16 +228,41 @@ pub(crate) fn collect_changes(
                 WorktreeStatus::Deleted => Some(ChangeKind::Deleted),
                 WorktreeStatus::Modified => Some(ChangeKind::Modified),
             };
-        if staged.is_some() || unstaged.is_some() {
+        if staged.is_none() && unstaged.is_none() {
+            continue;
+        }
+        // JetBrains parity: the panel lists the **net** HEAD ↔ worktree
+        // difference, not raw `git status`. When the index diverges from HEAD
+        // while the worktree still matches HEAD (e.g. stale content was staged
+        // and the disk file was later restored), the staged and unstaged
+        // halves cancel out; listing the path would open a diff that reports
+        // "no uncommitted changes".
+        let net_dirty = match (head_entry, unstaged) {
+            // Disk stat-matches the index, so disk content equals the index
+            // blob; the index differs from HEAD ⇒ net change.
+            (Some(_), None) => true,
+            // Added in the index only: nets to a change while it exists on
+            // disk, nothing once the disk file is gone too.
+            (None, _) => workdir.join(path).symlink_metadata().is_ok(),
+            // Diverges on both sides: compare the disk file against HEAD.
+            (Some(head), Some(_)) => {
+                net_differs_from_head(repo, workdir, path, head.oid, head.mode)?
+            }
+        };
+        if net_dirty {
             add(path.clone(), staged, unstaged, false);
         }
     }
 
-    for path in head_map.keys() {
+    for (path, head) in head_map.iter() {
         if conflicted.contains(path) {
             continue;
         }
-        if !index_map.contains_key(path) {
+        // Deleted in the index only: hidden while the disk file still matches
+        // HEAD (the deletion never reached the worktree).
+        if !index_map.contains_key(path)
+            && net_differs_from_head(repo, workdir, path, head.oid, head.mode)?
+        {
             add(path.clone(), Some(ChangeKind::Deleted), None, false);
         }
     }
@@ -266,7 +291,13 @@ pub(crate) fn collect_changes(
         // On Unix a backslash is a normal filename character; translating it
         // to a separator can turn a harmless filename into a path escape.
         let path = rel.to_string_lossy().into_owned();
-        if index_map.contains_key(&path) || conflicted.contains(&path) {
+        // Paths present in HEAD are owned by the staged-deletion scan above
+        // (with its net HEAD ↔ worktree check); walking them here too would
+        // resurrect index-only phantoms as untracked entries.
+        if index_map.contains_key(&path)
+            || conflicted.contains(&path)
+            || head_map.contains_key(&path)
+        {
             continue;
         }
         add(path, None, None, true);
@@ -396,6 +427,52 @@ fn stats_equal(a: &Stat, b: &Stat) -> bool {
         && a.mtime.nsecs == b.mtime.nsecs
         && a.size == b.size
         && a.mtime.secs != 0
+}
+
+/// Net HEAD ↔ worktree check for paths the index-based scan already flagged:
+/// does the disk file differ from the HEAD blob? Only the dirty set reaches
+/// this, so the extra blob reads stay bounded.
+fn net_differs_from_head(
+    repo: &gix::Repository,
+    workdir: &Path,
+    path: &str,
+    head_oid: ObjectId,
+    head_mode: u32,
+) -> Result<bool> {
+    let abs = workdir.join(path);
+    let Ok(meta) = std::fs::symlink_metadata(&abs) else {
+        // Present in HEAD, gone from the worktree.
+        return Ok(true);
+    };
+    if meta.is_dir() {
+        // A tracked file replaced by a directory is a type change.
+        return Ok(true);
+    }
+    if !meta.is_file() && !meta.file_type().is_symlink() {
+        // FIFOs and device nodes can block forever in std::fs::read.
+        return Ok(true);
+    }
+    let is_symlink = meta.file_type().is_symlink();
+    let head_is_symlink = head_mode & 0o170000 == 0o120000;
+    if is_symlink != head_is_symlink {
+        return Ok(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let worktree_executable = meta.permissions().mode() & 0o111 != 0;
+        let head_executable = head_mode & 0o111 != 0;
+        if worktree_executable != head_executable {
+            return Ok(true);
+        }
+    }
+    if is_symlink {
+        let current = std::fs::read_link(&abs)?.to_string_lossy().into_owned();
+        let recorded = String::from_utf8_lossy(&blob_bytes(repo, head_oid)?).into_owned();
+        return Ok(current != recorded);
+    }
+    let bytes = std::fs::read(&abs)?;
+    Ok(bytes != blob_bytes(repo, head_oid)?)
 }
 
 fn blob_bytes_capped(repo: &gix::Repository, oid: gix::hash::ObjectId) -> Option<Vec<u8>> {

@@ -90,8 +90,15 @@ fn cached_patch_updates_index_without_touching_worktree() {
         "one\ntwo\n"
     );
     let snap = lazecode_git::snapshot(dir.path()).unwrap();
-    assert_eq!(snap.changes.len(), 1);
-    assert!(snap.changes[0].staged.is_some());
+    // Index-only divergence (disk still matches HEAD) nets out to zero and is
+    // hidden from the panel, matching JetBrains semantics; the index itself
+    // still carries the patch for the index commit path.
+    assert!(
+        snap.changes.is_empty(),
+        "index-only patch must not list: {:?}",
+        snap.changes.iter().map(|c| c.path.clone()).collect::<Vec<_>>()
+    );
+    assert!(git(dir.path(), &["diff", "--cached", "a.txt"]).contains("TWO"));
     lazecode_git::commit(dir.path(), "cached", false).unwrap();
     assert_eq!(
         git(dir.path(), &["cat-file", "-p", "HEAD:a.txt"]),

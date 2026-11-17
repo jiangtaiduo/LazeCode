@@ -13,6 +13,7 @@ include:
 | [alacritty_terminal](https://github.com/alacritty/alacritty) | Apache-2.0 |
 | [portable-pty](https://github.com/wez/wezterm) | MIT |
 | [syntect](https://github.com/trishume/syntect), [ropey](https://github.com/cessen/ropey) | MIT |
+| [two-face](https://codeberg.org/CosmicHarper/two-face) | MIT OR Apache-2.0 |
 | [notify](https://github.com/notify-rs/notify) | CC0-1.0 |
 | [encoding_rs](https://github.com/hsivonen/encoding_rs) | (Apache-2.0 OR MIT) AND BSD-3-Clause |
 

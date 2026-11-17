@@ -333,6 +333,12 @@ pub struct WorkspaceFile {
     /// Attached linked worktree names per project root. Needed before restoring
     /// open tabs so a side-worktree file is filed under the right checkout.
     pub open_worktrees: std::collections::BTreeMap<PathBuf, Vec<String>>,
+    /// Pane layout per project root, keyed by worktree name. Compare sessions
+    /// are not persisted, so their saved view falls back to the Git drawer.
+    pub worktree_views: std::collections::BTreeMap<
+        PathBuf,
+        std::collections::BTreeMap<String, crate::model::WorktreeViewState>,
+    >,
     pub sidebar_view: Option<String>,
     pub sidebar_visible: Option<bool>,
     pub sidebar_width: Option<f32>,
@@ -523,5 +529,35 @@ mod agent_settings_tests {
         let legacy: Settings = toml::from_str("theme = \"dark\"\n").unwrap();
         assert_eq!(legacy.agents.options.len(), 4);
         assert_eq!(legacy.agents.options[2].name, "omp");
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+    use crate::model::{PanelTab, SidebarView, WorktreeViewState};
+
+    #[test]
+    fn workspace_round_trips_per_worktree_views() {
+        let view = WorktreeViewState {
+            terminal_visible: true,
+            panel_visible: false,
+            sidebar_view: SidebarView::Git,
+            panel_tab: PanelTab::Git,
+            ..Default::default()
+        };
+        let mut file = WorkspaceFile::default();
+        file.worktree_views
+            .entry(PathBuf::from("/tmp/project"))
+            .or_default()
+            .insert("feature".to_string(), view);
+
+        let text = toml::to_string_pretty(&file).unwrap();
+        let back: WorkspaceFile = toml::from_str(&text).unwrap();
+        let views = back
+            .worktree_views
+            .get(Path::new("/tmp/project"))
+            .expect("project view map");
+        assert_eq!(views.get("feature"), Some(&view));
     }
 }

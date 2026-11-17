@@ -53,16 +53,33 @@ pub struct SyntaxHighlighter {
 
 impl SyntaxHighlighter {
     pub fn new(path: &std::path::Path) -> Self {
+        Self::detect(path, None)
+    }
+
+    /// Detect syntax by extension, well-known file name, or a shebang/first
+    /// line. Used after reading a file whose name has no extension.
+    pub fn with_first_line(path: &std::path::Path, first_line: Option<&str>) -> Self {
+        Self::detect(path, first_line)
+    }
+
+    fn detect(path: &std::path::Path, first_line: Option<&str>) -> Self {
         let syntax_set = syntax_set();
-        let syntax = syntax_set
-            .find_syntax_for_file(path)
-            .ok()
-            .flatten()
+        let file_name = path.file_name().and_then(|name| name.to_str());
+        let supported = syntax_set.find_syntax_for_file(path).ok().flatten();
+        let syntax = supported
+            // `find_syntax_for_file` opens extensionless files, but a virtual
+            // buffer may not exist yet. Match the name explicitly first.
+            .or_else(|| file_name.and_then(|name| syntax_set.find_syntax_by_extension(name)))
             .or_else(|| {
                 path.extension()
                     .and_then(|ext| ext.to_str())
                     .and_then(|ext| syntax_set.find_syntax_by_extension(ext))
-            });
+            })
+            .or_else(|| {
+                let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+                syntax_set.find_syntax_by_name(syntax_alias(&ext)?)
+            })
+            .or_else(|| first_line.and_then(|line| syntax_set.find_syntax_by_first_line(line)));
         Self {
             syntax,
             cache: Vec::new(),
@@ -178,7 +195,9 @@ impl SyntaxHighlighter {
 
 fn syntax_set() -> &'static SyntaxSet {
     static SET: OnceLock<SyntaxSet> = OnceLock::new();
-    SET.get_or_init(SyntaxSet::load_defaults_newlines)
+    // `two-face` carries the syntax definitions used by bat, including modern
+    // JS/TS/JSX, Vue, Svelte, YAML, TOML, SQL and language-specific file names.
+    SET.get_or_init(two_face::syntax::extra_newlines)
 }
 
 fn theme() -> &'static Theme {
@@ -275,6 +294,21 @@ fn build_theme() -> Theme {
     };
     // Most specific first; syntect scores specificity, but keeping a stable
     // order also makes the mapping deterministic.
+    push(
+        "meta.mapping.key.json string.quoted.double.json",
+        C_PROPERTY,
+    );
+    push("meta.mapping.key", C_PROPERTY);
+    push(
+        "meta.structure.dictionary.json string.quoted.double.json",
+        C_PROPERTY,
+    );
+    push("support.type.property-name", C_PROPERTY);
+    push("markup.heading", C_KEYWORD);
+    push("markup.bold", C_KEYWORD);
+    push("markup.italic", C_VARIABLE);
+    push("markup.raw", C_STRING);
+    push("markup.quote", C_COMMENT);
     push("comment", C_COMMENT);
     push("string", C_STRING);
     push("constant.character", C_STRING);
@@ -338,6 +372,19 @@ fn kind_for_color(color: Color) -> TokenKind {
     }
 }
 
+/// Aliases for extensions that syntect's JavaScript/TypeScript grammars use
+/// under a different name.
+fn syntax_alias(ext: &str) -> Option<&'static str> {
+    match ext {
+        // The bat syntax set has no separate JSX grammar; TypeScriptReact is
+        // the closest JSX-capable grammar and highlights tags/attributes well.
+        "jsx" => Some("TypeScriptReact"),
+        "mjs" | "cjs" => Some("JavaScript"),
+        "jsonc" | "json5" => Some("JSON"),
+        _ => None,
+    }
+}
+
 /// Comment prefix/suffix for the common languages handled by the editor.
 /// The suffix is empty for line comments and `-->` for HTML-family blocks.
 pub fn comment_tokens(path: &std::path::Path) -> (&'static str, &'static str) {
@@ -384,6 +431,58 @@ mod tests {
         let spans = highlighter.spans(0);
         assert!(spans.iter().any(|s| s.kind == TokenKind::Keyword));
         assert!(spans.iter().any(|s| s.kind == TokenKind::String));
+    }
+
+    #[test]
+    fn detects_common_editor_languages() {
+        for file in [
+            "main.tsx",
+            "main.ts",
+            "main.jsx",
+            "main.js",
+            "data.json",
+            "config.yaml",
+            "Cargo.toml",
+            "query.sql",
+            "index.html",
+            "style.css",
+            "App.vue",
+            "App.svelte",
+            "Program.cs",
+            "Main.kt",
+            "main.swift",
+            "main.go",
+            "script.rb",
+            "index.php",
+            "Dockerfile",
+            "README.md",
+        ] {
+            let highlighter = SyntaxHighlighter::new(std::path::Path::new(file));
+            assert!(
+                highlighter.is_enabled(),
+                "expected syntax highlighting for {file}"
+            );
+        }
+    }
+
+    #[test]
+    fn highlights_json_keys_and_literals() {
+        let rope = Rope::from_str("{\"key\": 1, \"flag\": true}\n");
+        let mut highlighter = SyntaxHighlighter::new(std::path::Path::new("data.json"));
+        highlighter.ensure(&rope, 0, 0);
+        let spans = highlighter.spans(0);
+        assert!(spans.iter().any(|span| span.kind == TokenKind::Property));
+        assert!(spans.iter().any(|span| span.kind == TokenKind::Number));
+        assert!(spans.iter().any(|span| span.kind == TokenKind::Literal));
+    }
+
+    #[test]
+    fn detects_extensionless_script_from_shebang() {
+        let highlighter = SyntaxHighlighter::with_first_line(
+            std::path::Path::new("script"),
+            Some("#!/usr/bin/env bash"),
+        );
+        assert!(highlighter.is_enabled());
     }
 
     #[test]

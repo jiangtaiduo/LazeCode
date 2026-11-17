@@ -951,3 +951,19 @@ fn external_file_edit_is_visible_to_disk_stamp_and_reload() {
     assert_eq!(file.doc.text(), "after external edit\n");
     assert!(!file.disk_changed());
 }
+
+#[test]
+fn missing_repository_is_not_shown_as_a_git_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = Settings::default();
+    let mut project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
+    project.git_error = Some(
+        "not a Git repository: Could not find a git repository in \"/tmp/nowhere\"".to_string(),
+    );
+    project.refresh_git();
+    assert!(
+        project.git_error.is_none(),
+        "a plain folder must use the initialize empty state, not a red Git error"
+    );
+    assert!(project.git.is_none());
+}

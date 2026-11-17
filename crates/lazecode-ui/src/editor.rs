@@ -114,6 +114,54 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     }
 }
 
+/// Run the built-in JSON formatter on one file tab. This does not call an LSP;
+/// JSON stays usable when no language server is configured.
+pub(crate) fn format_json_tab(
+    model: &mut AppModel,
+    project_index: usize,
+    tab_id: u64,
+    compact: bool,
+) {
+    let zh = model.settings.language.is_zh();
+    let is_json = model
+        .projects
+        .get(project_index)
+        .and_then(|project| project.tab_by_id(tab_id))
+        .is_some_and(|tab| match &tab.kind {
+            TabKind::File(file) => lazecode_core::is_json_path(&file.doc.path),
+            _ => false,
+        });
+    if !is_json {
+        model.toast(
+            if zh {
+                "当前文件不是 JSON"
+            } else {
+                "The active file is not JSON"
+            },
+            lazecode_core::ToastKind::Warning,
+        );
+        return;
+    }
+    let result = model
+        .projects
+        .get_mut(project_index)
+        .and_then(|project| project.tab_mut_by_id(tab_id))
+        .and_then(|tab| match &mut tab.kind {
+            TabKind::File(file) => Some(file.doc.format_json(compact)),
+            _ => None,
+        });
+    if let Some(Err(err)) = result {
+        model.toast(
+            if zh {
+                format!("JSON 格式错误：{err}")
+            } else {
+                format!("Invalid JSON: {err}")
+            },
+            lazecode_core::ToastKind::Error,
+        );
+    }
+}
+
 /// 打开（或激活）分支比较页，标题按当前语言生成。
 pub fn open_compare_page(model: &mut AppModel, left: String, right: String) {
     let title = if model.settings.language.is_zh() {
@@ -204,7 +252,12 @@ fn draw_tabbar(
                         Pos2::new(x, canvas_rect.top()),
                         Vec2::new(width, canvas_rect.height()),
                     );
-                    if active == Some(id) {
+                    // Only reveal an active tab that is actually clipped.
+                    // Calling scroll_to_rect every frame keeps a scroll target
+                    // alive forever (especially when the last tab cannot be
+                    // centered), which used to repaint the whole window at the
+                    // compositor rate.
+                    if active == Some(id) && !ui.clip_rect().contains_rect(tab_rect) {
                         ui.scroll_to_rect(tab_rect, Some(egui::Align::Center));
                     }
                     let is_active = active == Some(id);
@@ -650,30 +703,68 @@ fn draw_markdown_view(
     ui: &mut Ui,
     rt: &mut UiRuntime,
     p: crate::theme::Palette,
-    _theme: &Theme,
+    theme: &Theme,
     rect: Rect,
     text: &str,
+    tab_id: u64,
 ) {
     ui.painter().rect_filled(rect, 0.0, p.editor);
     super::app_ui::region(ui, rect, "md-view", |ui| {
-        egui::ScrollArea::vertical()
-            .id_salt("md-preview-scroll")
+        let stored = rt.md_scroll.get(&tab_id).copied().unwrap_or(0.0);
+        let output = egui::ScrollArea::vertical()
+            .id_salt(("md-preview-scroll", tab_id))
             .auto_shrink([false, false])
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .vertical_scroll_offset(stored)
             .show(ui, |ui| {
-                let avail_w = ui.available_width();
+                // Reserve the custom scrollbar gutter so text never runs
+                // underneath the handle in narrow/split layouts.
+                let avail_w = (ui.available_width() - SCROLLBAR_W).max(160.0);
                 let doc_w = avail_w.min(960.0);
-                let side_pad = ((avail_w - doc_w) * 0.5).max(38.0);
+                let min_pad = if avail_w < 720.0 { 20.0 } else { 38.0 };
+                let side_pad = ((avail_w - doc_w) * 0.5).max(min_pad);
+                let content_w = (avail_w - side_pad * 2.0).max(160.0);
                 ui.horizontal(|ui| {
                     ui.add_space(side_pad);
                     ui.vertical(|ui| {
-                        ui.set_max_width(doc_w - 76.0);
+                        ui.set_max_width(content_w);
                         ui.add_space(26.0);
-                        egui_commonmark::CommonMarkViewer::new().show(ui, &mut rt.md_cache, text);
+                        ui.scope(|ui| {
+                            // Mature Markdown previews use a larger reading
+                            // scale than the surrounding 13px UI chrome.
+                            let styles = &mut ui.style_mut().text_styles;
+                            styles.insert(egui::TextStyle::Body, FontId::proportional(14.5));
+                            styles.insert(egui::TextStyle::Heading, FontId::proportional(27.0));
+                            styles.insert(egui::TextStyle::Monospace, FontId::monospace(13.0));
+                            ui.spacing_mut().item_spacing.y = 7.0;
+                            let source_id = ui.make_persistent_id(("md-preview", tab_id));
+                            egui_commonmark::CommonMarkViewer::new()
+                                .indentation_spaces(2)
+                                .max_image_width(Some(content_w as usize))
+                                .default_width(Some(content_w as usize))
+                                .enable_scroll_to_heading(true)
+                                .show_with_id(source_id, ui, &mut rt.md_cache, text);
+                        });
                         ui.add_space(72.0);
                     });
                     ui.add_space(side_pad);
                 });
             });
+        let current = output.state.clamped_offset().y;
+        rt.md_scroll.insert(tab_id, current);
+        let track = Rect::from_min_max(Pos2::new(rect.right() - SCROLLBAR_W, rect.top()), rect.max);
+        let mut offset = current;
+        if crate::widgets::scrollbar(
+            ui,
+            track,
+            output.content_size.y,
+            output.inner_rect.height(),
+            &mut offset,
+            theme,
+        ) {
+            rt.md_scroll.insert(tab_id, offset);
+            ui.ctx().request_repaint();
+        }
     });
 }
 
@@ -869,7 +960,7 @@ fn draw_file(
             return;
         };
         let text = file.doc.rope.to_string();
-        draw_markdown_view(ui, rt, p, theme, rect, &text);
+        draw_markdown_view(ui, rt, p, theme, rect, &text, tab_id);
         return;
     }
 
@@ -897,7 +988,7 @@ fn draw_file(
             return;
         };
         let text = file.doc.rope.to_string();
-        draw_markdown_view(ui, rt, p, theme, right_rect, &text);
+        draw_markdown_view(ui, rt, p, theme, right_rect, &text, tab_id);
         return;
     }
 

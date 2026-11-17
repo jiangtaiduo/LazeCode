@@ -21,6 +21,19 @@ fn command_shift() -> Modifiers {
 pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     let ctx = ui.ctx();
     let blocked = rt.blocks_input(model);
+    let active_json_tab = model.active_project.and_then(|index| {
+        let tab_id = model.projects[index].active_tab?;
+        if rt.editor_focus != Some(tab_id) {
+            return None;
+        }
+        let is_json = model.projects[index]
+            .tab_by_id(tab_id)
+            .is_some_and(|tab| match &tab.kind {
+                lazecode_core::TabKind::File(file) => lazecode_core::is_json_path(&file.doc.path),
+                _ => false,
+            });
+        is_json.then_some((index, tab_id))
+    });
     let mut open_palette = false;
     let mut toggle_sidebar = false;
     let mut toggle_panel = false;
@@ -42,6 +55,8 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     let mut unshelve_dialog = false;
     let mut undo = false;
     let mut redo = false;
+    let mut format_json = false;
+    let mut minify_json = false;
     ctx.input_mut(|input| {
         if input.consume_key(command_shift(), Key::A) {
             open_palette = true;
@@ -101,6 +116,17 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
             mac_cmd: true,
             ..Default::default()
         };
+        let alt_shift = Modifiers {
+            alt: true,
+            shift: true,
+            ..Default::default()
+        };
+        if !blocked && active_json_tab.is_some() && input.consume_key(alt_shift, Key::F) {
+            format_json = true;
+        }
+        if !blocked && active_json_tab.is_some() && input.consume_key(alt_shift, Key::M) {
+            minify_json = true;
+        }
         if !blocked && input.consume_key(cmd_alt, Key::U) {
             unshelve_silent = true;
         }
@@ -223,6 +249,12 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
                     }
                 }
             }
+        }
+    }
+    if format_json || minify_json {
+        if let Some((project_index, tab_id)) = active_json_tab {
+            crate::editor::format_json_tab(model, project_index, tab_id, minify_json);
+            ctx.request_repaint();
         }
     }
     if search {

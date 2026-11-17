@@ -96,112 +96,110 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
 
     let mut tool_x = x + 14.0;
     let tool_y = top + 20.0;
-    // An empty Single files checkout is only a console host: keep the empty
-    // home titlebar (disabled project/Git actions) exactly as it was.
-    if !single_active || single_empty {
+    // Project/Commit/Git Log stay visible in single-file workspaces; the
+    // buttons are disabled instead of disappearing so the titlebar does not
+    // shift when opening a file from the empty home screen.
+    let response = toolbar_button(
+        ui,
+        theme,
+        Pos2::new(tool_x, tool_y),
+        "title-project",
+        Icon::Files,
+        project_active,
+        has_project && !single_active,
+        None,
+        crate::tr!(model, "Project", "项目").to_string(),
+    );
+    titlebar_control_hovered |= response.hovered();
+    control_rects.push(response.rect);
+    if response.clicked() {
+        if project_active {
+            model.ui.sidebar_visible = false;
+        } else {
+            model.ui.sidebar_view = SidebarView::Files;
+            model.ui.sidebar_visible = true;
+        }
+    }
+    tool_x += 34.0;
+
+    let response = toolbar_button(
+        ui,
+        theme,
+        Pos2::new(tool_x, tool_y),
+        "title-commit",
+        Icon::Changes,
+        commit_active,
+        has_project && !single_active,
+        (changes > 0).then_some(p.rose),
+        crate::tr!(model, "Commit", "提交").to_string(),
+    );
+    titlebar_control_hovered |= response.hovered();
+    control_rects.push(response.rect);
+    if response.clicked() {
+        if commit_active {
+            model.ui.sidebar_visible = false;
+        } else {
+            model.ui.sidebar_view = SidebarView::Git;
+            model.ui.sidebar_visible = true;
+        }
+    }
+    tool_x += 34.0;
+
+    if has_compare {
         let response = toolbar_button(
             ui,
             theme,
             Pos2::new(tool_x, tool_y),
-            "title-project",
-            Icon::Files,
-            project_active,
-            has_project && !single_active,
+            "title-compare",
+            Icon::Compare,
+            compare_active,
+            true,
             None,
-            crate::tr!(model, "Project", "项目").to_string(),
+            crate::tr!(model, "Compare", "比较").to_string(),
         );
         titlebar_control_hovered |= response.hovered();
         control_rects.push(response.rect);
         if response.clicked() {
-            if project_active {
-                model.ui.sidebar_visible = false;
-            } else {
-                model.ui.sidebar_view = SidebarView::Files;
-                model.ui.sidebar_visible = true;
-            }
-        }
-        tool_x += 34.0;
-
-        let response = toolbar_button(
-            ui,
-            theme,
-            Pos2::new(tool_x, tool_y),
-            "title-commit",
-            Icon::Changes,
-            commit_active,
-            has_project && !single_active,
-            (changes > 0).then_some(p.rose),
-            crate::tr!(model, "Commit", "提交").to_string(),
-        );
-        titlebar_control_hovered |= response.hovered();
-        control_rects.push(response.rect);
-        if response.clicked() {
-            if commit_active {
-                model.ui.sidebar_visible = false;
-            } else {
+            if compare_active {
                 model.ui.sidebar_view = SidebarView::Git;
+            } else {
+                model.ui.sidebar_view = SidebarView::Compare;
                 model.ui.sidebar_visible = true;
-            }
-        }
-        tool_x += 34.0;
-
-        if has_compare {
-            let response = toolbar_button(
-                ui,
-                theme,
-                Pos2::new(tool_x, tool_y),
-                "title-compare",
-                Icon::Compare,
-                compare_active,
-                true,
-                None,
-                crate::tr!(model, "Compare", "比较").to_string(),
-            );
-            titlebar_control_hovered |= response.hovered();
-            control_rects.push(response.rect);
-            if response.clicked() {
-                if compare_active {
-                    model.ui.sidebar_view = SidebarView::Git;
-                } else {
-                    model.ui.sidebar_view = SidebarView::Compare;
-                    model.ui.sidebar_visible = true;
-                    if let Some(project) = model.active_project_mut() {
-                        if let Some(session) = project.compare_session.as_mut() {
-                            session.minimized = false;
-                        }
+                if let Some(project) = model.active_project_mut() {
+                    if let Some(session) = project.compare_session.as_mut() {
+                        session.minimized = false;
                     }
                 }
             }
-            tool_x += 34.0;
         }
-
-        let response = toolbar_button(
-            ui,
-            theme,
-            Pos2::new(tool_x, tool_y),
-            "title-gitlog",
-            Icon::GitLog,
-            log_active,
-            has_project && !single_active,
-            None,
-            crate::tr!(model, "Git Log · ⌘9", "Git 日志 · ⌘9").to_string(),
-        );
-        titlebar_control_hovered |= response.hovered();
-        control_rects.push(response.rect);
-        if response.clicked() {
-            if log_active {
-                model.ui.panel_visible = false;
-            } else {
-                model.ui.panel_visible = true;
-                model.ui.panel_tab = PanelTab::Git;
-                if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
-                    model.ui.terminal_visible = false;
-                }
-                model.queue(Command::RefreshLog);
-            }
-        }
+        tool_x += 34.0;
     }
 
+    let response = toolbar_button(
+        ui,
+        theme,
+        Pos2::new(tool_x, tool_y),
+        "title-gitlog",
+        Icon::GitLog,
+        log_active,
+        has_project && !single_active,
+        None,
+        crate::tr!(model, "Git Log · ⌘9", "Git 日志 · ⌘9").to_string(),
+    );
+    titlebar_control_hovered |= response.hovered();
+    control_rects.push(response.rect);
+    if response.clicked() {
+        if log_active {
+            model.ui.panel_visible = false;
+        } else {
+            model.ui.panel_visible = true;
+            model.ui.panel_tab = PanelTab::Git;
+            if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
+                model.ui.terminal_visible = false;
+            }
+            model.queue(Command::RefreshLog);
+        }
+    }
     tool_x += 34.0;
 
     let response = toolbar_button(

@@ -1041,37 +1041,53 @@ fn source_control(
         Pos2::new(rect.right(), dock.top()),
     );
 
-    if let Some(err) = &git_error {
-        text_clipped(
-            ui.painter(),
-            Rect::from_min_size(
-                Pos2::new(list.left() + 12.0, list.top() + 10.0),
-                Vec2::new(list.width() - 24.0, 20.0),
-            ),
-            err,
-            FontId::proportional(10.5),
-            p.rose,
-            Align2::LEFT_CENTER,
-        );
+    if can_git {
+        if let Some(err) = &git_error {
+            // A live repository can still fail to refresh (locked index, bad
+            // permissions). Keep it to one clipped line so it never spills
+            // into the editor pane.
+            text_clipped(
+                ui.painter(),
+                Rect::from_min_size(
+                    Pos2::new(list.left() + 12.0, list.top() + 10.0),
+                    Vec2::new((list.width() - 24.0).max(1.0), 20.0),
+                ),
+                err.lines().next().unwrap_or(err),
+                FontId::proportional(10.5),
+                p.rose,
+                Align2::LEFT_CENTER,
+            );
+        }
     }
 
     if !can_git {
         // 非 Git 项目：对齐稳定版 notRepoNotice，并提供初始化入口
         // （原 dock 内的初始化按钮放在空态之外，实际不可达）。
-        let center = Pos2::new(rect.center().x, rect.top() + 58.0);
-        ui.painter().text(
-            Pos2::new(center.x, center.y + 30.0),
-            Align2::CENTER_CENTER,
-            crate::tr!(
-                model,
-                "The current directory is not a Git repository, so changes cannot be committed",
-                "当前目录不是 Git 仓库，无法提交"
-            ),
+        // A missing repository is an expected state; the red refresh error is
+        // deliberately suppressed above so this is the only message shown.
+        let notice = crate::tr!(
+            model,
+            "This folder is not a Git repository. Initialize one to track changes.",
+            "当前目录不是 Git 仓库，初始化后即可跟踪更改。"
+        );
+        let galley = ui.painter().layout(
+            notice.to_string(),
             FontId::proportional(12.0),
             p.text3,
+            (list.width() - 28.0).max(120.0),
         );
-        let init =
-            Rect::from_center_size(Pos2::new(center.x, center.y + 62.0), Vec2::new(170.0, 26.0));
+        let text_h = galley.size().y;
+        let group_top = list.top() + ((list.height() - text_h - 44.0) * 0.5).max(18.0);
+        ui.painter().with_clip_rect(list).galley(
+            Pos2::new(list.center().x - galley.size().x * 0.5, group_top),
+            galley,
+            p.text3,
+        );
+        let init_w = 170.0_f32.min((list.width() - 32.0).max(140.0));
+        let init = Rect::from_center_size(
+            Pos2::new(list.center().x, group_top + text_h + 22.0 + 13.0),
+            Vec2::new(init_w, 26.0),
+        );
         if crate::widgets::secondary_button(
             ui,
             init,

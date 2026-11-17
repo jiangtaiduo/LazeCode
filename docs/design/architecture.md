@@ -178,7 +178,7 @@ flowchart TB
 | PTY | `portable-pty` | 已在用；进程组/退出清理成熟 |
 | 文本 | `fontdb` + `rustybuzz` + `swash` | 系统字体、shaping、光栅化、彩色 emoji |
 | 编辑器 buffer | `ropey` | 稳定 rope；大文件另走分页 |
-| 语法高亮 | `syntect` 5.3（`default-fancy`） | 纯 Rust fancy-regex；不用 onig；Web 语言只做语法高亮 |
+| 语法高亮 | `syntect` 5.3（`default-fancy`）+ `two-face` bat 语法集 | 纯 Rust fancy-regex；不用 onig；覆盖现代 Web 语言与常见配置格式 |
 | Diff | `similar` / `imara-diff` | 行 diff；可增量 |
 | 3-way merge | `diffy` 或自研 | merge 结果与冲突块 |
 | Git | `gix 0.90` + 自研 porcelain | 范围对齐 `commands.rs` 138 / 全后端 177 个 command；见第 7 节 |
@@ -212,6 +212,7 @@ flowchart TB
 - `syntect` 默认 feature 是 `default-onig`，会拉 C 的 onig。必须：
   ```toml
   syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+  two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
   ```
 - `egui_dock` 0.21.1 依赖 `egui ^0.36`，而 `egui` 最新是 0.37；直接引入不可行。处理顺序按 §8.2：先 spike"从 egui_dock fork dock 逻辑并解除 egui 版本耦合"，撞墙再自研 `DockTree`；spike 结论回写 §8.2/§13 后生效（§13 已设为非默认自研）。
 - `tree-sitter` 是 C；本方案不用。
@@ -221,7 +222,7 @@ flowchart TB
 - `alacritty_terminal` 的 `Cell` 是 24B、`Row<Cell>` 是 32B；20k@120 实测约 68MiB/pane，不是旧稿 16.6MB。当前 libghostty 线格式是 8B/cell（20k@120 的 cells 约 19.2MB decimal），不要拿旧数字做预算。默认热历史用 10k，20k 只作为可选。
 - `egui_wgpu::Callback` 的 `paint` 只拿到当前 render pass；但 `CallbackTrait::prepare`/`finish_prepare` 拿到 `&mut wgpu::CommandEncoder`，可以在 egui 主 pass 之前录制自己的离屏 pass。终端仍建议用自定义 renderer 做显式两段式排序/纹理生命周期，但理由不是“Callback 不能开 pass”。
 - 不要在 `winit` 的 `NSView` 上另实现一套 `NSTextInputClient`；先吃 `winit`/`egui` 的 IME 事件。`egui-winit 0.37` 已把 `ime.cursor_rect` 转发到 `Window::set_ime_cursor_area`，不默认 patch `winit`；只有复现具体 macOS bug 才 patch/overlay。
-- `syntect` 要验证 TS/JS/TSX/JSX/JSON/JSONC/CSS/SCSS/Less/HTML 的语法定义；缺的 vendor `.sublime-syntax`，仍然纯 Rust，不引入 tree-sitter。
+- `two-face` 提供 bat 的扩展语法集；TS/JS/TSX/JSX/JSON/JSONC/CSS/SCSS/Less/HTML 等由本地语法定义高亮，仍然纯 Rust，不引入 tree-sitter 或 LSP。
 
 ---
 

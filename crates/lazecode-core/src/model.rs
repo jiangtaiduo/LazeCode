@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -26,7 +26,7 @@ const AGENT_COLD_BYTES: usize = 16 * 1024 * 1024;
 /// Stable `MAX_PANES_PER_TAB`: a tab splits into at most four panes.
 pub const MAX_PANES_PER_TAB: usize = 4;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SidebarView {
     Files,
     Git,
@@ -35,7 +35,7 @@ pub enum SidebarView {
     Compare,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PanelTab {
     Console,
     Git,
@@ -48,7 +48,7 @@ pub enum TerminalPlacement {
     Right,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum GitSubtab {
     #[default]
     Log,
@@ -68,6 +68,75 @@ pub struct Toast {
     pub message: String,
     pub kind: ToastKind,
     pub expires: Instant,
+}
+
+/// The part of the workspace layout that belongs to one checkout. The editor
+/// tabs and terminal tabs already live on [`WorktreeState`]; this snapshot
+/// covers the surrounding panes, so switching projects/worktrees restores the
+/// surface the user was looking at instead of carrying the previous layout
+/// across checkouts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct WorktreeViewState {
+    pub sidebar_visible: bool,
+    pub sidebar_view: SidebarView,
+    pub panel_visible: bool,
+    pub panel_maximised: bool,
+    pub panel_tab: PanelTab,
+    pub git_subtab: GitSubtab,
+    pub terminal_visible: bool,
+    pub terminal_maximised: bool,
+}
+
+impl Default for WorktreeViewState {
+    fn default() -> Self {
+        Self {
+            sidebar_visible: true,
+            sidebar_view: SidebarView::Files,
+            panel_visible: true,
+            panel_maximised: false,
+            panel_tab: PanelTab::Console,
+            git_subtab: GitSubtab::Log,
+            terminal_visible: false,
+            terminal_maximised: false,
+        }
+    }
+}
+
+impl WorktreeViewState {
+    fn capture(ui: &UiState) -> Self {
+        Self {
+            sidebar_visible: ui.sidebar_visible,
+            sidebar_view: ui.sidebar_view,
+            panel_visible: ui.panel_visible,
+            panel_maximised: ui.panel_maximised,
+            panel_tab: ui.panel_tab,
+            git_subtab: ui.git_subtab,
+            terminal_visible: ui.terminal_visible,
+            terminal_maximised: ui.terminal_maximised,
+        }
+    }
+
+    /// Compare sessions are deliberately not persisted across restarts, so a
+    /// persisted layout falls back to the regular Git drawer.
+    fn persisted(self) -> Self {
+        let mut view = self;
+        if view.sidebar_view == SidebarView::Compare {
+            view.sidebar_view = SidebarView::Git;
+        }
+        view
+    }
+
+    fn apply(self, ui: &mut UiState) {
+        ui.sidebar_visible = self.sidebar_visible;
+        ui.sidebar_view = self.sidebar_view;
+        ui.panel_visible = self.panel_visible;
+        ui.panel_maximised = self.panel_maximised;
+        ui.panel_tab = self.panel_tab;
+        ui.git_subtab = self.git_subtab;
+        ui.terminal_visible = self.terminal_visible;
+        ui.terminal_maximised = self.terminal_maximised;
+    }
 }
 
 pub struct UiState {
@@ -134,6 +203,11 @@ pub struct UiState {
     /// Branch comparison session (data plus both UI sides), kept across
     /// dialog openings so the last comparison survives.
     pub compare_branches: CompareBranchesState,
+    /// Saved layout per checkout path. The active checkout is mirrored into
+    /// this map whenever the workspace is saved so a restart can restore it.
+    pub worktree_views: HashMap<PathBuf, WorktreeViewState>,
+    /// Checkout whose layout is currently mirrored into the fields above.
+    pub view_target: Option<PathBuf>,
 }
 
 /// 详情列文件缓存：一次「选中提交 / 多选范围 / 整侧」的文件清单。
@@ -251,6 +325,8 @@ impl Default for UiState {
             tree_reveal: None,
             locate_flash: None,
             compare_branches: CompareBranchesState::default(),
+            worktree_views: HashMap::new(),
+            view_target: None,
         }
     }
 }
@@ -378,6 +454,14 @@ pub enum TabKind {
 pub struct ImageTab {
     pub path: PathBuf,
     pub external: bool,
+}
+
+/// Whether the path is a plain JSON document. JSONC is deliberately excluded
+/// because its comments cannot be round-tripped by the formatter.
+pub fn is_json_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
 }
 
 pub fn is_image_path(path: &std::path::Path) -> bool {
@@ -651,7 +735,7 @@ impl WorktreeState {
             Ok(snapshot) => (Some(snapshot), None),
             Err(err) => {
                 let message = err.to_string();
-                if message.contains("not a Git repository") {
+                if is_not_a_git_repository(&message) {
                     (None, None)
                 } else {
                     (None, Some(message))
@@ -969,7 +1053,7 @@ impl ProjectState {
             Ok(snapshot) => (Some(snapshot), None),
             Err(err) => {
                 let message = err.to_string();
-                if message.contains("not a Git repository") {
+                if is_not_a_git_repository(&message) {
                     (None, None)
                 } else {
                     (None, Some(message))
@@ -1192,7 +1276,15 @@ impl ProjectState {
                 self.git = Some(snapshot);
                 self.git_error = None;
             }
-            Err(err) => self.git_error = Some(err.to_string()),
+            Err(err) => {
+                let message = err.to_string();
+                if is_not_a_git_repository(&message) {
+                    self.git = None;
+                    self.git_error = None;
+                } else {
+                    self.git_error = Some(message);
+                }
+            }
         }
         self.prune_unchecked();
         self.git_loading = false;
@@ -1216,7 +1308,15 @@ impl ProjectState {
                 worktree.git = Some(snapshot);
                 worktree.git_error = None;
             }
-            Err(err) => worktree.git_error = Some(err.to_string()),
+            Err(err) => {
+                let message = err.to_string();
+                if is_not_a_git_repository(&message) {
+                    worktree.git = None;
+                    worktree.git_error = None;
+                } else {
+                    worktree.git_error = Some(message);
+                }
+            }
         }
         worktree.git_loading = false;
     }
@@ -1249,10 +1349,19 @@ impl ProjectState {
                 worktree.git_error = None;
             }
             Err(err) => {
-                if is_main || active {
-                    self.git_error = Some(err.clone());
+                if is_not_a_git_repository(&err) {
+                    if is_main || active {
+                        self.git = None;
+                        self.git_error = None;
+                    }
+                    worktree.git = None;
+                    worktree.git_error = None;
+                } else {
+                    if is_main || active {
+                        self.git_error = Some(err.clone());
+                    }
+                    worktree.git_error = Some(err);
                 }
-                worktree.git_error = Some(err);
             }
         }
         if active {
@@ -2365,6 +2474,24 @@ impl AppModel {
             if let Some(draft) = workspace.commit_drafts.get(path) {
                 project.commit_message = draft.clone();
             }
+            let saved_views: Vec<(PathBuf, WorktreeViewState)> = workspace
+                .worktree_views
+                .get(path)
+                .map(|views| {
+                    project
+                        .worktrees
+                        .iter()
+                        .filter_map(|worktree| {
+                            views
+                                .get(&worktree.name)
+                                .map(|view| (worktree.path.clone(), *view))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (worktree_path, view) in saved_views {
+                self.ui.worktree_views.insert(worktree_path, view);
+            }
         }
         let active_before_single = self.active_project;
         if !workspace.single_files.is_empty() {
@@ -2780,6 +2907,41 @@ impl AppModel {
         };
     }
 
+    /// Mirror the active checkout's saved pane layout into [`UiState`].
+    ///
+    /// Call once at the start of every frame so an activation caused by any
+    /// command, palette action or restore path gets the same save/restore
+    /// behaviour; the swap is deliberately deferred to the frame boundary so
+    /// the layout rectangles are computed from the restored state.
+    pub fn sync_worktree_view(&mut self) {
+        let target = self
+            .active_project()
+            .map(|project| project.active_worktree().path.clone());
+        if target == self.ui.view_target {
+            return;
+        }
+        let first_checkout = self.ui.view_target.is_none();
+        let current = WorktreeViewState::capture(&self.ui);
+        if let Some(previous) = self.ui.view_target.take() {
+            self.ui.worktree_views.insert(previous, current);
+        }
+        let Some(path) = target else {
+            return;
+        };
+        if let Some(saved) = self.ui.worktree_views.get(&path).copied() {
+            saved.apply(&mut self.ui);
+        } else if first_checkout {
+            // Preserve the layout restored from the workspace file for the
+            // first visible checkout instead of replacing it with defaults.
+            self.ui.worktree_views.insert(path.clone(), current);
+        } else {
+            let view = WorktreeViewState::default();
+            self.ui.worktree_views.insert(path.clone(), view);
+            view.apply(&mut self.ui);
+        }
+        self.ui.view_target = Some(path);
+    }
+
     pub fn switch_project(&mut self, index: usize) {
         if index < self.projects.len() {
             self.active_project = Some(index);
@@ -2938,6 +3100,15 @@ impl AppModel {
     }
 
     pub fn save_workspace(&mut self) {
+        let active_view = self.active_project().map(|project| {
+            (
+                project.active_worktree().path.clone(),
+                WorktreeViewState::capture(&self.ui),
+            )
+        });
+        if let Some((path, view)) = active_view {
+            self.ui.worktree_views.insert(path, view);
+        }
         let single_index = self.single_files_index();
         let single_files: Vec<PathBuf> = single_index
             .and_then(|index| self.projects.get(index))
@@ -3007,6 +3178,7 @@ impl AppModel {
             active_tabs: BTreeMap::new(),
             active_worktrees: BTreeMap::new(),
             open_worktrees: BTreeMap::new(),
+            worktree_views: BTreeMap::new(),
             favorite_branches: self.favorite_branches.iter().cloned().collect(),
             commit_drafts: BTreeMap::new(),
         };
@@ -3054,6 +3226,12 @@ impl AppModel {
                     .map(|worktree| worktree.name.clone())
                     .collect(),
             );
+            let views = file.worktree_views.entry(project.root.clone()).or_default();
+            for worktree in &project.worktrees {
+                if let Some(view) = self.ui.worktree_views.get(&worktree.path) {
+                    views.insert(worktree.name.clone(), view.persisted());
+                }
+            }
         }
         if let Err(err) = file.save() {
             log::warn!("cannot save workspace: {err}");
@@ -3086,15 +3264,73 @@ impl AppModel {
     }
 }
 
+/// A missing repository is an expected state of an ordinary folder, not a
+/// red Git failure. Keep the snapshot/error projection empty so the drawer can
+/// show one actionable "initialize" empty state.
+fn is_not_a_git_repository(message: &str) -> bool {
+    message.contains("not a Git repository")
+}
+
 fn initials_of(name: &str) -> String {
-    let letters: String = name.chars().filter(|ch| ch.is_alphanumeric()).collect();
+    let letters: Vec<char> = name.chars().filter(|ch| ch.is_alphanumeric()).collect();
     if letters.is_empty() {
-        "LC".to_string()
-    } else if letters.chars().count() == 1 {
-        letters.to_uppercase()
-    } else {
-        letters.chars().take(2).collect::<String>().to_uppercase()
+        return "LC".to_string();
     }
+
+    let segments: Vec<&str> = name
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let mut initials = Vec::with_capacity(2);
+    if segments.len() > 1 {
+        for segment in segments {
+            if let Some(ch) = segment.chars().next() {
+                initials.push(ch);
+                if initials.len() == 2 {
+                    break;
+                }
+            }
+        }
+    } else {
+        let has_lower = letters.iter().any(|ch| ch.is_lowercase());
+        let has_upper = letters.iter().any(|ch| ch.is_uppercase());
+        if has_lower && has_upper {
+            // camelCase / PascalCase: word-initial capitals, plus a lowercase
+            // first letter (it marks the first word just as a capital does).
+            if letters[0].is_lowercase() {
+                initials.push(letters[0]);
+            }
+            for ch in &letters {
+                if ch.is_uppercase() {
+                    initials.push(*ch);
+                    if initials.len() == 2 {
+                        break;
+                    }
+                }
+            }
+        } else {
+            initials.extend(letters.iter().take(2).copied());
+        }
+    }
+
+    // Short words (e.g. "Foo") may yield only one capital; fill to two so the
+    // rail badge stays visually stable whenever the name has enough letters.
+    for ch in &letters {
+        if initials.len() == 2 {
+            break;
+        }
+        if !initials
+            .iter()
+            .any(|chosen| chosen.to_uppercase().eq(ch.to_uppercase()))
+        {
+            initials.push(*ch);
+        }
+    }
+    initials
+        .into_iter()
+        .take(2)
+        .collect::<String>()
+        .to_uppercase()
 }
 
 /// Project identity colors. Keep red and green out of this palette: those
@@ -3166,4 +3402,85 @@ pub fn is_snapshot_ignored(git: &lazecode_git::RepoSnapshot, rel_path: &std::pat
         }
     }
     false
+}
+
+#[cfg(test)]
+mod initials_tests {
+    use super::initials_of;
+
+    #[test]
+    fn project_initials_follow_camel_and_separator_rules() {
+        // camelCase / PascalCase: capital letters, including a lowercase start.
+        assert_eq!(initials_of("LazeCode"), "LC");
+        assert_eq!(initials_of("lazeCode"), "LC");
+        assert_eq!(initials_of("myAwesomeProject"), "MA");
+        // Separated words: first letter of each segment.
+        assert_eq!(initials_of("my project"), "MP");
+        assert_eq!(initials_of("my-project"), "MP");
+        assert_eq!(initials_of("my_project"), "MP");
+        // Uniform case: first two letters.
+        assert_eq!(initials_of("lazecode"), "LA");
+        assert_eq!(initials_of("LAZECODE"), "LA");
+        // At most two characters, even with many segments.
+        assert_eq!(initials_of("one-two-three-four"), "OT");
+        assert_eq!(initials_of("a"), "A");
+        assert_eq!(initials_of("---"), "LC");
+    }
+}
+
+#[cfg(test)]
+mod workspace_restore_tests {
+    use super::*;
+    use crate::settings::Settings;
+
+    fn blank_model(settings: Settings) -> AppModel {
+        AppModel {
+            settings: settings.clone(),
+            projects: Vec::new(),
+            active_project: None,
+            ui: UiState::default(),
+            toasts: Vec::new(),
+            recent: Vec::new(),
+            recent_files: Vec::new(),
+            commands: Vec::new(),
+            notifier: None,
+            lsp: LspManager::new(false, None),
+            should_quit: false,
+            version: "test",
+            favorite_branches: HashSet::new(),
+            git_cmd_log: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn workspace_restore_applies_saved_worktree_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let view = WorktreeViewState {
+            terminal_visible: true,
+            panel_visible: false,
+            sidebar_view: SidebarView::Git,
+            panel_tab: PanelTab::Git,
+            ..Default::default()
+        };
+        let mut workspace = WorkspaceFile {
+            projects: vec![root.clone()],
+            active_project: Some(root.clone()),
+            ..Default::default()
+        };
+        workspace
+            .worktree_views
+            .entry(root)
+            .or_default()
+            .insert("main".to_string(), view);
+
+        let mut model = blank_model(Settings::default());
+        model.restore_workspace(workspace);
+        model.sync_worktree_view();
+
+        assert!(model.ui.terminal_visible);
+        assert!(!model.ui.panel_visible);
+        assert_eq!(model.ui.sidebar_view, SidebarView::Git);
+        assert_eq!(model.ui.panel_tab, PanelTab::Git);
+    }
 }

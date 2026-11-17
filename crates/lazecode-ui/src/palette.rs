@@ -397,6 +397,28 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
         PaletteAction::FormatDocument,
     );
     action(
+        Icon::Save,
+        crate::tr!(model, "Format JSON", "格式化 JSON"),
+        crate::tr!(
+            model,
+            "Reformat JSON with the built-in formatter (no LSP)",
+            "使用内置格式化器重新排版 JSON（不依赖 LSP）"
+        ),
+        Some("⌥⇧F"),
+        PaletteAction::FormatJson,
+    );
+    action(
+        Icon::Save,
+        crate::tr!(model, "Minify JSON", "压缩 JSON"),
+        crate::tr!(
+            model,
+            "Compress JSON to a single line",
+            "将 JSON 压缩为单行"
+        ),
+        Some("⌥⇧M"),
+        PaletteAction::MinifyJson,
+    );
+    action(
         Icon::Search,
         crate::tr!(model, "Go to symbol…", "转到符号…"),
         crate::tr!(
@@ -806,6 +828,16 @@ fn execute(action: PaletteAction, model: &mut AppModel, rt: &mut UiRuntime) {
             {
                 rt.lsp.format_request = Some(tab_id);
             }
+        }
+        action @ (PaletteAction::FormatJson | PaletteAction::MinifyJson) => {
+            let Some(project_index) = model.active_project else {
+                return;
+            };
+            let Some(tab_id) = model.projects[project_index].active_tab else {
+                return;
+            };
+            let compact = matches!(&action, PaletteAction::MinifyJson);
+            crate::editor::format_json_tab(model, project_index, tab_id, compact);
         }
         PaletteAction::GoToSymbol => {
             if let Some(tab_id) = model

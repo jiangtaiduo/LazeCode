@@ -15,7 +15,7 @@ pub use lsp::{
     LspRange, ServerKey, WorkspaceEdit,
 };
 pub use model::{
-    is_snapshot_ignored, AppModel, CompareBranchesSideView, CompareBranchesState,
+    is_json_path, is_snapshot_ignored, AppModel, CompareBranchesSideView, CompareBranchesState,
     CompareDateFilter, CompareDetail, CompareSession, DatePreset, DiffSource, DiffTab,
     DiffViewMode, FileTab, GitSubtab, ImageTab, LogQuery, MarkdownViewMode, PaneSplit, PanelTab,
     ProjectState, SidebarView, Tab, TabKind, TerminalPane, TerminalPlacement, TerminalTab, Toast,

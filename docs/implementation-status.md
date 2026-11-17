@@ -20,12 +20,17 @@
 - Project rail (one tile per open project, console-activity rings, fixed
   open-project action), titlebar tool group and active-project switcher,
   resizable explorer/source-control/consoles sidebar, editor stage,
-  resizable bottom panel, status bar, toasts.
+  resizable bottom panel, status bar, toasts. Project initials follow word,
+  camel-case and uniform-case rules (`LazeCode` → `LC`, `my_project` → `MP`,
+  `lazecode` → `LA`).
+- Each project/worktree keeps its own active editor/diff tab, console dock,
+  sidebar selection, and bottom-panel state; switching projects or worktrees
+  restores that checkout's layout.
 - Command palette (`⌘K`), find-in-files overlay, settings overlay, project and
   branch popovers, create/delete-branch dialogs, dirty-tab and quit guards.
 - English/Chinese chrome for the primary surfaces; language is persisted.
-- Workspace persistence (open projects, open file tabs, active tabs, sidebar
-  and panel geometry) in
+- Workspace persistence (open projects, open file tabs, active tabs,
+  per-worktree pane layout, sidebar and panel geometry) in
   `~/Library/Application Support/LazeCode/workspace.toml`; settings in
   `settings.toml` next to it.
 
@@ -46,10 +51,13 @@
 - `ropey` buffer with cursor/selection, undo/redo grouping, auto-indent,
   indent/outdent, comment toggle, word/line/document motions, page motion.
 - Incremental `syntect` highlighting with per-line parse-state cache
-  (`default-fancy`, no onig); language detection by path/extension.
+  (`default-fancy`, no onig) and the bat syntax collection from `two-face`;
+  language detection by path/extension/first line, including JSX aliases.
 - Tabs, dirty dots, breadcrumbs, line numbers, current-line highlight,
   minimap, horizontal/vertical scrolling, selection and clipboard.
 - Find/replace within the document, regex/whole-word/case options.
+- Built-in JSON format/minify with key-order preservation; Markdown Preview/Split
+  with responsive typography, heading navigation and source-consistent scrollbars.
 - IME preedit/commit overlay; Cmd+Z/Shift+Z, Cmd+A, Cmd+C/X, Cmd+V, Cmd+S,
   Cmd+F, page/word/line movement.
 - Git diff tab (`HEAD → worktree`) with hunk/line rendering and binary guard.
@@ -208,8 +216,9 @@ Write path:
   restores a file subset into a chosen or new changelist (entry kept).
 - Commit dock: message history (10 entries, settings.toml) with a
   refill/clear popover and a Commit & Push button that opens the push
-  dialog after success. Non-Git projects get a not-a-repository notice with
-  an Initialize Git Repository entry.
+  dialog after success. Non-Git projects get a wrapped, clipped
+  not-a-repository notice with an Initialize Git Repository entry; expected
+  missing-repository refreshes are not rendered as red errors.
 - Context menus match the stable drawer item-for-item (tracked + untracked
   branches, greyed placeholders, separators): functional Compare Before
   with Local / Create Patch from Local Changes (save dialog) / History Up

@@ -6,7 +6,9 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-use lazecode_core::{AppModel, ProjectState, Settings, UiState, WorktreeState};
+use lazecode_core::{
+    AppModel, PanelTab, ProjectState, Settings, SidebarView, UiState, WorktreeState,
+};
 use lazecode_terminal::Notifier;
 use std::collections::HashSet;
 
@@ -211,4 +213,93 @@ fn external_commit_refreshes_source_changes() {
             .map(|change| change.path.clone())
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn pane_layout_is_isolated_per_project_and_worktree() {
+    let dir_a = repo();
+    let dir_b = repo();
+    let root_a = dir_a.path().canonicalize().unwrap();
+    let root_b = dir_b.path().canonicalize().unwrap();
+    let linked_parent = tempfile::tempdir().unwrap();
+    let linked = linked_parent.path().join("feature-wt");
+    lazecode_git::add_worktree_detached_at_head(&root_a, &linked).unwrap();
+    let linked = linked.canonicalize().unwrap();
+
+    let settings = Settings::default();
+    let project_a = ProjectState::open(root_a.clone(), &settings, None).unwrap();
+    let (mut model, index_a) = model(project_a);
+    let project_b = ProjectState::open(root_b, &settings, None).unwrap();
+    let index_b = model.add_loaded_project(project_b);
+    model.sync_worktree_view();
+
+    // Project B / main: console open, Commit drawer visible.
+    model.ui.terminal_visible = true;
+    model.ui.sidebar_visible = true;
+    model.ui.sidebar_view = SidebarView::Git;
+    model.ui.panel_visible = false;
+    model.ui.panel_tab = PanelTab::Git;
+    model.ui.git_subtab = lazecode_core::GitSubtab::Console;
+
+    // First visit to project A / main gets the default layout, not B's.
+    model.switch_project(index_a);
+    model.sync_worktree_view();
+    assert!(!model.ui.terminal_visible);
+    assert!(model.ui.panel_visible);
+    assert_eq!(model.ui.sidebar_view, SidebarView::Files);
+
+    // Project A / main: consoles drawer, editor visible.
+    model.ui.sidebar_view = SidebarView::Consoles;
+    model.ui.terminal_visible = false;
+    model.ui.panel_visible = true;
+    let worktree = WorktreeState::load(
+        "feature-wt".to_string(),
+        linked.clone(),
+        false,
+        &settings.ignored_patterns,
+    );
+    model.projects[index_a].attach_worktree(worktree);
+    model.sync_worktree_view();
+
+    // The new worktree starts from defaults, not from A/main.
+    assert!(!model.ui.terminal_visible);
+    assert_eq!(model.ui.sidebar_view, SidebarView::Files);
+    assert!(model.ui.panel_visible);
+
+    // Project A / feature-wt: console open, no drawer.
+    model.ui.terminal_visible = true;
+    model.ui.sidebar_visible = false;
+    model.ui.panel_visible = false;
+
+    model.switch_project(index_b);
+    model.sync_worktree_view();
+    assert!(model.ui.terminal_visible, "B/main console must return");
+    assert_eq!(model.ui.sidebar_view, SidebarView::Git);
+    assert_eq!(model.ui.panel_tab, PanelTab::Git);
+    assert!(!model.ui.panel_visible);
+
+    model.switch_project(index_a);
+    model.sync_worktree_view();
+    assert!(
+        model.ui.terminal_visible,
+        "A/feature-wt console must return"
+    );
+    assert!(!model.ui.sidebar_visible);
+    assert_eq!(model.ui.sidebar_view, SidebarView::Files);
+    assert!(!model.ui.panel_visible);
+
+    model.projects[index_a]
+        .ensure_worktree("main", &settings.ignored_patterns)
+        .unwrap();
+    model.sync_worktree_view();
+    assert_eq!(
+        model.ui.sidebar_view,
+        SidebarView::Consoles,
+        "A/main drawer selection must return"
+    );
+    assert!(!model.ui.terminal_visible);
+    assert!(model.ui.panel_visible);
+
+    let _ = std::fs::remove_dir_all(&linked);
+    let _ = std::fs::remove_dir_all(&root_a);
 }

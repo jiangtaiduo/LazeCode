@@ -176,6 +176,7 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     rt.frame_count = rt.frame_count.wrapping_add(1);
     egui_extras::install_image_loaders(ui.ctx());
+    model.sync_worktree_view();
     model.sync_lsp();
     crate::lsp_ui::poll(ui.ctx(), model, rt);
     let theme = Theme::for_mode(model.settings.theme);

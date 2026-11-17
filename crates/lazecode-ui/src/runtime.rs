@@ -624,6 +624,8 @@ pub struct UiRuntime {
     pub applied_theme: Option<lazecode_core::ThemeMode>,
     pub last_frame: Instant,
     pub md_cache: egui_commonmark::CommonMarkCache,
+    /// Per-tab rendered-Markdown scroll offset, in points.
+    pub md_scroll: HashMap<u64, f32>,
     /// Bounded decoded-image cache for image tabs (not `egui_extras`' global
     /// loader cache, which never evicts).
     pub image_cache: crate::image_cache::ImageCache,
@@ -734,6 +736,7 @@ impl Default for UiRuntime {
             last_frame: Instant::now(),
             cursor_epoch: 0.0,
             md_cache: egui_commonmark::CommonMarkCache::default(),
+            md_scroll: HashMap::new(),
             image_cache: crate::image_cache::ImageCache::default(),
             media_project_roots: Vec::new(),
             media_markdown_paths: HashSet::new(),
@@ -1431,6 +1434,8 @@ pub enum PaletteAction {
     CompareBranches,
     GoToLine,
     FormatDocument,
+    FormatJson,
+    MinifyJson,
     GoToSymbol,
     RenameSymbol,
     GoToDefinition,

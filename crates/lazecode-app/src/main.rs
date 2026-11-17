@@ -1098,6 +1098,10 @@ impl LazeApp {
         if self.last_vcs_poll.elapsed() < std::time::Duration::from_secs(2) {
             return false;
         }
+        // Advance the schedule even when there is nothing to poll; otherwise
+        // the next idle deadline stays in the past and turns WaitUntil into a
+        // 1 ms wake loop.
+        self.last_vcs_poll = std::time::Instant::now();
         let Some(project) = self.model.active_project() else {
             return false;
         };
@@ -1105,7 +1109,6 @@ impl LazeApp {
             return false;
         }
         let root = project.active_root().to_path_buf();
-        self.last_vcs_poll = std::time::Instant::now();
         let slow_due = self.last_full_vcs_poll.elapsed() >= std::time::Duration::from_secs(30);
         let fingerprint = git_fingerprint(&root);
         match fingerprint {
@@ -1459,7 +1462,15 @@ impl ApplicationHandler<AppEvent> for LazeApp {
         }
         let gfx = self.gfx.as_mut().expect("gfx checked above");
         let window = Arc::clone(&gfx.window);
-        let response = gfx.egui_state.on_window_event(&gfx.window, &event);
+        // egui-winit reports `repaint: true` for RedrawRequested. Feeding that
+        // response back into request_redraw makes every rendered frame queue
+        // another frame forever (a 60 fps busy loop even on the welcome
+        // screen). The redraw branch below already owns frame pacing.
+        let response = if matches!(&event, WindowEvent::RedrawRequested) {
+            egui_winit::EventResponse::default()
+        } else {
+            gfx.egui_state.on_window_event(&gfx.window, &event)
+        };
         if response.repaint {
             if self.pacer.due(Instant::now()) {
                 gfx.window.request_redraw();
@@ -1618,9 +1629,6 @@ impl ApplicationHandler<AppEvent> for LazeApp {
             // wait loop: just poll its state at a low cadence until visible.
             deadline = deadline.max(now + std::time::Duration::from_millis(100));
         }
-        if deadline <= now {
-            deadline = now + std::time::Duration::from_millis(1);
-        }
         deadline = deadline.min(self.last_watch_poll + std::time::Duration::from_millis(600));
         deadline = deadline.min(self.last_vcs_poll + std::time::Duration::from_secs(2));
         deadline = deadline.min(self.last_busy_poll + std::time::Duration::from_secs(2));
@@ -1631,8 +1639,13 @@ impl ApplicationHandler<AppEvent> for LazeApp {
         if self.model.settings.editor.auto_save {
             deadline = deadline.min(self.last_autosave + std::time::Duration::from_secs(2));
         }
+        // The min() calls above can pull the deadline back into the past when
+        // a poll is intentionally idle (no project, no busy targets). Clamp
+        // last so `WaitUntil` never turns into a zero-delay wake loop.
+        if deadline <= now {
+            deadline = now + std::time::Duration::from_millis(1);
+        }
         event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
-
         if frame_pending && self.pacer.due(now) {
             self.wants_frame = false;
             if let Some(gfx) = &self.gfx {

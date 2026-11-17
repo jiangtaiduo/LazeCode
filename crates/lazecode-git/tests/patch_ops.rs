@@ -96,7 +96,10 @@ fn cached_patch_updates_index_without_touching_worktree() {
     assert!(
         snap.changes.is_empty(),
         "index-only patch must not list: {:?}",
-        snap.changes.iter().map(|c| c.path.clone()).collect::<Vec<_>>()
+        snap.changes
+            .iter()
+            .map(|c| c.path.clone())
+            .collect::<Vec<_>>()
     );
     assert!(git(dir.path(), &["diff", "--cached", "a.txt"]).contains("TWO"));
     lazecode_git::commit(dir.path(), "cached", false).unwrap();

@@ -3419,7 +3419,7 @@ fn draw_editor_context_menu(
     path_str: &str,
 ) {
     let zh = model.settings.language.is_zh();
-    let items = [
+    let mut items = vec![
         (if zh { "剪切" } else { "Cut" }, 0),
         (if zh { "复制" } else { "Copy" }, 1),
         (if zh { "粘贴" } else { "Paste" }, 2),
@@ -3450,6 +3450,10 @@ fn draw_editor_context_menu(
             7,
         ),
     ];
+    if lazecode_core::is_json_path(std::path::Path::new(path_str)) {
+        items.push((if zh { "格式化 JSON" } else { "Format JSON" }, 8));
+        items.push((if zh { "压缩 JSON" } else { "Minify JSON" }, 9));
+    }
     let height = items.len() as f32 * MENU_ROW_H + 8.0;
     let rect = popover_rect(screen, menu.anchor, 200.0, height);
     menu_frame(ui, rect, theme);
@@ -3563,6 +3567,11 @@ fn draw_editor_context_menu(
                             file.annotate = !file.annotate;
                         }
                     }
+                }
+            }
+            8 | 9 => {
+                if let Some(id) = active_tab_id {
+                    crate::editor::format_json_tab(model, project_idx, id, code == 9);
                 }
             }
             _ => {}

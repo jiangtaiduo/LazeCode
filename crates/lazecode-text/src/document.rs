@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ropey::Rope;
+use serde::Serialize as _;
 
 use crate::syntax::{comment_tokens, SyntaxHighlighter};
 
@@ -119,6 +120,7 @@ impl Document {
         let file = lazecode_fs::file::read_text_file(path)?;
         let mut doc = Self::empty(path.to_path_buf(), tab_width, use_spaces);
         doc.rope = Rope::from_str(&file.text);
+        doc.highlighter = SyntaxHighlighter::with_first_line(&doc.path, file.text.lines().next());
         doc.encoding = file.encoding;
         doc.eol = file.eol;
         doc.had_bom = file.had_bom;
@@ -815,6 +817,45 @@ impl Document {
         Ok(())
     }
 
+    /// Rewrite a JSON document with stable key order. `compact` produces a
+    /// single minified line; otherwise the document uses the editor's indent
+    /// settings. Invalid JSON is rejected without touching the buffer.
+    pub fn format_json(&mut self, compact: bool) -> Result<bool, String> {
+        if self.read_only {
+            return Err("document is read-only".to_string());
+        }
+        let source = self.text();
+        let value: serde_json::Value =
+            serde_json::from_str(&source).map_err(|err| err.to_string())?;
+        let mut formatted = if compact {
+            serde_json::to_string(&value).map_err(|err| err.to_string())?
+        } else {
+            let indent = if self.use_spaces {
+                " ".repeat(self.tab_width.max(1))
+            } else {
+                "\t".to_string()
+            };
+            let formatter = serde_json::ser::PrettyFormatter::with_indent(indent.as_bytes());
+            let mut bytes = Vec::new();
+            let mut serializer = serde_json::Serializer::with_formatter(&mut bytes, formatter);
+            value
+                .serialize(&mut serializer)
+                .map_err(|err| err.to_string())?;
+            String::from_utf8(bytes).map_err(|err| err.to_string())?
+        };
+        if !compact && source.ends_with('\n') {
+            formatted.push('\n');
+        }
+        if formatted == source {
+            return Ok(false);
+        }
+        let cursor = self.char_index(self.cursor).min(formatted.chars().count());
+        self.apply_edit(0, self.rope.len_chars(), &formatted, MergeKind::None);
+        self.cursor = self.cursor_at(cursor);
+        self.selection = None;
+        Ok(true)
+    }
+
     pub fn save(&mut self) -> anyhow::Result<()> {
         if self.read_only {
             anyhow::bail!("document is read-only");
@@ -939,6 +980,32 @@ mod tests {
         let mut doc = Document::empty(PathBuf::from("test.rs"), 4, true);
         doc.rope = Rope::from_str(text);
         doc
+    }
+
+    #[test]
+    fn json_format_and_compact_preserve_order_and_undo() {
+        let mut doc = doc("{\"b\":1,\"a\":[true,null]}\n");
+        assert!(doc.format_json(false).unwrap());
+        assert_eq!(
+            doc.text(),
+            "{\n    \"b\": 1,\n    \"a\": [\n        true,\n        null\n    ]\n}\n"
+        );
+        assert!(doc.dirty);
+        assert!(doc.undo());
+        assert_eq!(doc.text(), "{\"b\":1,\"a\":[true,null]}\n");
+
+        assert!(doc.format_json(true).unwrap());
+        assert_eq!(doc.text(), "{\"b\":1,\"a\":[true,null]}");
+        assert!(doc.dirty);
+    }
+
+    #[test]
+    fn invalid_json_is_rejected_without_mutating() {
+        let mut doc = doc("{\"a\":}\n");
+        let err = doc.format_json(false).unwrap_err();
+        assert!(!err.is_empty());
+        assert_eq!(doc.text(), "{\"a\":}\n");
+        assert!(!doc.dirty);
     }
 
     #[test]

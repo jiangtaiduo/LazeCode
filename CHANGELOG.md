@@ -14,6 +14,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   single-file workspace) or one or more folders (opened as projects, or
   focused when already open). Dropping files and folders together is rejected
   without opening anything.
+- Syntax highlighting now uses the bat syntax collection (via `two-face`), so
+  modern TypeScript/JSX, Vue, Svelte, TOML, YAML, SQL, Dockerfiles and other
+  common formats are highlighted without any language server.
+- JSON files can be reformatted with the built-in formatter or minified to one
+  line. Key order is preserved, indentation follows the editor settings, and
+  invalid JSON is rejected without changing the buffer.
+- Markdown preview uses a larger reading scale, centered responsive width,
+  constrained images, heading navigation, and a per-tab scroll position. Its
+  scrollbar now uses the same geometry and palette as the source editor,
+  including split view.
+- Each project/worktree remembers its own editor/console/diff surface, drawer
+  selection, and bottom-panel layout. Switching projects or worktrees restores
+  that checkout's previous view, and the state is saved in `workspace.toml`;
+  new checkouts start from the default layout.
+- Project-rail initials follow word and camel-case boundaries: `LazeCode` →
+  `LC`, `my_project` → `MP`, `lazecode`/`LAZECODE` → `LA`.
 
 ### Fixed
 
@@ -31,6 +47,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Linked worktrees now have a cheap `.git` fingerprint that follows the
   `gitdir:` pointer and shared refs instead of falling back to the 30-second
   full Git refresh.
+- A non-Git folder no longer shows a duplicate red "not a Git repository"
+  refresh error above the initialize prompt, and long empty-state/error text is
+  wrapped or clipped inside the commit drawer.
+- Idle CPU no longer spikes above the stable build: the event loop clamps its
+  wait deadline after all poll deadlines, advances the VCS poll schedule even
+  without a project, ignores the self-referential RedrawRequested repaint, and
+  only scrolls the active tab when it is clipped. This removes the 50k/s wait
+  loop and the 60 fps tab-strip repaint loop.
+- In the single-file workspace the Project, Commit and Git Log titlebar buttons
+  stay visible but are disabled instead of collapsing the toolbar, and the
+  unused Compare slot no longer leaves a gap before the terminal button.
 
 ## [0.4.9] - 2026-11-16
 

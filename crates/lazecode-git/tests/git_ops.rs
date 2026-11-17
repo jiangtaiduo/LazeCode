@@ -596,7 +596,10 @@ fn index_only_divergence_matching_disk_is_hidden() {
     assert!(
         snap.changes.is_empty(),
         "phantom staged entry listed: {:?}",
-        snap.changes.iter().map(|c| c.path.clone()).collect::<Vec<_>>()
+        snap.changes
+            .iter()
+            .map(|c| c.path.clone())
+            .collect::<Vec<_>>()
     );
     let diff = lazecode_git::file_diff(dir.path(), "a.txt").unwrap();
     assert_eq!(diff.diff.additions, 0);
@@ -608,7 +611,10 @@ fn index_only_divergence_matching_disk_is_hidden() {
     assert!(
         snap.changes.is_empty(),
         "phantom staged deletion listed: {:?}",
-        snap.changes.iter().map(|c| c.path.clone()).collect::<Vec<_>>()
+        snap.changes
+            .iter()
+            .map(|c| c.path.clone())
+            .collect::<Vec<_>>()
     );
 
     // Real net changes still list, staged or not.

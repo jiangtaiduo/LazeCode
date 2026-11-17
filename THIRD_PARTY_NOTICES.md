@@ -16,6 +16,7 @@ transitive inventory; every dependency ships its own license metadata.
 | `bytemuck` | Zlib OR Apache-2.0 OR MIT |
 | `pollster` | Apache-2.0/MIT |
 | `rfd`, `ropey`, `syntect`, `portable-pty` | MIT |
+| `two-face` | MIT OR Apache-2.0 |
 | `alacritty_terminal`, `similar` | Apache-2.0 |
 | `vte` | Apache-2.0 OR MIT |
 | `muda` | Apache-2.0 OR MIT |

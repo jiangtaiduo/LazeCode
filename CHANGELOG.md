@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-11-17
+
 ### Added
 
 - Native drag-and-drop accepts one or more files (opened together in the

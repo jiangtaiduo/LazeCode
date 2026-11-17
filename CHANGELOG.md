@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Native drag-and-drop accepts one or more files (opened together in the
+  single-file workspace) or one or more folders (opened as projects, or
+  focused when already open). Dropping files and folders together is rejected
+  without opening anything.
+
 ### Fixed
 
 - The main checkout no longer registers a second recursive watcher, tree scan

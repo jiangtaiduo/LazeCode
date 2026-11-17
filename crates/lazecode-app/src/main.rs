@@ -485,11 +485,52 @@ impl FramePacer {
     }
 }
 
+const DROP_BATCH_DELAY: Duration = Duration::from_millis(50);
+
+/// What a batch of dropped paths should do. Files and folders are intentionally
+/// never mixed: a folder means "open project", a file means "single-file mode".
+#[derive(Debug, PartialEq, Eq)]
+enum DroppedPaths {
+    Files(Vec<std::path::PathBuf>),
+    Projects(Vec<std::path::PathBuf>),
+    Mixed,
+    Empty,
+}
+
+fn classify_dropped_paths(paths: Vec<std::path::PathBuf>) -> DroppedPaths {
+    let mut files = Vec::new();
+    let mut projects = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for path in paths {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        if path.is_dir() {
+            projects.push(path);
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
+    if !files.is_empty() && !projects.is_empty() {
+        DroppedPaths::Mixed
+    } else if !projects.is_empty() {
+        DroppedPaths::Projects(projects)
+    } else if !files.is_empty() {
+        DroppedPaths::Files(files)
+    } else {
+        DroppedPaths::Empty
+    }
+}
+
 struct LazeApp {
     model: AppModel,
     runtime: UiRuntime,
     gfx: Option<Gfx>,
     jobs: JobQueue,
+    /// Native drop events arrive one path at a time; collect them briefly so
+    /// mixed file/folder batches can be rejected before anything opens.
+    pending_drops: Vec<std::path::PathBuf>,
+    drop_deadline: Option<Instant>,
     last_watch_poll: std::time::Instant,
     last_vcs_poll: std::time::Instant,
     last_full_vcs_poll: std::time::Instant,
@@ -524,6 +565,8 @@ impl LazeApp {
             runtime,
             gfx: None,
             jobs,
+            pending_drops: Vec::new(),
+            drop_deadline: None,
             last_watch_poll: std::time::Instant::now(),
             // The first VCS poll runs on the first idle turn; native file
             // watchers are best effort and can miss .git ref/index rewrites.
@@ -1230,6 +1273,62 @@ impl LazeApp {
         });
     }
 
+    fn finish_drop_batch(&mut self, now: Instant) -> bool {
+        if self.pending_drops.is_empty() {
+            self.drop_deadline = None;
+            return false;
+        }
+        if self.drop_deadline.is_some_and(|deadline| now < deadline) {
+            return false;
+        }
+        self.drop_deadline = None;
+        let paths = std::mem::take(&mut self.pending_drops);
+        self.open_dropped_paths(paths);
+        true
+    }
+
+    fn open_dropped_paths(&mut self, paths: Vec<std::path::PathBuf>) {
+        let zh = self.model.settings.language.is_zh();
+        match classify_dropped_paths(paths) {
+            DroppedPaths::Mixed => {
+                self.model.toast(
+                    if zh {
+                        "不能同时拖入文件和目录，请分次打开"
+                    } else {
+                        "Drop files and folders separately"
+                    },
+                    lazecode_core::ToastKind::Warning,
+                );
+            }
+            DroppedPaths::Projects(projects) => {
+                let mut opened = false;
+                for project in projects {
+                    match self.model.open_project(project) {
+                        Ok(_) => opened = true,
+                        Err(err) => self.model.toast(err, lazecode_core::ToastKind::Error),
+                    }
+                }
+                if opened {
+                    self.runtime.clear_terminal_cache();
+                }
+            }
+            DroppedPaths::Files(files) => match self.model.open_files(files) {
+                Ok(_) => self.runtime.clear_terminal_cache(),
+                Err(err) => self.model.toast(err, lazecode_core::ToastKind::Error),
+            },
+            DroppedPaths::Empty => {
+                self.model.toast(
+                    if zh {
+                        "只能打开文件或目录"
+                    } else {
+                        "Only files and folders can be opened"
+                    },
+                    lazecode_core::ToastKind::Warning,
+                );
+            }
+        }
+    }
+
     fn request_quit(&mut self, _event_loop: &ActiveEventLoop) {
         // The probe runs off-thread; `poll_quit_probe` resolves it, and exit
         // happens where `model.should_quit` is consumed.
@@ -1440,16 +1539,9 @@ impl ApplicationHandler<AppEvent> for LazeApp {
                 }
             }
             WindowEvent::DroppedFile(path) => {
-                if path.is_dir() {
-                    let _ = self.model.open_project(path);
-                } else if path.is_file() {
-                    if let Some(active) = self.model.active_project {
-                        let _ = self.model.open_file_in(active, path);
-                    } else {
-                        let _ = self.model.open_files(vec![path]);
-                    }
-                }
-                gfx.window.request_redraw();
+                self.pending_drops.push(path);
+                self.drop_deadline
+                    .get_or_insert_with(|| Instant::now() + DROP_BATCH_DELAY);
             }
             WindowEvent::RedrawRequested => {
                 self.poll_jobs();
@@ -1495,6 +1587,7 @@ impl ApplicationHandler<AppEvent> for LazeApp {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "macos")]
         self.poll_menu(event_loop);
+        let had_drops = self.finish_drop_batch(Instant::now());
         let had_jobs = self.poll_jobs();
         let had_watcher_changes = self.poll_watchers();
         let had_vcs_poll = self.poll_vcs();
@@ -1509,6 +1602,7 @@ impl ApplicationHandler<AppEvent> for LazeApp {
 
         let now = std::time::Instant::now();
         let frame_pending = self.wants_frame
+            || had_drops
             || had_jobs
             || had_watcher_changes
             || had_vcs_poll
@@ -1530,6 +1624,9 @@ impl ApplicationHandler<AppEvent> for LazeApp {
         deadline = deadline.min(self.last_watch_poll + std::time::Duration::from_millis(600));
         deadline = deadline.min(self.last_vcs_poll + std::time::Duration::from_secs(2));
         deadline = deadline.min(self.last_busy_poll + std::time::Duration::from_secs(2));
+        if let Some(at) = self.drop_deadline {
+            deadline = deadline.min(at);
+        }
         deadline = deadline.min(self.last_workspace_save + std::time::Duration::from_secs(30));
         if self.model.settings.editor.auto_save {
             deadline = deadline.min(self.last_autosave + std::time::Duration::from_secs(2));
@@ -1936,6 +2033,104 @@ mod tests {
             "shared refs must invalidate the linked checkout"
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dropped_paths_open_files_and_projects_by_batch_type() {
+        struct NoopNotifier;
+        impl Notifier for NoopNotifier {
+            fn notify(&self) {}
+        }
+
+        let root = std::env::temp_dir().join(format!("lazecode-drop-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("one")).unwrap();
+        std::fs::create_dir_all(root.join("two")).unwrap();
+        let file_a = root.join("a.txt");
+        std::fs::write(&file_a, "a\n").unwrap();
+        let file_b = root.join("b.txt");
+        std::fs::write(&file_b, "b\n").unwrap();
+        let project_one = root.join("one").canonicalize().unwrap();
+        let project_two = root.join("two").canonicalize().unwrap();
+
+        let model = AppModel {
+            settings: Settings::default(),
+            projects: Vec::new(),
+            active_project: None,
+            ui: Default::default(),
+            toasts: Vec::new(),
+            recent: Vec::new(),
+            recent_files: Vec::new(),
+            commands: Vec::new(),
+            notifier: None,
+            lsp: lazecode_core::LspManager::new(false, None),
+            should_quit: false,
+            version: "test",
+            favorite_branches: std::collections::HashSet::new(),
+            git_cmd_log: Vec::new(),
+        };
+        let mut app = LazeApp::new(model, JobQueue::new(Arc::new(NoopNotifier)));
+
+        app.open_dropped_paths(vec![file_a.clone(), file_b.clone()]);
+        let files = app.model.active_project().unwrap();
+        assert!(files.is_single_file);
+        assert_eq!(files.tabs.len(), 2);
+
+        app.open_dropped_paths(vec![project_one.clone()]);
+        assert!(!app.model.active_project().unwrap().is_single_file);
+        assert_eq!(app.model.active_project().unwrap().root, project_one);
+
+        app.open_dropped_paths(vec![project_two.clone()]);
+        assert_eq!(app.model.active_project().unwrap().root, project_two);
+        let project_count = app.model.projects.len();
+
+        // Dropping an already-open project focuses it instead of duplicating.
+        app.open_dropped_paths(vec![project_one.clone()]);
+        assert_eq!(app.model.active_project().unwrap().root, project_one);
+        assert_eq!(app.model.projects.len(), project_count);
+
+        // Mixed batches are rejected before anything opens or switches.
+        app.open_dropped_paths(vec![file_a, project_two]);
+        assert_eq!(app.model.active_project().unwrap().root, project_one);
+        assert_eq!(app.model.projects.len(), project_count);
+
+        drop(app);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dropped_paths_classify_files_projects_and_mixed_batches() {
+        let root =
+            std::env::temp_dir().join(format!("lazecode-drop-classify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("project")).unwrap();
+        let file = root.join("a.txt");
+        std::fs::write(&file, "a\n").unwrap();
+        let file_two = root.join("b.txt");
+        std::fs::write(&file_two, "b\n").unwrap();
+        let project = root.join("project");
+
+        assert_eq!(
+            classify_dropped_paths(vec![file.clone(), file.clone()]),
+            DroppedPaths::Files(vec![file.clone()])
+        );
+        assert_eq!(
+            classify_dropped_paths(vec![project.clone(), project.clone()]),
+            DroppedPaths::Projects(vec![project.clone()])
+        );
+        assert_eq!(
+            classify_dropped_paths(vec![file.clone(), project.clone()]),
+            DroppedPaths::Mixed
+        );
+        assert_eq!(
+            classify_dropped_paths(vec![root.join("missing")]),
+            DroppedPaths::Empty
+        );
+        assert_eq!(
+            classify_dropped_paths(vec![file_two.clone(), project.clone()]),
+            DroppedPaths::Mixed
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

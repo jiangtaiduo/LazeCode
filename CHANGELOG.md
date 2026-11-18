@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.11] - 2026-11-18
+
 ### Added
 
 - In the Git log branch tree, the copy shortcut (Cmd+C / Ctrl+C) copies the

@@ -43,6 +43,14 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     let tabbar = Rect::from_min_size(rect.min, Vec2::new(rect.width(), TABBAR_H));
     draw_tabbar(ui, model, rt, theme, tabbar, index);
 
+    // Closing the last tab can end the checkout mid-frame:
+    // settle_single_files_workspace drops an emptied Single files workspace or
+    // switches to another project, so the index captured above may now point
+    // past the vec. Re-resolve the target instead of using the stale index.
+    let Some(index) = model.active_project else {
+        draw_welcome(ui, model, rt, theme, rect, None);
+        return;
+    };
     let active = model.projects[index].active_tab;
     let Some(active) = active else {
         draw_welcome(ui, model, rt, theme, rect, Some(index));

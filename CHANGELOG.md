@@ -8,6 +8,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Closing the last editor tab of a Single files workspace no longer crashes
+  the app. The tab-close click happens mid-frame while an emptied ad-hoc
+  checkout is dropped or another project takes over; the editor body now
+  re-resolves the active project instead of using the stale index, falling
+  back to another open project or the home screen.
+- One physical Ctrl+C in a console no longer quits kitty-protocol programs
+  (omp agents, modern TUIs). Under the kitty keyboard protocol's disambiguate
+  flag the terminal must not report key releases; encoding them without an
+  event-type marker made a release byte-identical to a press, so programs
+  saw two Ctrl+C presses per keystroke and treated the second as quit.
+  Releases are now only reported when the program explicitly requested event
+  types, and ctrl/alt combos only switch to `CSI u` under disambiguate.
+
 ## [0.4.10] - 2026-11-17
 
 ### Added

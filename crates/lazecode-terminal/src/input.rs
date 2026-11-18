@@ -118,13 +118,41 @@ fn uses_kitty(stroke: KeyStroke, flags: KittyKeyboard) -> bool {
     if !flags.is_active() {
         return false;
     }
-    if flags.contains(KittyKeyboard::REPORT_ALL_KEYS_AS_ESC) {
+    let event_reported = flags.contains(KittyKeyboard::REPORT_EVENT_TYPES);
+    // Releases must only be reported when the program asked for them
+    // (`0b10`). Encoding a release as `CSI u` without an event-type marker
+    // (that flag is exactly what adds the `:event` sub-field) makes it
+    // byte-identical to a press, so one physical Ctrl+C arrives as two
+    // presses and REPL-style agents treat the second one as quit.
+    if stroke.event == KeyEvent::Release && !event_reported {
+        return false;
+    }
+    let all_keys = flags.contains(KittyKeyboard::REPORT_ALL_KEYS_AS_ESC);
+    // Enter/Tab/Backspace keep their legacy bytes (and get no release
+    // events) unless every key is reported, so `reset` stays typeable when a
+    // program dies without restoring the mode.
+    if stroke.event == KeyEvent::Release
+        && !all_keys
+        && matches!(
+            stroke.key,
+            TerminalKey::Enter
+                | TerminalKey::Tab
+                | TerminalKey::BackTab
+                | TerminalKey::Backspace
+        )
+    {
+        return false;
+    }
+    if all_keys {
         return true;
     }
-    if stroke.event != KeyEvent::Press && flags.contains(KittyKeyboard::REPORT_EVENT_TYPES) {
+    if stroke.event == KeyEvent::Release {
         return true;
     }
-    if stroke.ctrl || stroke.alt {
+    // Presses and repeats encode like the press would: repeats are treated
+    // as presses without the event-types flag, and `CSI u` for ctrl/alt
+    // combos is a disambiguate (`0b1`) feature.
+    if flags.contains(KittyKeyboard::DISAMBIGUATE_ESC_CODES) && (stroke.ctrl || stroke.alt) {
         return true;
     }
     // Shift makes the legacy encoding of the control keys ambiguous
@@ -416,6 +444,102 @@ mod tests {
         assert_eq!(bytes, vec![3]);
     }
 
+    fn with_event(stroke: KeyStroke, event: KeyEvent) -> KeyStroke {
+        KeyStroke {
+            event,
+            ..stroke
+        }
+    }
+
+    /// omp-style negotiation: the program pushes disambiguate + alternate keys
+    /// (`CSI > 5 u`) but not event types. The press becomes `CSI u`, and the
+    /// release must NOT be encoded at all — a bare `CSI u` release is
+    /// indistinguishable from a press and made agents see two Ctrl+C presses
+    /// per keystroke (the second one quits them).
+    #[test]
+    fn ctrl_c_release_is_dropped_under_disambiguate_only() {
+        let modes = kitty(KittyKeyboard::DISAMBIGUATE_ESC_CODES);
+        let press = encoded(
+            stroke(TerminalKey::Char('c'), true, false, false),
+            &modes,
+        );
+        assert_eq!(press, "\x1b[99;5u");
+        let release = with_event(
+            stroke(TerminalKey::Char('c'), true, false, false),
+            KeyEvent::Release,
+        );
+        assert_eq!(encode_key(release, &modes), None);
+    }
+
+    /// Event types (`0b10`) add explicit `:1`/`:3` markers, so a release is
+    /// unambiguous and must be reported.
+    #[test]
+    fn ctrl_c_release_is_marked_when_event_types_enabled() {
+        let modes =
+            kitty(KittyKeyboard::DISAMBIGUATE_ESC_CODES | KittyKeyboard::REPORT_EVENT_TYPES);
+        let press = encoded(
+            with_event(stroke(TerminalKey::Char('c'), true, false, false), KeyEvent::Press),
+            &modes,
+        );
+        assert_eq!(press, "\x1b[99;5:1u");
+        let release = encoded(
+            with_event(stroke(TerminalKey::Char('c'), true, false, false), KeyEvent::Release),
+            &modes,
+        );
+        assert_eq!(release, "\x1b[99;5:3u");
+    }
+
+    /// Event types without disambiguate: presses keep legacy bytes
+    /// (`\x03` still raises SIGINT); only repeats/releases go out as `CSI u`.
+    #[test]
+    fn ctrl_c_press_stays_legacy_with_event_types_only() {
+        let modes = kitty(KittyKeyboard::REPORT_EVENT_TYPES);
+        let press =
+            encode_key(stroke(TerminalKey::Char('c'), true, false, false), &modes).unwrap();
+        assert_eq!(press, vec![3]);
+        let release = with_event(
+            stroke(TerminalKey::Char('c'), true, false, false),
+            KeyEvent::Release,
+        );
+        assert_eq!(encoded(release, &modes), "\x1b[99;5:3u");
+    }
+
+    /// Enter/Tab/Backspace keep legacy bytes and get no release events unless
+    /// every key is reported, so `reset` stays typeable after a crashed
+    /// program leaves the mode on.
+    #[test]
+    fn enter_like_keys_have_no_release_without_all_keys() {
+        let modes = kitty(
+            KittyKeyboard::DISAMBIGUATE_ESC_CODES | KittyKeyboard::REPORT_EVENT_TYPES,
+        );
+        for key in [
+            TerminalKey::Enter,
+            TerminalKey::Tab,
+            TerminalKey::BackTab,
+            TerminalKey::Backspace,
+        ] {
+            let release = with_event(KeyStroke::plain(key), KeyEvent::Release);
+            assert_eq!(encode_key(release, &modes), None, "{key:?} release");
+        }
+        let all_keys = kitty(
+            KittyKeyboard::REPORT_ALL_KEYS_AS_ESC | KittyKeyboard::REPORT_EVENT_TYPES,
+        );
+        let release = with_event(KeyStroke::plain(TerminalKey::Enter), KeyEvent::Release);
+        assert_eq!(encoded(release, &all_keys), "\x1b[13;1:3u");
+    }
+
+    /// Repeats without event types must still reach the program as presses
+    /// (holding Backspace/arrows keeps producing input).
+    #[test]
+    fn repeat_is_a_press_without_event_types() {
+        let modes = kitty(KittyKeyboard::DISAMBIGUATE_ESC_CODES);
+        let repeat = with_event(
+            stroke(TerminalKey::Char('c'), true, false, false),
+            KeyEvent::Repeat,
+        );
+        assert_eq!(encoded(repeat, &modes), "\x1b[99;5u");
+    }
+
     #[test]
     fn arrows_follow_application_mode() {
         let mut modes = modes();
@@ -560,14 +684,14 @@ mod tests {
             &modes
         )
         .is_none());
-        // A ctrl-modified release is disambiguated even without flag 2.
-        assert_eq!(
-            encoded(
-                stroke(TerminalKey::Char('a'), true, false, false).with_event(KeyEvent::Release),
-                &modes
-            ),
-            "\x1b[97;5u"
-        );
+        // Modified releases are equally silent: without flag 2 there is no
+        // event-type marker, so a `CSI u` release would be byte-identical to
+        // a press and double every Ctrl+C for kitty-aware programs.
+        assert!(encode_key(
+            stroke(TerminalKey::Char('a'), true, false, false).with_event(KeyEvent::Release),
+            &modes
+        )
+        .is_none());
     }
 
     #[test]

@@ -616,7 +616,36 @@ fn merge_contents(ancestor: &[u8], current: &[u8], other: &[u8]) -> Option<(Vec<
     Some((output, resolution == gix::merge::blob::Resolution::Conflict))
 }
 
+/// Stash apply switches: restrict the restore to a path subset
+/// ("Cherry-Pick Selected Changes") and optionally re-create the staged
+/// state recorded by the stash (`Reinstate index`).
+#[derive(Clone, Debug, Default)]
+pub struct StashApplyOptions {
+    /// Exact repo-relative paths to restore; `None` = the whole stash.
+    pub paths: Option<Vec<String>>,
+    /// Write the stash's index version of the applied files back to the
+    /// real index (`git stash apply --index` semantics).
+    pub reinstate_index: bool,
+}
+
 pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
+    stash_apply_with(root, stash, &StashApplyOptions::default())
+}
+
+/// Restore only `paths` from the stash (subtree lists are expanded by the
+/// caller); no index side effects.
+pub fn stash_apply_paths(root: &Path, stash: &str, paths: &[String]) -> Result<String> {
+    stash_apply_with(
+        root,
+        stash,
+        &StashApplyOptions {
+            paths: Some(paths.to_vec()),
+            reinstate_index: false,
+        },
+    )
+}
+
+pub fn stash_apply_with(root: &Path, stash: &str, options: &StashApplyOptions) -> Result<String> {
     let repo = discover(root)?;
     let workdir = workdir(&repo)?;
     let stash_id = stash_oid(&repo, stash)?;
@@ -625,6 +654,13 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
     let mut actions: Vec<(String, StashAction)> = Vec::new();
     let mut conflicts: Vec<StashConflict> = Vec::new();
     for path in new.keys().chain(base.keys()) {
+        if options
+            .paths
+            .as_ref()
+            .is_some_and(|paths| !paths.iter().any(|wanted| wanted == path))
+        {
+            continue;
+        }
         let old = base.get(path);
         let new_entry = new.get(path);
         if old == new_entry {
@@ -736,6 +772,7 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
     if actions.is_empty() && conflicts.is_empty() {
         return Ok("stash applied".to_string());
     }
+    let applied_paths: Vec<String> = actions.iter().map(|(path, _)| path.clone()).collect();
     let backup = CheckoutBackup::capture(&repo, &workdir, actions.iter().map(|(path, _)| path))?;
     let result = (|| -> Result<()> {
         let mut filters = crate::filter::FilterContext::new(&repo)?;
@@ -803,9 +840,19 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
         return Err(error);
     }
     backup.discard();
+    let conflicted: Vec<String> = conflicts.iter().map(|c| c.path.clone()).collect();
     if !conflicts.is_empty() {
         write_conflict_index(&repo, &conflicts)?;
         conflicts.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+    if options.reinstate_index {
+        let reinstate: Vec<String> = applied_paths
+            .into_iter()
+            .filter(|path| !conflicted.contains(path))
+            .collect();
+        write_stash_index(&repo, &base, &index, &reinstate)?;
+    }
+    if !conflicts.is_empty() {
         return Err(anyhow!(
             "stash applied with conflicts: {}",
             conflicts
@@ -816,6 +863,82 @@ pub fn stash_apply(root: &Path, stash: &str) -> Result<String> {
         ));
     }
     Ok("stash applied".to_string())
+}
+
+/// Restore the staged state the stash recorded: for each applied path whose
+/// stash-index entry differs from the stash base, write that entry (or its
+/// removal) into the real index. Paths without staged changes are left alone,
+/// so the user's current staging is preserved — `git stash apply --index`.
+fn write_stash_index(
+    repo: &gix::Repository,
+    base: &TreeMap,
+    index: &TreeMap,
+    paths: &[String],
+) -> Result<()> {
+    let relevant: Vec<&String> = paths
+        .iter()
+        .filter(|path| base.get(*path) != index.get(*path))
+        .collect();
+    if relevant.is_empty() {
+        return Ok(());
+    }
+    let file = open_index(repo)?;
+    let index_path = file.path().to_path_buf();
+    let (mut state, _) = file.into_parts();
+    for path in relevant {
+        state.remove_entries(|_, candidate, _| candidate.to_str().ok() == Some(path.as_str()));
+        if let Some(entry) = index.get(path) {
+            state.dangerously_push_entry(
+                Stat::default(),
+                entry.oid,
+                Flags::empty(),
+                Mode::from_bits_truncate(entry.mode),
+                path.as_str().into(),
+            );
+        }
+    }
+    state.remove_tree();
+    state.sort_entries();
+    write_index(gix::index::File::from_state(state, index_path))
+}
+
+/// A stashed file's "before" version (the stash base blob) against the
+/// current working-tree file — the reference UX's "Compare Before with Local".
+pub fn stash_before_local_diff(root: &Path, stash: &str, path: &str) -> Result<crate::model::FileDiff> {
+    use crate::diff::{build_file_diff, load_blob_capped};
+    let repo = discover(root)?;
+    let workdir = workdir(&repo)?;
+    let spec = stash_oid(&repo, stash)?;
+    let (_, base, _, _) = stash_trees(&repo, spec)?;
+    crate::ops::validate_repo_path(path)?;
+    let old_entry = base.get(path);
+    let old = old_entry
+        .map(|entry| load_blob_capped(&repo, entry.oid))
+        .unwrap_or_default();
+    let abs = safe_worktree_join(&workdir, path)?;
+    let (new, new_exists) = match read_worktree(&abs)? {
+        Some((data, _)) => (data, true),
+        None => (Vec::new(), false),
+    };
+    Ok(build_file_diff(
+        path.to_string(),
+        old,
+        new,
+        old_entry.is_some(),
+        new_exists,
+    ))
+}
+
+/// File content as committed at HEAD — the read-only "Open Repository
+/// Version" tab. Raw blob bytes: line endings/filters stay repository-side.
+pub fn head_file_bytes(root: &Path, path: &str) -> Result<Vec<u8>> {
+    let repo = discover(root)?;
+    crate::ops::validate_repo_path(path)?;
+    let map = head_tree_map(&repo)?;
+    let entry = map
+        .get(path)
+        .ok_or_else(|| anyhow!("{path} is not tracked in HEAD"))?;
+    blob_bytes(&repo, entry.oid)
 }
 
 pub fn stash_pop(root: &Path, stash: &str) -> Result<String> {

@@ -239,6 +239,32 @@ pub enum Command {
         stash: String,
         path: String,
     },
+    /// 在新标签页打开贮藏文件的差异（不复用单例 diff 标签）。
+    OpenStashDiffNewTab {
+        stash: String,
+        path: String,
+    },
+    /// 贮藏文件的「更改前」版本与当前工作区比较。
+    OpenStashBeforeLocalDiff {
+        stash: String,
+        path: String,
+    },
+    /// 以只读标签页打开文件在 HEAD（仓库版本）中的内容。
+    OpenRepositoryVersion {
+        path: String,
+    },
+    /// 只应用贮藏中选中的文件/目录子树（Cherry-Pick Selected Changes）。
+    CherryPickStashPaths {
+        stash: String,
+        paths: Vec<String>,
+    },
+    /// Unstash… 对话框确认后的操作：可选新建分支、弹出、恢复索引。
+    Unstash {
+        stash: String,
+        branch: Option<String>,
+        pop: bool,
+        reinstate_index: bool,
+    },
     OpenCompareCommitsDiff {
         from: String,
         to: String,

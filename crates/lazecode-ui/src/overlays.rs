@@ -190,9 +190,9 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             MenuKind::CommitExtras => {
                 draw_commit_extras_menu(ui, model, rt, theme, screen, menu);
             }
-            MenuKind::StashTabMenu { project } => {
+            MenuKind::StashEntryMenu { project } => {
                 let payload = menu.payload.clone();
-                draw_stash_tab_menu(
+                draw_stash_entry_menu(
                     ui,
                     model,
                     rt,
@@ -4258,77 +4258,150 @@ fn draw_commit_extras_menu(
         rt.menu = Some(menu);
     }
 }
-/// Stash 页签 ⋮ 菜单（对齐 PyCharm：Apply / Pop / Drop / Clear）。
-fn draw_stash_tab_menu(
+/// 贮藏条目右键菜单：弹出 / 应用 / Unstash… / 丢弃 / 清空 / 显示差异。
+fn draw_stash_entry_menu(
     ui: &mut Ui,
     model: &mut AppModel,
     rt: &mut UiRuntime,
     theme: &Theme,
     screen: Rect,
     menu: MenuState,
-    _project: usize,
+    project_idx: usize,
     payload: Option<&str>,
 ) {
+    let p = theme.palette;
     let stash = payload
         .map(str::to_string)
         .or_else(|| rt.stash_selected.clone());
-    // PyCharm 顺序：Pop 在最前，危险操作（丢弃/清空）垫底并标红。
-    let items: [(&str, u8, bool); 5] = [
-        (crate::tr!(model, "Pop", "弹出"), 1, false),
-        (crate::tr!(model, "Apply", "应用"), 0, false),
-        (crate::tr!(model, "Drop", "丢弃"), 2, true),
-        (crate::tr!(model, "Clear", "清空"), 3, true),
-        (crate::tr!(model, "Refresh", "刷新"), 4, false),
+    let message = stash
+        .as_ref()
+        .and_then(|stash| {
+            rt.stash_entries
+                .iter()
+                .find(|entry| &entry.name == stash)
+                .map(|entry| entry.message())
+        })
+        .unwrap_or_else(|| stash.clone().unwrap_or_default());
+    // 显示差异需要一个文件：优先用该贮藏下当前选中的文件，否则第一条。
+    let diff_target = stash.as_ref().and_then(|stash| {
+        let paths = model.projects.get_mut(project_idx)?.stash_paths_for(stash);
+        rt.stash_file_sel
+            .as_ref()
+            .filter(|path| paths.iter().any(|known| known == *path))
+            .cloned()
+            .or_else(|| paths.first().cloned())
+    });
+    let branch = model
+        .projects
+        .get(project_idx)
+        .map(|project| project.branch())
+        .unwrap_or_default();
+
+    // (label, code, danger, enabled)
+    let items: [(&str, u8, bool, bool); 7] = [
+        (crate::tr!(model, "Pop", "弹出"), 0, false, stash.is_some()),
+        (crate::tr!(model, "Apply", "应用"), 1, false, stash.is_some()),
+        (
+            crate::tr!(model, "Unstash…", "Unstash…"),
+            2,
+            false,
+            stash.is_some(),
+        ),
+        (crate::tr!(model, "Drop", "丢弃"), 3, true, stash.is_some()),
+        (crate::tr!(model, "Clear", "清空"), 4, true, true),
+        (
+            crate::tr!(model, "Show Diff", "显示差异"),
+            5,
+            false,
+            diff_target.is_some(),
+        ),
+        (
+            crate::tr!(model, "Show Diff in a New Tab", "在新标签页显示差异"),
+            6,
+            false,
+            diff_target.is_some(),
+        ),
     ];
-    let height = items.len() as f32 * MENU_ROW_H + 8.0;
-    let rect = popover_rect(screen, menu.anchor, 180.0, height);
+    let sep_after = 4usize;
+    let height = items.len() as f32 * MENU_ROW_H + 12.0;
+    let rect = popover_rect(screen, menu.anchor, 230.0, height);
     menu_frame(ui, rect, theme);
     let mut picked: Option<u8> = None;
-    for (i, (label, code, danger)) in items.iter().enumerate() {
+    let mut y = rect.top() + 4.0;
+    for (i, (label, code, danger, enabled)) in items.iter().enumerate() {
+        if i == sep_after {
+            ui.painter().hline(
+                (rect.left() + 8.0)..=(rect.right() - 8.0),
+                y + 3.0,
+                Stroke::new(1.0, p.border_soft),
+            );
+            y += 6.0;
+        }
         let row = Rect::from_min_size(
-            Pos2::new(rect.left() + 4.0, rect.top() + 4.0 + i as f32 * MENU_ROW_H),
+            Pos2::new(rect.left() + 4.0, y),
             Vec2::new(rect.width() - 8.0, MENU_ROW_H),
         );
-        let enabled = stash.is_some() || *code == 4;
         if menu_row(
             ui,
             theme,
             row,
-            ui.scope_id().with(("stash-tab", i)),
+            ui.scope_id().with(("stash-entry", i)),
             label,
             *danger,
-            enabled,
+            *enabled,
         ) {
             picked = Some(*code);
         }
+        y += MENU_ROW_H;
     }
     let mut close = false;
     match picked {
         Some(0) => {
             if let Some(stash) = stash {
-                model.queue(Command::StashApply(stash));
+                model.queue(Command::StashPop(stash));
             }
             close = true;
         }
         Some(1) => {
             if let Some(stash) = stash {
-                model.queue(Command::StashPop(stash));
+                model.queue(Command::StashApply(stash));
             }
             close = true;
         }
         Some(2) => {
             if let Some(stash) = stash {
-                model.queue(Command::StashDrop(stash));
+                rt.dialog = crate::runtime::DialogState::Unstash {
+                    stash,
+                    message,
+                    branch,
+                    as_new_branch: String::new(),
+                    pop: false,
+                    reinstate_index: false,
+                    error: None,
+                };
             }
             close = true;
         }
         Some(3) => {
-            model.queue(Command::StashClear);
+            if let Some(stash) = stash {
+                model.queue(Command::StashDrop(stash));
+            }
             close = true;
         }
         Some(4) => {
-            rt.stash_loaded = None;
-            rt.stash_details = None;
+            model.queue(Command::StashClear);
+            close = true;
+        }
+        Some(5) => {
+            if let (Some(stash), Some(path)) = (stash, diff_target) {
+                model.queue(Command::OpenStashDiff { stash, path });
+            }
+            close = true;
+        }
+        Some(6) => {
+            if let (Some(stash), Some(path)) = (stash, diff_target) {
+                model.queue(Command::OpenStashDiffNewTab { stash, path });
+            }
             close = true;
         }
         _ => {}
@@ -4341,7 +4414,9 @@ fn draw_stash_tab_menu(
     }
 }
 
-/// Stash 页签文件行右键菜单：显示差异 / 打开工作区文件。
+/// 贮藏文件 / 目录右键菜单（对齐参考实现）：
+/// Show Diff · Show Diff in a New Tab · Compare Before with Local ·
+/// Edit Source · Open Repository Version · Cherry-Pick Selected Changes。
 fn draw_stash_file_menu(
     ui: &mut Ui,
     model: &mut AppModel,
@@ -4349,32 +4424,108 @@ fn draw_stash_file_menu(
     theme: &Theme,
     screen: Rect,
     menu: MenuState,
-    _project: usize,
-    path: &str,
+    project_idx: usize,
+    payload: &str,
 ) {
-    let stash = rt.stash_selected.clone();
-    let file_path = model
-        .active_project()
-        .map(|project| project.active_root().join(path));
-    let file_exists = file_path.as_ref().is_some_and(|path| path.is_file());
-    let items: [(&str, u8, bool); 2] = [
-        (crate::tr!(model, "Show Diff", "显示差异"), 0, false),
-        (crate::tr!(model, "Open File", "打开文件"), 1, false),
+    let mut segments = payload.split('\u{1}');
+    let Some(stash) = segments.next().filter(|stash| !stash.is_empty()) else {
+        return;
+    };
+    let kind = segments.next().unwrap_or("f");
+    let path = segments.next().unwrap_or("").to_string();
+    let stash = stash.to_string();
+
+    // 目录 / 树根展开为该范围内的文件清单；文件就是它自己。
+    let mut files: Vec<String> = Vec::new();
+    if let Some(details) = model
+        .projects
+        .get_mut(project_idx)
+        .and_then(|project| project.stash_details_for(&stash))
+    {
+        match kind {
+            "t" => files.extend(details.tracked.iter().cloned()),
+            "u" => files.extend(details.untracked.iter().cloned()),
+            "d" => {
+                let prefix = if path.is_empty() {
+                    String::new()
+                } else {
+                    format!("{path}/")
+                };
+                files.extend(
+                    details
+                        .tracked
+                        .iter()
+                        .chain(details.untracked.iter())
+                        .filter(|file| !prefix.is_empty() && file.starts_with(&prefix))
+                        .cloned(),
+                );
+            }
+            _ => {}
+        }
+    }
+    if kind == "f" && !path.is_empty() {
+        files = vec![path.clone()];
+    }
+    let target = files.first().cloned();
+    let worktree_target = target.as_ref().and_then(|target| {
+        model
+            .active_project()
+            .map(|project| project.active_root().join(target))
+    });
+    let target_exists = worktree_target.as_ref().is_some_and(|path| path.is_file());
+
+    // (label, code, danger, enabled)
+    let items: [(&str, u8, bool, bool); 6] = [
+        (
+            crate::tr!(model, "Show Diff", "显示差异"),
+            0,
+            false,
+            target.is_some(),
+        ),
+        (
+            crate::tr!(model, "Show Diff in a New Tab", "在新标签页显示差异"),
+            1,
+            false,
+            target.is_some(),
+        ),
+        (
+            crate::tr!(model, "Compare Before with Local", "与本地的前一版本比较"),
+            2,
+            false,
+            target.is_some(),
+        ),
+        (
+            crate::tr!(model, "Edit Source", "编辑源文件"),
+            3,
+            false,
+            target_exists,
+        ),
+        (
+            crate::tr!(model, "Open Repository Version", "打开仓库版本"),
+            4,
+            false,
+            target.is_some(),
+        ),
+        (
+            crate::tr!(
+                model,
+                "Cherry-Pick Selected Changes",
+                "拣选选中更改"
+            ),
+            5,
+            false,
+            !files.is_empty(),
+        ),
     ];
     let height = items.len() as f32 * MENU_ROW_H + 8.0;
-    let rect = popover_rect(screen, menu.anchor, 190.0, height);
+    let rect = popover_rect(screen, menu.anchor, 250.0, height);
     menu_frame(ui, rect, theme);
     let mut picked: Option<u8> = None;
-    for (i, (label, code, danger)) in items.iter().enumerate() {
+    for (i, (label, code, danger, enabled)) in items.iter().enumerate() {
         let row = Rect::from_min_size(
             Pos2::new(rect.left() + 4.0, rect.top() + 4.0 + i as f32 * MENU_ROW_H),
             Vec2::new(rect.width() - 8.0, MENU_ROW_H),
         );
-        let enabled = if *code == 0 {
-            stash.is_some()
-        } else {
-            file_exists
-        };
         if menu_row(
             ui,
             theme,
@@ -4382,7 +4533,7 @@ fn draw_stash_file_menu(
             ui.scope_id().with(("stash-file", i)),
             label,
             *danger,
-            enabled,
+            *enabled,
         ) {
             picked = Some(*code);
         }
@@ -4390,21 +4541,42 @@ fn draw_stash_file_menu(
     let mut close = false;
     match picked {
         Some(0) => {
-            if let Some(stash) = stash {
-                model.queue(Command::OpenStashDiff {
-                    stash,
-                    path: path.to_string(),
-                });
+            if let Some(path) = target {
+                model.queue(Command::OpenStashDiff { stash, path });
             }
             close = true;
         }
         Some(1) => {
-            if let Some(path) = file_path {
+            if let Some(path) = target {
+                model.queue(Command::OpenStashDiffNewTab { stash, path });
+            }
+            close = true;
+        }
+        Some(2) => {
+            if let Some(path) = target {
+                model.queue(Command::OpenStashBeforeLocalDiff { stash, path });
+            }
+            close = true;
+        }
+        Some(3) => {
+            if let Some(path) = worktree_target {
                 model.queue(Command::OpenFileAt {
                     path,
                     line: 0,
                     character: 0,
                 });
+            }
+            close = true;
+        }
+        Some(4) => {
+            if let Some(path) = target {
+                model.queue(Command::OpenRepositoryVersion { path });
+            }
+            close = true;
+        }
+        Some(5) => {
+            if !files.is_empty() {
+                model.queue(Command::CherryPickStashPaths { stash, paths: files });
             }
             close = true;
         }
@@ -7766,6 +7938,25 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         return;
     }
     let mut confirm_add_remote = false;
+    let unstash_text = if let DialogState::Unstash { message, .. } = &dialog {
+        let name = if message.trim().is_empty() {
+            crate::tr!(model, "stash", "贮藏").to_string()
+        } else {
+            message.clone()
+        };
+        Some((
+            crate::tr!(model, "Unstash Changes in {name}…", "Unstash Changes in {name}…")
+                .replace("{name}", &name),
+            crate::tr!(
+                model,
+                "Apply the stashed changes to the current branch or a new one.",
+                "将贮藏的更改应用到当前分支或新分支。"
+            )
+            .to_string(),
+        ))
+    } else {
+        None
+    };
     let (title, subtitle, width, height) = match &dialog {
         DialogState::NewBranch { .. } => (
             crate::tr!(model, "New branch", "新建分支"),
@@ -8028,6 +8219,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             460.0,
             280.0,
         ),
+
         DialogState::ConfirmDiscard { .. } => (
             crate::tr!(model, "Rollback changes", "回滚更改"),
             crate::tr!(
@@ -8068,8 +8260,15 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             480.0,
             260.0,
         ),
+        DialogState::Unstash { .. } => ("", "", 500.0, 360.0),
         _ => return,
     };
+    let (title, subtitle) = match unstash_text {
+        Some((title, subtitle)) => (title, subtitle),
+        None => (title.to_string(), subtitle.to_string()),
+    };
+    let title = title.as_str();
+    let subtitle = subtitle.as_str();
     let subtitle = match &dialog {
         DialogState::ConfirmTerminalClose {
             action, commands, ..
@@ -9328,6 +9527,97 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 );
             }
         }
+        DialogState::Unstash {
+            branch,
+            as_new_branch,
+            pop,
+            reinstate_index,
+            error,
+            ..
+        } => {
+            ui.painter().text(
+                Pos2::new(rect.left() + 22.0, rect.top() + 92.0),
+                Align2::LEFT_CENTER,
+                crate::tr!(model, "Current branch:", "当前分支:"),
+                FontId::proportional(11.5),
+                p.text3,
+            );
+            ui.painter().text(
+                Pos2::new(rect.left() + 130.0, rect.top() + 92.0),
+                Align2::LEFT_CENTER,
+                if branch.is_empty() { "—" } else { branch.as_str() },
+                FontId::proportional(11.5),
+                p.text,
+            );
+            ui.painter().text(
+                Pos2::new(rect.left() + 22.0, rect.top() + 128.0),
+                Align2::LEFT_CENTER,
+                crate::tr!(model, "As new branch:", "作为新分支:"),
+                FontId::proportional(11.5),
+                p.text3,
+            );
+            let input = Rect::from_min_size(
+                Pos2::new(rect.left() + 130.0, rect.top() + 113.0),
+                Vec2::new(rect.width() - 152.0, 28.0),
+            );
+            ui.painter()
+                .rect_filled(input, egui::CornerRadius::same(4), p.panel2);
+            ui.painter().rect_stroke(
+                input,
+                egui::CornerRadius::same(4),
+                Stroke::new(1.0, p.border),
+                StrokeKind::Inside,
+            );
+            ui.put(
+                input.shrink2(Vec2::new(8.0, 4.0)),
+                TextEdit::singleline(as_new_branch)
+                    .frame(egui::Frame::NONE)
+                    .align(egui::Align2::LEFT_CENTER)
+                    .hint_text(crate::tr!(
+                        model,
+                        "Leave empty to stay on the current branch",
+                        "留空则停留在当前分支"
+                    ))
+                    .font(FontId::monospace(11.0)),
+            );
+            let pop_check = Rect::from_center_size(
+                Pos2::new(rect.left() + 30.0, rect.top() + 170.0),
+                Vec2::splat(16.0),
+            );
+            if checkbox(ui, pop_check, *pop, theme).clicked() {
+                *pop = !*pop;
+            }
+            ui.painter().text(
+                Pos2::new(rect.left() + 42.0, rect.top() + 170.0),
+                Align2::LEFT_CENTER,
+                crate::tr!(model, "Pop stash", "弹出贮藏"),
+                FontId::proportional(11.0),
+                p.text2,
+            );
+            let index_check = Rect::from_center_size(
+                Pos2::new(rect.left() + 30.0, rect.top() + 198.0),
+                Vec2::splat(16.0),
+            );
+            if checkbox(ui, index_check, *reinstate_index, theme).clicked() {
+                *reinstate_index = !*reinstate_index;
+            }
+            ui.painter().text(
+                Pos2::new(rect.left() + 42.0, rect.top() + 198.0),
+                Align2::LEFT_CENTER,
+                crate::tr!(model, "Reinstate index", "恢复索引"),
+                FontId::proportional(11.0),
+                p.text2,
+            );
+            if let Some(err) = error {
+                ui.painter().text(
+                    Pos2::new(rect.left() + 22.0, rect.top() + 228.0),
+                    Align2::LEFT_CENTER,
+                    err,
+                    FontId::proportional(9.5),
+                    p.rose,
+                );
+            }
+        }
         DialogState::ConfirmDiscard { paths } => {
             // 预览前若干路径，超出部分以计数收尾。
             let show = paths.len().min(4);
@@ -9648,6 +9938,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         DialogState::RenameTerminal { .. } => crate::tr!(model, "Rename", "重命名"),
         DialogState::NewChangelist { .. } => crate::tr!(model, "Create", "创建"),
         DialogState::StashCreate { .. } => crate::tr!(model, "Stash", "贮藏"),
+        DialogState::Unstash { .. } => crate::tr!(model, "Apply Stash", "应用贮藏"),
         DialogState::ConfirmDiscard { .. } => crate::tr!(model, "Rollback", "回滚"),
         DialogState::DeleteChangelist { .. } => crate::tr!(model, "Delete", "删除"),
         DialogState::Unshelve { .. } => crate::tr!(model, "Unshelve", "恢复"),
@@ -10240,6 +10531,22 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 model.queue(Command::StashPush {
                     message: (!message.is_empty()).then_some(message),
                     include_untracked: *include_untracked,
+                });
+                close = true;
+            }
+            DialogState::Unstash {
+                stash,
+                as_new_branch,
+                pop,
+                reinstate_index,
+                ..
+            } => {
+                let branch = as_new_branch.trim().to_string();
+                model.queue(Command::Unstash {
+                    stash: stash.clone(),
+                    branch: (!branch.is_empty()).then_some(branch),
+                    pop: *pop,
+                    reinstate_index: *reinstate_index,
                 });
                 close = true;
             }

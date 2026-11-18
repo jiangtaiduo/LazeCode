@@ -1626,6 +1626,48 @@ fn handle_editor_input(
 ) {
     let events = ui.input(|input| input.events.clone());
     for event in events {
+        // Read-only snapshots (repository version tabs) allow navigation and
+        // copy but no mutation, so the buffer never diverges from the blob.
+        if doc.read_only {
+            match &event {
+                Event::Copy => {
+                    if let Some(text) = doc.selected_text() {
+                        ui.ctx().copy_text(text);
+                    }
+                }
+                Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } => {
+                    let navigates = matches!(
+                        key,
+                        Key::ArrowUp
+                            | Key::ArrowDown
+                            | Key::ArrowLeft
+                            | Key::ArrowRight
+                            | Key::Home
+                            | Key::End
+                            | Key::PageUp
+                            | Key::PageDown
+                    ) || (modifiers.command && matches!(key, Key::A | Key::C));
+                    if navigates {
+                        let _ = handle_editor_key(
+                            ui,
+                            doc,
+                            pending,
+                            tab_id,
+                            rt,
+                            *key,
+                            *modifiers,
+                        );
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
         if handle_completion_event(doc, rt, tab_id, &event) {
             continue;
         }
@@ -2101,6 +2143,30 @@ fn draw_diff(
             .filter(|s| &s.from == from && &s.to == to)
             .map(|s| s.nav_order.clone())
             .unwrap_or_default(),
+        DiffSource::Stash { stash, .. } => model.projects[index]
+            .stash_details
+            .get(stash)
+            .map(|details| {
+                details
+                    .tracked
+                    .iter()
+                    .chain(details.untracked.iter())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default(),
+        DiffSource::StashBeforeLocal { stash, .. } => model.projects[index]
+            .stash_details
+            .get(stash)
+            .map(|details| {
+                details
+                    .tracked
+                    .iter()
+                    .chain(details.untracked.iter())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default(),
         DiffSource::Commit { commit, .. } => model.projects[index]
             .commit_details
             .as_ref()
@@ -2483,6 +2549,13 @@ fn draw_diff(
                 format!("{stash} 中的更改")
             } else {
                 format!("Changes in {stash}")
+            }
+        }
+        DiffSource::StashBeforeLocal { .. } => {
+            if zh {
+                "更改前 → 工作区".to_string()
+            } else {
+                "Before → working tree".to_string()
             }
         }
         DiffSource::Worktree { .. } => {

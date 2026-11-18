@@ -802,9 +802,12 @@ fn source_control(
         rt.stash_entries = lazecode_git::stash_list(&stash_root).unwrap_or_default();
         rt.stash_loaded = Some(stash_root.clone());
         rt.stash_selected = None;
-        rt.stash_details = None;
+        rt.stash_expanded.clear();
         rt.stash_collapsed.clear();
         rt.stash_file_sel = None;
+        if let Some(project) = model.active_project_mut() {
+            project.invalidate_stash_details();
+        }
     }
     // 贮藏被清空后不能停留在隐藏的页签上。
     if rt.commit_tab == CommitTab::Stash && rt.stash_entries.is_empty() {
@@ -879,14 +882,12 @@ fn source_control(
         Vec2::splat(22.0),
     );
     if icon_button(ui, more_rect, Icon::More, false, theme).clicked() {
-        let kind = if rt.commit_tab == CommitTab::Stash {
-            crate::runtime::MenuKind::StashTabMenu {
-                project: model.active_project.unwrap_or(0),
-            }
-        } else {
-            crate::runtime::MenuKind::CommitExtras
-        };
-        rt.open_menu(kind, more_rect, None::<String>);
+        // 抽屉级菜单：与 Shelf/Commit 页签完全一致（不再按页签切换）。
+        rt.open_menu(
+            crate::runtime::MenuKind::CommitExtras,
+            more_rect,
+            None::<String>,
+        );
     }
     let min_rect = Rect::from_center_size(
         Pos2::new(head.right() - 16.0, head.center().y),
@@ -1026,13 +1027,22 @@ fn source_control(
         let refresh = tool_btn(ui, 0, Icon::Refresh, true, theme);
         if tool_btn(ui, 1, Icon::ExpandAll, true, theme) {
             rt.stash_collapsed.clear();
+            let names: Vec<String> = rt
+                .stash_entries
+                .iter()
+                .map(|entry| entry.name.clone())
+                .collect();
+            rt.stash_expanded.extend(names);
         }
         if tool_btn(ui, 2, Icon::CollapseAll, true, theme) {
-            collapse_stash_tree(rt);
+            rt.stash_expanded.clear();
+            rt.stash_collapsed.clear();
         }
         if refresh {
             rt.stash_loaded = None;
-            rt.stash_details = None;
+            if let Some(project) = model.active_project_mut() {
+                project.invalidate_stash_details();
+            }
         }
     }
     ui.painter().hline(
@@ -3596,7 +3606,7 @@ fn paint_chevron(painter: &egui::Painter, center: Pos2, open: bool, color: Color
     }
 }
 
-// ---------------- Stash 页签（对齐 PyCharm：贮藏列表 + 文件树 + Apply/Pop） ----------------
+// ---------------- Stash 页签（贮藏列表 + 可折叠文件树 + Apply/Pop） ----------------
 
 #[derive(Default)]
 struct StashDirNode {
@@ -3612,21 +3622,28 @@ enum StashRow {
         message: String,
         branch: Option<String>,
         selected: bool,
+        expanded: bool,
     },
     Root {
+        stash: String,
         key: String,
+        kind: String,
         label: String,
         count: usize,
         expanded: bool,
     },
     Dir {
+        stash: String,
         key: String,
+        /// 仓库相对目录路径（右键菜单的作用范围）。
+        path: String,
         label: String,
         count: usize,
         depth: usize,
         expanded: bool,
     },
     File {
+        stash: String,
         path: String,
         name: String,
         depth: usize,
@@ -3643,7 +3660,9 @@ fn insert_stash_file(node: &mut StashDirNode, parts: &[&str], full: &str) {
     insert_stash_file(child, &parts[1..], full);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn flatten_stash_dirs(
+    stash: &str,
     root_key: &str,
     nodes: &std::collections::BTreeMap<String, StashDirNode>,
     prefix: &str,
@@ -3660,17 +3679,20 @@ fn flatten_stash_dirs(
         let key = format!("{root_key}:{path}");
         let expanded = !collapsed.contains(&key);
         rows.push(StashRow::Dir {
+            stash: stash.to_string(),
             key: key.clone(),
+            path: path.clone(),
             label: name.clone(),
             count: node.count,
             depth,
             expanded,
         });
         if expanded {
-            flatten_stash_dirs(root_key, &node.sub, &path, depth + 1, collapsed, rows);
+            flatten_stash_dirs(stash, root_key, &node.sub, &path, depth + 1, collapsed, rows);
             for file in &node.files {
                 let name = file.rsplit('/').next().unwrap_or(file).to_string();
                 rows.push(StashRow::File {
+                    stash: stash.to_string(),
                     path: file.clone(),
                     name,
                     depth: depth + 1,
@@ -3680,16 +3702,22 @@ fn flatten_stash_dirs(
     }
 }
 
+/// 一条贮藏下的一个树根（已跟踪改动 / 未跟踪快照）。
+/// key 带贮藏名前缀，多条贮藏同时展开时目录折叠状态互不影响。
 fn push_stash_root(
     rows: &mut Vec<StashRow>,
+    stash: &str,
     collapsed: &HashSet<String>,
-    root_key: &str,
+    kind: &str,
     label: &str,
     files: &[String],
 ) {
-    let expanded = !collapsed.contains(root_key);
+    let root_key = format!("{stash}:{kind}");
+    let expanded = !collapsed.contains(&root_key);
     rows.push(StashRow::Root {
-        key: root_key.to_string(),
+        stash: stash.to_string(),
+        key: root_key.clone(),
+        kind: kind.to_string(),
         label: label.to_string(),
         count: files.len(),
         expanded,
@@ -3703,11 +3731,12 @@ fn push_stash_root(
         insert_stash_file(&mut tree, &parts, file);
     }
     // 树根下的目录与散文件比根行深一级（PyCharm 的缩进层级）。
-    flatten_stash_dirs(root_key, &tree.sub, "", 1, collapsed, rows);
+    flatten_stash_dirs(stash, &root_key, &tree.sub, "", 1, collapsed, rows);
     // 根目录下的散文件排在目录之后。
     for file in &tree.files {
         let name = file.rsplit('/').next().unwrap_or(file).to_string();
         rows.push(StashRow::File {
+            stash: stash.to_string(),
             path: file.clone(),
             name,
             depth: 1,
@@ -3715,80 +3744,73 @@ fn push_stash_root(
     }
 }
 
-/// 工具栏「全部折叠」：两个树根与所有目录键加入折叠集合。
-pub(crate) fn collapse_stash_tree(rt: &mut UiRuntime) {
-    rt.stash_collapsed.clear();
-    let Some((_, details)) = &rt.stash_details else {
-        return;
-    };
-    for (root_key, files) in [
-        ("tracked", &details.tracked),
-        ("untracked", &details.untracked),
-    ] {
-        rt.stash_collapsed.insert(root_key.to_string());
-        for file in files.iter() {
-            let parts: Vec<&str> = file.split('/').collect();
-            let mut prefix = String::new();
-            for part in parts.iter().take(parts.len().saturating_sub(1)) {
-                if !prefix.is_empty() {
-                    prefix.push('/');
-                }
-                prefix.push_str(part);
-                rt.stash_collapsed.insert(format!("{root_key}:{prefix}"));
-            }
-        }
-    }
+/// 右键菜单 payload：`<stash>\x01<kind>\x01<path>`，kind 为 f/d/t/u
+/// （文件 / 目录 / 已跟踪树根 / 未跟踪树根）。
+fn stash_menu_payload(stash: &str, kind: &str, path: &str) -> String {
+    format!("{stash}\u{1}{kind}\u{1}{path}")
 }
 
 fn stash_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, rect: Rect) {
     let p = theme.palette;
-    let root = active(model).active_root().to_path_buf();
     let zh = model.settings.language.is_zh();
     let project_index = model.active_project.unwrap_or(0);
 
     if rt.stash_entries.is_empty() {
         return;
     }
-    if rt.stash_selected.is_none() {
+    // 选中项失效（被丢弃/切换仓库）→ 回退到最新一条并展开它。
+    let selection_valid = rt
+        .stash_selected
+        .as_ref()
+        .is_some_and(|name| rt.stash_entries.iter().any(|entry| &entry.name == name));
+    let mut reveal_selected = false;
+    if !selection_valid {
         rt.stash_selected = rt.stash_entries.first().map(|entry| entry.name.clone());
-    }
-    // 选中的贮藏被删掉后回退到最新一条。
-    if !rt
-        .stash_entries
-        .iter()
-        .any(|entry| Some(&entry.name) == rt.stash_selected.as_ref())
-    {
-        rt.stash_selected = rt.stash_entries.first().map(|entry| entry.name.clone());
-        rt.stash_details = None;
         rt.stash_file_sel = None;
+        reveal_selected = true;
     }
-    if let Some(selected) = rt.stash_selected.clone() {
-        let stale = rt
-            .stash_details
-            .as_ref()
-            .map(|(cached, _)| cached != &selected)
-            .unwrap_or(true);
-        if stale {
-            let details = lazecode_git::stash_details(&root, &selected).unwrap_or_default();
-            rt.stash_details = Some((selected, details));
-            rt.stash_file_sel = None;
+    if let Some(name) = rt.stash_selected.clone() {
+        if reveal_selected {
+            rt.stash_expanded.insert(name);
         }
     }
+    // 丢弃的贮藏不再占用展开状态。
+    let known: HashSet<String> = rt
+        .stash_entries
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect();
+    rt.stash_expanded.retain(|name| known.contains(name));
+
+    // 每条展开的贮藏独立加载文件分组（model 缓存，git 只跑一次）。
+    let entries = rt.stash_entries.clone();
+    let mut details_by_stash: std::collections::HashMap<String, lazecode_git::StashDetails> =
+        std::collections::HashMap::new();
+    for entry in &entries {
+        if rt.stash_expanded.contains(&entry.name) {
+            if let Some(details) = model.projects[project_index].stash_details_for(&entry.name) {
+                details_by_stash.insert(entry.name.clone(), details);
+            }
+        }
+    }
+    let project_name = active(model).name.clone();
 
     let mut rows: Vec<StashRow> = Vec::new();
-    for entry in &rt.stash_entries {
+    for entry in &entries {
         rows.push(StashRow::Stash {
             name: entry.name.clone(),
             message: entry.message(),
             branch: entry.branch.clone(),
             selected: rt.stash_selected.as_deref() == Some(entry.name.as_str()),
+            expanded: rt.stash_expanded.contains(&entry.name),
         });
-    }
-    if let Some((_, details)) = &rt.stash_details {
+        let Some(details) = details_by_stash.get(&entry.name) else {
+            continue;
+        };
         if !details.tracked.is_empty() {
-            let project_name = active(model).name.clone();
             push_stash_root(
                 &mut rows,
+                &entry.name,
                 &rt.stash_collapsed,
                 "tracked",
                 &project_name,
@@ -3796,12 +3818,7 @@ fn stash_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
             );
         }
         if !details.untracked.is_empty() {
-            let branch = rt
-                .stash_selected
-                .as_ref()
-                .and_then(|name| rt.stash_entries.iter().find(|entry| &entry.name == name))
-                .and_then(|entry| entry.branch.clone());
-            let label = match branch {
+            let label = match entry.branch.as_deref() {
                 Some(branch) if zh => format!("{branch} 上的未跟踪文件"),
                 Some(branch) => format!("Untracked files on {branch}"),
                 None if zh => "未跟踪文件".to_string(),
@@ -3809,6 +3826,7 @@ fn stash_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
             };
             push_stash_root(
                 &mut rows,
+                &entry.name,
                 &rt.stash_collapsed,
                 "untracked",
                 &label,
@@ -3826,7 +3844,8 @@ fn stash_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
 
     let mut toggle: Option<String> = None;
     let mut select_stash: Option<String> = None;
-    let mut open_diff: Option<String> = None;
+    let mut select_file: Option<(String, String)> = None;
+    let mut open_diff: Option<(String, String)> = None;
     super::app_ui::region(ui, list, "stash-rows", |ui| {
         egui::ScrollArea::vertical()
             .id_salt("stash-scroll")
@@ -3842,6 +3861,7 @@ fn stash_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
                             message,
                             branch,
                             selected,
+                            expanded,
                         } => {
                             let (rect, response) = ui.allocate_exact_size(
                                 Vec2::new(ui.available_width(), 24.0),
@@ -3854,14 +3874,31 @@ fn stash_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
                                     if *selected { p.selected_row } else { p.hover },
                                 );
                             }
+                            // 条目折叠箭头：多条贮藏各自展开/折叠。
+                            paint_icon(
+                                ui.painter(),
+                                Rect::from_center_size(
+                                    Pos2::new(rect.left() + 10.0, rect.center().y),
+                                    Vec2::splat(11.0),
+                                ),
+                                if *expanded {
+                                    Icon::ChevronDown
+                                } else {
+                                    Icon::ChevronRight
+                                },
+                                p.text3,
+                            );
                             let badge_w = branch
                                 .as_ref()
-                                .map(|name| (name.chars().count() as f32 * 6.2 + 30.0).min(rect.width() * 0.45))
+                                .map(|name| {
+                                    (name.chars().count() as f32 * 6.2 + 30.0)
+                                        .min(rect.width() * 0.45)
+                                })
                                 .unwrap_or(0.0);
                             text_clipped(
                                 ui.painter(),
                                 Rect::from_min_max(
-                                    Pos2::new(rect.left() + 10.0, rect.top()),
+                                    Pos2::new(rect.left() + 24.0, rect.top()),
                                     Pos2::new(rect.right() - badge_w - 8.0, rect.bottom()),
                                 ),
                                 message,
@@ -3902,10 +3939,13 @@ fn stash_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
                             }
                             if response.clicked() {
                                 select_stash = Some(name.clone());
+                                toggle = Some(name.clone());
                             }
                             if response.secondary_clicked() {
+                                rt.stash_selected = Some(name.clone());
+                                rt.stash_file_sel = None;
                                 rt.open_menu(
-                                    crate::runtime::MenuKind::StashTabMenu {
+                                    crate::runtime::MenuKind::StashEntryMenu {
                                         project: project_index,
                                     },
                                     rect,
@@ -3913,23 +3953,26 @@ fn stash_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
                                 );
                             }
                         }
-                        StashRow::Root {
-                            key,
-                            label,
-                            count,
-                            expanded,
-                        }
-                        | StashRow::Dir {
-                            key,
-                            label,
-                            count,
-                            depth: _,
-                            expanded,
-                        } => {
-                            let depth = match row {
-                                StashRow::Root { .. } => 0usize,
-                                StashRow::Dir { depth, .. } => *depth,
-                                _ => 0,
+                        StashRow::Root { .. } | StashRow::Dir { .. } => {
+                            let (stash, key, kind, label, count, depth, expanded) = match row {
+                                StashRow::Root {
+                                    stash,
+                                    key,
+                                    kind,
+                                    label,
+                                    count,
+                                    expanded,
+                                } => (stash, key, Some(kind), label, count, 0usize, expanded),
+                                StashRow::Dir {
+                                    stash,
+                                    key,
+                                    label,
+                                    count,
+                                    depth,
+                                    expanded,
+                                    ..
+                                } => (stash, key, None, label, count, *depth, expanded),
+                                _ => unreachable!(),
                             };
                             let (rect, response) = ui.allocate_exact_size(
                                 Vec2::new(ui.available_width(), 24.0),
@@ -3962,10 +4005,7 @@ fn stash_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
                                 p.text,
                             );
                             ui.painter().galley(
-                                Pos2::new(
-                                    x + 16.0,
-                                    rect.center().y - galley.size().y * 0.5,
-                                ),
+                                Pos2::new(x + 16.0, rect.center().y - galley.size().y * 0.5),
                                 galley.clone(),
                                 p.text,
                             );
@@ -3979,13 +4019,38 @@ fn stash_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
                             if response.clicked() {
                                 toggle = Some(key.clone());
                             }
+                            if response.secondary_clicked() {
+                                // 目录 / 树根与文件共用同一套右键菜单。
+                                let payload = match kind {
+                                    Some(kind) => stash_menu_payload(stash, kind, ""),
+                                    None => match row {
+                                        StashRow::Dir { path, .. } => {
+                                            stash_menu_payload(stash, "d", path)
+                                        }
+                                        _ => String::new(),
+                                    },
+                                };
+                                rt.open_menu(
+                                    crate::runtime::MenuKind::StashFileMenu {
+                                        project: project_index,
+                                    },
+                                    rect,
+                                    Some(payload),
+                                );
+                            }
                         }
-                        StashRow::File { path, name, depth } => {
+                        StashRow::File {
+                            stash,
+                            path,
+                            name,
+                            depth,
+                        } => {
                             let (rect, response) = ui.allocate_exact_size(
                                 Vec2::new(ui.available_width(), 24.0),
                                 Sense::click(),
                             );
-                            let selected = rt.stash_file_sel.as_deref() == Some(path.as_str());
+                            let selected = rt.stash_selected.as_deref() == Some(stash.as_str())
+                                && rt.stash_file_sel.as_deref() == Some(path.as_str());
                             if selected || response.hovered() {
                                 ui.painter().rect_filled(
                                     rect.shrink2(Vec2::new(2.0, 1.0)),
@@ -4016,19 +4081,20 @@ fn stash_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
                                 Align2::LEFT_CENTER,
                             );
                             if response.clicked() {
-                                rt.stash_file_sel = Some(path.clone());
+                                select_file = Some((stash.clone(), path.clone()));
                             }
                             if response.double_clicked() {
-                                open_diff = Some(path.clone());
+                                open_diff = Some((stash.clone(), path.clone()));
                             }
                             if response.secondary_clicked() {
+                                rt.stash_selected = Some(stash.clone());
                                 rt.stash_file_sel = Some(path.clone());
                                 rt.open_menu(
                                     crate::runtime::MenuKind::StashFileMenu {
                                         project: project_index,
                                     },
                                     rect,
-                                    Some(path.clone()),
+                                    Some(stash_menu_payload(stash, "f", path)),
                                 );
                             }
                         }
@@ -4038,21 +4104,29 @@ fn stash_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
     });
 
     if let Some(key) = toggle {
-        if !rt.stash_collapsed.remove(&key) {
+        // 贮藏条目自身：切换展开集合（键即贮藏名）；树根/目录：切换折叠集合。
+        if rt.stash_entries.iter().any(|entry| entry.name == key) {
+            if !rt.stash_expanded.remove(&key) {
+                rt.stash_expanded.insert(key);
+            }
+        } else if !rt.stash_collapsed.remove(&key) {
             rt.stash_collapsed.insert(key);
         }
     }
     if let Some(name) = select_stash {
         if rt.stash_selected.as_deref() != Some(name.as_str()) {
             rt.stash_selected = Some(name);
-            rt.stash_details = None;
             rt.stash_file_sel = None;
         }
     }
-    if let Some(path) = open_diff {
-        if let Some(stash) = rt.stash_selected.clone() {
-            model.queue(Command::OpenStashDiff { stash, path });
+    if let Some((stash, path)) = select_file {
+        if rt.stash_selected.as_deref() != Some(stash.as_str()) {
+            rt.stash_selected = Some(stash);
         }
+        rt.stash_file_sel = Some(path);
+    }
+    if let Some((stash, path)) = open_diff {
+        model.queue(Command::OpenStashDiff { stash, path });
     }
 
     // ----- 底部操作栏（PyCharm：Apply / Pop） -----

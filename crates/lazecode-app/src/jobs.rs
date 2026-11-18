@@ -457,6 +457,10 @@ impl JobQueue {
                     lazecode_git::stash_file_diff(&job_root, stash, path)
                         .map_err(|err| err.to_string())
                 }
+                DiffSource::StashBeforeLocal { stash, path } => {
+                    lazecode_git::stash_before_local_diff(&job_root, stash, path)
+                        .map_err(|err| err.to_string())
+                }
                 DiffSource::Files { old_path, new_path } => {
                     lazecode_git::diff_two_files(old_path, new_path).map_err(|err| err.to_string())
                 }
@@ -2829,6 +2833,145 @@ impl JobQueue {
                     self.diff_source(root, source);
                 }
             }
+            Command::OpenStashDiffNewTab { stash, path } => {
+                if let Some(project) = model.active_project_mut() {
+                    let source = DiffSource::Stash {
+                        stash: stash.clone(),
+                        path: path.clone(),
+                    };
+                    project.open_diff_source_new_tab(source.clone());
+                    let root = project.active_root().to_path_buf();
+                    self.diff_source(root, source);
+                }
+            }
+            Command::OpenStashBeforeLocalDiff { stash, path } => {
+                if let Some(project) = model.active_project_mut() {
+                    let source = DiffSource::StashBeforeLocal {
+                        stash: stash.clone(),
+                        path: path.clone(),
+                    };
+                    project.open_diff_source(source.clone());
+                    let root = project.active_root().to_path_buf();
+                    self.diff_source(root, source);
+                }
+            }
+            Command::OpenRepositoryVersion { path } => {
+                let Some(project) = model.active_project_mut() else {
+                    return;
+                };
+                let root = project.active_root().to_path_buf();
+                let relative = path.clone();
+                let label = std::path::Path::new(&relative)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| relative.clone());
+                let settings = model.settings.clone();
+                match lazecode_git::head_file_bytes(&root, &relative) {
+                    Ok(bytes) => {
+                        if let Some(project) = model.active_project_mut() {
+                            let label = format!("{label} (HEAD)");
+                            if let Err(err) = project.open_revision_snapshot(
+                                &root.join(&relative),
+                                &bytes,
+                                label,
+                                &settings,
+                            ) {
+                                model.toast(err, ToastKind::Error);
+                            }
+                        }
+                    }
+                    Err(err) => model.toast(err.to_string(), ToastKind::Error),
+                }
+            }
+            Command::CherryPickStashPaths { stash, paths } => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.active_root().to_path_buf())
+                    .unwrap_or_default();
+                let stash = stash.clone();
+                let paths = paths.clone();
+                self.spawn(
+                    "stash-apply-paths",
+                    format!("stash-ap:{root:?}:{stash}:{paths:?}"),
+                    move || {
+                        let result = lazecode_git::stash_apply_paths(&root, &stash, &paths);
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(_) => {
+                                    if paths.len() == 1 {
+                                        format!("已拣选 {}", paths[0])
+                                    } else {
+                                        format!("已拣选 {} 个文件", paths.len())
+                                    }
+                                }
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: true,
+                            reload_files: true,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
+            Command::Unstash {
+                stash,
+                branch,
+                pop,
+                reinstate_index,
+            } => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.active_root().to_path_buf())
+                    .unwrap_or_default();
+                let stash = stash.clone();
+                let branch = branch.clone();
+                let pop = pop;
+                let reinstate_index = reinstate_index;
+                self.spawn(
+                    "stash-unstash",
+                    format!("stash-u:{root:?}:{stash}:{branch:?}:{pop}:{reinstate_index}"),
+                    move || {
+                        let result = (|| -> Result<String, String> {
+                            if let Some(branch) = branch.as_deref() {
+                                lazecode_git::create_branch(&root, branch, true)
+                                    .map_err(|err| err.to_string())?;
+                            }
+                            lazecode_git::stash_apply_with(
+                                &root,
+                                &stash,
+                                &lazecode_git::StashApplyOptions {
+                                    paths: None,
+                                    reinstate_index,
+                                },
+                            )
+                            .map_err(|err| err.to_string())?;
+                            if pop {
+                                lazecode_git::stash_drop(&root, &stash)
+                                    .map_err(|err| err.to_string())?;
+                            }
+                            Ok(match branch {
+                                Some(branch) => format!("已在 {branch} 上恢复 {stash}"),
+                                None => format!("已恢复 {stash}"),
+                            })
+                        })();
+                        let ok = result.is_ok();
+                        let message = match result {
+                            Ok(message) => message,
+                            Err(err) => err,
+                        };
+                        JobResult::OpDone {
+                            root,
+                            message,
+                            ok,
+                            refresh: true,
+                            reload_files: true,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
             Command::OpenCompareWithLocalDiff { commit, path } => {
                 if let Some(project) = model.active_project_mut() {
                     let source = DiffSource::CompareWithLocal { commit, path };
@@ -3689,9 +3832,12 @@ impl JobQueue {
                     runtime.stash_loaded = None;
                     runtime.stash_entries.clear();
                     runtime.stash_selected = None;
-                    runtime.stash_details = None;
+                    runtime.stash_expanded.clear();
                     runtime.stash_collapsed.clear();
                     runtime.stash_file_sel = None;
+                    if let Some(project) = model.active_project_mut() {
+                        project.invalidate_stash_details();
+                    }
                 }
                 model.toast(
                     message,

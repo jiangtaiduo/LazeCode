@@ -20,11 +20,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   entries (PyCharm-style). It lists stashes with the branch each was created
   on, shows the selected stash's changes as a directory tree with per-folder
   file counts, and keeps `--include-untracked` snapshots under a separate
-  "Untracked files on <branch>" root. Apply/Pop buttons sit in the footer;
-  the ⋮ menu offers Pop, Apply, Drop, Clear and Refresh; double-clicking a
-  file (or its context menu) opens the diff between the stash base and the
-  stashed content, and files still present in the worktree can be opened in
-  the editor.
+  "Untracked files on <branch>" root. Apply/Pop buttons sit in the footer.
+  Every stash entry has its own disclosure chevron, so several stashes can be
+  expanded side by side (per-stash details are cached; tree collapse keys are
+  namespaced per stash). The drawer ⋮ menu is now the same menu as on the
+  Commit and Shelf tabs. Right-clicking a stash entry offers Pop, Apply,
+  Unstash…, Drop, Clear and Show Diff in the current or a new tab;
+  right-clicking a file *or folder* offers Show Diff, Show Diff in a New Tab,
+  Compare Before with Local, Edit Source, Open Repository Version, and
+  Cherry-Pick Selected Changes (a native, path-filtered three-way apply of
+  that file or folder subtree). The Unstash… dialog targets the current
+  branch or a branch created on the spot, optionally pops the stash and
+  reinstates the index recorded by the stash. Double-clicking a file still
+  opens the stash diff, which now navigates across every file of the stash
+  with F7/←/→. Repository-version tabs are read-only snapshots, so the
+  checkout is never written back to.
 
 ### Fixed
 

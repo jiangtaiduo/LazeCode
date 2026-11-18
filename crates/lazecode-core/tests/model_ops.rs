@@ -967,3 +967,54 @@ fn missing_repository_is_not_shown_as_a_git_error() {
     );
     assert!(project.git.is_none());
 }
+
+#[test]
+fn new_tab_diff_skips_the_singleton_reuse() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "b\n").unwrap();
+    let settings = Settings::default();
+    let mut project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
+    let first = project.open_diff_source(lazecode_core::DiffSource::Worktree {
+        path: "a.txt".to_string(),
+    });
+    // The default diff tab is a singleton: a second source replaces it.
+    let reused = project.open_diff_source(lazecode_core::DiffSource::Worktree {
+        path: "b.txt".to_string(),
+    });
+    assert_eq!(first, reused);
+    // "Show Diff in a New Tab" must add a second diff tab instead.
+    let extra = project.open_diff_source_new_tab(lazecode_core::DiffSource::Worktree {
+        path: "b.txt".to_string(),
+    });
+    assert_ne!(first, extra);
+    let diffs = project
+        .tabs
+        .iter()
+        .filter(|tab| matches!(tab.kind, TabKind::Diff(_)))
+        .count();
+    assert_eq!(diffs, 2);
+}
+
+#[test]
+fn repository_version_snapshot_opens_a_read_only_titled_tab() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("versioned.txt"), "worktree\n").unwrap();
+    let settings = Settings::default();
+    let mut project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
+    let source = dir.path().join("versioned.txt");
+    let id = project
+        .open_revision_snapshot(&source, b"committed\n", "versioned.txt (HEAD)".to_string(), &settings)
+        .unwrap();
+    let tab = project.tabs.iter().find(|tab| tab.id == id).expect("tab");
+    assert_eq!(tab.title(), "versioned.txt (HEAD)");
+    match &tab.kind {
+        TabKind::File(file) => {
+            assert!(file.doc.read_only);
+            assert_eq!(file.doc.text(), "committed\n");
+            // The temp snapshot must not alias the worktree file.
+            assert_ne!(file.doc.path, source);
+        }
+        _ => panic!("expected a file tab"),
+    }
+}

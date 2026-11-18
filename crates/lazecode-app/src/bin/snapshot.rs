@@ -287,7 +287,14 @@ fn main() -> anyhow::Result<()> {
         });
     }
     match mode.as_str() {
-        "stash" | "stash_untracked" | "stash_menu" | "stash_file_menu" => {
+        "stash"
+        | "stash_untracked"
+        | "stash_collapsed"
+        | "stash_menu"
+        | "stash_file_menu"
+        | "stash_dir_menu"
+        | "stash_header_menu"
+        | "unstash" => {
             // 贮藏页签：打开 Git 抽屉并切到 Stash。
             model.ui.sidebar_view = SidebarView::Git;
             model.ui.sidebar_visible = true;
@@ -298,33 +305,75 @@ fn main() -> anyhow::Result<()> {
             runtime.stash_loaded = Some(
                 std::fs::canonicalize(&project_root).unwrap_or_else(|_| project_root.clone()),
             );
-            if mode == "stash_untracked" {
-                // 第二条贮藏（含未跟踪快照）。
-                runtime.stash_selected = Some("stash@{1}".to_string());
+            let selected = if mode == "stash_untracked" {
+                "stash@{1}"
+            } else {
+                "stash@{0}"
+            };
+            runtime.stash_selected = Some(selected.to_string());
+            if mode != "stash_collapsed" {
+                runtime.stash_expanded.insert(selected.to_string());
             }
             if mode == "stash_menu" {
                 runtime.menu = Some(lazecode_ui::runtime::MenuState {
-                    kind: lazecode_ui::runtime::MenuKind::StashTabMenu { project: 0 },
+                    kind: lazecode_ui::runtime::MenuKind::StashEntryMenu { project: 0 },
                     anchor: egui::Rect::from_min_size(
                         egui::pos2(150.0, 62.0),
+                        egui::vec2(1.0, 1.0),
+                    ),
+                    payload: Some("stash@{0}".to_string()),
+                    opened_frame: 0,
+                });
+            }
+            if mode == "stash_file_menu" || mode == "stash_dir_menu" {
+                let (kind, path, anchor_y) = if mode == "stash_file_menu" {
+                    (
+                        "f",
+                        "backend/app/queue/pipeline_registry.py",
+                        260.0,
+                    )
+                } else {
+                    ("d", "backend", 300.0)
+                };
+                runtime.stash_file_sel = Some(path.to_string());
+                runtime.menu = Some(lazecode_ui::runtime::MenuState {
+                    kind: lazecode_ui::runtime::MenuKind::StashFileMenu { project: 0 },
+                    anchor: egui::Rect::from_min_size(
+                        egui::pos2(160.0, anchor_y),
+                        egui::vec2(1.0, 1.0),
+                    ),
+                    payload: Some(format!(
+                        "stash@{{0}}\u{1}{kind}\u{1}{path}"
+                    )),
+                    opened_frame: 0,
+                });
+            }
+            if mode == "stash_header_menu" {
+                // 抽屉级 ⋮ 菜单：与 Shelf/Commit 页签共用同一套条目。
+                runtime.menu = Some(lazecode_ui::runtime::MenuState {
+                    kind: lazecode_ui::runtime::MenuKind::CommitExtras,
+                    anchor: egui::Rect::from_min_size(
+                        egui::pos2(300.0, 60.0),
                         egui::vec2(1.0, 1.0),
                     ),
                     payload: None,
                     opened_frame: 0,
                 });
             }
-            if mode == "stash_file_menu" {
-                runtime.stash_file_sel =
-                    Some("backend/app/queue/pipeline_registry.py".to_string());
-                runtime.menu = Some(lazecode_ui::runtime::MenuState {
-                    kind: lazecode_ui::runtime::MenuKind::StashFileMenu { project: 0 },
-                    anchor: egui::Rect::from_min_size(
-                        egui::pos2(160.0, 260.0),
-                        egui::vec2(1.0, 1.0),
-                    ),
-                    payload: Some("backend/app/queue/pipeline_registry.py".to_string()),
-                    opened_frame: 0,
-                });
+            if mode == "unstash" {
+                runtime.dialog = lazecode_ui::runtime::DialogState::Unstash {
+                    stash: "stash@{0}".to_string(),
+                    message: runtime
+                        .stash_entries
+                        .first()
+                        .map(|entry| entry.message())
+                        .unwrap_or_default(),
+                    branch: "feat-expert-mode".to_string(),
+                    as_new_branch: String::new(),
+                    pop: false,
+                    reinstate_index: false,
+                    error: None,
+                };
             }
         }
         "settings" => runtime.settings_open = true,

@@ -114,11 +114,11 @@ pub enum MenuKind {
     ShelfContext {
         project: usize,
     },
-    /// Stash 页签 ⋮ 菜单：应用 / 弹出 / 丢弃 / 清空 / 刷新。
-    StashTabMenu {
+    /// 贮藏条目右键菜单：弹出 / 应用 / Unstash… / 丢弃 / 清空 / 显示差异。
+    StashEntryMenu {
         project: usize,
     },
-    /// Stash 页签文件行右键菜单（payload = 仓库相对路径）。
+    /// Stash 页签文件/目录行右键菜单（payload = `<stash>\x01<f|d>\x01<path>`）。
     StashFileMenu {
         project: usize,
     },
@@ -406,6 +406,18 @@ pub enum DialogState {
         include_untracked: bool,
         error: Option<String>,
     },
+    /// Unstash… 对话框：当前分支、可选新分支、弹出 / 恢复索引。
+    Unstash {
+        stash: String,
+        /// 贮藏说明（对话框标题）。
+        message: String,
+        /// 当前分支（只读行）。
+        branch: String,
+        as_new_branch: String,
+        pop: bool,
+        reinstate_index: bool,
+        error: Option<String>,
+    },
     StashManager {
         stashes: Vec<lazecode_git::StashEntry>,
         selected: usize,
@@ -678,9 +690,11 @@ pub struct UiRuntime {
     pub stash_loaded: Option<std::path::PathBuf>,
     /// 当前选中的贮藏，如 `stash@{0}`。
     pub stash_selected: Option<String>,
-    /// 选中贮藏的文件分组（加载后缓存，切换选择时重建）。
-    pub stash_details: Option<(String, lazecode_git::StashDetails)>,
-    /// 折叠的树根/目录键（`tracked:…` / `untracked:…`；默认展开）。
+    /// 展开的贮藏条目（`stash@{n}`）。每个条目独立展开/折叠；首帧只展开
+    /// 第一条，避免多条贮藏各自铺开整棵文件树。
+    pub stash_expanded: std::collections::HashSet<String>,
+    /// 折叠的树根/目录键（`<stash>:tracked:…` / `<stash>:untracked:…`；
+    /// 默认展开）。
     pub stash_collapsed: std::collections::HashSet<String>,
     /// 选中的贮藏文件（仓库相对路径）。
     pub stash_file_sel: Option<String>,
@@ -787,7 +801,7 @@ impl Default for UiRuntime {
             stash_entries: Vec::new(),
             stash_loaded: None,
             stash_selected: None,
-            stash_details: None,
+            stash_expanded: std::collections::HashSet::new(),
             stash_collapsed: std::collections::HashSet::new(),
             stash_file_sel: None,
             tree_submenu: None,

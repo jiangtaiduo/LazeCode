@@ -1,8 +1,9 @@
 use lazecode_git::{
     blame, compare_commits, diff_patch_paths, file_history, shelf_delete, shelf_files, shelf_list,
     shelf_patch, shelf_rename, shelf_restore, shelf_restore_partial, shelf_save, shelf_save_paths,
-    stash_apply, stash_details, stash_drop, stash_file_diff, stash_files, stash_list, stash_pop,
-    stash_push, submodule_list,
+    head_file_bytes, stash_apply, stash_apply_paths, stash_apply_with, stash_before_local_diff,
+    stash_details, stash_drop, stash_file_diff, stash_files, stash_list, stash_pop, stash_push,
+    submodule_list, StashApplyOptions,
 };
 use std::path::Path;
 use std::process::Command;
@@ -100,6 +101,90 @@ fn stash_details_split_tracked_and_untracked_with_diff() {
     let untracked_diff = stash_file_diff(root, "stash@{0}", "new.txt").unwrap();
     assert_eq!(untracked_diff.kind, lazecode_git::ChangeKind::Added);
     assert!(untracked_diff.new_text.contains("brand new"));
+}
+
+#[test]
+fn stash_apply_paths_restores_only_the_selection() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("b.txt"), "beta\n").unwrap();
+    git(root, &["add", "b.txt"]);
+    git(root, &["commit", "-q", "-m", "b"]);
+    std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+    std::fs::write(root.join("b.txt"), "beta changed\n").unwrap();
+    stash_push(root, Some("two files"), false, false).unwrap();
+
+    stash_apply_paths(root, "stash@{0}", &["a.txt".to_string()]).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "one\ntwo\n"
+    );
+    // b.txt was not part of the selection and stays at its base version.
+    assert_eq!(
+        std::fs::read_to_string(root.join("b.txt")).unwrap(),
+        "beta\n"
+    );
+    // The stash itself is untouched by a partial apply.
+    assert_eq!(stash_list(root).unwrap().len(), 1);
+}
+
+#[test]
+fn stash_apply_reinstate_index_restages_stashed_index_state() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("b.txt"), "beta\n").unwrap();
+    git(root, &["add", "b.txt"]);
+    git(root, &["commit", "-q", "-m", "b"]);
+
+    // b.txt: staged modification; a.txt: unstaged modification.
+    std::fs::write(root.join("b.txt"), "beta staged\n").unwrap();
+    git(root, &["add", "b.txt"]);
+    std::fs::write(root.join("a.txt"), "one unstaged\n").unwrap();
+    stash_push(root, Some("mixed"), false, false).unwrap();
+
+    stash_apply_with(
+        root,
+        "stash@{0}",
+        &StashApplyOptions {
+            paths: None,
+            reinstate_index: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "one unstaged\n"
+    );
+    assert_eq!(
+        git(root, &["show", ":b.txt"]),
+        "beta staged"
+    );
+    // Only the file that was staged in the stash is staged again.
+    assert_eq!(git(root, &["diff", "--cached", "--name-only"]), "b.txt");
+}
+
+#[test]
+fn stash_before_local_diff_uses_stash_base_against_worktree() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+    stash_push(root, Some("wip"), false, false).unwrap();
+    // Move the local file after the stash was created.
+    std::fs::write(root.join("a.txt"), "one local\n").unwrap();
+
+    let diff = stash_before_local_diff(root, "stash@{0}", "a.txt").unwrap();
+    assert_eq!(diff.kind, lazecode_git::ChangeKind::Modified);
+    assert_eq!(diff.old_text, "one\n");
+    assert_eq!(diff.new_text, "one local\n");
+}
+
+#[test]
+fn head_file_bytes_reads_the_committed_blob() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "changed\n").unwrap();
+    assert_eq!(head_file_bytes(root, "a.txt").unwrap(), b"one\n");
+    assert!(head_file_bytes(root, "missing.txt").is_err());
 }
 
 #[test]
@@ -649,4 +734,37 @@ fn stash_apply_streams_large_lfs_objects() {
     );
     stash_apply(root, "stash@{0}").unwrap();
     assert_eq!(std::fs::read(root.join("big.bin")).unwrap(), new);
+}
+
+#[test]
+fn unstash_sequence_creates_branch_restores_index_and_pops() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("b.txt"), "beta\n").unwrap();
+    git(root, &["add", "b.txt"]);
+    git(root, &["commit", "-q", "-m", "b"]);
+    std::fs::write(root.join("b.txt"), "beta staged\n").unwrap();
+    git(root, &["add", "b.txt"]);
+    std::fs::write(root.join("a.txt"), "one unstaged\n").unwrap();
+    stash_push(root, Some("mixed"), false, false).unwrap();
+
+    lazecode_git::create_branch(root, "recovered", true).unwrap();
+    assert_eq!(git(root, &["rev-parse", "--abbrev-ref", "HEAD"]), "recovered");
+    stash_apply_with(
+        root,
+        "stash@{0}",
+        &StashApplyOptions {
+            paths: None,
+            reinstate_index: true,
+        },
+    )
+    .unwrap();
+    stash_drop(root, "stash@{0}").unwrap();
+
+    assert!(stash_list(root).unwrap().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "one unstaged\n"
+    );
+    assert_eq!(git(root, &["show", ":b.txt"]), "beta staged");
 }

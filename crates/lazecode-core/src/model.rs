@@ -370,6 +370,9 @@ impl DiskStamp {
 pub struct FileTab {
     pub doc: Document,
     pub external: bool,
+    /// Tab label override for read-only snapshots ("README.md (HEAD)");
+    /// the document keeps its real path for syntax/language detection.
+    pub title_override: Option<String>,
     pub md_mode: MarkdownViewMode,
     pub annotate: bool,
     pub blame: Option<Vec<lazecode_git::BlameLine>>,
@@ -420,6 +423,11 @@ pub enum DiffSource {
     },
     /// 贮藏中单个文件的差异（基线 ↔ 贮藏内容，含未跟踪快照）。
     Stash {
+        stash: String,
+        path: String,
+    },
+    /// 贮藏文件的「更改前」版本 ↔ 当前工作区（Compare Before with Local）。
+    StashBeforeLocal {
         stash: String,
         path: String,
     },
@@ -557,7 +565,10 @@ pub struct Tab {
 impl Tab {
     pub fn title(&self) -> String {
         match &self.kind {
-            TabKind::File(file) => file.doc.title(),
+            TabKind::File(file) => file
+                .title_override
+                .clone()
+                .unwrap_or_else(|| file.doc.title()),
             TabKind::Compare(compare) => compare.title.clone(),
             TabKind::Image(img) => img
                 .path
@@ -579,6 +590,9 @@ impl Tab {
                 ),
                 DiffSource::Stash { stash, .. } => {
                     format!("Diff ({stash})")
+                }
+                DiffSource::StashBeforeLocal { .. } => {
+                    "Diff (Before ↔ Local)".to_string()
                 }
                 DiffSource::Files { .. } => diff
                     .path
@@ -953,6 +967,10 @@ pub struct ProjectState {
     pub log_loading: bool,
     /// Compare Versions 会话（稳定版 CompareDrawer）。
     pub compare_session: Option<CompareSession>,
+    /// Per-stash tracked/untracked groups (`stash@{n}` → details). Loaded on
+    /// demand by the Stash tab and the diff tab's cross-file navigation; the
+    /// UI and background refresh invalidate it through `invalidate_stash_details`.
+    pub stash_details: HashMap<String, lazecode_git::StashDetails>,
 }
 
 impl ProjectState {
@@ -1031,6 +1049,7 @@ impl ProjectState {
             git_loading: false,
             log_loading: false,
             compare_session: None,
+            stash_details: HashMap::new(),
         }
     }
 
@@ -1152,6 +1171,7 @@ impl ProjectState {
             git_loading: false,
             log_loading: false,
             compare_session: None,
+            stash_details: HashMap::new(),
         };
         // The worktree projection must exist before branch/changes accessors
         // are used (refresh_branches reads the active branch for pending count).
@@ -1736,6 +1756,7 @@ impl ProjectState {
             kind: TabKind::File(FileTab {
                 doc,
                 external,
+                title_override: None,
                 md_mode: if is_md {
                     MarkdownViewMode::Preview
                 } else {
@@ -1754,13 +1775,128 @@ impl ProjectState {
     }
 
     pub fn open_diff_source(&mut self, source: DiffSource) -> u64 {
+        self.open_diff_source_inner(source, false)
+    }
+
+    /// 「Show Diff in a New Tab」：跳过单例标签复用，总是新开一个 diff 标签。
+    pub fn open_diff_source_new_tab(&mut self, source: DiffSource) -> u64 {
+        self.open_diff_source_inner(source, true)
+    }
+
+    /// Cached file groups of one stash; loads (one native git pass) on first
+    /// use. Clone so callers can keep rendering while mutating the model.
+    pub fn stash_details_for(&mut self, stash: &str) -> Option<lazecode_git::StashDetails> {
+        if let Some(details) = self.stash_details.get(stash) {
+            return Some(details.clone());
+        }
+        let root = self.active_root().to_path_buf();
+        let details = lazecode_git::stash_details(&root, stash).ok()?;
+        self.stash_details.insert(stash.to_string(), details.clone());
+        Some(details)
+    }
+
+    /// Every changed path of a stash (tracked, then untracked) — the ordering
+    /// the stash tree and the diff tab's ←/→ navigation use.
+    pub fn stash_paths_for(&mut self, stash: &str) -> Vec<String> {
+        let Some(details) = self.stash_details_for(stash) else {
+            return Vec::new();
+        };
+        let mut paths = details.tracked;
+        paths.extend(details.untracked);
+        paths
+    }
+
+    pub fn invalidate_stash_details(&mut self) {
+        self.stash_details.clear();
+    }
+
+    /// Open a read-only repository-version snapshot (Open Repository Version):
+    /// the blob is staged into the OS temp dir so syntax highlighting, search
+    /// and links keep working on a real file, while the tab is read-only and
+    /// never writes back to the checkout.
+    pub fn open_revision_snapshot(
+        &mut self,
+        source_path: &Path,
+        bytes: &[u8],
+        label: String,
+        settings: &Settings,
+    ) -> Result<u64, String> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        source_path.hash(&mut hasher);
+        bytes.hash(&mut hasher);
+        let hash = hasher.finish();
+        let name = source_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "version".to_string());
+        let dir = std::env::temp_dir().join("lazecode-revisions");
+        std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+        let file = dir.join(format!("{hash:016x}-{name}"));
+        if !file.is_file() {
+            std::fs::write(&file, bytes).map_err(|err| err.to_string())?;
+        }
+        let worktree_root = self.active_root().to_path_buf();
+        if let Some(id) = self
+            .tabs
+            .iter()
+            .find(|tab| {
+                tab.worktree == worktree_root
+                    && match &tab.kind {
+                        TabKind::File(file_tab) => file_tab.doc.path == file,
+                        TabKind::Image(image) => image.path == file,
+                        _ => false,
+                    }
+            })
+            .map(|tab| tab.id)
+        {
+            self.set_active_tab(id);
+            return Ok(id);
+        }
+        let id = NEXT_TAB.fetch_add(1, Ordering::Relaxed);
+        if is_image_path(source_path) {
+            self.tabs.push(Tab {
+                id,
+                worktree: worktree_root,
+                kind: TabKind::Image(ImageTab {
+                    path: file,
+                    external: false,
+                }),
+            });
+            self.set_active_tab(id);
+            return Ok(id);
+        }
+        let mut doc = Document::open(&file, settings.editor.tab_width, settings.editor.use_spaces)
+            .map_err(|err| err.to_string())?;
+        doc.read_only = true;
+        self.tabs.push(Tab {
+            id,
+            worktree: worktree_root,
+            kind: TabKind::File(FileTab {
+                doc,
+                external: false,
+                title_override: Some(label),
+                md_mode: MarkdownViewMode::Code,
+                annotate: false,
+                blame: None,
+                disk_stamp: DiskStamp::read(&file),
+            }),
+        });
+        self.set_active_tab(id);
+        Ok(id)
+    }
+
+    fn open_diff_source_inner(&mut self, source: DiffSource, force_new: bool) -> u64 {
         let worktree_root = self.active_root().to_path_buf();
         let is_img = match &source {
             DiffSource::Worktree { path }
             | DiffSource::Commit { path, .. }
             | DiffSource::CompareWithLocal { path, .. }
             | DiffSource::CompareCommits { path, .. }
-            | DiffSource::Stash { path, .. } => is_image_path(std::path::Path::new(path)),
+            | DiffSource::Stash { path, .. }
+            | DiffSource::StashBeforeLocal { path, .. } => {
+                is_image_path(std::path::Path::new(path))
+            }
             DiffSource::Files { new_path, .. } => is_image_path(new_path),
         };
         if is_img {
@@ -1769,7 +1905,8 @@ impl ProjectState {
                 | DiffSource::Commit { path, .. }
                 | DiffSource::CompareWithLocal { path, .. }
                 | DiffSource::CompareCommits { path, .. }
-                | DiffSource::Stash { path, .. } => worktree_root.join(path),
+                | DiffSource::Stash { path, .. }
+                | DiffSource::StashBeforeLocal { path, .. } => worktree_root.join(path),
                 DiffSource::Files { new_path, .. } => new_path.clone(),
             };
             if let Ok(id) = self.open_file(path_buf, &Settings::default()) {
@@ -1787,7 +1924,7 @@ impl ProjectState {
                     && matches!(&tab.kind, TabKind::Diff(diff) if diff.source == source)
             })
             .map(|tab| tab.id);
-        if let Some(id) = existing {
+        if let Some(id) = existing.filter(|_| !force_new) {
             self.set_active_tab(id);
             return id;
         }
@@ -1796,7 +1933,8 @@ impl ProjectState {
             | DiffSource::Commit { path, .. }
             | DiffSource::CompareWithLocal { path, .. }
             | DiffSource::CompareCommits { path, .. }
-            | DiffSource::Stash { path, .. } => path.clone(),
+            | DiffSource::Stash { path, .. }
+            | DiffSource::StashBeforeLocal { path, .. } => path.clone(),
             DiffSource::Files { old_path, new_path } => format!(
                 "{} ↔ {}",
                 old_path
@@ -1811,7 +1949,7 @@ impl ProjectState {
         };
         // 稳定版语义（App.tsx enterDiff）：diff 是全局单例标签，换文件/
         // 换提交/换来源只换内容不新开标签；任两文件互比（Files）不参与。
-        if !matches!(source, DiffSource::Files { .. }) {
+        if !force_new && !matches!(source, DiffSource::Files { .. }) {
             let reuse = self.tabs.iter().position(|tab| {
                 tab.worktree == worktree_root
                     && matches!(

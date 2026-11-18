@@ -111,6 +111,31 @@ fn modify_diff_unstage_and_checkout() {
 }
 
 #[test]
+fn log_marks_head_and_puts_the_checked_out_branch_first() {
+    let dir = init();
+    std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "base", false).unwrap();
+
+    // `aaa` sorts before `main`; the checked-out branch must still lead the
+    // refs after HEAD so the compact log label names the current branch.
+    lazecode_git::create_branch(dir.path(), "aaa", false).unwrap();
+    lazecode_git::checkout_branch(dir.path(), "aaa").unwrap();
+
+    let log = lazecode_git::log(dir.path(), Default::default()).unwrap();
+    let refs = &log[0].refs;
+    assert_eq!(refs[0].kind, lazecode_git::RefKind::Head);
+    assert_eq!(refs[0].label, "HEAD");
+    assert_eq!(refs[1].kind, lazecode_git::RefKind::LocalBranch);
+    assert_eq!(refs[1].label, "aaa");
+    let main_at = refs
+        .iter()
+        .position(|r| r.kind == lazecode_git::RefKind::LocalBranch && r.label == "main")
+        .expect("main points at the same commit");
+    assert!(main_at > 1, "checked-out branch must precede main: {refs:?}");
+}
+
+#[test]
 fn stage_deletion_removes_index_entry() {
     let dir = init();
     std::fs::write(dir.path().join("gone.txt"), "bye\n").unwrap();

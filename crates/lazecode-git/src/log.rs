@@ -211,18 +211,24 @@ fn log_from_tips(
             .unwrap_or_default();
         let (message, body) = split_message(&raw);
         let mut labels = refs.get(&id).cloned().unwrap_or_default();
-        if head_branch.as_deref().is_some_and(|branch| {
-            labels
+        if let Some(branch) = head_branch.as_deref() {
+            // The log label shows the checked-out branch first (PyCharm's
+            // current-branch group sits right after HEAD): move it ahead of
+            // the other local branches and mark the commit with HEAD.
+            if let Some(position) = labels
                 .iter()
-                .any(|label| label.kind == RefKind::LocalBranch && label.label == branch)
-        }) {
-            labels.insert(
-                0,
-                RefLabel {
-                    label: "HEAD".to_string(),
-                    kind: RefKind::Head,
-                },
-            );
+                .position(|label| label.kind == RefKind::LocalBranch && label.label == branch)
+            {
+                let current = labels.remove(position);
+                labels.insert(0, current);
+                labels.insert(
+                    0,
+                    RefLabel {
+                        label: "HEAD".to_string(),
+                        kind: RefKind::Head,
+                    },
+                );
+            }
         }
         let in_head = if head_ancestors.is_empty() || head_branch.is_none() {
             None

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2};
 use lazecode_core::{AppModel, Command};
 use lazecode_git::{
-    lane_color, lane_x, CommitInfo, GraphBreak, GraphRowLayout, RefKind, GRAPH_BREAK_GAP, GRAPH_H,
+    lane_color, lane_x, CommitInfo, GraphBreak, GraphRowLayout, GRAPH_BREAK_GAP, GRAPH_H,
     LANE_W, NODE_R,
 };
 
@@ -2071,13 +2071,16 @@ fn draw_git_log(
                 let right_reserved = date_w + author_w + 16.0;
                 let content_right = (row.right() - right_reserved).max(msg_x + 100.0);
 
-                // Refs badges total width
-                let refs_w = commit
-                    .refs
-                    .iter()
-                    .take(3)
-                    .map(|r| r.label.chars().count() as f32 * 6.0 + 16.0)
-                    .sum::<f32>();
+                // Compact PyCharm-style reference label: one group name plus a
+                // fanned icon stack, capped at a third of the text area. The
+                // complete reference list lives in the hover tooltip.
+                let refs_max_w = ((content_right - msg_x) / 3.0).min(240.0).max(24.0);
+                let refs_cluster =
+                    crate::log_refs::prepare(ui.painter(), &commit.refs, refs_max_w);
+                let refs_w = refs_cluster
+                    .as_ref()
+                    .map(|cluster| cluster.width + 6.0)
+                    .unwrap_or(0.0);
 
                 // Available space for subject
                 let avail_for_subject = (content_right - msg_x - refs_w).max(80.0);
@@ -2109,41 +2112,18 @@ fn draw_git_log(
                 );
 
                 // log-ref: drawn immediately following the subject text (stable flex layout)
-                let mut badge_x = msg_x + actual_subject_w + 6.0;
-                for label in commit.refs.iter().take(3) {
-                    if badge_x >= content_right {
-                        break;
-                    }
-                    let color = match label.kind {
-                        RefKind::Head => Color32::from_rgb(0x3f, 0xb9, 0x50),
-                        RefKind::LocalBranch => Color32::from_rgb(0x3f, 0xb9, 0x50),
-                        RefKind::RemoteBranch => p.violet,
-                        RefKind::Tag => p.amber,
-                    };
-                    let (icon, isize): (Icon, f32) = match label.kind {
-                        RefKind::Tag => (Icon::Tag, 10.0),
-                        RefKind::RemoteBranch => (Icon::Cloud, 11.0),
-                        _ => (Icon::Branch, 11.0),
-                    };
-                    paint_icon(
-                        ui.painter(),
-                        Rect::from_center_size(
-                            Pos2::new(badge_x + 5.0, row.center().y),
-                            Vec2::splat(isize),
-                        ),
-                        icon,
-                        color,
+                if let Some(cluster) = refs_cluster {
+                    let badge_x = msg_x + actual_subject_w + 6.0;
+                    let id = ui.make_persistent_id(("git-log-refs", commit.id.as_str()));
+                    crate::log_refs::paint(
+                        ui,
+                        model.settings.language,
+                        &p,
+                        row,
+                        badge_x,
+                        &cluster,
+                        id,
                     );
-                    let text_x = badge_x + 12.0;
-                    let text_w = label.label.chars().count() as f32 * 6.0;
-                    ui.painter().text(
-                        Pos2::new(text_x, row.center().y),
-                        Align2::LEFT_CENTER,
-                        &label.label,
-                        FontId::proportional(11.5),
-                        color,
-                    );
-                    badge_x = text_x + text_w + 8.0;
                 }
 
                 // 3. Author column (right-aligned before date)

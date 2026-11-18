@@ -1177,56 +1177,48 @@ fn draw_pane(
                         );
                         msg_x += 16.0;
                     }
-                    let refs_w: f32 = commit
-                        .refs
-                        .iter()
-                        .take(3)
-                        .map(|r| r.label.chars().count() as f32 * 6.0 + 20.0)
-                        .sum();
-                    let msg_right = row.right() - AUTHOR_W - DATE_W - refs_w - 12.0;
+                    let content_right =
+                        (row.right() - AUTHOR_W - DATE_W - 12.0).max(msg_x + 60.0);
+                    let refs_max_w = ((content_right - msg_x) / 3.0).min(240.0).max(24.0);
+                    let refs_cluster =
+                        crate::log_refs::prepare(ui.painter(), &commit.refs, refs_max_w);
+                    let refs_w = refs_cluster
+                        .as_ref()
+                        .map(|cluster| cluster.width + 6.0)
+                        .unwrap_or(0.0);
+                    let subject_right = (content_right - refs_w).max(msg_x + 60.0);
+                    let subject_font = FontId::proportional(13.0);
+                    let subject_galley = ui.painter().layout_no_wrap(
+                        commit.message.clone(),
+                        subject_font.clone(),
+                        p.text,
+                    );
+                    let actual_subject_w =
+                        subject_galley.size().x.min(subject_right - msg_x);
                     text_clipped(
                         ui.painter(),
                         Rect::from_min_max(
                             Pos2::new(msg_x, row.top()),
-                            Pos2::new(msg_right.max(msg_x + 60.0), row.bottom()),
+                            Pos2::new(msg_x + actual_subject_w, row.bottom()),
                         ),
                         &commit.message,
-                        FontId::proportional(13.0),
+                        subject_font,
                         p.text,
                         Align2::LEFT_CENTER,
                     );
-                    let mut badge_x = msg_right.max(msg_x + 60.0) + 4.0;
-                    for label in commit.refs.iter().take(3) {
-                        let color = match label.kind {
-                            lazecode_git::RefKind::Head => p.green,
-                            lazecode_git::RefKind::LocalBranch => p.green,
-                            lazecode_git::RefKind::RemoteBranch => p.violet,
-                            lazecode_git::RefKind::Tag => p.amber,
-                        };
-                        let (icon, isize): (Icon, f32) = match label.kind {
-                            lazecode_git::RefKind::Tag => (Icon::Tag, 10.0),
-                            lazecode_git::RefKind::RemoteBranch => (Icon::Cloud, 11.0),
-                            _ => (Icon::Branch, 11.0),
-                        };
-                        paint_icon(
-                            ui.painter(),
-                            Rect::from_center_size(
-                                Pos2::new(badge_x + 5.0, row.center().y),
-                                Vec2::splat(isize),
-                            ),
-                            icon,
-                            color,
+                    if let Some(cluster) = refs_cluster {
+                        let badge_x = msg_x + actual_subject_w + 6.0;
+                        let id =
+                            ui.make_persistent_id(("compare-log-refs", commit.id.as_str()));
+                        crate::log_refs::paint(
+                            ui,
+                            model.settings.language,
+                            &p,
+                            row,
+                            badge_x,
+                            &cluster,
+                            id,
                         );
-                        let text_x = badge_x + 12.0;
-                        let text_w = label.label.chars().count() as f32 * 6.0;
-                        ui.painter().text(
-                            Pos2::new(text_x, row.center().y),
-                            Align2::LEFT_CENTER,
-                            &label.label,
-                            FontId::proportional(11.5),
-                            color,
-                        );
-                        badge_x = text_x + text_w + 8.0;
                     }
                     // 作者（76px 右对齐）+ 日期（104px 右对齐）。
                     let author_rect = Rect::from_min_max(

@@ -481,12 +481,40 @@ fn main() -> anyhow::Result<()> {
         time: Some(1.0),
         ..Default::default()
     };
-    let output = ctx.run_ui(raw, |ui| {
+    // `LAZE_POINTER=x,y` (logical points) hovers a widget; a second frame lets
+    // egui's tooltip delay elapse so hover-only surfaces land in the capture.
+    let hover = std::env::var("LAZE_POINTER").ok().and_then(|raw| {
+        let (x, y) = raw.split_once(',')?;
+        Some(egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))
+    });
+    let input_for = |time: f64, move_pointer: bool| {
+        let mut input = raw.clone();
+        input.time = Some(time);
+        if move_pointer {
+            if let Some(pos) = hover {
+                input.events = vec![egui::Event::PointerMoved(pos)];
+            }
+        }
+        input
+    };
+    let mut earlier_textures = Vec::new();
+    let mut output = ctx.run_ui(input_for(1.0, true), |ui| {
         lazecode_ui::draw(ui, &mut model, &mut runtime);
     });
+    if hover.is_some() {
+        // Keep the pointer still: egui only opens hover tooltips once the
+        // pointer has settled. The first frame that opens a tooltip is a
+        // sizing pass, so a third frame actually paints it.
+        for time in [2.0, 3.0] {
+            earlier_textures.push(output.textures_delta);
+            output = ctx.run_ui(input_for(time, false), |ui| {
+                lazecode_ui::draw(ui, &mut model, &mut runtime);
+            });
+        }
+    }
     let width = (W * SCALE) as u32;
     let height = (H * SCALE) as u32;
-    let pixels = render(&ctx, output, width, height)?;
+    let pixels = render(&ctx, output, earlier_textures, width, height)?;
 
     save_png(&output_path, width, height, &pixels)?;
     println!("wrote {}", output_path.display());
@@ -495,7 +523,8 @@ fn main() -> anyhow::Result<()> {
 
 fn render(
     ctx: &egui::Context,
-    output: egui::FullOutput,
+    mut output: egui::FullOutput,
+    mut earlier_textures: Vec<egui::TexturesDelta>,
     width: u32,
     height: u32,
 ) -> anyhow::Result<Vec<u8>> {
@@ -537,12 +566,21 @@ fn render(
         size_in_pixels: [width, height],
         pixels_per_point: output.pixels_per_point,
     };
-    let mut textures = output.textures_delta;
-    for (id, deltas) in &textures.set {
-        for delta in deltas {
-            renderer.update_texture(&device, &queue, *id, delta);
+    let mut apply_textures = |batch: &egui::TexturesDelta| {
+        for (id, deltas) in &batch.set {
+            for delta in deltas {
+                renderer.update_texture(&device, &queue, *id, delta);
+            }
         }
+        for id in &batch.free {
+            renderer.free_texture(id);
+        }
+    };
+    for batch in &mut earlier_textures {
+        apply_textures(batch);
+        batch.clear();
     }
+    apply_textures(&output.textures_delta);
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("snapshot"),
     });
@@ -604,10 +642,7 @@ fn render(
         },
     );
     queue.submit(Some(encoder.finish()));
-    for id in textures.free.drain() {
-        renderer.free_texture(&id);
-    }
-    textures.clear();
+    output.textures_delta.clear();
     let slice = buffer.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |result| {

@@ -10,6 +10,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- In the Git log branch tree, the copy shortcut (Cmd+C / Ctrl+C) copies the
+  selected branch names in full — `feature/a/b` and `origin/feature/a/b` keep
+  every path segment — joining multi-selection line by line. A focused editor
+  or console keeps its own copy behavior; clicking a branch row hands the
+  keyboard to the tree.
+
 - The Git drawer gains a Stash tab, shown only while the checkout has stash
   entries (PyCharm-style). It lists stashes with the branch each was created
   on, shows the selected stash's changes as a directory tree with per-folder

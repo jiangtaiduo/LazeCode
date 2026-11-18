@@ -2583,6 +2583,10 @@ fn draw_branch_list(
                             open_menu = Some((branch.name.clone(), branch.remote, anchor));
                         }
                         if response.clicked() {
+                            // 分支树成为键盘焦点：编辑器/控制台让位，Cmd+C
+                            // 复制选中分支全名。
+                            rt.editor_focus = None;
+                            rt.terminal_focus = None;
                             let cmd = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
                             let shift = ui.input(|i| i.modifiers.shift);
                             if cmd {
@@ -2706,6 +2710,8 @@ fn draw_branch_list(
                                 open_menu = Some((branch.name.clone(), true, anchor));
                             }
                             if response.clicked() {
+                                rt.editor_focus = None;
+                                rt.terminal_focus = None;
                                 let cmd = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
                                 if cmd {
                                     let selection = &mut model.projects[index].ref_selection;
@@ -2781,6 +2787,20 @@ fn draw_branch_list(
                 }
             });
     });
+    // Cmd+C / Ctrl+C：复制选中分支的全名（保留 a/b 路径；多选按行拼接）。
+    // 文本面（编辑器/终端）持有焦点时让位给它们自己的复制。
+    let copy_event = ui.input(|input| {
+        input
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Copy))
+    });
+    if copy_event && rt.editor_focus.is_none() && rt.terminal_focus.is_none() {
+        let selection = model.projects[index].ref_selection.clone();
+        if !selection.is_empty() {
+            ui.ctx().copy_text(selection.join("\n"));
+        }
+    }
     // Apply deferred actions.
     if let Some(dir) = toggle_dir {
         if expanded_dirs.contains(&dir) {

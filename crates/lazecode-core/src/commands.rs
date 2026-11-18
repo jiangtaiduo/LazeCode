@@ -72,7 +72,10 @@ pub enum Command {
         include_untracked: bool,
     },
     StashApply(String),
+    StashPop(String),
     StashDrop(String),
+    /// Drop every stash entry of the active checkout.
+    StashClear,
     /// Shelve the given paths (empty = all tracked changes) as a named patch.
     ShelfSave {
         name: String,
@@ -229,6 +232,11 @@ pub enum Command {
     },
     OpenCompareWithLocalDiff {
         commit: String,
+        path: String,
+    },
+    /// 打开贮藏中单个文件的差异页。
+    OpenStashDiff {
+        stash: String,
         path: String,
     },
     OpenCompareCommitsDiff {

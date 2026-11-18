@@ -11,7 +11,7 @@ use crate::{discover, resolve_commit, short_id, workdir, Result};
 
 const MAX_DIFF_BYTES: usize = 4 * 1024 * 1024;
 
-fn load_blob_capped(repo: &gix::Repository, oid: ObjectId) -> Vec<u8> {
+pub(crate) fn load_blob_capped(repo: &gix::Repository, oid: ObjectId) -> Vec<u8> {
     let Ok(header) = repo.find_header(oid) else {
         return Vec::new();
     };
@@ -21,7 +21,7 @@ fn load_blob_capped(repo: &gix::Repository, oid: ObjectId) -> Vec<u8> {
     blob_bytes(repo, oid).unwrap_or_default()
 }
 
-fn build_file_diff(
+pub(crate) fn build_file_diff(
     path: String,
     old: Vec<u8>,
     new: Vec<u8>,

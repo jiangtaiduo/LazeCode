@@ -8,6 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- The Git drawer gains a Stash tab, shown only while the checkout has stash
+  entries (PyCharm-style). It lists stashes with the branch each was created
+  on, shows the selected stash's changes as a directory tree with per-folder
+  file counts, and keeps `--include-untracked` snapshots under a separate
+  "Untracked files on <branch>" root. Apply/Pop buttons sit in the footer;
+  the ⋮ menu offers Pop, Apply, Drop, Clear and Refresh; double-clicking a
+  file (or its context menu) opens the diff between the stash base and the
+  stashed content, and files still present in the worktree can be opened in
+  the editor.
+
 ### Fixed
 
 - Closing the last editor tab of a Single files workspace no longer crashes

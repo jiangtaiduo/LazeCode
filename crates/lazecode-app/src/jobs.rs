@@ -453,6 +453,10 @@ impl JobQueue {
                     lazecode_git::diff_commits(&job_root, from, to, path)
                         .map_err(|err| err.to_string())
                 }
+                DiffSource::Stash { stash, path } => {
+                    lazecode_git::stash_file_diff(&job_root, stash, path)
+                        .map_err(|err| err.to_string())
+                }
                 DiffSource::Files { old_path, new_path } => {
                     lazecode_git::diff_two_files(old_path, new_path).map_err(|err| err.to_string())
                 }
@@ -2378,6 +2382,63 @@ impl JobQueue {
                     },
                 );
             }
+            Command::StashPop(stash) => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.active_root().to_path_buf())
+                    .unwrap_or_default();
+                let stash = stash.clone();
+                self.spawn("stash-pop", format!("stash-p:{root:?}:{stash}"), move || {
+                    let result = lazecode_git::stash_pop(&root, &stash);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => format!("已弹出 {stash}"),
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::StashClear => {
+                let zh = model.settings.language.is_zh();
+                let root = model
+                    .active_project()
+                    .map(|project| project.active_root().to_path_buf())
+                    .unwrap_or_default();
+                self.spawn("stash-clear", format!("stash-c:{root:?}"), move || {
+                    // 丢弃后索引前移，重复丢弃 stash@{0} 直到清空。
+                    let mut dropped = 0usize;
+                    let mut error = None;
+                    loop {
+                        match lazecode_git::stash_drop(&root, "stash@{0}") {
+                            Ok(_) => dropped += 1,
+                            Err(err) => {
+                                if dropped == 0 {
+                                    error = Some(err.to_string());
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    let ok = error.is_none();
+                    JobResult::OpDone {
+                        root,
+                        message: match error {
+                            Some(err) => err,
+                            None if zh => format!("已清空 {dropped} 条贮藏"),
+                            None => format!("Cleared {dropped} stash entr(y/ies)"),
+                        },
+                        ok,
+                        refresh: true,
+                        reload_files: false,
+                        clear_commit_message: false,
+                    }
+                });
+            }
             Command::ShelfSave { name, paths } => {
                 let zh = model.settings.language.is_zh();
                 let root = model
@@ -2752,6 +2813,17 @@ impl JobQueue {
             Command::OpenCommitDiff { commit, path } => {
                 if let Some(project) = model.active_project_mut() {
                     let source = DiffSource::Commit { commit, path };
+                    project.open_diff_source(source.clone());
+                    let root = project.active_root().to_path_buf();
+                    self.diff_source(root, source);
+                }
+            }
+            Command::OpenStashDiff { stash, path } => {
+                if let Some(project) = model.active_project_mut() {
+                    let source = DiffSource::Stash {
+                        stash: stash.clone(),
+                        path: path.clone(),
+                    };
                     project.open_diff_source(source.clone());
                     let root = project.active_root().to_path_buf();
                     self.diff_source(root, source);
@@ -3611,6 +3683,16 @@ impl JobQueue {
                 reload_files,
                 clear_commit_message,
             } => {
+                // Stash jobs carry a `stash…` key: their result changes the
+                // stash list, so the drawer tab must reload it.
+                if completion.key.starts_with("stash") {
+                    runtime.stash_loaded = None;
+                    runtime.stash_entries.clear();
+                    runtime.stash_selected = None;
+                    runtime.stash_details = None;
+                    runtime.stash_collapsed.clear();
+                    runtime.stash_file_sel = None;
+                }
                 model.toast(
                     message,
                     if ok {

@@ -190,6 +190,32 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             MenuKind::CommitExtras => {
                 draw_commit_extras_menu(ui, model, rt, theme, screen, menu);
             }
+            MenuKind::StashTabMenu { project } => {
+                let payload = menu.payload.clone();
+                draw_stash_tab_menu(
+                    ui,
+                    model,
+                    rt,
+                    theme,
+                    screen,
+                    menu,
+                    project,
+                    payload.as_deref(),
+                );
+            }
+            MenuKind::StashFileMenu { project } => {
+                let payload = menu.payload.clone();
+                draw_stash_file_menu(
+                    ui,
+                    model,
+                    rt,
+                    theme,
+                    screen,
+                    menu,
+                    project,
+                    payload.as_deref().unwrap_or(""),
+                );
+            }
             MenuKind::CommitViewOptions => {
                 draw_commit_view_options_menu(ui, model, rt, theme, screen, menu);
             }
@@ -4232,6 +4258,166 @@ fn draw_commit_extras_menu(
         rt.menu = Some(menu);
     }
 }
+/// Stash 页签 ⋮ 菜单（对齐 PyCharm：Apply / Pop / Drop / Clear）。
+fn draw_stash_tab_menu(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    screen: Rect,
+    menu: MenuState,
+    _project: usize,
+    payload: Option<&str>,
+) {
+    let stash = payload
+        .map(str::to_string)
+        .or_else(|| rt.stash_selected.clone());
+    // PyCharm 顺序：Pop 在最前，危险操作（丢弃/清空）垫底并标红。
+    let items: [(&str, u8, bool); 5] = [
+        (crate::tr!(model, "Pop", "弹出"), 1, false),
+        (crate::tr!(model, "Apply", "应用"), 0, false),
+        (crate::tr!(model, "Drop", "丢弃"), 2, true),
+        (crate::tr!(model, "Clear", "清空"), 3, true),
+        (crate::tr!(model, "Refresh", "刷新"), 4, false),
+    ];
+    let height = items.len() as f32 * MENU_ROW_H + 8.0;
+    let rect = popover_rect(screen, menu.anchor, 180.0, height);
+    menu_frame(ui, rect, theme);
+    let mut picked: Option<u8> = None;
+    for (i, (label, code, danger)) in items.iter().enumerate() {
+        let row = Rect::from_min_size(
+            Pos2::new(rect.left() + 4.0, rect.top() + 4.0 + i as f32 * MENU_ROW_H),
+            Vec2::new(rect.width() - 8.0, MENU_ROW_H),
+        );
+        let enabled = stash.is_some() || *code == 4;
+        if menu_row(
+            ui,
+            theme,
+            row,
+            ui.scope_id().with(("stash-tab", i)),
+            label,
+            *danger,
+            enabled,
+        ) {
+            picked = Some(*code);
+        }
+    }
+    let mut close = false;
+    match picked {
+        Some(0) => {
+            if let Some(stash) = stash {
+                model.queue(Command::StashApply(stash));
+            }
+            close = true;
+        }
+        Some(1) => {
+            if let Some(stash) = stash {
+                model.queue(Command::StashPop(stash));
+            }
+            close = true;
+        }
+        Some(2) => {
+            if let Some(stash) = stash {
+                model.queue(Command::StashDrop(stash));
+            }
+            close = true;
+        }
+        Some(3) => {
+            model.queue(Command::StashClear);
+            close = true;
+        }
+        Some(4) => {
+            rt.stash_loaded = None;
+            rt.stash_details = None;
+            close = true;
+        }
+        _ => {}
+    }
+    if should_dismiss(ui, rect, menu.opened_frame, rt.frame_count) {
+        close = true;
+    }
+    if !close {
+        rt.menu = Some(menu);
+    }
+}
+
+/// Stash 页签文件行右键菜单：显示差异 / 打开工作区文件。
+fn draw_stash_file_menu(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    screen: Rect,
+    menu: MenuState,
+    _project: usize,
+    path: &str,
+) {
+    let stash = rt.stash_selected.clone();
+    let file_path = model
+        .active_project()
+        .map(|project| project.active_root().join(path));
+    let file_exists = file_path.as_ref().is_some_and(|path| path.is_file());
+    let items: [(&str, u8, bool); 2] = [
+        (crate::tr!(model, "Show Diff", "显示差异"), 0, false),
+        (crate::tr!(model, "Open File", "打开文件"), 1, false),
+    ];
+    let height = items.len() as f32 * MENU_ROW_H + 8.0;
+    let rect = popover_rect(screen, menu.anchor, 190.0, height);
+    menu_frame(ui, rect, theme);
+    let mut picked: Option<u8> = None;
+    for (i, (label, code, danger)) in items.iter().enumerate() {
+        let row = Rect::from_min_size(
+            Pos2::new(rect.left() + 4.0, rect.top() + 4.0 + i as f32 * MENU_ROW_H),
+            Vec2::new(rect.width() - 8.0, MENU_ROW_H),
+        );
+        let enabled = if *code == 0 {
+            stash.is_some()
+        } else {
+            file_exists
+        };
+        if menu_row(
+            ui,
+            theme,
+            row,
+            ui.scope_id().with(("stash-file", i)),
+            label,
+            *danger,
+            enabled,
+        ) {
+            picked = Some(*code);
+        }
+    }
+    let mut close = false;
+    match picked {
+        Some(0) => {
+            if let Some(stash) = stash {
+                model.queue(Command::OpenStashDiff {
+                    stash,
+                    path: path.to_string(),
+                });
+            }
+            close = true;
+        }
+        Some(1) => {
+            if let Some(path) = file_path {
+                model.queue(Command::OpenFileAt {
+                    path,
+                    line: 0,
+                    character: 0,
+                });
+            }
+            close = true;
+        }
+        _ => {}
+    }
+    if should_dismiss(ui, rect, menu.opened_frame, rt.frame_count) {
+        close = true;
+    }
+    if !close {
+        rt.menu = Some(menu);
+    }
+}
+
 fn draw_commit_view_options_menu(
     ui: &mut Ui,
     model: &mut AppModel,

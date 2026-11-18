@@ -287,6 +287,46 @@ fn main() -> anyhow::Result<()> {
         });
     }
     match mode.as_str() {
+        "stash" | "stash_untracked" | "stash_menu" | "stash_file_menu" => {
+            // 贮藏页签：打开 Git 抽屉并切到 Stash。
+            model.ui.sidebar_view = SidebarView::Git;
+            model.ui.sidebar_visible = true;
+            runtime.commit_tab = lazecode_ui::runtime::CommitTab::Stash;
+            // 预加载选择（真实运行由抽屉首帧加载；快照需要确定性选择）。
+            runtime.stash_entries =
+                lazecode_git::stash_list(&project_root).unwrap_or_default();
+            runtime.stash_loaded = Some(
+                std::fs::canonicalize(&project_root).unwrap_or_else(|_| project_root.clone()),
+            );
+            if mode == "stash_untracked" {
+                // 第二条贮藏（含未跟踪快照）。
+                runtime.stash_selected = Some("stash@{1}".to_string());
+            }
+            if mode == "stash_menu" {
+                runtime.menu = Some(lazecode_ui::runtime::MenuState {
+                    kind: lazecode_ui::runtime::MenuKind::StashTabMenu { project: 0 },
+                    anchor: egui::Rect::from_min_size(
+                        egui::pos2(150.0, 62.0),
+                        egui::vec2(1.0, 1.0),
+                    ),
+                    payload: None,
+                    opened_frame: 0,
+                });
+            }
+            if mode == "stash_file_menu" {
+                runtime.stash_file_sel =
+                    Some("backend/app/queue/pipeline_registry.py".to_string());
+                runtime.menu = Some(lazecode_ui::runtime::MenuState {
+                    kind: lazecode_ui::runtime::MenuKind::StashFileMenu { project: 0 },
+                    anchor: egui::Rect::from_min_size(
+                        egui::pos2(160.0, 260.0),
+                        egui::vec2(1.0, 1.0),
+                    ),
+                    payload: Some("backend/app/queue/pipeline_registry.py".to_string()),
+                    opened_frame: 0,
+                });
+            }
+        }
         "settings" => runtime.settings_open = true,
         "settings-editor" => {
             runtime.settings_open = true;

@@ -2476,6 +2476,13 @@ fn draw_diff(
             }
         }
         DiffSource::Files { .. } => crate::tr!(model, "File vs File", "两文件对比").to_string(),
+        DiffSource::Stash { stash, .. } => {
+            if zh {
+                format!("{stash} 中的更改")
+            } else {
+                format!("Changes in {stash}")
+            }
+        }
         DiffSource::Worktree { .. } => {
             crate::tr!(model, "Working tree vs index", "工作区 vs 索引").to_string()
         }

@@ -418,6 +418,11 @@ pub enum DiffSource {
         to: String,
         path: String,
     },
+    /// 贮藏中单个文件的差异（基线 ↔ 贮藏内容，含未跟踪快照）。
+    Stash {
+        stash: String,
+        path: String,
+    },
     Files {
         old_path: PathBuf,
         new_path: PathBuf,
@@ -572,6 +577,9 @@ impl Tab {
                     &from[..from.len().min(7)],
                     &to[..to.len().min(7)]
                 ),
+                DiffSource::Stash { stash, .. } => {
+                    format!("Diff ({stash})")
+                }
                 DiffSource::Files { .. } => diff
                     .path
                     .rsplit('/')
@@ -1751,7 +1759,8 @@ impl ProjectState {
             DiffSource::Worktree { path }
             | DiffSource::Commit { path, .. }
             | DiffSource::CompareWithLocal { path, .. }
-            | DiffSource::CompareCommits { path, .. } => is_image_path(std::path::Path::new(path)),
+            | DiffSource::CompareCommits { path, .. }
+            | DiffSource::Stash { path, .. } => is_image_path(std::path::Path::new(path)),
             DiffSource::Files { new_path, .. } => is_image_path(new_path),
         };
         if is_img {
@@ -1759,7 +1768,8 @@ impl ProjectState {
                 DiffSource::Worktree { path }
                 | DiffSource::Commit { path, .. }
                 | DiffSource::CompareWithLocal { path, .. }
-                | DiffSource::CompareCommits { path, .. } => worktree_root.join(path),
+                | DiffSource::CompareCommits { path, .. }
+                | DiffSource::Stash { path, .. } => worktree_root.join(path),
                 DiffSource::Files { new_path, .. } => new_path.clone(),
             };
             if let Ok(id) = self.open_file(path_buf, &Settings::default()) {
@@ -1785,7 +1795,8 @@ impl ProjectState {
             DiffSource::Worktree { path }
             | DiffSource::Commit { path, .. }
             | DiffSource::CompareWithLocal { path, .. }
-            | DiffSource::CompareCommits { path, .. } => path.clone(),
+            | DiffSource::CompareCommits { path, .. }
+            | DiffSource::Stash { path, .. } => path.clone(),
             DiffSource::Files { old_path, new_path } => format!(
                 "{} ↔ {}",
                 old_path

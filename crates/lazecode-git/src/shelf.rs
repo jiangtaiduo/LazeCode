@@ -25,7 +25,37 @@ use crate::{discover, workdir, Result};
 pub struct StashEntry {
     /// e.g. `stash@{0}`.
     pub name: String,
+    /// Raw reflog message: `On <branch>: <message>` or
+    /// `WIP on <branch>: <sha> <subject>`.
     pub subject: String,
+    /// Branch the stash was created on, parsed from the reflog message.
+    pub branch: Option<String>,
+}
+
+impl StashEntry {
+    /// Reflog message without git's `On <branch>:` / `WIP on <branch>: <sha>`
+    /// prefix — the text the user typed when creating the stash.
+    pub fn message(&self) -> String {
+        stash_message_parts(&self.subject).1
+    }
+}
+
+/// Split a stash reflog message into `(branch, message)`.
+fn stash_message_parts(subject: &str) -> (Option<String>, String) {
+    let subject = subject.trim();
+    if let Some(rest) = subject.strip_prefix("On ") {
+        if let Some((branch, message)) = rest.split_once(": ") {
+            return (Some(branch.to_string()), message.trim().to_string());
+        }
+    }
+    if let Some(rest) = subject.strip_prefix("WIP on ") {
+        if let Some((branch, message)) = rest.split_once(": ") {
+            // Drop the abbreviated commit id git puts in front of the subject.
+            let message = message.split_once(' ').map(|(_, tail)| tail).unwrap_or(message);
+            return (Some(branch.to_string()), message.trim().to_string());
+        }
+    }
+    (None, subject.to_string())
 }
 
 pub fn stash_list(root: &Path) -> Result<Vec<StashEntry>> {
@@ -43,9 +73,11 @@ pub fn stash_list(root: &Path) -> Result<Vec<StashEntry>> {
     let mut entries = Vec::new();
     for (index, line) in lines.enumerate() {
         let line = line.map_err(|err| anyhow!("cannot parse stash reflog: {err}"))?;
+        let subject = String::from_utf8_lossy(line.message.as_ref()).to_string();
         entries.push(StashEntry {
             name: format!("stash@{{{index}}}"),
-            subject: String::from_utf8_lossy(line.message.as_ref()).to_string(),
+            branch: stash_message_parts(&subject).0,
+            subject,
         });
     }
     Ok(entries)
@@ -320,6 +352,68 @@ pub fn stash_files(root: &Path, stash: &str) -> Result<Vec<String>> {
     paths.sort();
     paths.dedup();
     Ok(paths)
+}
+
+/// 贮藏内容按 PyCharm 的两个树根拆分：已跟踪改动 + 未跟踪文件快照。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StashDetails {
+    /// Paths whose tracked content differs between the stash base and the
+    /// stashed worktree state (sorted).
+    pub tracked: Vec<String>,
+    /// Paths captured by `git stash push --include-untracked` (sorted).
+    pub untracked: Vec<String>,
+}
+
+pub fn stash_details(root: &Path, stash: &str) -> Result<StashDetails> {
+    let repo = discover(root)?;
+    let stash = stash_oid(&repo, stash)?;
+    let commit = repo.find_commit(stash)?;
+    let mut parents = commit.parent_ids().map(|id| id.detach());
+    let base_id = parents
+        .next()
+        .ok_or_else(|| anyhow!("stash has no base commit"))?;
+    let base = commit_tree_map(&repo, base_id)?;
+    let stashed = commit_tree_map(&repo, stash)?;
+    let mut tracked = Vec::new();
+    for path in stashed.keys().chain(base.keys()) {
+        if stashed.get(path) != base.get(path) {
+            tracked.push(path.clone());
+        }
+    }
+    tracked.sort();
+    tracked.dedup();
+    let _index_parent = parents.next();
+    let mut untracked: Vec<String> = match parents.next() {
+        Some(id) => commit_tree_map(&repo, id)?.keys().cloned().collect(),
+        None => Vec::new(),
+    };
+    untracked.sort();
+    untracked.dedup();
+    Ok(StashDetails { tracked, untracked })
+}
+
+/// 单个文件在贮藏中的差异：基线与贮藏内容（含未跟踪快照）对比。
+pub fn stash_file_diff(root: &Path, stash: &str, path: &str) -> Result<crate::model::FileDiff> {
+    use crate::diff::{build_file_diff, load_blob_capped};
+    let repo = discover(root)?;
+    let spec = stash_oid(&repo, stash)?;
+    let (_, base, _, stashed) = stash_trees(&repo, spec)?;
+    crate::ops::validate_repo_path(path)?;
+    let old_entry = base.get(path);
+    let new_entry = stashed.get(path);
+    let old = old_entry
+        .map(|entry| load_blob_capped(&repo, entry.oid))
+        .unwrap_or_default();
+    let new = new_entry
+        .map(|entry| load_blob_capped(&repo, entry.oid))
+        .unwrap_or_default();
+    Ok(build_file_diff(
+        path.to_string(),
+        old,
+        new,
+        old_entry.is_some(),
+        new_entry.is_some(),
+    ))
 }
 
 fn read_worktree(path: &Path) -> Result<Option<(Vec<u8>, u32)>> {

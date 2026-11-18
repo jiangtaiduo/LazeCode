@@ -114,6 +114,14 @@ pub enum MenuKind {
     ShelfContext {
         project: usize,
     },
+    /// Stash 页签 ⋮ 菜单：应用 / 弹出 / 丢弃 / 清空 / 刷新。
+    StashTabMenu {
+        project: usize,
+    },
+    /// Stash 页签文件行右键菜单（payload = 仓库相对路径）。
+    StashFileMenu {
+        project: usize,
+    },
     Project,
     Branch,
     Worktree,
@@ -663,6 +671,19 @@ pub struct UiRuntime {
     pub shelf_selected: Option<String>,
     /// 选中的架藏文件（仓库相对路径，单架藏内多选）。
     pub shelf_file_sel: Vec<String>,
+    // --- Stash 页签状态 ---
+    /// 贮藏列表（抽屉可见时按仓库加载；决定页签是否显示）。
+    pub stash_entries: Vec<lazecode_git::StashEntry>,
+    /// 已加载贮藏数据所属仓库（切换项目或 git 变更后重新加载）。
+    pub stash_loaded: Option<std::path::PathBuf>,
+    /// 当前选中的贮藏，如 `stash@{0}`。
+    pub stash_selected: Option<String>,
+    /// 选中贮藏的文件分组（加载后缓存，切换选择时重建）。
+    pub stash_details: Option<(String, lazecode_git::StashDetails)>,
+    /// 折叠的树根/目录键（`tracked:…` / `untracked:…`；默认展开）。
+    pub stash_collapsed: std::collections::HashSet<String>,
+    /// 选中的贮藏文件（仓库相对路径）。
+    pub stash_file_sel: Option<String>,
     pub commit_view_menu_frame: u64,
     pub cmp_view_menu_frame: u64,
     pub new_ignore_pattern: String,
@@ -679,11 +700,13 @@ pub struct BranchSubmenuState {
     pub anchor: egui::Rect,
 }
 
-/// CommitDrawer 顶部页签（稳定版 tabCommit / tabShelf）。
+/// CommitDrawer 顶部页签（稳定版 tabCommit / tabShelf + 贮藏）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CommitTab {
     Commit,
     Shelf,
+    /// 仅在仓库存在 stash 记录时显示。
+    Stash,
 }
 
 impl Default for UiRuntime {
@@ -761,6 +784,12 @@ impl Default for UiRuntime {
             shelf_files_map: HashMap::new(),
             shelf_selected: None,
             shelf_file_sel: Vec::new(),
+            stash_entries: Vec::new(),
+            stash_loaded: None,
+            stash_selected: None,
+            stash_details: None,
+            stash_collapsed: std::collections::HashSet::new(),
+            stash_file_sel: None,
             tree_submenu: None,
             branch_submenu: None,
             branch_sections_collapsed: std::collections::HashSet::new(),

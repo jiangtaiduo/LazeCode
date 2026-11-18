@@ -1,7 +1,8 @@
 use lazecode_git::{
     blame, compare_commits, diff_patch_paths, file_history, shelf_delete, shelf_files, shelf_list,
     shelf_patch, shelf_rename, shelf_restore, shelf_restore_partial, shelf_save, shelf_save_paths,
-    stash_apply, stash_drop, stash_files, stash_list, stash_pop, stash_push, submodule_list,
+    stash_apply, stash_details, stash_drop, stash_file_diff, stash_files, stash_list, stash_pop,
+    stash_push, submodule_list,
 };
 use std::path::Path;
 use std::process::Command;
@@ -54,6 +55,51 @@ fn stash_round_trip() {
     );
     stash_drop(root, "stash@{0}").unwrap();
     assert!(stash_list(root).unwrap().is_empty());
+}
+
+#[test]
+fn stash_entry_parses_branch_and_clean_message() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+    stash_push(root, Some("WIP pre-merge"), false, false).unwrap();
+    let list = stash_list(root).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].branch.as_deref(), Some("main"));
+    assert_eq!(list[0].message(), "WIP pre-merge");
+
+    // Without -m git writes `WIP on <branch>: <sha> <subject>`; the default
+    // message must come out without the abbreviated id.
+    std::fs::write(root.join("a.txt"), "one\nthree\n").unwrap();
+    stash_push(root, None, false, false).unwrap();
+    let list = stash_list(root).unwrap();
+    let default_entry = list
+        .iter()
+        .find(|entry| entry.subject.starts_with("WIP on "))
+        .expect("default stash message");
+    assert_eq!(default_entry.branch.as_deref(), Some("main"));
+    assert!(!default_entry.message().contains("WIP on"));
+}
+
+#[test]
+fn stash_details_split_tracked_and_untracked_with_diff() {
+    let dir = repo();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+    std::fs::write(root.join("new.txt"), "brand new\n").unwrap();
+    stash_push(root, Some("split me"), false, true).unwrap();
+
+    let details = stash_details(root, "stash@{0}").unwrap();
+    assert_eq!(details.tracked, vec!["a.txt".to_string()]);
+    assert_eq!(details.untracked, vec!["new.txt".to_string()]);
+
+    let tracked_diff = stash_file_diff(root, "stash@{0}", "a.txt").unwrap();
+    assert_eq!(tracked_diff.kind, lazecode_git::ChangeKind::Modified);
+    assert!(tracked_diff.new_text.contains("two"));
+
+    let untracked_diff = stash_file_diff(root, "stash@{0}", "new.txt").unwrap();
+    assert_eq!(untracked_diff.kind, lazecode_git::ChangeKind::Added);
+    assert!(untracked_diff.new_text.contains("brand new"));
 }
 
 #[test]

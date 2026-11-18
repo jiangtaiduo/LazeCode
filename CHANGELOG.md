@@ -8,18 +8,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
-
-- Git log commit rows now show references the way PyCharm's compact view
-  does: one label for the first reference group (the checked-out branch, or
-  `remote & branch` when that branch tracks a remote at the commit) with a
-  fanned stack of colored label icons — yellow HEAD, green local branches,
-  violet remotes, gray tags. The label is capped at a third of the row, so
-  commits pointing at many branches and tags no longer grow horizontally;
-  hovering lists every reference on its own line, with full names, and
-  tag-only commits keep their names in that tooltip. The checked-out branch
-  is also ordered first among a commit's references.
-
 ## [0.4.11] - 2026-11-18
 
 ### Added
@@ -49,6 +37,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   opens the stash diff, which now navigates across every file of the stash
   with F7/←/→. Repository-version tabs are read-only snapshots, so the
   checkout is never written back to.
+
+### Changed
+
+- Git log commit rows now show references the way PyCharm's compact view
+  does: one label for the first reference group (the checked-out branch, or
+  `remote & branch` when that branch tracks a remote at the commit) with a
+  fanned stack of colored label icons — yellow HEAD, green local branches,
+  violet remotes, gray tags. The label is capped at a third of the row, so
+  commits pointing at many branches and tags no longer grow horizontally;
+  hovering lists every reference on its own line, with full names, and
+  tag-only commits keep their names in that tooltip. The checked-out branch
+  is also ordered first among a commit's references.
 
 ### Fixed
 

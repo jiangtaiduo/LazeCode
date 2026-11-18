@@ -19,6 +19,21 @@
 
 ### 修复
 
+- 按过一次 Shift+Tab 后控制台和编辑器按键不再被静默吞掉。输入网关原来用
+  `egui_wants_keyboard_input()`（任意控件持有焦点），egui 的 Tab 焦点导航把
+  焦点交给某个按钮后，之后所有按键（Ctrl+C、Shift+Tab、Option+左……）全部
+  丢失。现在只有真正的文本编辑器（`text_edit_focused()`）会接管按键；控制台
+  聚焦时 Ctrl+P 交给 TUI（omp 切换模型）。
+- kitty 键盘协议下方向键/Home/End/F1–F4 改用规范的 `CSI 1;修饰符 X` 形式，
+  不再使用私有码位 `CSI u`（omp 等 TUI 不识别后者），Option+左/右按词移动
+  恢复。
+- Push 与 Fetch 改回原生 `git` 传输。原手写 push 从分支尖端把所有可达对象
+  打到同一个包、逐对象压缩（无 delta）、不协商远端已有对象——每次 push 都
+  重传整段历史。Fetch（和 clone）走 gix 单线程 pack 索引，大仓库明显慢于
+  git。clone、fetch --all、分支 push 现在都走 `git`，保留本地快进检查和
+  `--force-with-lease` 语义。
+- 贮藏页签文件树中子目录相对树根缩进一级。
+
 - 关闭单文件工作区的最后一个标签页不再导致应用崩溃。关闭点击发生在渲染
   帧中途，此时清空的临时 checkout 会被移除或切换到其他项目；编辑器主体
   现在会重新解析活动项目而不是沿用失效索引，从而回退到其他已打开项目或

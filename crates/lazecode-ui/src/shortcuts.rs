@@ -61,8 +61,10 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         if input.consume_key(command_shift(), Key::A) {
             open_palette = true;
         }
-        // ^P：稳定版 Group by Directory 切换（源控抽屉可见时）。
-        if !blocked && input.consume_key(egui::Modifiers::CTRL, Key::P) {
+        // ^P：稳定版 Group by Directory 切换（源控抽屉可见时）。控制台聚焦时
+        // 让给 TUI（omp 用 Ctrl+P 切换模型），不在应用层吞掉。
+        if !blocked && rt.terminal_focus.is_none() && input.consume_key(egui::Modifiers::CTRL, Key::P)
+        {
             toggle_tree_view = true;
         }
         if !blocked && input.consume_key(command_only(), Key::Num1) {

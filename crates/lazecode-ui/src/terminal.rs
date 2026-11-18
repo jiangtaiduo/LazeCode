@@ -349,7 +349,11 @@ pub fn draw(
     // press anchor behind painted a permanent one-cell blue block.
     clear_selection_on_click(selection, response.clicked());
 
-    if focus && !search.open && !ui.ctx().egui_wants_keyboard_input() {
+    // Only a real text editor should take keys away from the console.
+    // `egui_wants_keyboard_input()` is "any widget has focus": one Shift+Tab
+    // makes egui's focus navigation focus some button, which used to mute all
+    // terminal keys (Ctrl+C, Shift+Tab, …) for the rest of the session.
+    if focus && !search.open && !ui.ctx().text_edit_focused() {
         handle_input(
             ui,
             session,

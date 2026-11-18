@@ -1207,7 +1207,9 @@ fn draw_file_inner(
             }
         }
 
-        if focused && !overlays_open && !ui.ctx().egui_wants_keyboard_input() {
+        // `text_edit_focused` (not `egui_wants_keyboard_input`): egui's Tab
+        // navigation moving focus onto some button must not mute the editor.
+        if focused && !overlays_open && !ui.ctx().text_edit_focused() {
             handle_editor_input(ui, doc, &mut pending, tab_id, rt);
         }
 

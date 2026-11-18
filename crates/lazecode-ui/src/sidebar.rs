@@ -3702,14 +3702,15 @@ fn push_stash_root(
         let parts: Vec<&str> = file.split('/').collect();
         insert_stash_file(&mut tree, &parts, file);
     }
-    flatten_stash_dirs(root_key, &tree.sub, "", 0, collapsed, rows);
+    // 树根下的目录与散文件比根行深一级（PyCharm 的缩进层级）。
+    flatten_stash_dirs(root_key, &tree.sub, "", 1, collapsed, rows);
     // 根目录下的散文件排在目录之后。
     for file in &tree.files {
         let name = file.rsplit('/').next().unwrap_or(file).to_string();
         rows.push(StashRow::File {
             path: file.clone(),
             name,
-            depth: 0,
+            depth: 1,
         });
     }
 }

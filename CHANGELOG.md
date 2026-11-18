@@ -22,6 +22,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Console and editor keys are no longer muted after pressing Shift+Tab. The
+  input gate used `egui_wants_keyboard_input()` ("any widget has focus"), so
+  egui's Tab focus navigation handing focus to some button silently dropped
+  every subsequent key (Ctrl+C, Shift+Tab, Option+Left, …). Only a real text
+  editor (`text_edit_focused()`) takes keys away now, and Ctrl+P is left to
+  focused consoles so TUI model cycling works.
+- Modified arrows/Home/End/F1–F4 under the kitty keyboard protocol use the
+  spec's `CSI 1;modifiers X` form instead of Private-Use `CSI u` codepoints,
+  which kitty-aware TUIs (omp) ignore — Option+Left/Right word movement works
+  again.
+- Push and fetch now use the native `git` transport. The hand-written push
+  built one pack from every object reachable from the tip, compressed each
+  object on its own (no deltas) and sent it without negotiating what the
+  remote already had — every push re-uploaded the whole history. Fetch (and
+  clone) used gix's single-threaded pack indexing, much slower than git on
+  large repositories. Clone, fetch-all and branch push all go through `git`
+  again, keeping the local fast-forward guard and `--force-with-lease`.
+- Stash file trees indent child folders one level under their root.
+
 - Closing the last editor tab of a Single files workspace no longer crashes
   the app. The tab-close click happens mid-frame while an emptied ad-hoc
   checkout is dropped or another project takes over; the editor body now

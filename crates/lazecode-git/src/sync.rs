@@ -1,18 +1,16 @@
 //! Remote sync: push, fetch, clone and fast-forward-only pull use native gix
 //! transport; pull merge/rebase still uses `git`.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 
 use anyhow::anyhow;
 use gix::refs::transaction::{PreviousValue, RefEdit};
-use gix::remote::Direction;
 
 use crate::{discover, Result};
 
-fn run(root: &Path, args: &[&str]) -> Result<String> {
+/// Run the `git` binary in `root` (non-interactive) and return trimmed
+/// stdout. Shared with the push/fetch transports.
+pub(crate) fn run_git(root: &Path, args: &[&str]) -> Result<String> {
     let output = crate::porcelain(root)
         .args(args)
         .output()
@@ -36,7 +34,7 @@ pub struct RemoteInfo {
 }
 
 pub fn remote_list(root: &Path) -> Result<Vec<RemoteInfo>> {
-    let output = run(root, &["remote", "-v"])?;
+    let output = run_git(root, &["remote", "-v"])?;
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
     for line in output.lines() {
@@ -59,22 +57,22 @@ pub fn remote_add(root: &Path, name: &str, url: &str) -> Result<()> {
     if name.contains(' ') || name.starts_with('-') {
         anyhow::bail!("unsuitable remote name '{name}'");
     }
-    run(root, &["remote", "add", name, url]).map(drop)
+    run_git(root, &["remote", "add", name, url]).map(drop)
 }
 
 pub fn remote_remove(root: &Path, name: &str) -> Result<()> {
-    run(root, &["remote", "remove", name]).map(drop)
+    run_git(root, &["remote", "remove", name]).map(drop)
 }
 
 pub fn remote_rename(root: &Path, from: &str, to: &str) -> Result<()> {
     if to.contains(' ') || to.starts_with('-') {
         anyhow::bail!("unsuitable remote name '{to}'");
     }
-    run(root, &["remote", "rename", from, to]).map(drop)
+    run_git(root, &["remote", "rename", from, to]).map(drop)
 }
 
 pub fn remote_set_url(root: &Path, name: &str, url: &str) -> Result<()> {
-    run(root, &["remote", "set-url", name, url]).map(drop)
+    run_git(root, &["remote", "set-url", name, url]).map(drop)
 }
 
 // ---------------- sync operations ----------------
@@ -160,7 +158,7 @@ pub fn push_tags(root: &Path, remote: &str) -> Result<String> {
     if remote.is_empty() || remote.starts_with('-') || remote.chars().any(char::is_whitespace) {
         anyhow::bail!("unsuitable remote name '{remote}'");
     }
-    run(root, &["push", remote, "--tags"])
+    run_git(root, &["push", remote, "--tags"])
 }
 
 /// Push one local tag to `remote`.
@@ -171,20 +169,21 @@ pub fn push_tag(root: &Path, remote: &str, tag: &str) -> Result<String> {
     if tag.is_empty() || tag.starts_with('-') || tag.chars().any(char::is_whitespace) {
         anyhow::bail!("unsuitable tag name '{tag}'");
     }
-    run(root, &["push", remote, &format!("refs/tags/{tag}")])
+    run_git(root, &["push", remote, &format!("refs/tags/{tag}")])
 }
 
 /// Fetch all remotes and prune stale remote-tracking branches.
+///
+/// Uses the `git` binary: gix's fetch is single-threaded while indexing the
+/// received pack on this build (no `gix` "parallel" feature), which is much
+/// slower than native git on large repositories.
 pub fn fetch_all(root: &Path) -> Result<String> {
-    let repo = discover(root)?;
-    let names: Vec<String> = repo
+    run_git(root, &["fetch", "--all", "--prune"])?;
+    let names = discover(root)?
         .remote_names()
         .into_iter()
         .map(|name| name.to_string())
-        .collect();
-    for name in &names {
-        fetch_remote(&repo, name)?;
-    }
+        .collect::<Vec<_>>();
     Ok(names
         .iter()
         .map(|name| format!("{name}: fetched"))
@@ -192,73 +191,13 @@ pub fn fetch_all(root: &Path) -> Result<String> {
         .join("\n"))
 }
 
-/// Upper bound on one blocking fetch: a dropped connection may never send FIN,
-/// so the watchdog flips the interrupt flag to release the job thread.
-const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
-
-fn prune_remote_tracking(
-    repo: &gix::Repository,
-    remote: &str,
-    keep: &HashSet<String>,
-) -> Result<usize> {
-    let prefix = format!("refs/remotes/{remote}/");
-    let mut stale = Vec::new();
-    for reference in repo.references()?.all()? {
-        let reference = reference?;
-        let name = reference.name().as_bstr().to_string();
-        if !name.starts_with(&prefix) || keep.contains(&name) {
-            continue;
-        }
-        let Some(target) = reference.target().try_id().map(|id| id.to_owned()) else {
-            continue;
-        };
-        stale.push((name, target));
+/// Fetch one remote through the native transport (used by fast-forward pull,
+/// which then re-reads the refs the git process just updated).
+fn fetch_remote(root: &Path, name: &str) -> Result<()> {
+    if name.is_empty() || name.starts_with('-') || name.chars().any(char::is_whitespace) {
+        anyhow::bail!("unsuitable remote name '{name}'");
     }
-    let mut removed = 0;
-    for (name, target) in stale {
-        let edit = RefEdit::delete(
-            name.as_str().try_into()?,
-            PreviousValue::MustExistAndMatch(gix::refs::Target::Object(target)),
-        );
-        repo.edit_reference(edit)?;
-        removed += 1;
-    }
-    Ok(removed)
-}
-
-fn fetch_remote(repo: &gix::Repository, name: &str) -> Result<()> {
-    let remote = repo.find_remote(name)?;
-    let connection = remote.connect(Direction::Fetch)?;
-    let prepare = connection.prepare_fetch(
-        gix::progress::Discard,
-        gix::remote::ref_map::Options::default(),
-    )?;
-    let interrupt = Arc::new(AtomicBool::new(false));
-    // The watchdog flips the interrupt flag on timeout; `done_tx` releases it
-    // when receive returns, so sleeping watchdogs do not accumulate.
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
-    {
-        let interrupt = Arc::clone(&interrupt);
-        std::thread::Builder::new()
-            .name("lazecode-fetch-watchdog".to_string())
-            .spawn(move || {
-                if done_rx.recv_timeout(FETCH_TIMEOUT).is_err() {
-                    interrupt.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            })?;
-    }
-    let outcome = prepare.receive(gix::progress::Discard, &interrupt);
-    let _ = done_tx.send(());
-    let outcome = outcome.map_err(|err| anyhow!("fetch failed: {err}"))?;
-    let keep: HashSet<String> = outcome
-        .ref_map
-        .mappings
-        .iter()
-        .filter_map(|mapping| mapping.local.as_ref())
-        .map(|local| local.to_string())
-        .collect();
-    let _ = prune_remote_tracking(repo, name, &keep)?;
-    Ok(())
+    run_git(root, &["fetch", "--prune", name]).map(drop)
 }
 
 /// Pull the current branch's upstream using the requested mode.
@@ -305,7 +244,10 @@ fn pull_fast_forward(root: &Path) -> Result<String> {
         .map(|value| value.to_string())
         .ok_or_else(|| anyhow!("branch '{branch}' has no upstream branch"))?;
     let leaf = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
-    fetch_remote(&repo, &remote)?;
+    fetch_remote(root, &remote)?;
+    // The git process updated the refs; drop the handle so the ref cache
+    // below reflects what it wrote.
+    let repo = discover(root)?;
     let upstream_ref = format!("refs/remotes/{remote}/{leaf}");
     let upstream = repo
         .find_reference(upstream_ref.as_str())
@@ -332,6 +274,9 @@ pub enum PullMode {
 }
 
 /// Clone `url` into `destination` (directory must not exist or be empty).
+///
+/// Native git: the same pack-indexing cost as fetch made gix clones of large
+/// repositories much slower than the `git` binary.
 pub fn clone(url: &str, destination: &Path) -> Result<PathBuf> {
     if destination.exists() {
         let empty = std::fs::read_dir(destination)
@@ -341,20 +286,22 @@ pub fn clone(url: &str, destination: &Path) -> Result<PathBuf> {
             anyhow::bail!("{} already exists and is not empty", destination.display());
         }
     }
-    // Same committer fallback as `discover()`; the fresh clone is reopened by
-    // the fetch, so it must travel in the open options as well.
-    let mut open_opts = crate::open_options();
-    open_opts.permissions.config.git_binary = true;
-    let mut prepare = gix::clone::PrepareFetch::new(
-        url,
-        destination,
-        gix::create::Kind::WithWorktree,
-        gix::create::Options::default(),
-        open_opts,
-    )?
-    .fetch_then_checkout(gix::progress::Discard, &AtomicBool::new(false))?
-    .0;
-    let _repo = prepare.main_worktree(gix::progress::Discard, &AtomicBool::new(false))?;
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let target = destination
+        .file_name()
+        .ok_or_else(|| anyhow!("clone destination has no directory name"))?;
+    let output = crate::porcelain(parent)
+        .args(["clone", "--"])
+        .arg(url)
+        .arg(target)
+        .output()
+        .map_err(|err| anyhow!("git clone failed to spawn: {err}"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
     Ok(destination.to_path_buf())
 }
 

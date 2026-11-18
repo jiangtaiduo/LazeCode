@@ -192,12 +192,45 @@ fn associated_text(stroke: KeyStroke) -> Option<u32> {
     Some(ch as u32)
 }
 
+/// KitConnect: arrows, Home/End and F1–F4 keep the `CSI 1;mods [ABCDEFHPQS]`
+/// shape in the kitty protocol (the Private-Use codepoints in the spec table
+/// are only for keys without a legacy form). Programs like omp ignore the
+/// Private-Use form, so modified arrows (Option/Word movement) must use this.
+fn kitty_csi_final(key: TerminalKey) -> Option<char> {
+    Some(match key {
+        TerminalKey::Up => 'A',
+        TerminalKey::Down => 'B',
+        TerminalKey::Right => 'C',
+        TerminalKey::Left => 'D',
+        TerminalKey::Home => 'H',
+        TerminalKey::End => 'F',
+        TerminalKey::F(1) => 'P',
+        TerminalKey::F(2) => 'Q',
+        TerminalKey::F(3) => 'R',
+        TerminalKey::F(4) => 'S',
+        _ => return None,
+    })
+}
+
 fn kitty_sequence(stroke: KeyStroke, flags: KittyKeyboard) -> Option<String> {
     let code = kitty_key_code(stroke.key)?;
     let modifiers = modifier_code(stroke);
     let event = flags
         .contains(KittyKeyboard::REPORT_EVENT_TYPES)
         .then_some(kitty_event_code(stroke.event));
+    if let Some(final_byte) = kitty_csi_final(stroke.key) {
+        let mut out = String::from("[");
+        if modifiers != 1 || event.is_some() {
+            out.push_str("1;");
+            out.push_str(&modifiers.to_string());
+            if let Some(event) = event {
+                out.push(':');
+                out.push(event);
+            }
+        }
+        out.push(final_byte);
+        return Some(out);
+    }
     let text = if stroke.event == KeyEvent::Release {
         None
     } else if flags.contains(KittyKeyboard::REPORT_ASSOCIATED_TEXT) {
@@ -546,6 +579,39 @@ mod tests {
         );
     }
 
+    /// Modified arrows use `CSI 1;mods X` (kitty spec); omp ignores the
+    /// Private-Use `CSI <57350>;3u` form, which broke word movement.
+    #[test]
+    fn modified_arrows_use_csi_functional_form() {
+        let modes = kitty(KittyKeyboard::DISAMBIGUATE_ESC_CODES);
+        assert_eq!(
+            encoded(stroke(TerminalKey::Left, false, true, false), &modes),
+            "\x1b[1;3D"
+        );
+        assert_eq!(
+            encoded(stroke(TerminalKey::Right, true, false, false), &modes),
+            "\x1b[1;5C"
+        );
+        assert_eq!(
+            encoded(stroke(TerminalKey::Up, true, false, true), &modes),
+            "\x1b[1;6A"
+        );
+        // Releases carry the event sub-field when the program asked for it.
+        let with_events = kitty(
+            KittyKeyboard::DISAMBIGUATE_ESC_CODES | KittyKeyboard::REPORT_EVENT_TYPES,
+        );
+        let release = KeyStroke {
+            event: KeyEvent::Release,
+            ..stroke(TerminalKey::Left, false, true, false)
+        };
+        assert_eq!(encoded(release, &with_events), "\x1b[1;3:3D");
+        // Insert/Delete keep the Private-Use form (no legacy CSI letter).
+        assert_eq!(
+            encoded(stroke(TerminalKey::Delete, true, false, false), &modes),
+            "\x1b[57349;5u"
+        );
+    }
+
     /// Repeats without event types must still reach the program as presses
     /// (holding Backspace/arrows keeps producing input).
     #[test]
@@ -642,10 +708,11 @@ mod tests {
             encoded(stroke(TerminalKey::Enter, false, false, false), &modes),
             "\r"
         );
-        // Arrows with control become functional codepoints.
+        // Arrows with control keep the `CSI 1;mods X` functional shape (the
+        // Private-Use codepoint form is ignored by kitty-aware TUIs).
         assert_eq!(
             encoded(stroke(TerminalKey::Up, true, false, false), &modes),
-            "\x1b[57352;5u"
+            "\x1b[1;5A"
         );
         assert_eq!(
             encoded(stroke(TerminalKey::F(1), false, false, false), &modes),

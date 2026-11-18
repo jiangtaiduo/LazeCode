@@ -528,6 +528,24 @@ mod tests {
         assert_eq!(encoded(release, &all_keys), "\x1b[13;1:3u");
     }
 
+    /// omp's Shift+Tab (cycle reasoning effort / models) under the same
+    /// negotiation: one physical press must produce exactly one `CSI u`
+    /// sequence — the release is dropped, otherwise the cycle skips a state
+    /// per keystroke and the shortcut looks dead.
+    #[test]
+    fn shift_tab_press_is_single_csiu_under_disambiguate_only() {
+        let negotiated = kitty(KittyKeyboard::DISAMBIGUATE_ESC_CODES);
+        let press = encoded(stroke(TerminalKey::Tab, false, false, true), &negotiated);
+        assert_eq!(press, "\x1b[9;2u");
+        let release = with_event(stroke(TerminalKey::Tab, false, false, true), KeyEvent::Release);
+        assert_eq!(encode_key(release, &negotiated), None);
+        // Without kitty negotiation the legacy Backtab bytes stay intact.
+        assert_eq!(
+            encoded(stroke(TerminalKey::Tab, false, false, true), &modes()),
+            "\x1b[Z"
+        );
+    }
+
     /// Repeats without event types must still reach the program as presses
     /// (holding Backspace/arrows keeps producing input).
     #[test]

@@ -641,7 +641,7 @@ pub struct UiRuntime {
     pub update_open: bool,
     /// Update endpoint results, in-flight job and staging status.
     pub update: UpdateState,
-    pub applied_theme: Option<lazecode_core::ThemeMode>,
+    pub applied_theme: Option<(lazecode_core::ThemeMode, lazecode_core::ThemeSkin)>,
     pub last_frame: Instant,
     pub md_cache: egui_commonmark::CommonMarkCache,
     /// Per-tab rendered-Markdown scroll offset, in points.

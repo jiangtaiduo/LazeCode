@@ -19,6 +19,7 @@ pub mod search;
 pub mod settings;
 pub mod shortcuts;
 pub mod sidebar;
+pub mod skins;
 pub mod statusbar;
 pub mod strip;
 pub mod terminal;

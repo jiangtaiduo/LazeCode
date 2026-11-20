@@ -196,10 +196,12 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     rt.prune_terminal_caches(model);
     model.sync_lsp();
     crate::lsp_ui::poll(ui.ctx(), model, rt);
-    let theme = Theme::for_mode(model.settings.theme);
-    if rt.applied_theme != Some(model.settings.theme) {
+    let mode = model.settings.theme;
+    let skin = model.settings.skin(mode);
+    let theme = Theme::new(mode, skin);
+    if rt.applied_theme != Some((mode, skin)) {
         theme.apply(ui.ctx());
-        rt.applied_theme = Some(model.settings.theme);
+        rt.applied_theme = Some((mode, skin));
     }
     let layout = compute_layout(ui.max_rect(), model);
 
@@ -250,7 +252,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     let painter = ui.painter().clone();
     // Stable Liquid Glass: the window body carries the stable gradient and
     // the glass panels draw as translucent fills on top of it.
-    crate::theme::body_gradient(&painter, layout.full, theme.dark);
+    crate::theme::body_gradient(&painter, layout.full, &theme);
     painter.rect_filled(layout.titlebar, 0.0, p.titlebar);
     painter.rect_filled(layout.strip, 0.0, p.rail);
     // The activity rail's edge must not read as a window divider; the

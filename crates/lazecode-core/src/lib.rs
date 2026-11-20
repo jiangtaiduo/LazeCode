@@ -21,4 +21,4 @@ pub use model::{
     ProjectState, SidebarView, Tab, TabKind, TerminalPane, TerminalPlacement, TerminalTab, Toast,
     ToastKind, UiState, WorktreeState, MAX_PANES_PER_TAB,
 };
-pub use settings::{Language, Settings, ThemeMode, WorkspaceFile};
+pub use settings::{Language, Settings, ThemeMode, ThemeSkin, WorkspaceFile};

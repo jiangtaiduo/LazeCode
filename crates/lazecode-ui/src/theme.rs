@@ -114,7 +114,18 @@ pub struct Palette {
 }
 
 impl Palette {
+    /// Backwards-compatible constructor: the Studio skin.
     pub fn dark() -> Self {
+        Self::studio_dark()
+    }
+
+    /// Backwards-compatible constructor: the Studio skin.
+    pub fn light() -> Self {
+        Self::studio_light()
+    }
+
+    /// The original LazeCode palette (skin "Studio"), dark variant.
+    pub fn studio_dark() -> Self {
         let rgba = |r: u8, g: u8, b: u8, a: u8| Color32::from_rgba_unmultiplied(r, g, b, a);
         Self {
             bg: Color32::from_rgb(0x23, 0x23, 0x26), // --bg-app
@@ -230,7 +241,8 @@ impl Palette {
         }
     }
 
-    pub fn light() -> Self {
+    /// The original LazeCode palette (skin "Studio"), light variant.
+    pub fn studio_light() -> Self {
         let rgba = |r: u8, g: u8, b: u8, a: u8| Color32::from_rgba_unmultiplied(r, g, b, a);
         Self {
             bg: Color32::from_rgb(0xe4, 0xe4, 0xe8),
@@ -254,8 +266,8 @@ impl Palette {
             current_line: Color32::from_rgb(0xee, 0xf1, 0xf6),
             selection: rgba(10, 132, 255, 36), // 0.14
             text: Color32::from_rgb(0x1d, 0x1d, 0x1f),
-            text2: Color32::from_rgb(0x6e, 0x6e, 0x73),
-            text3: Color32::from_rgb(0x8e, 0x8e, 0x93),
+            text2: Color32::from_rgb(0x5f, 0x5f, 0x66),
+            text3: Color32::from_rgb(0x74, 0x74, 0x7a),
             text_bright: Color32::from_rgb(0x00, 0x00, 0x00),
             accent: Color32::from_rgb(0x00, 0x71, 0xe3), // macOS light blue
             accent_on_fill: Color32::from_rgb(0xff, 0xff, 0xff),
@@ -275,12 +287,13 @@ impl Palette {
             diff_add_strong: rgba(36, 138, 61, 89), // 0.35
             diff_del: rgba(215, 0, 21, 31),         // 0.12
             diff_del_strong: rgba(215, 0, 21, 77),  // 0.30
-            // Stable never overrides the Monaco diff colours per variant — the
-            // theme.css values apply to light too. Mirror that verbatim.
-            diff_line_add: Color32::from_rgb(0x2c, 0x41, 0x34),
-            diff_line_del: Color32::from_rgb(0x48, 0x2b, 0x2b),
-            diff_char_add: Color32::from_rgb(0x38, 0x55, 0x42),
-            diff_char_del: Color32::from_rgb(0x5e, 0x34, 0x36),
+            // Light diff rows must read against light surfaces; the old
+            // stable build reused the dark Monaco literals and put dark text
+            // on them, which was unreadable.
+            diff_line_add: Color32::from_rgb(0xdd, 0xf3, 0xe4),
+            diff_line_del: Color32::from_rgb(0xff, 0xe2, 0xe0),
+            diff_char_add: Color32::from_rgb(0xb8, 0xe6, 0xc4),
+            diff_char_del: Color32::from_rgb(0xff, 0xc9, 0xc6),
             jb_accent: Color32::from_rgb(0x35, 0x74, 0xf0),
             balloon_bg: Color32::from_rgb(0xff, 0xff, 0xff),
             balloon_text: Color32::from_rgb(0x1e, 0x1f, 0x22),
@@ -290,7 +303,7 @@ impl Palette {
             tok_str: Color32::from_rgb(0x0b, 0x75, 0x00), // string
             tok_num: Color32::from_rgb(0x0b, 0x75, 0xc4), // number
             tok_fn: Color32::from_rgb(0x0b, 0x4f, 0x8a),
-            tok_com: Color32::from_rgb(0x8a, 0x91, 0x9c), // comment (italic)
+            tok_com: Color32::from_rgb(0x6f, 0x76, 0x80), // comment (italic)
             tok_punc: Color32::from_rgb(0x5a, 0x5a, 0x60), // delimiter
             tok_lit: Color32::from_rgb(0x0b, 0x75, 0xc4),
             tok_var: Color32::from_rgb(0x1d, 0x1d, 0x1f),
@@ -330,6 +343,15 @@ pub struct Theme {
 }
 
 impl Theme {
+    /// Theme for `mode` using the skin remembered for that mode.
+    pub fn new(mode: ThemeMode, skin: lazecode_core::ThemeSkin) -> Self {
+        Self {
+            dark: mode == ThemeMode::Dark,
+            palette: crate::skins::palette(skin, mode == ThemeMode::Dark),
+        }
+    }
+
+    /// Studio theme, used by tests and callers that only know the mode.
     pub fn for_mode(mode: ThemeMode) -> Self {
         match mode {
             ThemeMode::Dark => Self {
@@ -640,15 +662,12 @@ pub const STRIP_BTN: f32 = 32.0;
 /// Stable context-menu width (.branch-ctx-menu).
 pub const MENU_W: f32 = 260.0;
 
-/// Paint the stable window body gradient under everything:
-/// dark = `radial-gradient(1200px 600px at 18% -8%, #2b2b3d, #1e1e20 58%)`,
-/// light = `linear-gradient(160deg, #f2f2f5, #e6e6ea)`.
-pub fn body_gradient(painter: &Painter, rect: Rect, dark: bool) {
-    let p = if dark {
-        Palette::dark()
-    } else {
-        Palette::light()
-    };
+/// Paint the window body gradient under everything, tinted by the active
+/// skin: dark skins use a radial glow around the gradient's tint colour,
+/// light skins a 160° linear wash.
+pub fn body_gradient(painter: &Painter, rect: Rect, theme: &Theme) {
+    let p = theme.palette;
+    let dark = theme.dark;
     let cols = 8usize;
     let rows = 5usize;
     let color_at = |x: f32, y: f32| -> Color32 {

@@ -1,5 +1,5 @@
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2};
-use lazecode_core::{AppModel, Language, ThemeMode};
+use lazecode_core::{AppModel, Language, ThemeMode, ThemeSkin};
 
 use crate::icons::{paint as paint_icon, Icon};
 use crate::runtime::UiRuntime;
@@ -305,6 +305,207 @@ fn heading(ui: &mut Ui, theme: &Theme, rect: Rect, title: &str, subtitle: &str) 
     );
 }
 
+/// Five colour chips used by the skin picker rows.
+fn skin_swatches(painter: &egui::Painter, rect: Rect, p: &crate::theme::Palette, count: usize) {
+    let colors = [
+        p.bg, p.editor, p.accent, p.tok_kw, p.tok_str, p.tok_num, p.green, p.rose,
+    ];
+    let gap = 2.0;
+    let width = ((rect.width() - gap * (count.saturating_sub(1)) as f32) / count as f32).max(1.0);
+    for (index, color) in colors.iter().take(count).enumerate() {
+        let chip = Rect::from_min_size(
+            Pos2::new(rect.left() + index as f32 * (width + gap), rect.top()),
+            Vec2::new(width, rect.height()),
+        );
+        painter.rect_filled(chip, egui::CornerRadius::same(2), *color);
+        painter.rect_stroke(
+            chip,
+            egui::CornerRadius::same(2),
+            Stroke::new(1.0, p.border_soft),
+            StrokeKind::Inside,
+        );
+    }
+}
+
+/// Live miniature of the app: chrome, copy, accent and a highlighted code
+/// sample. Uses the active theme so selecting a skin updates it next frame.
+fn skin_preview(ui: &mut Ui, model: &AppModel, theme: &Theme, rect: Rect) {
+    let p = theme.palette;
+    let painter = ui.painter();
+    painter.rect_filled(rect, egui::CornerRadius::same(8), p.bg);
+    painter.rect_stroke(
+        rect,
+        egui::CornerRadius::same(8),
+        Stroke::new(1.0, p.border),
+        StrokeKind::Inside,
+    );
+
+    let header = Rect::from_min_max(rect.min, Pos2::new(rect.right(), rect.top() + 20.0));
+    painter.rect_filled(
+        header,
+        egui::CornerRadius {
+            nw: 8,
+            ne: 8,
+            sw: 0,
+            se: 0,
+        },
+        p.titlebar,
+    );
+    for (index, color) in [p.win_close, p.amber, p.green].into_iter().enumerate() {
+        painter.circle_filled(
+            Pos2::new(rect.left() + 10.0 + index as f32 * 8.0, header.center().y),
+            3.0,
+            color,
+        );
+    }
+    let zh = model.settings.language.is_zh();
+    let name = crate::skins::display_name(model.settings.skin(model.settings.theme), zh);
+    text_clipped(
+        painter,
+        Rect::from_min_max(
+            Pos2::new(rect.left() + 46.0, header.top()),
+            Pos2::new(rect.right() - 10.0, header.bottom()),
+        ),
+        &format!(
+            "LazeCode  ·  {}  ·  {}",
+            name,
+            if theme.dark {
+                crate::tr!(model, "Dark", "深色")
+            } else {
+                crate::tr!(model, "Light", "浅色")
+            }
+        ),
+        FontId::proportional(9.5),
+        p.text2,
+        Align2::LEFT_CENTER,
+    );
+
+    let statusbar = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - 16.0), rect.max);
+    painter.rect_filled(
+        statusbar,
+        egui::CornerRadius {
+            nw: 0,
+            ne: 0,
+            sw: 8,
+            se: 8,
+        },
+        p.statusbar,
+    );
+    let body_top = header.bottom();
+    let body = Rect::from_min_max(
+        Pos2::new(rect.left(), body_top),
+        Pos2::new(rect.right(), statusbar.top()),
+    );
+    let rail = Rect::from_min_max(body.min, Pos2::new(body.left() + 24.0, body.bottom()));
+    painter.rect_filled(rail, 0.0, p.rail);
+    painter.rect_filled(
+        Rect::from_center_size(
+            Pos2::new(rail.center().x, rail.top() + 14.0),
+            Vec2::splat(10.0),
+        ),
+        egui::CornerRadius::same(3),
+        p.accent,
+    );
+    let sidebar = Rect::from_min_max(
+        Pos2::new(rail.right(), body.top()),
+        Pos2::new(rail.right() + 92.0, body.bottom()),
+    );
+    painter.rect_filled(sidebar, 0.0, p.sidebar);
+    for index in 0..3 {
+        let row = Rect::from_min_size(
+            Pos2::new(
+                sidebar.left() + 10.0,
+                sidebar.top() + 10.0 + index as f32 * 13.0,
+            ),
+            Vec2::new(64.0 - index as f32 * 10.0, 5.0),
+        );
+        painter.rect_filled(row, egui::CornerRadius::same(2), p.hover);
+    }
+    let code = Rect::from_min_max(
+        Pos2::new(sidebar.right() + 1.0, body.top()),
+        Pos2::new(body.right(), body.bottom()),
+    );
+    painter.rect_filled(code, 0.0, p.editor);
+    painter.vline(
+        code.left() - 0.5,
+        code.y_range(),
+        Stroke::new(1.0, p.border_soft),
+    );
+
+    let font = FontId::monospace(10.5);
+    let draw_line = |y: f32, segments: &[(&str, Color32)]| {
+        let mut x = code.left() + 12.0;
+        for (text, color) in segments {
+            let galley = painter.layout_no_wrap((*text).to_owned(), font.clone(), *color);
+            let advance = galley.size().x;
+            painter.galley(Pos2::new(x, y), galley, *color);
+            x += advance;
+        }
+    };
+    draw_line(
+        code.top() + 9.0,
+        &[
+            ("fn ", p.tok_kw),
+            ("paint", p.tok_fn),
+            ("(", p.tok_punc),
+            ("ctx", p.tok_var),
+            (": &mut ", p.tok_punc),
+            ("Ctx", p.tok_type),
+            (") {", p.tok_punc),
+        ],
+    );
+    draw_line(
+        code.top() + 23.0,
+        &[
+            ("    let ", p.tok_kw),
+            ("n", p.tok_var),
+            (" = ", p.tok_punc),
+            ("42", p.tok_num),
+            ("; // tuned", p.tok_com),
+        ],
+    );
+    draw_line(
+        code.top() + 37.0,
+        &[
+            ("    accent", p.tok_var),
+            (".", p.tok_punc),
+            ("fill", p.tok_fn),
+            ("(", p.tok_punc),
+            ("\"LazeCode\"", p.tok_str),
+            (");", p.tok_punc),
+        ],
+    );
+
+    text_clipped(
+        painter,
+        Rect::from_min_max(
+            Pos2::new(statusbar.left() + 8.0, statusbar.top()),
+            Pos2::new(statusbar.right() - 70.0, statusbar.bottom()),
+        ),
+        &format!(
+            "{}  ·  UTF-8  ·  {}",
+            crate::tr!(model, "main", "主分支"),
+            crate::tr!(model, "Ln 12, Col 4", "行 12，列 4")
+        ),
+        FontId::proportional(9.0),
+        p.text3,
+        Align2::LEFT_CENTER,
+    );
+    let pill = Rect::from_min_size(
+        Pos2::new(statusbar.right() - 64.0, statusbar.top() + 3.0),
+        Vec2::new(56.0, 10.0),
+    );
+    painter.rect_filled(pill, egui::CornerRadius::same(3), p.accent);
+    text_clipped(
+        painter,
+        pill,
+        crate::tr!(model, "Build", "构建"),
+        FontId::proportional(8.0),
+        p.accent_on_fill,
+        Align2::CENTER_CENTER,
+    );
+}
+
 fn appearance(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, rect: Rect) {
     let p = theme.palette;
     heading(
@@ -363,6 +564,97 @@ fn appearance(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
         model.save_settings();
     }
     y += 42.0;
+    ui.painter().text(
+        Pos2::new(rect.left(), y),
+        Align2::LEFT_CENTER,
+        crate::tr!(model, "Color skin", "配色皮肤"),
+        FontId::proportional(11.5),
+        p.text2,
+    );
+    let current_skin = model.settings.skin(model.settings.theme);
+    let skin_field = Rect::from_min_size(
+        Pos2::new(rect.left() + 160.0, y - 13.0),
+        Vec2::new(300.0, 26.0),
+    );
+    let mut chosen_skin = None;
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(skin_field)
+            .id_salt("settings-skin")
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    egui::ComboBox::from_id_salt("settings-skin")
+        .width(skin_field.width())
+        .selected_text(
+            egui::RichText::new(crate::skins::display_name(
+                current_skin,
+                model.settings.language.is_zh(),
+            ))
+            .color(p.text),
+        )
+        .show_ui(&mut child, |ui| {
+            ui.set_min_width(300.0);
+            egui::ScrollArea::vertical()
+                .id_salt("settings-skin-list")
+                .max_height(330.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    for skin in ThemeSkin::ALL {
+                        let (row, response) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 26.0),
+                            Sense::click(),
+                        );
+                        let active = skin == current_skin;
+                        if active {
+                            ui.painter().rect_filled(
+                                row,
+                                egui::CornerRadius::same(4),
+                                p.selected_row,
+                            );
+                        } else if response.hovered() {
+                            ui.painter()
+                                .rect_filled(row, egui::CornerRadius::same(4), p.hover);
+                        }
+                        skin_swatches(
+                            ui.painter(),
+                            Rect::from_min_size(
+                                Pos2::new(row.left() + 6.0, row.center().y - 6.0),
+                                Vec2::new(64.0, 12.0),
+                            ),
+                            &crate::skins::palette(skin, model.settings.theme == ThemeMode::Dark),
+                            5,
+                        );
+                        crate::widgets::text_clipped(
+                            ui.painter(),
+                            Rect::from_min_max(
+                                Pos2::new(row.left() + 80.0, row.top()),
+                                Pos2::new(row.right() - 8.0, row.bottom()),
+                            ),
+                            crate::skins::display_name(skin, model.settings.language.is_zh()),
+                            FontId::proportional(11.5),
+                            if active { p.text } else { p.text2 },
+                            Align2::LEFT_CENTER,
+                        );
+                        if response.clicked() {
+                            chosen_skin = Some(skin);
+                            ui.close();
+                        }
+                    }
+                });
+        });
+    if let Some(skin) = chosen_skin {
+        let mode = model.settings.theme;
+        model.settings.set_skin(mode, skin);
+        rt.applied_theme = None;
+        model.save_settings();
+    }
+    y += 46.0;
+    let preview = Rect::from_min_size(
+        Pos2::new(rect.left(), y),
+        Vec2::new(rect.width().min(520.0), 106.0),
+    );
+    skin_preview(ui, model, theme, preview);
+    y += 120.0;
     ui.painter().text(
         Pos2::new(rect.left(), y),
         Align2::LEFT_CENTER,
@@ -1375,4 +1667,39 @@ fn about(ui: &mut Ui, model: &AppModel, theme: &Theme, rect: Rect) {
         p.blue,
     );
     let _ = (primary_button, text_clipped);
+}
+
+#[cfg(test)]
+mod skin_ui_tests {
+    use super::*;
+    use lazecode_core::Settings;
+
+    #[test]
+    fn appearance_screen_renders_for_every_skin() {
+        let mut model = AppModel::new(Settings::default(), None);
+        model.ui.settings_section = 0;
+        let mut rt = UiRuntime::default();
+        for mode in [ThemeMode::Dark, ThemeMode::Light] {
+            for skin in ThemeSkin::ALL {
+                model.settings.theme = mode;
+                model.settings.set_skin(mode, skin);
+                let theme = Theme::new(mode, skin);
+                let ctx = egui::Context::default();
+                let mut input = egui::RawInput::default();
+                input.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0)));
+                let mut output = ctx.run_ui(input, |ui| {
+                    draw(ui, &mut model, &mut rt, &theme);
+                });
+                let shapes = output.shapes.len();
+                output.textures_delta.clear();
+                assert!(
+                    shapes > 60,
+                    "{} {:?}: settings screen drew {} shapes",
+                    skin.id(),
+                    mode,
+                    shapes
+                );
+            }
+        }
+    }
 }

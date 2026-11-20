@@ -8,6 +8,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- 21 colour skins (20 palettes read from the design moodboards plus the
+  original Studio colours), each with a dark and a light variant. A skin
+  drives the whole surface stack, the three text tiers, the editor's 12
+  syntax classes, diff/selection/conflict colours and the terminal ANSI-16.
+  Palettes are authored as ten anchor colours per mode and derived in OKLCH
+  with contrast-fitted text and tokens, so every combination clears the
+  accessibility thresholds covered by the new unit tests.
+
+- Settings → Appearance now has a **Color skin** picker (per-mode memory) and
+  a live miniature preview of the chrome, copy, accent button and highlighted
+  code. Dark and light skins are stored independently in `settings.toml`
+  (`dark_skin` / `light_skin`); existing files default to Studio unchanged.
+
+- Studio's light diff rows now use light insert/delete tints, so dark editor
+  text no longer sits on the old dark Monaco backgrounds.
+
 ### Fixed
 
 - Resizing the window no longer throws a scrolled-back console to the top of

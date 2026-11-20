@@ -2392,20 +2392,24 @@ impl JobQueue {
                     .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let stash = stash.clone();
-                self.spawn("stash-pop", format!("stash-p:{root:?}:{stash}"), move || {
-                    let result = lazecode_git::stash_pop(&root, &stash);
-                    JobResult::OpDone {
-                        root,
-                        message: match &result {
-                            Ok(_) => format!("已弹出 {stash}"),
-                            Err(err) => err.to_string(),
-                        },
-                        ok: result.is_ok(),
-                        refresh: true,
-                        reload_files: true,
-                        clear_commit_message: false,
-                    }
-                });
+                self.spawn(
+                    "stash-pop",
+                    format!("stash-p:{root:?}:{stash}"),
+                    move || {
+                        let result = lazecode_git::stash_pop(&root, &stash);
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(_) => format!("已弹出 {stash}"),
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: true,
+                            reload_files: true,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
             }
             Command::StashClear => {
                 let zh = model.settings.language.is_zh();
@@ -2927,8 +2931,6 @@ impl JobQueue {
                     .unwrap_or_default();
                 let stash = stash.clone();
                 let branch = branch.clone();
-                let pop = pop;
-                let reinstate_index = reinstate_index;
                 self.spawn(
                     "stash-unstash",
                     format!("stash-u:{root:?}:{stash}:{branch:?}:{pop}:{reinstate_index}"),
@@ -3414,12 +3416,10 @@ impl JobQueue {
                 if let Some(project) = model.active_project_mut() {
                     for id in terminal_ids {
                         project.close_terminal(id);
-                        runtime.terminal_snapshots.remove(&id);
-                        runtime.terminal_selections.remove(&id);
-                        runtime.terminal_search.remove(&id);
-                        if runtime.terminal_focus == Some(id) {
-                            runtime.terminal_focus = None;
-                        }
+                        // `forget_terminal` covers every per-pane map and the
+                        // focus; hand-maintained subsets drift (kitty texture
+                        // caches used to leak here).
+                        runtime.forget_terminal(id);
                     }
                 }
                 let key = format!("worktree-remove:{}", name);

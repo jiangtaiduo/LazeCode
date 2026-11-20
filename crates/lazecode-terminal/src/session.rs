@@ -1159,6 +1159,25 @@ impl Session {
         }
     }
 
+    /// How long presentation must still be held for a synchronized update
+    /// (DEC private mode 2026). `None` means the grid is safe to snapshot;
+    /// `Some` is the time until the program closes the frame or rio-vt's
+    /// safety timeout fires. Snapshotting mid-update exposes a partially
+    /// painted screen (omp repaints whole screens inside BSU/ESU after a
+    /// resize), which reads as a one-frame flash of garbled text.
+    pub fn sync_update_hold(&self) -> Option<std::time::Duration> {
+        let term = self.term.lock();
+        if !term.synchronized_output() {
+            return None;
+        }
+        let now = rio_vt::time::Instant::now();
+        if term.sync_update_expired(now) {
+            return None;
+        }
+        term.sync_update_deadline()
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
+
     pub fn age_secs(&self) -> u64 {
         now_ms().saturating_sub(self.created_ms) / 1000
     }
@@ -2063,6 +2082,44 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         assert!(found, "terminal output not observed");
+    }
+
+    #[test]
+    fn synchronized_update_holds_presentation_until_esu() {
+        let session = spawn(SpawnOptions {
+            cwd: std::env::temp_dir(),
+            cols: 80,
+            rows: 12,
+            command: Some(
+                "printf '\\033[?2026h\\033[2J\\033[HPARTIAL'; sleep 0.4; \
+                 printf 'DONE\\033[?2026l'"
+                    .to_string(),
+            ),
+            ..Default::default()
+        })
+        .expect("spawn");
+
+        assert!(
+            wait_until(
+                || session.sync_update_hold().is_some(),
+                std::time::Duration::from_secs(4)
+            ),
+            "BSU was never observed"
+        );
+        // The grid already holds the partial frame; a renderer that snapshots
+        // here would paint it. The hold is what keeps the last full frame.
+        let mut snap = Snapshot::default();
+        session.snapshot_into(&mut snap);
+        assert!(snapshot_text(&snap).contains("PARTIAL"));
+        assert!(
+            wait_until(
+                || session.sync_update_hold().is_none(),
+                std::time::Duration::from_secs(4)
+            ),
+            "ESU was never observed"
+        );
+        session.snapshot_into(&mut snap);
+        assert!(snapshot_text(&snap).contains("DONE"));
     }
 
     #[test]

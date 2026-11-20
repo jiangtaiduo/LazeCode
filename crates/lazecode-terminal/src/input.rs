@@ -135,10 +135,7 @@ fn uses_kitty(stroke: KeyStroke, flags: KittyKeyboard) -> bool {
         && !all_keys
         && matches!(
             stroke.key,
-            TerminalKey::Enter
-                | TerminalKey::Tab
-                | TerminalKey::BackTab
-                | TerminalKey::Backspace
+            TerminalKey::Enter | TerminalKey::Tab | TerminalKey::BackTab | TerminalKey::Backspace
         )
     {
         return false;
@@ -478,10 +475,7 @@ mod tests {
     }
 
     fn with_event(stroke: KeyStroke, event: KeyEvent) -> KeyStroke {
-        KeyStroke {
-            event,
-            ..stroke
-        }
+        KeyStroke { event, ..stroke }
     }
 
     /// omp-style negotiation: the program pushes disambiguate + alternate keys
@@ -492,10 +486,7 @@ mod tests {
     #[test]
     fn ctrl_c_release_is_dropped_under_disambiguate_only() {
         let modes = kitty(KittyKeyboard::DISAMBIGUATE_ESC_CODES);
-        let press = encoded(
-            stroke(TerminalKey::Char('c'), true, false, false),
-            &modes,
-        );
+        let press = encoded(stroke(TerminalKey::Char('c'), true, false, false), &modes);
         assert_eq!(press, "\x1b[99;5u");
         let release = with_event(
             stroke(TerminalKey::Char('c'), true, false, false),
@@ -511,12 +502,18 @@ mod tests {
         let modes =
             kitty(KittyKeyboard::DISAMBIGUATE_ESC_CODES | KittyKeyboard::REPORT_EVENT_TYPES);
         let press = encoded(
-            with_event(stroke(TerminalKey::Char('c'), true, false, false), KeyEvent::Press),
+            with_event(
+                stroke(TerminalKey::Char('c'), true, false, false),
+                KeyEvent::Press,
+            ),
             &modes,
         );
         assert_eq!(press, "\x1b[99;5:1u");
         let release = encoded(
-            with_event(stroke(TerminalKey::Char('c'), true, false, false), KeyEvent::Release),
+            with_event(
+                stroke(TerminalKey::Char('c'), true, false, false),
+                KeyEvent::Release,
+            ),
             &modes,
         );
         assert_eq!(release, "\x1b[99;5:3u");
@@ -527,8 +524,7 @@ mod tests {
     #[test]
     fn ctrl_c_press_stays_legacy_with_event_types_only() {
         let modes = kitty(KittyKeyboard::REPORT_EVENT_TYPES);
-        let press =
-            encode_key(stroke(TerminalKey::Char('c'), true, false, false), &modes).unwrap();
+        let press = encode_key(stroke(TerminalKey::Char('c'), true, false, false), &modes).unwrap();
         assert_eq!(press, vec![3]);
         let release = with_event(
             stroke(TerminalKey::Char('c'), true, false, false),
@@ -542,9 +538,8 @@ mod tests {
     /// program leaves the mode on.
     #[test]
     fn enter_like_keys_have_no_release_without_all_keys() {
-        let modes = kitty(
-            KittyKeyboard::DISAMBIGUATE_ESC_CODES | KittyKeyboard::REPORT_EVENT_TYPES,
-        );
+        let modes =
+            kitty(KittyKeyboard::DISAMBIGUATE_ESC_CODES | KittyKeyboard::REPORT_EVENT_TYPES);
         for key in [
             TerminalKey::Enter,
             TerminalKey::Tab,
@@ -554,9 +549,8 @@ mod tests {
             let release = with_event(KeyStroke::plain(key), KeyEvent::Release);
             assert_eq!(encode_key(release, &modes), None, "{key:?} release");
         }
-        let all_keys = kitty(
-            KittyKeyboard::REPORT_ALL_KEYS_AS_ESC | KittyKeyboard::REPORT_EVENT_TYPES,
-        );
+        let all_keys =
+            kitty(KittyKeyboard::REPORT_ALL_KEYS_AS_ESC | KittyKeyboard::REPORT_EVENT_TYPES);
         let release = with_event(KeyStroke::plain(TerminalKey::Enter), KeyEvent::Release);
         assert_eq!(encoded(release, &all_keys), "\x1b[13;1:3u");
     }
@@ -570,7 +564,10 @@ mod tests {
         let negotiated = kitty(KittyKeyboard::DISAMBIGUATE_ESC_CODES);
         let press = encoded(stroke(TerminalKey::Tab, false, false, true), &negotiated);
         assert_eq!(press, "\x1b[9;2u");
-        let release = with_event(stroke(TerminalKey::Tab, false, false, true), KeyEvent::Release);
+        let release = with_event(
+            stroke(TerminalKey::Tab, false, false, true),
+            KeyEvent::Release,
+        );
         assert_eq!(encode_key(release, &negotiated), None);
         // Without kitty negotiation the legacy Backtab bytes stay intact.
         assert_eq!(
@@ -597,9 +594,8 @@ mod tests {
             "\x1b[1;6A"
         );
         // Releases carry the event sub-field when the program asked for it.
-        let with_events = kitty(
-            KittyKeyboard::DISAMBIGUATE_ESC_CODES | KittyKeyboard::REPORT_EVENT_TYPES,
-        );
+        let with_events =
+            kitty(KittyKeyboard::DISAMBIGUATE_ESC_CODES | KittyKeyboard::REPORT_EVENT_TYPES);
         let release = KeyStroke {
             event: KeyEvent::Release,
             ..stroke(TerminalKey::Left, false, true, false)

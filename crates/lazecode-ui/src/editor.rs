@@ -1653,15 +1653,7 @@ fn handle_editor_input(
                             | Key::PageDown
                     ) || (modifiers.command && matches!(key, Key::A | Key::C));
                     if navigates {
-                        let _ = handle_editor_key(
-                            ui,
-                            doc,
-                            pending,
-                            tab_id,
-                            rt,
-                            *key,
-                            *modifiers,
-                        );
+                        let _ = handle_editor_key(ui, doc, pending, tab_id, rt, *key, *modifiers);
                     }
                 }
                 _ => {}
@@ -2858,6 +2850,8 @@ fn draw_diff(
             Pos2::new(select_rect.left(), toolbar.bottom() + 2.0),
             Vec2::new(menu_w, 48.0),
         );
+        // Register for the shell's wheel interception (next frame).
+        rt.menu_hit_rects.push(menu_rect);
         ui.painter()
             .rect_filled(menu_rect, egui::CornerRadius::same(6), p.menu_bg);
         ui.painter().rect_stroke(

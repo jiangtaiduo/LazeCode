@@ -116,9 +116,10 @@ fn primary_name(refs: &[RefLabel]) -> String {
     }
 
     // Without HEAD, the first *tracked pair* outranks a lone branch.
-    if let Some((local, remote)) = ordered.iter().find_map(|local| {
-        paired_remote(local, &remotes).map(|remote| (*local, remote))
-    }) {
+    if let Some((local, remote)) = ordered
+        .iter()
+        .find_map(|local| paired_remote(local, &remotes).map(|remote| (*local, remote)))
+    {
         if let Some(prefix) = remote_prefix(&remote.label, &local.label) {
             return format!("{prefix} & {}", local.label);
         }
@@ -135,11 +136,7 @@ fn primary_name(refs: &[RefLabel]) -> String {
 /// Shorten like IntelliJ: first replace the part before the first `/` with
 /// `..` (so long `remote/feature/name` refs keep their meaningful tail), then
 /// trim to the budget with an ellipsis.
-pub(crate) fn shorten_label(
-    name: &str,
-    max_w: f32,
-    measure: impl Fn(&str) -> f32,
-) -> String {
+pub(crate) fn shorten_label(name: &str, max_w: f32, measure: impl Fn(&str) -> f32) -> String {
     if name.is_empty() || max_w <= 0.0 {
         return String::new();
     }
@@ -208,11 +205,7 @@ pub(crate) fn prepare(painter: &Painter, refs: &[RefLabel], max_w: f32) -> Optio
     };
     let full = primary_name(refs);
     let text = shorten_label(&full, max_w - icon_w - ICON_TEXT_GAP, measure);
-    let text_w = if text.is_empty() {
-        0.0
-    } else {
-        measure(&text)
-    };
+    let text_w = if text.is_empty() { 0.0 } else { measure(&text) };
     let width = if text_w > 0.0 {
         icon_w + ICON_TEXT_GAP + text_w
     } else {
@@ -250,13 +243,7 @@ pub(crate) fn paint(
 ) {
     let painter = ui.painter();
     let center_y = row.center().y;
-    for (index, kind) in cluster
-        .kinds
-        .iter()
-        .take(MAX_STACK)
-        .rev()
-        .enumerate()
-    {
+    for (index, kind) in cluster.kinds.iter().take(MAX_STACK).rev().enumerate() {
         paint_icon(
             painter,
             Rect::from_center_size(
@@ -313,11 +300,7 @@ pub(crate) fn paint(
         if rest > 0 {
             let more = crate::i18n::t(language, "and {} more", "另有 {} 个")
                 .replace("{}", &rest.to_string());
-            ui.label(
-                egui::RichText::new(more)
-                    .size(12.0)
-                    .color(p.text3),
-            );
+            ui.label(egui::RichText::new(more).size(12.0).color(p.text3));
         }
     });
 }
@@ -396,10 +379,7 @@ mod tests {
 
     #[test]
     fn tag_only_commits_hide_the_inline_name() {
-        let refs = vec![
-            label("v1.0", RefKind::Tag),
-            label("v2.0", RefKind::Tag),
-        ];
+        let refs = vec![label("v1.0", RefKind::Tag), label("v2.0", RefKind::Tag)];
         assert_eq!(primary_name(&refs), "");
         let rows = ordered_rows(&refs);
         assert_eq!(rows.len(), 2);

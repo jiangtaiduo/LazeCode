@@ -2,7 +2,7 @@
 //! right-clicking entries, files and folders opens the reference menus.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use egui::{Pos2, Vec2};
@@ -74,8 +74,7 @@ fn frame(
 }
 
 fn stash_fixture(name: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("lazecode-ui-stash-{}-{name}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("lazecode-ui-stash-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("fixture dir");
     let git = |args: &[&str]| {
@@ -103,9 +102,9 @@ fn stash_fixture(name: &str) -> PathBuf {
     dir
 }
 
-fn stash_runtime(root: &PathBuf, settings: &Settings) -> (AppModel, UiRuntime) {
+fn stash_runtime(root: &Path, settings: &Settings) -> (AppModel, UiRuntime) {
     let mut model = model(settings);
-    let project = ProjectState::open(root.clone(), settings, None).expect("project");
+    let project = ProjectState::open(root.to_path_buf(), settings, None).expect("project");
     model.projects.push(project);
     model.active_project = Some(0);
     model.ui.sidebar_visible = true;

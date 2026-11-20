@@ -1004,7 +1004,12 @@ fn repository_version_snapshot_opens_a_read_only_titled_tab() {
     let mut project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
     let source = dir.path().join("versioned.txt");
     let id = project
-        .open_revision_snapshot(&source, b"committed\n", "versioned.txt (HEAD)".to_string(), &settings)
+        .open_revision_snapshot(
+            &source,
+            b"committed\n",
+            "versioned.txt (HEAD)".to_string(),
+            &settings,
+        )
         .unwrap();
     let tab = project.tabs.iter().find(|tab| tab.id == id).expect("tab");
     assert_eq!(tab.title(), "versioned.txt (HEAD)");

@@ -100,13 +100,15 @@ fn copy_shortcut_copies_selected_branch_names_in_full() {
     assert_eq!(copied, vec!["origin/feature/a/b".to_string()]);
 
     // 多选：按行拼接。
-    model.projects[0].ref_selection =
-        vec!["feature/a/b".to_string(), "origin/main".to_string()];
+    model.projects[0].ref_selection = vec!["feature/a/b".to_string(), "origin/main".to_string()];
     let copied = frame(&ctx, &mut model, &mut rt, vec![Event::Copy]);
     assert_eq!(copied, vec!["feature/a/b\norigin/main".to_string()]);
 
     // 文本面（编辑器）持有焦点时让位，不抢复制。
     rt.editor_focus = Some(1);
     let copied = frame(&ctx, &mut model, &mut rt, vec![Event::Copy]);
-    assert!(copied.is_empty(), "editor focus must keep its own copy: {copied:?}");
+    assert!(
+        copied.is_empty(),
+        "editor focus must keep its own copy: {copied:?}"
+    );
 }

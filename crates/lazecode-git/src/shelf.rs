@@ -51,7 +51,10 @@ fn stash_message_parts(subject: &str) -> (Option<String>, String) {
     if let Some(rest) = subject.strip_prefix("WIP on ") {
         if let Some((branch, message)) = rest.split_once(": ") {
             // Drop the abbreviated commit id git puts in front of the subject.
-            let message = message.split_once(' ').map(|(_, tail)| tail).unwrap_or(message);
+            let message = message
+                .split_once(' ')
+                .map(|(_, tail)| tail)
+                .unwrap_or(message);
             return (Some(branch.to_string()), message.trim().to_string());
         }
     }
@@ -904,7 +907,11 @@ fn write_stash_index(
 
 /// A stashed file's "before" version (the stash base blob) against the
 /// current working-tree file — the reference UX's "Compare Before with Local".
-pub fn stash_before_local_diff(root: &Path, stash: &str, path: &str) -> Result<crate::model::FileDiff> {
+pub fn stash_before_local_diff(
+    root: &Path,
+    stash: &str,
+    path: &str,
+) -> Result<crate::model::FileDiff> {
     use crate::diff::{build_file_diff, load_blob_capped};
     let repo = discover(root)?;
     let workdir = workdir(&repo)?;

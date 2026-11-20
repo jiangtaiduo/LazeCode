@@ -299,7 +299,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     }
 }
 
-fn popover_rect(screen: Rect, anchor: Rect, width: f32, height: f32) -> Rect {
+fn popover_rect(rt: &mut UiRuntime, screen: Rect, anchor: Rect, width: f32, height: f32) -> Rect {
     let is_point = anchor.width() <= 4.0 && anchor.height() <= 4.0;
     let x = if is_point {
         anchor
@@ -321,7 +321,10 @@ fn popover_rect(screen: Rect, anchor: Rect, width: f32, height: f32) -> Rect {
     } else {
         (anchor.top() - height - if is_point { 0.0 } else { 4.0 }).max(screen.top() + 8.0)
     };
-    Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, height))
+    let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(width, height));
+    // Register the surface for the shell's wheel interception (next frame).
+    rt.menu_hit_rects.push(rect);
+    rect
 }
 
 /// Stable `.py-dialog-window` material: opaque dialog surface, radius 12,
@@ -489,7 +492,7 @@ fn draw_project_menu(
     // Stay under 80% of the screen; only the excess scrolls.
     let max_body_h = (screen.height() * 0.8 - header_h - footer_h).max(120.0);
     let body_h = content_h.min(max_body_h);
-    let rect = popover_rect(screen, menu.anchor, 326.0, header_h + body_h + footer_h);
+    let rect = popover_rect(rt, screen, menu.anchor, 326.0, header_h + body_h + footer_h);
     menu_frame(ui, rect, theme);
     ui.painter().text(
         Pos2::new(rect.left() + 14.0, rect.top() + 20.0),
@@ -820,7 +823,7 @@ fn draw_worktree_menu(
     };
     let count = model.projects[index].worktrees.len();
     let height = 86.0 + (count as f32 * 36.0).min(320.0) + 74.0;
-    let rect = popover_rect(screen, menu.anchor, 324.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 324.0, height);
     menu_frame(ui, rect, theme);
     ui.painter().text(
         Pos2::new(rect.left() + 14.0, rect.top() + 18.0),
@@ -1080,7 +1083,7 @@ fn draw_log_branch_menu(
     // The immutable borrow of `model.projects` ended above; the overlay only
     // reads cloned data afterwards.
     let height = 12.0 + (rows_vec.len() as f32 * 24.0 + 26.0).min(320.0);
-    let rect = popover_rect(screen, menu.anchor, 260.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 260.0, height);
     menu_frame(ui, rect, theme);
     let mut pick: Option<Option<String>> = None;
     let rows = Rect::from_min_max(
@@ -1315,7 +1318,7 @@ fn draw_log_date_menu(
         ),
     ];
     let height = items.len() as f32 * 26.0 + 12.0;
-    let rect = popover_rect(screen, menu.anchor, 160.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 160.0, height);
     menu_frame(ui, rect, theme);
 
     let mut pick: Option<lazecode_core::DatePreset> = None;
@@ -1469,7 +1472,7 @@ fn draw_commit_menu(
         list
     };
     let height = items.len() as f32 * MENU_ROW_H + 8.0;
-    let rect = popover_rect(screen, menu.anchor, 260.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 260.0, height);
     menu_frame(ui, rect, theme);
     // 稳定版提交右键菜单（CommitContextMenu）没有标题行。
     let mut action: Option<u8> = None;
@@ -1697,7 +1700,7 @@ fn draw_tag_context_menu(
         (crate::tr!(model, "Delete tag", "删除标签").to_string(), 4),
     ];
     let height = items.len() as f32 * MENU_ROW_H + 8.0;
-    let rect = popover_rect(screen, menu.anchor, 300.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 300.0, height);
     menu_frame(ui, rect, theme);
     let mut action = None;
     for (i, (label, code)) in items.iter().enumerate() {
@@ -1826,7 +1829,7 @@ fn draw_branch_context_menu(
     // The favorite row is drawn after `items`, so include it in the frame.
     let extra_row = if is_multi { 0.0 } else { MENU_ROW_H };
     let height = items.len() as f32 * MENU_ROW_H + extra_row + 8.0;
-    let rect = popover_rect(screen, menu.anchor, 260.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 260.0, height);
     menu_frame(ui, rect, theme);
     // 稳定版分支右键菜单没有标题行（BranchContextMenu 无 header）。
     let mut action: Option<u8> = None;
@@ -2064,7 +2067,7 @@ fn draw_tree_context_menu(
     let sep_count = items.iter().filter(|i| matches!(i, Item::Sep)).count();
     let height = 12.0 + row_count as f32 * 24.0 + sep_count as f32 * 8.0;
     let width = if is_batch { 160.0 } else { 200.0 };
-    let rect = popover_rect(screen, menu.anchor, width, height);
+    let rect = popover_rect(rt, screen, menu.anchor, width, height);
     menu_frame(ui, rect, theme);
 
     let mut action: Option<u8> = None;
@@ -2205,6 +2208,7 @@ fn draw_tree_context_menu(
                 .clamp(screen.top() + 8.0, screen.bottom() - sub_h - 8.0);
             let sub_rect = Rect::from_min_size(Pos2::new(sub_x, sub_y), Vec2::new(sub_w, sub_h));
             sub_rect_opt = Some(sub_rect);
+            rt.menu_hit_rects.push(sub_rect);
             menu_frame(ui, sub_rect, theme);
 
             let mut sy = sub_rect.top() + 6.0;
@@ -2503,7 +2507,7 @@ fn draw_editor_tab_context_menu(
     ];
 
     let height = items.len() as f32 * MENU_ROW_H + 8.0;
-    let rect = popover_rect(screen, menu.anchor, 200.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 200.0, height);
     menu_frame(ui, rect, theme);
 
     // 稳定版右键菜单没有标题行（对齐 EditorTabBar ctx menu），直接列菜单项。
@@ -2660,7 +2664,7 @@ fn draw_terminal_tab_context_menu(
         .count();
     let seps = items.len() - rows;
     let height = rows as f32 * MENU_ROW_H + seps as f32 * 8.0 + 12.0;
-    let rect = popover_rect(screen, menu.anchor, 200.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 200.0, height);
     menu_frame(ui, rect, theme);
 
     let zh = model.settings.language.is_zh();
@@ -2825,7 +2829,7 @@ fn draw_commit_history_menu(
     }
 
     let height = items.len() as f32 * 26.0 + 24.0;
-    let rect = popover_rect(screen, menu.anchor, 320.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 320.0, height);
     menu_frame(ui, rect, theme);
 
     let mut action: Option<u8> = None;
@@ -2943,7 +2947,7 @@ fn draw_changelist_header_menu(
     }
 
     let height = items.len() as f32 * MENU_ROW_H + 8.0;
-    let rect = popover_rect(screen, menu.anchor, 260.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 260.0, height);
     menu_frame(ui, rect, theme);
 
     // 稳定版右键菜单没有标题行，直接列菜单项。
@@ -3004,7 +3008,7 @@ fn draw_log_sort_options_menu(
 ) {
     let p = theme.palette;
     let zh = model.settings.language.is_zh();
-    let rect = popover_rect(screen, menu.anchor, 220.0, 160.0);
+    let rect = popover_rect(rt, screen, menu.anchor, 220.0, 160.0);
     menu_frame(ui, rect, theme);
 
     let (topo, first_parent, no_merges) = {
@@ -3212,7 +3216,7 @@ fn draw_log_path_filter_menu(
 ) {
     let p = theme.palette;
     let zh = model.settings.language.is_zh();
-    let rect = popover_rect(screen, menu.anchor, 260.0, 84.0);
+    let rect = popover_rect(rt, screen, menu.anchor, 260.0, 84.0);
     menu_frame(ui, rect, theme);
 
     let mut current_path = model.projects[project_idx].log_query.path.clone();
@@ -3340,7 +3344,7 @@ fn draw_commit_details_file_menu(
         ),
     ];
     let height = items.len() as f32 * MENU_ROW_H + 8.0;
-    let rect = popover_rect(screen, menu.anchor, 220.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 220.0, height);
     menu_frame(ui, rect, theme);
     let mut action: Option<u8> = None;
     let row_start = rect.top() + 4.0;
@@ -3481,7 +3485,7 @@ fn draw_editor_context_menu(
         items.push((if zh { "压缩 JSON" } else { "Minify JSON" }, 9));
     }
     let height = items.len() as f32 * MENU_ROW_H + 8.0;
-    let rect = popover_rect(screen, menu.anchor, 200.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 200.0, height);
     menu_frame(ui, rect, theme);
     let mut action: Option<u8> = None;
     let row_start = rect.top() + 4.0;
@@ -4164,7 +4168,7 @@ fn draw_commit_extras_menu(
         ),
     ];
     let height = items.len() as f32 * MENU_ROW_H + 8.0;
-    let rect = popover_rect(screen, menu.anchor, 220.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 220.0, height);
     menu_frame(ui, rect, theme);
     let mut picked: Option<u8> = None;
     for (i, (label, code, danger)) in items.iter().enumerate() {
@@ -4259,6 +4263,7 @@ fn draw_commit_extras_menu(
     }
 }
 /// 贮藏条目右键菜单：弹出 / 应用 / Unstash… / 丢弃 / 清空 / 显示差异。
+#[allow(clippy::too_many_arguments)]
 fn draw_stash_entry_menu(
     ui: &mut Ui,
     model: &mut AppModel,
@@ -4300,7 +4305,12 @@ fn draw_stash_entry_menu(
     // (label, code, danger, enabled)
     let items: [(&str, u8, bool, bool); 7] = [
         (crate::tr!(model, "Pop", "弹出"), 0, false, stash.is_some()),
-        (crate::tr!(model, "Apply", "应用"), 1, false, stash.is_some()),
+        (
+            crate::tr!(model, "Apply", "应用"),
+            1,
+            false,
+            stash.is_some(),
+        ),
         (
             crate::tr!(model, "Unstash…", "Unstash…"),
             2,
@@ -4324,7 +4334,7 @@ fn draw_stash_entry_menu(
     ];
     let sep_after = 4usize;
     let height = items.len() as f32 * MENU_ROW_H + 12.0;
-    let rect = popover_rect(screen, menu.anchor, 230.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 230.0, height);
     menu_frame(ui, rect, theme);
     let mut picked: Option<u8> = None;
     let mut y = rect.top() + 4.0;
@@ -4417,6 +4427,7 @@ fn draw_stash_entry_menu(
 /// 贮藏文件 / 目录右键菜单（对齐参考实现）：
 /// Show Diff · Show Diff in a New Tab · Compare Before with Local ·
 /// Edit Source · Open Repository Version · Cherry-Pick Selected Changes。
+#[allow(clippy::too_many_arguments)]
 fn draw_stash_file_menu(
     ui: &mut Ui,
     model: &mut AppModel,
@@ -4507,18 +4518,14 @@ fn draw_stash_file_menu(
             target.is_some(),
         ),
         (
-            crate::tr!(
-                model,
-                "Cherry-Pick Selected Changes",
-                "拣选选中更改"
-            ),
+            crate::tr!(model, "Cherry-Pick Selected Changes", "拣选选中更改"),
             5,
             false,
             !files.is_empty(),
         ),
     ];
     let height = items.len() as f32 * MENU_ROW_H + 8.0;
-    let rect = popover_rect(screen, menu.anchor, 250.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 250.0, height);
     menu_frame(ui, rect, theme);
     let mut picked: Option<u8> = None;
     for (i, (label, code, danger, enabled)) in items.iter().enumerate() {
@@ -4576,7 +4583,10 @@ fn draw_stash_file_menu(
         }
         Some(5) => {
             if !files.is_empty() {
-                model.queue(Command::CherryPickStashPaths { stash, paths: files });
+                model.queue(Command::CherryPickStashPaths {
+                    stash,
+                    paths: files,
+                });
             }
             close = true;
         }
@@ -4601,7 +4611,7 @@ fn draw_commit_view_options_menu(
     let p = theme.palette;
     let menu_w = 210.0;
     let menu_h = 100.0;
-    let rect = popover_rect(screen, menu.anchor, menu_w, menu_h);
+    let rect = popover_rect(rt, screen, menu.anchor, menu_w, menu_h);
     menu_frame(ui, rect, theme);
 
     ui.painter().text(
@@ -4706,7 +4716,7 @@ fn draw_compare_view_options_menu(
     let zh = model.settings.language.is_zh();
     let menu_w = 180.0;
     let menu_h = 56.0;
-    let rect = popover_rect(screen, menu.anchor, menu_w, menu_h);
+    let rect = popover_rect(rt, screen, menu.anchor, menu_w, menu_h);
     menu_frame(ui, rect, theme);
 
     ui.painter().text(
@@ -4837,7 +4847,7 @@ fn draw_shelf_context_menu(
         ));
     }
     let height = items.len() as f32 * MENU_ROW_H + 8.0;
-    let rect = popover_rect(screen, menu.anchor, 260.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 260.0, height);
     menu_frame(ui, rect, theme);
     let mut picked: Option<u8> = None;
     for (i, (label, code, danger, enabled)) in items.iter().enumerate() {
@@ -4954,7 +4964,7 @@ fn draw_change_file_menu(
     let (items, ctx) = change_menu_items(model, project, &paths);
 
     let height = items.len() as f32 * MENU_ROW_H + 8.0;
-    let rect = popover_rect(screen, menu.anchor, 260.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 260.0, height);
     menu_frame(ui, rect, theme);
 
     // 稳定版右键菜单没有标题行，直接列菜单项。
@@ -5058,7 +5068,7 @@ fn draw_branch_menu(
     let max_height = (screen.height() * 0.8).max(180.0);
     let needed_height = top_h + sections_h + 16.0;
     let height = needed_height.clamp(140.0, max_height);
-    let rect = popover_rect(screen, menu.anchor, 330.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 330.0, height);
     menu_frame(ui, rect, theme);
 
     let mut close = false;
@@ -5713,6 +5723,9 @@ fn draw_branch_menu(
         );
         let sub_rect = Rect::from_min_size(Pos2::new(sub_x, sub_y), Vec2::new(sub_w, sub_h));
         sub_rect_opt = Some(sub_rect);
+        // Register for the shell's wheel interception (next frame), matching
+        // the tree context submenu.
+        rt.menu_hit_rects.push(sub_rect);
 
         menu_frame(ui, sub_rect, theme);
 
@@ -5932,7 +5945,7 @@ fn draw_agent_menu(
     let options = model.settings.agents.options.clone();
     let visible_rows = options.len().min(9);
     let height = 52.0 + visible_rows as f32 * 46.0 + 24.0;
-    let rect = popover_rect(screen, anchor, 320.0, height);
+    let rect = popover_rect(rt, screen, anchor, 320.0, height);
     menu_frame(ui, rect, theme);
     ui.painter().text(
         Pos2::new(rect.left() + 14.0, rect.top() + 20.0),
@@ -6347,7 +6360,7 @@ fn draw_compare_user_menu(
     let mut authors = crate::compare::unique_authors(&commits);
     authors.insert(0, crate::tr!(model, "All authors", "全部作者").to_string());
     let height = (authors.len() as f32 * 24.0 + 20.0).min(320.0);
-    let rect = popover_rect(screen, menu.anchor, 200.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 200.0, height);
     menu_frame(ui, rect, theme);
     let mut picked: Option<Option<String>> = None;
     for (i, author) in authors.iter().enumerate() {
@@ -6414,7 +6427,7 @@ fn draw_compare_date_menu(
         ),
     ];
     let height = items.len() as f32 * 24.0 + 20.0;
-    let rect = popover_rect(screen, menu.anchor, 160.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 160.0, height);
     menu_frame(ui, rect, theme);
     let mut picked: Option<Option<lazecode_core::CompareDateFilter>> = None;
     for (i, (label, value)) in items.iter().enumerate() {
@@ -6472,7 +6485,7 @@ fn draw_compare_ref_menu(
     let mut refs = crate::compare::unique_refs(&commits);
     refs.insert(0, crate::tr!(model, "All Branches", "全部分支").to_string());
     let height = (refs.len() as f32 * 24.0 + 20.0).min(320.0);
-    let rect = popover_rect(screen, menu.anchor, 220.0, height);
+    let rect = popover_rect(rt, screen, menu.anchor, 220.0, height);
     menu_frame(ui, rect, theme);
     let mut picked: Option<Option<String>> = None;
     for (i, name) in refs.iter().enumerate() {
@@ -7945,8 +7958,12 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             message.clone()
         };
         Some((
-            crate::tr!(model, "Unstash Changes in {name}…", "Unstash Changes in {name}…")
-                .replace("{name}", &name),
+            crate::tr!(
+                model,
+                "Unstash Changes in {name}…",
+                "Unstash Changes in {name}…"
+            )
+            .replace("{name}", &name),
             crate::tr!(
                 model,
                 "Apply the stashed changes to the current branch or a new one.",
@@ -9545,7 +9562,11 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             ui.painter().text(
                 Pos2::new(rect.left() + 130.0, rect.top() + 92.0),
                 Align2::LEFT_CENTER,
-                if branch.is_empty() { "—" } else { branch.as_str() },
+                if branch.is_empty() {
+                    "—"
+                } else {
+                    branch.as_str()
+                },
                 FontId::proportional(11.5),
                 p.text,
             );

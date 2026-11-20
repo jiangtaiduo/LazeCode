@@ -657,6 +657,11 @@ pub struct UiRuntime {
     pub cursor_epoch: f64,
     pub agent_menu: Option<egui::Rect>,
     pub agent_menu_frame: u64,
+    /// Per-frame rects of open popovers, pushed by the overlay draw code and
+    /// taken by the shell at the start of the next frame: egui routes the
+    /// wheel by rect containment only (no z-order test), so panels need to
+    /// know where an overlay drawn later in the frame will land.
+    pub menu_hit_rects: Vec<egui::Rect>,
     pub frame_count: u64,
     pub branch_create_error: Option<String>,
     pub pending_open: Option<(std::path::PathBuf, usize, usize)>,
@@ -781,6 +786,7 @@ impl Default for UiRuntime {
             image_zoom: HashMap::new(),
             agent_menu: None,
             agent_menu_frame: 0,
+            menu_hit_rects: Vec::new(),
             frame_count: 0,
             branch_create_error: None,
             pending_open: None,
@@ -845,6 +851,32 @@ impl UiRuntime {
             || self.agent_menu.is_some()
             || self.update_open
             || !matches!(self.dialog, DialogState::None)
+    }
+
+    /// Hand this frame's popover rects to the shell and start a fresh buffer.
+    pub fn take_menu_hit_rects(&mut self) -> Vec<egui::Rect> {
+        std::mem::take(&mut self.menu_hit_rects)
+    }
+
+    /// True when scroll-wheel input this frame belongs to an overlay instead
+    /// of the panels underneath: modals own the whole window, popover menus
+    /// own their (previous frame's) rects. egui delivers the wheel to every
+    /// scroll surface containing the pointer — first consumer wins, and
+    /// panels always draw before overlays — so the shell must intercept the
+    /// delta before the panels run.
+    pub fn blocks_wheel(
+        &self,
+        model: &AppModel,
+        pos: Option<egui::Pos2>,
+        menu_rects: &[egui::Rect],
+    ) -> bool {
+        self.settings_open
+            || self.about_open
+            || self.search.open
+            || model.ui.command_palette_open
+            || self.update_open
+            || !matches!(self.dialog, DialogState::None)
+            || pos.is_some_and(|pos| menu_rects.iter().any(|rect| rect.contains(pos)))
     }
 
     /// Close the topmost overlay. Used by Escape and by the native Cmd+W
@@ -932,6 +964,36 @@ impl UiRuntime {
     pub fn set_terminal_focus(&mut self, id: u64) {
         self.terminal_focus = Some(id);
         self.editor_focus = None;
+    }
+
+    /// True when a text surface (console or editor) owns the keyboard: no
+    /// overlay/text field is taking keys, and the focused surface is the
+    /// active pane/tab of the active project.
+    pub fn typing_surface_owns_keys(&self, model: &AppModel, ctx: &egui::Context) -> bool {
+        if self.blocks_input(model) || ctx.text_edit_focused() {
+            return false;
+        }
+        let Some(project) = model.active_project() else {
+            return false;
+        };
+        if let Some(pane_id) = self.terminal_focus {
+            if !model.ui.terminal_visible || self.terminal_search.values().any(|search| search.open)
+            {
+                return false;
+            }
+            let worktree = project.active_worktree();
+            return worktree
+                .active_tab_id()
+                .and_then(|tab_id| worktree.tab_by_id(tab_id))
+                .is_some_and(|tab| tab.active_pane == pane_id);
+        }
+        if let Some(tab_id) = self.editor_focus {
+            return project.active_tab == Some(tab_id)
+                && project
+                    .tab_by_id(tab_id)
+                    .is_some_and(|tab| matches!(tab.kind, lazecode_core::TabKind::File(_)));
+        }
+        false
     }
 
     pub fn open_palette(&mut self) {
@@ -1293,7 +1355,19 @@ impl UiRuntime {
                     return;
                 }
                 let active = model.active_project == Some(index);
+                // Snapshots and probes are keyed by pane id; forget the closed
+                // project's panes instead of clearing every other project's
+                // last complete frame.
+                let doomed: Vec<u64> = model.projects[index]
+                    .worktrees
+                    .iter()
+                    .flat_map(|worktree| worktree.terminals.iter())
+                    .flat_map(|tab| tab.panes.iter().map(|pane| pane.id))
+                    .collect();
                 model.close_project(index);
+                for id in doomed {
+                    self.forget_terminal(id);
+                }
                 model.save_workspace();
                 self.clear_terminal_cache();
                 if active {
@@ -1409,7 +1483,10 @@ impl UiRuntime {
     pub fn clear_terminal_cache(&mut self) {
         // Drop a stale focus id from another project or its console looks
         // dead until clicked; the panel latches the new active session.
-        self.terminal_snapshots.clear();
+        // Snapshot cells are per pane and are the last complete frames: keep
+        // them so the first draw after a switch can hold a coherent screen
+        // while a TUI finishes its resize repaint. `forget_terminal` frees
+        // them when the pane closes.
         self.terminal_selections.clear();
         self.terminal_search.clear();
         self.terminal_preedit.clear();
@@ -1433,6 +1510,35 @@ impl UiRuntime {
         self.terminal_busy.remove(&id);
         self.terminal_scroll_fraction.remove(&id);
         if self.terminal_focus == Some(id) {
+            self.terminal_focus = None;
+        }
+    }
+
+    /// Drop per-pane state for panes the model no longer owns. The core can
+    /// close panes on its own (`settle_single_files_workspace` drops an
+    /// emptied Single files project outright), so call-site cleanup is not
+    /// exhaustive; one retain per frame is cheap and idempotent, and keeps
+    /// kitty texture caches from outliving their panes.
+    pub fn prune_terminal_caches(&mut self, model: &AppModel) {
+        let mut live: Vec<u64> = Vec::new();
+        for project in &model.projects {
+            for worktree in &project.worktrees {
+                for tab in &worktree.terminals {
+                    live.extend(tab.panes.iter().map(|pane| pane.id));
+                }
+            }
+        }
+        let alive = |id: &u64| live.contains(id);
+        self.terminal_snapshots.retain(|id, _| alive(id));
+        self.terminal_selections.retain(|id, _| alive(id));
+        self.terminal_search.retain(|id, _| alive(id));
+        self.terminal_preedit.retain(|id, _| alive(id));
+        self.terminal_wheel.retain(|id, _| alive(id));
+        self.terminal_wake.retain(|id, _| alive(id));
+        self.terminal_graphics.retain(|id, _| alive(id));
+        self.terminal_busy.retain(|id, _| alive(id));
+        self.terminal_scroll_fraction.retain(|id, _| alive(id));
+        if self.terminal_focus.is_some_and(|id| !alive(&id)) {
             self.terminal_focus = None;
         }
     }

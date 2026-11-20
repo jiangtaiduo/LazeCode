@@ -8,6 +8,53 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- A console first shown while its full-screen program (omp) is streaming
+  output no longer stays black until the program exits. A fresh pane has no
+  previous frame, but the renderer still held presentation while the program
+  was inside a synchronized update (DEC 2026) — and omp under load spends
+  virtually all of its time there — so nothing was ever painted. The hold now
+  only applies when a frame already exists; a fresh pane snapshots
+  immediately (one possibly-partial frame, replaced by the complete frame as
+  soon as the update closes). This is the black-console case when switching
+  between projects whose consoles are all running omp.
+
+- Scrolling over an open popup no longer scrolls the panel underneath. egui
+  delivers the wheel to every scroll surface containing the pointer and
+  panels draw before overlays, so the commit list under the branch filter
+  menu (and every other popover) consumed the scroll events aimed at the
+  menu. The app shell now holds the wheel back from all panels while an
+  overlay owns the pointer — modals (settings, search, command palette,
+  dialogs) anywhere on the window, popover menus inside their rect — and
+  hands it to the overlay pass, so filter menus with scrollable lists (log
+  branch/author filters, agent picker) scroll themselves and everything
+  else ignores the wheel. All popovers are covered: the menus drawn by the
+  overlay pass, the diff-view mode dropdown, the compare path-filter form,
+  and the editor completion list and symbol picker.
+
+- A focused console or editor keeps the keyboard to itself. egui's Tab focus
+  navigation used to park focus on a clickable widget, and egui treats
+  Enter/Space on a focused widget as a click — so Tab-completing a shell
+  command (or indenting code) and pressing Enter also activated the focused
+  project-rail tile and switched projects mid-command. The text surface now
+  clears and suppresses egui focus while it owns input; Tab and Enter reach
+  the shell/editor untouched.
+
+- Consoles no longer flash a half-composited frame when a full-screen TUI
+  (omp) repaints, such as after switching back to its project. While the
+  program is inside a synchronized update (DEC 2026), the console keeps
+  presenting the last complete frame; a short settle window does the same
+  while a TUI starts its resize repaint. The last complete snapshot is kept
+  across project switches so the hold has a coherent frame to show.
+
+- Removing a worktree releases all per-pane console state (including kitty
+  image textures), and panes the core closes behind the UI's back — an
+  emptied Single files project — no longer leave stale snapshots or a focus
+  id pointing at a dead pane behind. The shell now reconciles the per-pane
+  caches against the model once per frame instead of relying on every close
+  path to clean up by hand.
+
 ## [0.4.11] - 2026-11-18
 
 ### Added

@@ -1177,9 +1177,8 @@ fn draw_pane(
                         );
                         msg_x += 16.0;
                     }
-                    let content_right =
-                        (row.right() - AUTHOR_W - DATE_W - 12.0).max(msg_x + 60.0);
-                    let refs_max_w = ((content_right - msg_x) / 3.0).min(240.0).max(24.0);
+                    let content_right = (row.right() - AUTHOR_W - DATE_W - 12.0).max(msg_x + 60.0);
+                    let refs_max_w = ((content_right - msg_x) / 3.0).clamp(24.0, 240.0);
                     let refs_cluster =
                         crate::log_refs::prepare(ui.painter(), &commit.refs, refs_max_w);
                     let refs_w = refs_cluster
@@ -1193,8 +1192,7 @@ fn draw_pane(
                         subject_font.clone(),
                         p.text,
                     );
-                    let actual_subject_w =
-                        subject_galley.size().x.min(subject_right - msg_x);
+                    let actual_subject_w = subject_galley.size().x.min(subject_right - msg_x);
                     text_clipped(
                         ui.painter(),
                         Rect::from_min_max(
@@ -1208,8 +1206,7 @@ fn draw_pane(
                     );
                     if let Some(cluster) = refs_cluster {
                         let badge_x = msg_x + actual_subject_w + 6.0;
-                        let id =
-                            ui.make_persistent_id(("compare-log-refs", commit.id.as_str()));
+                        let id = ui.make_persistent_id(("compare-log-refs", commit.id.as_str()));
                         crate::log_refs::paint(
                             ui,
                             model.settings.language,
@@ -1448,6 +1445,7 @@ fn draw_pane(
             Vec2::new(form_w, 82.0),
         );
         crate::overlays::menu_frame(ui, form, theme);
+        rt.menu_hit_rects.push(form);
         let input = Rect::from_min_size(
             Pos2::new(form.left() + 8.0, form.top() + 8.0),
             Vec2::new(form_w - 16.0, 26.0),

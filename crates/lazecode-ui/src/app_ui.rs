@@ -175,8 +175,25 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
 
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     rt.frame_count = rt.frame_count.wrapping_add(1);
+    // A focused console/editor owns the keyboard, but egui still runs Tab
+    // focus navigation over clickable widgets and treats Enter/Space on the
+    // focused widget as a click (FAKE_PRIMARY_CLICKED). Tab completion or
+    // indentation followed by Enter therefore activated whichever widget got
+    // focus — a project-rail tile switched projects mid-command. Keep egui
+    // focus off while a text surface owns input; it receives Tab/Enter itself.
+    if rt.typing_surface_owns_keys(model, ui.ctx()) {
+        ui.ctx().memory_mut(|memory| {
+            memory.move_focus(egui::FocusDirection::None);
+            if let Some(id) = memory.focused() {
+                memory.surrender_focus(id);
+            }
+        });
+    }
     egui_extras::install_image_loaders(ui.ctx());
     model.sync_worktree_view();
+    // The core can drop panes without going through the UI close paths
+    // (`settle_single_files_workspace`), so reconcile per-pane caches here.
+    rt.prune_terminal_caches(model);
     model.sync_lsp();
     crate::lsp_ui::poll(ui.ctx(), model, rt);
     let theme = Theme::for_mode(model.settings.theme);
@@ -267,6 +284,19 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         );
     }
 
+    // egui hands the wheel to every scroll surface containing the pointer
+    // (first consumer wins; no z-order test), and panels draw before
+    // overlays. While an overlay owns the pointer — modals anywhere, popover
+    // menus inside their rect — stash the delta away from the panels here and
+    // hand it back just before the overlay pass below.
+    let menu_rects = rt.take_menu_hit_rects();
+    let overlay_wheel = ui.input_mut(|input| {
+        if rt.blocks_wheel(model, input.pointer.interact_pos(), &menu_rects) {
+            core::mem::take(&mut input.smooth_scroll_delta)
+        } else {
+            egui::Vec2::ZERO
+        }
+    });
     crate::strip::draw(ui, model, rt, &theme, layout.strip);
     crate::titlebar::draw(ui, model, rt, &theme, layout.titlebar);
     if let Some(sidebar) = layout.sidebar {
@@ -324,6 +354,11 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         crate::panel::draw(ui, model, rt, &theme, panel);
     }
     crate::statusbar::draw(ui, model, rt, &theme, layout.status);
+    // Overlay phase: settings, dialogs and popover menus scroll with the
+    // wheel the panels were denied above.
+    if overlay_wheel != egui::Vec2::ZERO {
+        ui.input_mut(|input| input.smooth_scroll_delta = overlay_wheel);
+    }
     crate::lsp_ui::draw_popups(ui, model, rt, &theme);
 
     // Full-screen hit-test blocker: above the shell chrome, below every

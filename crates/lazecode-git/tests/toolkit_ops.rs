@@ -1,9 +1,9 @@
 use lazecode_git::{
-    blame, compare_commits, diff_patch_paths, file_history, shelf_delete, shelf_files, shelf_list,
-    shelf_patch, shelf_rename, shelf_restore, shelf_restore_partial, shelf_save, shelf_save_paths,
-    head_file_bytes, stash_apply, stash_apply_paths, stash_apply_with, stash_before_local_diff,
-    stash_details, stash_drop, stash_file_diff, stash_files, stash_list, stash_pop, stash_push,
-    submodule_list, StashApplyOptions,
+    blame, compare_commits, diff_patch_paths, file_history, head_file_bytes, shelf_delete,
+    shelf_files, shelf_list, shelf_patch, shelf_rename, shelf_restore, shelf_restore_partial,
+    shelf_save, shelf_save_paths, stash_apply, stash_apply_paths, stash_apply_with,
+    stash_before_local_diff, stash_details, stash_drop, stash_file_diff, stash_files, stash_list,
+    stash_pop, stash_push, submodule_list, StashApplyOptions,
 };
 use std::path::Path;
 use std::process::Command;
@@ -155,10 +155,7 @@ fn stash_apply_reinstate_index_restages_stashed_index_state() {
         std::fs::read_to_string(root.join("a.txt")).unwrap(),
         "one unstaged\n"
     );
-    assert_eq!(
-        git(root, &["show", ":b.txt"]),
-        "beta staged"
-    );
+    assert_eq!(git(root, &["show", ":b.txt"]), "beta staged");
     // Only the file that was staged in the stash is staged again.
     assert_eq!(git(root, &["diff", "--cached", "--name-only"]), "b.txt");
 }
@@ -749,7 +746,10 @@ fn unstash_sequence_creates_branch_restores_index_and_pops() {
     stash_push(root, Some("mixed"), false, false).unwrap();
 
     lazecode_git::create_branch(root, "recovered", true).unwrap();
-    assert_eq!(git(root, &["rev-parse", "--abbrev-ref", "HEAD"]), "recovered");
+    assert_eq!(
+        git(root, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        "recovered"
+    );
     stash_apply_with(
         root,
         "stash@{0}",

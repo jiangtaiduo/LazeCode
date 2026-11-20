@@ -287,24 +287,16 @@ fn main() -> anyhow::Result<()> {
         });
     }
     match mode.as_str() {
-        "stash"
-        | "stash_untracked"
-        | "stash_collapsed"
-        | "stash_menu"
-        | "stash_file_menu"
-        | "stash_dir_menu"
-        | "stash_header_menu"
-        | "unstash" => {
+        "stash" | "stash_untracked" | "stash_collapsed" | "stash_menu" | "stash_file_menu"
+        | "stash_dir_menu" | "stash_header_menu" | "unstash" => {
             // 贮藏页签：打开 Git 抽屉并切到 Stash。
             model.ui.sidebar_view = SidebarView::Git;
             model.ui.sidebar_visible = true;
             runtime.commit_tab = lazecode_ui::runtime::CommitTab::Stash;
             // 预加载选择（真实运行由抽屉首帧加载；快照需要确定性选择）。
-            runtime.stash_entries =
-                lazecode_git::stash_list(&project_root).unwrap_or_default();
-            runtime.stash_loaded = Some(
-                std::fs::canonicalize(&project_root).unwrap_or_else(|_| project_root.clone()),
-            );
+            runtime.stash_entries = lazecode_git::stash_list(&project_root).unwrap_or_default();
+            runtime.stash_loaded =
+                Some(std::fs::canonicalize(&project_root).unwrap_or_else(|_| project_root.clone()));
             let selected = if mode == "stash_untracked" {
                 "stash@{1}"
             } else {
@@ -327,11 +319,7 @@ fn main() -> anyhow::Result<()> {
             }
             if mode == "stash_file_menu" || mode == "stash_dir_menu" {
                 let (kind, path, anchor_y) = if mode == "stash_file_menu" {
-                    (
-                        "f",
-                        "backend/app/queue/pipeline_registry.py",
-                        260.0,
-                    )
+                    ("f", "backend/app/queue/pipeline_registry.py", 260.0)
                 } else {
                     ("d", "backend", 300.0)
                 };
@@ -342,9 +330,7 @@ fn main() -> anyhow::Result<()> {
                         egui::pos2(160.0, anchor_y),
                         egui::vec2(1.0, 1.0),
                     ),
-                    payload: Some(format!(
-                        "stash@{{0}}\u{1}{kind}\u{1}{path}"
-                    )),
+                    payload: Some(format!("stash@{{0}}\u{1}{kind}\u{1}{path}")),
                     opened_frame: 0,
                 });
             }

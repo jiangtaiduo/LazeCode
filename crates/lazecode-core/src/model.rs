@@ -591,9 +591,7 @@ impl Tab {
                 DiffSource::Stash { stash, .. } => {
                     format!("Diff ({stash})")
                 }
-                DiffSource::StashBeforeLocal { .. } => {
-                    "Diff (Before ↔ Local)".to_string()
-                }
+                DiffSource::StashBeforeLocal { .. } => "Diff (Before ↔ Local)".to_string(),
                 DiffSource::Files { .. } => diff
                     .path
                     .rsplit('/')
@@ -1791,7 +1789,8 @@ impl ProjectState {
         }
         let root = self.active_root().to_path_buf();
         let details = lazecode_git::stash_details(&root, stash).ok()?;
-        self.stash_details.insert(stash.to_string(), details.clone());
+        self.stash_details
+            .insert(stash.to_string(), details.clone());
         Some(details)
     }
 

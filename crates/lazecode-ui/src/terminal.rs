@@ -21,6 +21,9 @@ const SCROLLBAR: f32 = 8.0;
 
 pub struct TerminalOutput {
     pub focus_requested: bool,
+    /// The caller must not record this session wake as presented: the
+    /// snapshot was held back for a synchronized update or a resize settle.
+    pub refresh_pending: bool,
 }
 
 /// Per-pane egui texture cache for kitty images, mirroring the terminal's own
@@ -206,9 +209,6 @@ pub fn draw(
         preedit.clear();
     }
     let refresh = refresh || snapshot.rows == 0;
-    if refresh {
-        session.snapshot_into(snapshot);
-    }
     // Repaint only while output is recent: 30 fps for streamed output, 60 fps
     // for typing, slow when unfocused.
     if focus && session.last_output_ms().is_some_and(|age| age < 120) {
@@ -224,12 +224,57 @@ pub fn draw(
     );
     let cols = ((inner.width() / char_w).floor() as usize).max(2);
     let rows = ((inner.height() / line_h).floor() as usize).max(2);
-    if cols != snapshot.cols || rows != snapshot.rows {
+    let (session_cols, session_rows) = session.size();
+    let resize_needed = cols as u16 != session_cols || rows as u16 != session_rows;
+    let mut sync_hold = session.sync_update_hold();
+    // Do not resize under a program that is midway through a synchronized
+    // frame: rio-vt ends the update on resize, and the rest of the frame then
+    // lands as an incoherent grid. Resize after ESU instead.
+    if resize_needed && sync_hold.is_none() {
         session.resize(cols as u16, rows as u16);
         // Absolute selection endpoints cannot survive reflow.
         *selection = None;
         *wheel_accum = 0.0;
+        sync_hold = session.sync_update_hold();
+    }
+    // Hold the last complete frame while the program is inside a synchronized
+    // update (DEC 2026) and for a short settle window after a resize. omp
+    // repaints whole screens inside BSU/ESU; snapshotting mid-frame paints a
+    // garbled one-frame flash of mixed old/new rows before the final frame.
+    const RESIZE_SETTLE_MS: u64 = 100;
+    // With no previous frame there is nothing to hold; the first snapshot
+    // (sync-held when the program is mid-frame) fills the pane immediately.
+    let has_frame = snapshot.rows > 0;
+    let resize_hold = if !has_frame {
+        None
+    } else {
+        session
+            .last_resize_ms()
+            .filter(|age| *age < RESIZE_SETTLE_MS)
+            .map(|age| std::time::Duration::from_millis(RESIZE_SETTLE_MS - age))
+    };
+    let (session_cols, session_rows) = session.size();
+    let size_mismatch =
+        session_cols as usize != snapshot.cols || session_rows as usize != snapshot.rows;
+    let want_snapshot = refresh || snapshot.rows == 0 || size_mismatch;
+    // Only a pane that already has a frame can afford to hold one. A fresh
+    // pane (first draw after a project/tab switch, or a console started while
+    // in the background) that holds while a TUI streams inside BSU/ESU paints
+    // nothing at all — a black console until the program stops repainting.
+    let hold = has_frame && (sync_hold.is_some() || resize_hold.is_some());
+    let mut refresh_pending = false;
+    if want_snapshot && !hold {
         session.snapshot_into(snapshot);
+    }
+    // Mid-update the snapshot above is a partial frame; retry after ESU so the
+    // panel replaces it with the complete one instead of waiting for the next
+    // output wake.
+    if refresh && (hold || sync_hold.is_some()) {
+        refresh_pending = true;
+    }
+    if let Some(delay) = sync_hold.into_iter().chain(resize_hold).min() {
+        ui.ctx()
+            .request_repaint_after(delay + std::time::Duration::from_millis(1));
     }
     let cols = snapshot.cols.max(1);
     let rows = snapshot.rows.max(1);
@@ -734,7 +779,10 @@ pub fn draw(
         draw_search(ui, theme, rect, session, search);
     }
 
-    TerminalOutput { focus_requested }
+    TerminalOutput {
+        focus_requested,
+        refresh_pending,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

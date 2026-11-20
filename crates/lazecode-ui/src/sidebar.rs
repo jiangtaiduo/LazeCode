@@ -3688,7 +3688,15 @@ fn flatten_stash_dirs(
             expanded,
         });
         if expanded {
-            flatten_stash_dirs(stash, root_key, &node.sub, &path, depth + 1, collapsed, rows);
+            flatten_stash_dirs(
+                stash,
+                root_key,
+                &node.sub,
+                &path,
+                depth + 1,
+                collapsed,
+                rows,
+            );
             for file in &node.files {
                 let name = file.rsplit('/').next().unwrap_or(file).to_string();
                 rows.push(StashRow::File {
@@ -4130,8 +4138,11 @@ fn stash_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
     }
 
     // ----- 底部操作栏（PyCharm：Apply / Pop） -----
-    ui.painter()
-        .hline(bar.x_range(), bar.top() + 0.5, Stroke::new(1.0, p.border_soft));
+    ui.painter().hline(
+        bar.x_range(),
+        bar.top() + 0.5,
+        Stroke::new(1.0, p.border_soft),
+    );
     let apply_rect = Rect::from_min_size(
         Pos2::new(bar.left() + 10.0, bar.top() + 5.0),
         Vec2::new(74.0, 24.0),

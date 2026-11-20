@@ -510,7 +510,7 @@ pub fn draw_hover(ui: &egui::Ui, rt: &UiRuntime, theme: &Theme) {
 
 /// Draw the completion list below the caret. Purely visual; accepting is
 /// handled in the editor input path.
-pub fn draw_completion(ui: &egui::Ui, rt: &UiRuntime, theme: &Theme, line_h: f32) {
+pub fn draw_completion(ui: &egui::Ui, rt: &mut UiRuntime, theme: &Theme, line_h: f32) {
     let Some(state) = &rt.lsp.completion else {
         return;
     };
@@ -569,10 +569,13 @@ pub fn draw_completion(ui: &egui::Ui, rt: &UiRuntime, theme: &Theme, line_h: f32
             );
         }
     }
+    // Register for the shell's wheel interception (next frame); `state`
+    // borrowed `rt` above, so this must come after the loop.
+    rt.menu_hit_rects.push(rect);
 }
 
 /// Draw the document-symbol picker.
-pub fn draw_symbols(ui: &egui::Ui, model: &AppModel, rt: &UiRuntime, theme: &Theme) {
+pub fn draw_symbols(ui: &egui::Ui, model: &AppModel, rt: &mut UiRuntime, theme: &Theme) {
     let Some(state) = &rt.lsp.symbols else {
         return;
     };
@@ -629,6 +632,9 @@ pub fn draw_symbols(ui: &egui::Ui, model: &AppModel, rt: &UiRuntime, theme: &The
             p.text,
         );
     }
+    // Register for the shell's wheel interception (next frame); `state`
+    // borrowed `rt` above, so this must come after the loop.
+    rt.menu_hit_rects.push(rect);
 }
 
 fn symbol_label(symbol: &DocumentSymbol) -> String {
@@ -719,7 +725,7 @@ pub fn diagnostic_at<'a>(
 /// Foreground overlays for LSP providers. Called after the panels so the
 /// completion list and symbol picker are never covered by the terminal or
 /// status bar.
-pub fn draw_popups(ui: &egui::Ui, model: &AppModel, rt: &UiRuntime, theme: &Theme) {
+pub fn draw_popups(ui: &egui::Ui, model: &AppModel, rt: &mut UiRuntime, theme: &Theme) {
     let line_h = (model.settings.editor.font_size * 1.54).round().max(18.0);
     draw_completion(ui, rt, theme, line_h);
     draw_symbols(ui, model, rt, theme);

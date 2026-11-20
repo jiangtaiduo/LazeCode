@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2};
 use lazecode_core::{AppModel, Command};
 use lazecode_git::{
-    lane_color, lane_x, CommitInfo, GraphBreak, GraphRowLayout, GRAPH_BREAK_GAP, GRAPH_H,
-    LANE_W, NODE_R,
+    lane_color, lane_x, CommitInfo, GraphBreak, GraphRowLayout, GRAPH_BREAK_GAP, GRAPH_H, LANE_W,
+    NODE_R,
 };
 
 use crate::icons::{paint as paint_icon, Icon};
@@ -548,9 +548,6 @@ pub fn draw_terminal_dock(
         let wake_counter = session.wake_counter();
         let last_wake = rt_ref.terminal_wake.entry(*pane_id).or_insert(u64::MAX);
         let refresh = *last_wake != wake_counter;
-        if refresh {
-            *last_wake = wake_counter;
-        }
         let output = crate::terminal::draw(
             ui,
             session,
@@ -567,6 +564,11 @@ pub fn draw_terminal_dock(
             *pane_id,
             font_size,
         );
+        // A synchronized update or resize settle holds the last complete
+        // frame; leave the wake unconsumed so the retry takes a snapshot.
+        if refresh && !output.refresh_pending {
+            *last_wake = wake_counter;
+        }
         if output.focus_requested {
             activate = Some(*pane_id);
         }
@@ -2074,9 +2076,8 @@ fn draw_git_log(
                 // Compact PyCharm-style reference label: one group name plus a
                 // fanned icon stack, capped at a third of the text area. The
                 // complete reference list lives in the hover tooltip.
-                let refs_max_w = ((content_right - msg_x) / 3.0).min(240.0).max(24.0);
-                let refs_cluster =
-                    crate::log_refs::prepare(ui.painter(), &commit.refs, refs_max_w);
+                let refs_max_w = ((content_right - msg_x) / 3.0).clamp(24.0, 240.0);
+                let refs_cluster = crate::log_refs::prepare(ui.painter(), &commit.refs, refs_max_w);
                 let refs_w = refs_cluster
                     .as_ref()
                     .map(|cluster| cluster.width + 6.0)

@@ -132,7 +132,10 @@ fn log_marks_head_and_puts_the_checked_out_branch_first() {
         .iter()
         .position(|r| r.kind == lazecode_git::RefKind::LocalBranch && r.label == "main")
         .expect("main points at the same commit");
-    assert!(main_at > 1, "checked-out branch must precede main: {refs:?}");
+    assert!(
+        main_at > 1,
+        "checked-out branch must precede main: {refs:?}"
+    );
 }
 
 #[test]

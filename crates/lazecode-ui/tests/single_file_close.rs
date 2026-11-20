@@ -112,7 +112,9 @@ fn closing_last_single_file_tab_falls_back_to_home_without_panicking() {
         ..Settings::default()
     };
     let mut model = model(&settings);
-    model.open_files(vec![file.clone()]).expect("open single file");
+    model
+        .open_files(vec![file.clone()])
+        .expect("open single file");
     assert_eq!(model.projects.len(), 1);
     assert!(model.projects[0].is_single_file);
 
@@ -146,7 +148,9 @@ fn closing_last_single_file_tab_switches_to_the_other_project() {
     let _ = project.open_file(project_dir.join("Cargo.toml"), &settings);
     model.projects.push(project);
     model.active_project = Some(0);
-    model.open_files(vec![file.clone()]).expect("open single file");
+    model
+        .open_files(vec![file.clone()])
+        .expect("open single file");
 
     let ctx = egui::Context::default();
     lazecode_ui::install_fonts(&ctx, &settings);

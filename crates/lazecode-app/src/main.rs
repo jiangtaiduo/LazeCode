@@ -338,8 +338,10 @@ unsafe fn perform_standard_titlebar_double_click(ns_window: *mut AnyObject) {
     let mut action = "zoom";
     if !domain.is_null() {
         let value: *mut AnyObject = unsafe { msg_send![domain, objectForKey: &*key] };
-        let is_string: bool = unsafe { msg_send![value, isKindOfClass: class!(NSString)] };
-        if !value.is_null() && is_string {
+        // objc2 panics on messaging nil; the key may simply be unset.
+        let is_string: bool = !value.is_null()
+            && unsafe { msg_send![value, isKindOfClass: class!(NSString)] };
+        if is_string {
             let utf8: *const std::ffi::c_char = unsafe { msg_send![value, UTF8String] };
             if !utf8.is_null() {
                 let text = unsafe { std::ffi::CStr::from_ptr(utf8) }

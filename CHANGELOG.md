@@ -28,6 +28,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Double-clicking the titlebar could abort the app with "messaging
+  isKindOfClass: to nil" when the `AppleActionOnDoubleClick` global default
+  is unset: the preference lookup result was nil-messaged before the null
+  check. The check now happens first, so an unset key falls back to zoom.
+
 - Resizing the window no longer throws a scrolled-back console to the top of
   its history. The scroll position is stored as a line count above the live
   screen, but a resize rewraps the history — widening merges soft-wrapped

@@ -752,49 +752,115 @@ fn fill_row(row: &Row<Square>, styles: &[Style], extras: &ExtrasTable, out: &mut
     }
 }
 
-/// First `want` non-blank chars of a grid line. Rewrap-stable: a line's
-/// signature survives the split/merge of a resize reflow, so it can be used
-/// to re-anchor the viewport on the same content afterwards.
-fn row_signature(term: &Crosswords<Proxy>, line: i32, want: usize) -> Option<Vec<char>> {
-    let grid = &term.grid;
-    let cols = grid.columns();
-    let mut cells = vec![CellData::default(); cols];
-    let styles = grid.styles();
-    let extras = &grid.extras_table;
-    fill_row(&grid[Line(line)], styles, extras, &mut cells);
-    let signature: Vec<char> = cells
-        .iter()
-        .map(|cell| cell.ch)
-        .filter(|ch| !ch.is_whitespace() && *ch != '\0')
-        .take(want)
-        .collect();
-    (signature.len() >= 2).then_some(signature)
+/// Fill `cells` with the renderable characters of one grid line and `text`
+/// with their non-blank subsequence. Both buffers are reused so the anchor
+/// scan below stays allocation-free.
+fn row_text(term: &Crosswords<Proxy>, line: i32, cells: &mut Vec<CellData>, text: &mut Vec<char>) {
+    cells.clear();
+    cells.resize(term.grid.columns(), CellData::default());
+    fill_row(
+        &term.grid[Line(line)],
+        term.grid.styles(),
+        &term.grid.extras_table,
+        cells,
+    );
+    text.clear();
+    text.extend(
+        cells
+            .iter()
+            .map(|cell| cell.ch)
+            .filter(|ch| !ch.is_whitespace() && *ch != '\0'),
+    );
 }
 
-/// Offset delta from `stabilized` (the viewport top rio-vt's reflow landed
-/// on) to the line still carrying `signature`. The reflow rotation keeps the
-/// view within a couple of lines but drifts when boundary rows split or
-/// merge — the shortfall grows with how much wraps right at the boundary, so
-/// scan outward to a healthy multiple of the observed worst case. A miss
-/// keeps rio's position, which is already within a few lines.
-fn anchored_delta(
+/// `true` when `line` continues the row above it (that row ends with a
+/// wrapline flag). Continuation rows merge into their predecessor on a
+/// widening reflow, so their text no longer starts a row and a prefix match
+/// would miss them.
+fn is_wrap_continuation(term: &Crosswords<Proxy>, line: i32, hot: usize) -> bool {
+    if -line >= hot as i32 {
+        // Nothing above; the oldest row cannot continue anything.
+        return false;
+    }
+    let prev = &term.grid[Line(line - 1)];
+    let last = prev.len().saturating_sub(1);
+    prev.len() > 0 && prev[Column(last)].wrapline()
+}
+
+/// Choose the re-anchor target for a scrolled viewport top (`pinned`).
+///
+/// Returns `(rows_below_top, signature, span)`: the first row at or below the
+/// viewport top that neither continues the row above it nor is blank, its
+/// signature, and the normalized text of the rows between the viewport top
+/// and that anchor. A logical-line start keeps its text at the row start
+/// through any rewrap, so the post-resize scan can match it by prefix; the
+/// span lets the exact viewport top be restored afterwards even when the
+/// rows between top and anchor merge or split.
+fn viewport_anchor(
+    term: &Crosswords<Proxy>,
+    pinned: usize,
+    hot: usize,
+    cells: &mut Vec<CellData>,
+    text: &mut Vec<char>,
+) -> Option<(usize, Vec<char>, Vec<char>)> {
+    // Line(0) is the top live row; the viewport top sits `pinned` rows above
+    // it. Only history rows (Line ≤ -1) can carry the anchor.
+    let limit = (term.screen_lines() as usize - 1).min(pinned - 1);
+    let mut span = Vec::new();
+    for below in 0..=limit {
+        let line = -(pinned as i32) + below as i32;
+        row_text(term, line, cells, text);
+        // Continuation rows merge into their predecessor on a widening
+        // reflow, and blank rows carry nothing to match; both are skipped via
+        // the span so the anchor stays a row whose text keeps starting the
+        // row through any rewrap.
+        if is_wrap_continuation(term, line, hot) || text.len() < 2 {
+            span.extend(text.iter().copied());
+            continue;
+        }
+        let signature = text.iter().take(8).copied().collect();
+        return Some((below, signature, span));
+    }
+    None
+}
+
+/// Offset of the row still carrying `signature`, scanning outward from
+/// `stabilized` (where rio-vt's reflow left the viewport).
+///
+/// The reflow keeps the live screen anchored, so the anchor row moves by at
+/// most the net history change — far past any fixed window on a long
+/// scrollback, which is why the caller derives the radius from it. Rows are
+/// matched by prefix first and by contained characters second: a merged row
+/// only holds its old text mid-row. Nearest to rio's position wins, so
+/// repeated log lines resolve to the closest occurrence.
+fn anchored_row(
     term: &Crosswords<Proxy>,
     stabilized: usize,
     hot: usize,
+    radius: usize,
     signature: &[char],
-) -> Option<i32> {
-    for delta in 0..=24i32 {
-        for &signed in &[delta, -delta] {
-            let candidate = stabilized as i64 + signed as i64;
-            // 0 is the live view: content above the screen can never be the
-            // anchor, and pinning to 0 would unpin the viewport entirely.
-            if candidate <= 0 || candidate > hot as i64 {
-                continue;
-            }
-            if row_signature(term, -(candidate as i32), signature.len()).as_deref()
-                == Some(signature)
-            {
-                return Some(signed);
+    cells: &mut Vec<CellData>,
+    text: &mut Vec<char>,
+) -> Option<usize> {
+    for require_prefix in [true, false] {
+        for delta in 0..=radius as i64 {
+            for &signed in &[delta, -delta] {
+                let candidate = stabilized as i64 + signed;
+                if candidate <= 0 || candidate > hot as i64 {
+                    continue;
+                }
+                row_text(term, -(candidate as i32), cells, text);
+                if text.len() < signature.len() {
+                    continue;
+                }
+                let hit = if require_prefix {
+                    text.starts_with(signature)
+                } else {
+                    text.windows(signature.len()).any(|w| w == signature)
+                };
+                if hit {
+                    return Some(candidate as usize);
+                }
             }
         }
     }
@@ -1307,16 +1373,20 @@ impl Session {
             // display offset line by line, then we read the stabilized
             // position back.
             let view = self.shared.view_offset.load(Ordering::Relaxed);
-            let pinned = view.min(term.history_size());
+            let hot_before = term.history_size();
+            let pinned = view.min(hot_before);
             let current = term.grid.display_offset();
             if pinned != current {
                 term.grid
                     .scroll_display(Scroll::Delta(pinned as i32 - current as i32));
             }
-            // Content signature of the viewport top, so the rewrapped grid
-            // can be re-anchored on the exact line the user was reading.
+            // Content signature of a rewrap-stable row at or below the
+            // viewport top, so the rewrapped grid can be re-anchored on the
+            // content the user was reading.
+            let mut cells = Vec::with_capacity(term.grid.columns());
+            let mut text = Vec::with_capacity(term.grid.columns());
             let anchor = if pinned > 0 {
-                row_signature(&term, -(pinned as i32), 8)
+                viewport_anchor(&term, pinned, hot_before, &mut cells, &mut text)
             } else {
                 None
             };
@@ -1328,12 +1398,30 @@ impl Session {
                 cell_w,
                 cell_h,
             ));
+            let hot_after = term.history_size();
             let mut stabilized = term.grid.display_offset();
-            if let Some(signature) = anchor.as_deref() {
-                if let Some(delta) = anchored_delta(&term, stabilized, term.history_size(), signature)
-                {
-                    stabilized = ((stabilized as i64 + delta as i64).max(0) as usize)
-                        .min(term.history_size());
+            if let Some((_, signature, span)) = anchor.as_ref() {
+                // The reflow keeps the live screen anchored, so the anchor row
+                // moves by at most the net history change — hundreds of rows
+                // when widening merges a long scrollback. Scan that whole
+                // range around rio's position.
+                let radius = hot_before.abs_diff(hot_after).clamp(64, 4096);
+                if let Some(found) = anchored_row(
+                    &term, stabilized, hot_after, radius, signature, &mut cells, &mut text,
+                ) {
+                    // The viewport top sits `span` characters above the
+                    // anchor row. Walk them up row by row: rows fully inside
+                    // the span hold only span characters, so the first row
+                    // that exhausts them is the exact viewport top no matter
+                    // how the reflow merged or split the span.
+                    let mut top = found;
+                    let mut remaining = span.len();
+                    while remaining > 0 && top < hot_after {
+                        top += 1;
+                        row_text(&term, -(top as i32), &mut cells, &mut text);
+                        remaining = remaining.saturating_sub(text.len());
+                    }
+                    stabilized = top.clamp(1, hot_after);
                 }
             }
             if stabilized != pinned {
@@ -2417,6 +2505,132 @@ mod tests {
             sensitive.is_empty(),
             "uppercase query is case-sensitive: must NOT hit lowercase text"
         );
+    }
+
+    #[test]
+    fn resize_keeps_anchor_when_viewport_top_is_a_wrap_continuation() {
+        // Dragging the window wider merges soft-wrapped rows. When the
+        // viewport top is the *continuation* row of a wrapped line, its text
+        // moves into the middle of the merged row after the reflow — a
+        // row-start signature can never match it again, and the merged rows
+        // above the viewport shift it far past the old ±24 scan window. The
+        // viewport must still land on that logical line after one widen.
+        let options = SpawnOptions {
+            cwd: std::env::temp_dir(),
+            cols: 30,
+            rows: 6,
+            command: Some(
+                "for i in $(seq 1 300); do echo row-$i-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; done; echo END-MARKER"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        let session = spawn(options).expect("spawn");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while std::time::Instant::now() < deadline {
+            if !session.search("END-MARKER").is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut snap = Snapshot::default();
+        let mut viewport = |session: &Session, snap: &mut Snapshot| {
+            session.snapshot_into(snap);
+            let mut text = String::new();
+            for row in 0..snap.rows {
+                for col in 0..snap.cols {
+                    text.push(snap.cell(row, col).ch);
+                }
+                text.push('\n');
+            }
+            text
+        };
+
+        // Put the continuation row of `row-220` at the very top of the
+        // viewport: its first row wraps at 30 columns, so the next grid row
+        // starts with the wrapped `aaaa…` fragment.
+        let hits = session.search("row-220-");
+        assert!(!hits.is_empty(), "row-220 should be in scrollback");
+        session.scroll_to_line(hits[0].line + 1);
+        let text = viewport(&session, &mut snap);
+        assert!(
+            text.lines()
+                .next()
+                .unwrap_or_default()
+                .trim_start()
+                .starts_with("aaaa"),
+            "viewport top should be the wrap continuation of row-220: {text}"
+        );
+
+        // One widening step: every continuation merges into its first row and
+        // history halves — hundreds of rows above the viewport shift.
+        session.resize(60, 6);
+        let text = viewport(&session, &mut snap);
+        assert!(
+            text.lines().next().unwrap_or_default().contains("row-220"),
+            "widening must keep the viewport on the merged row-220: {text}"
+        );
+    }
+
+    #[test]
+    fn resize_drag_sequence_keeps_scrolled_anchor() {
+        // A drag fires a burst of small resizes. Each widening step merges
+        // rows above the viewport; when one step shifts more than the scan
+        // window, the old code kept rio's clamped position and the drift
+        // compounded until the view pinned at the oldest line. Every step of
+        // the sequence must keep the anchor line at the viewport top.
+        let options = SpawnOptions {
+            cwd: std::env::temp_dir(),
+            cols: 30,
+            rows: 6,
+            command: Some(
+                "for i in $(seq 1 300); do echo row-$i-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; done; echo END-MARKER"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        let session = spawn(options).expect("spawn");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while std::time::Instant::now() < deadline {
+            if !session.search("END-MARKER").is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut snap = Snapshot::default();
+        let mut viewport = |session: &Session, snap: &mut Snapshot| {
+            session.snapshot_into(snap);
+            let mut text = String::new();
+            for row in 0..snap.rows {
+                for col in 0..snap.cols {
+                    text.push(snap.cell(row, col).ch);
+                }
+                text.push('\n');
+            }
+            text
+        };
+
+        let hits = session.search("row-260-");
+        assert!(!hits.is_empty(), "row-260 should be in scrollback");
+        session.scroll_to_line(hits[0].line);
+        let text = viewport(&session, &mut snap);
+        assert!(
+            text.lines().next().unwrap_or_default().contains("row-260"),
+            "scrolled viewport should show row-260 at the top: {text}"
+        );
+
+        for cols in [36u16, 42, 48, 54, 60] {
+            session.resize(cols, 6);
+            let text = viewport(&session, &mut snap);
+            assert!(
+                text.lines().next().unwrap_or_default().contains("row-260"),
+                "widening to {cols} must keep row-260 at the viewport top: {text}"
+            );
+        }
     }
 
     #[test]

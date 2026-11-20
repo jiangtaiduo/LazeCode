@@ -28,6 +28,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Dragging the window could still throw a scrolled-back console to the top of
+  its history. The previous fix re-anchored the viewport by matching the
+  viewport-top row's *leading characters* within ±24 rows of where rio-vt's
+  reflow left it, but a widening reflow merges wrapped rows above the
+  viewport — shifting the anchor by far more than 24 rows on a long
+  scrollback — and when the top row was itself a wrap continuation, its text
+  moved *into the middle* of the merged row, so no row could ever match by
+  prefix. The re-anchor now walks down from the viewport top to the first
+  row that starts a logical line (its text keeps starting a row through any
+  rewrap), scans the whole reflow-affected range (radius from the net history
+  change, capped) matching by prefix first and contained characters second,
+  and restores the exact viewport top by walking the characters between the
+  top and the anchor back up from the matched row. Blank rows and rows that
+  are wrap continuations are skipped via that span instead of disabling the
+  anchor.
+
 - Double-clicking the titlebar could abort the app with "messaging
   isKindOfClass: to nil" when the `AppleActionOnDoubleClick` global default
   is unset: the preference lookup result was nil-messaged before the null

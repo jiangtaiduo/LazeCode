@@ -17,7 +17,7 @@ use rio_vt::ansi::CursorShape as RioCursorShape;
 use rio_vt::ansi::KeyboardModes as RioKeyboardModes;
 use rio_vt::config::colors::{AnsiColor, NamedColor};
 use rio_vt::crosswords::grid::row::Row;
-use rio_vt::crosswords::grid::{Dimensions, ExtrasTable};
+use rio_vt::crosswords::grid::{Dimensions, ExtrasTable, Scroll};
 use rio_vt::crosswords::pos::{Column, Line, Pos};
 use rio_vt::crosswords::search::RegexSearch;
 use rio_vt::crosswords::square::{CellFlags, ContentTag, Square, Wide};
@@ -752,6 +752,55 @@ fn fill_row(row: &Row<Square>, styles: &[Style], extras: &ExtrasTable, out: &mut
     }
 }
 
+/// First `want` non-blank chars of a grid line. Rewrap-stable: a line's
+/// signature survives the split/merge of a resize reflow, so it can be used
+/// to re-anchor the viewport on the same content afterwards.
+fn row_signature(term: &Crosswords<Proxy>, line: i32, want: usize) -> Option<Vec<char>> {
+    let grid = &term.grid;
+    let cols = grid.columns();
+    let mut cells = vec![CellData::default(); cols];
+    let styles = grid.styles();
+    let extras = &grid.extras_table;
+    fill_row(&grid[Line(line)], styles, extras, &mut cells);
+    let signature: Vec<char> = cells
+        .iter()
+        .map(|cell| cell.ch)
+        .filter(|ch| !ch.is_whitespace() && *ch != '\0')
+        .take(want)
+        .collect();
+    (signature.len() >= 2).then_some(signature)
+}
+
+/// Offset delta from `stabilized` (the viewport top rio-vt's reflow landed
+/// on) to the line still carrying `signature`. The reflow rotation keeps the
+/// view within a couple of lines but drifts when boundary rows split or
+/// merge — the shortfall grows with how much wraps right at the boundary, so
+/// scan outward to a healthy multiple of the observed worst case. A miss
+/// keeps rio's position, which is already within a few lines.
+fn anchored_delta(
+    term: &Crosswords<Proxy>,
+    stabilized: usize,
+    hot: usize,
+    signature: &[char],
+) -> Option<i32> {
+    for delta in 0..=24i32 {
+        for &signed in &[delta, -delta] {
+            let candidate = stabilized as i64 + signed as i64;
+            // 0 is the live view: content above the screen can never be the
+            // anchor, and pinning to 0 would unpin the viewport entirely.
+            if candidate <= 0 || candidate > hot as i64 {
+                continue;
+            }
+            if row_signature(term, -(candidate as i32), signature.len()).as_deref()
+                == Some(signature)
+            {
+                return Some(signed);
+            }
+        }
+    }
+    None
+}
+
 /// Max bytes fed to the parser between spool observations; one byte scrolls at
 /// most one line, so the ring's slack is never exceeded.
 const PARSE_SLICE: usize = 1024;
@@ -1249,6 +1298,28 @@ impl Session {
         drop(geom);
         {
             let mut term = self.term.lock();
+            // Reflow rewraps history and rewrites how many grid lines sit
+            // above the live screen, so the mirrored `view_offset` would land
+            // somewhere else entirely — widening shrinks history until the
+            // snapshot clamp pins the view to the oldest line and the console
+            // appears to jump to the top. Hand the offset to the grid for the
+            // resize: rio-vt stabilizes the viewport around its internal
+            // display offset line by line, then we read the stabilized
+            // position back.
+            let view = self.shared.view_offset.load(Ordering::Relaxed);
+            let pinned = view.min(term.history_size());
+            let current = term.grid.display_offset();
+            if pinned != current {
+                term.grid
+                    .scroll_display(Scroll::Delta(pinned as i32 - current as i32));
+            }
+            // Content signature of the viewport top, so the rewrapped grid
+            // can be re-anchored on the exact line the user was reading.
+            let anchor = if pinned > 0 {
+                row_signature(&term, -(pinned as i32), 8)
+            } else {
+                None
+            };
             term.resize(CrosswordsSize::new_with_dimensions(
                 cols as usize,
                 rows as usize,
@@ -1257,6 +1328,17 @@ impl Session {
                 cell_w,
                 cell_h,
             ));
+            let mut stabilized = term.grid.display_offset();
+            if let Some(signature) = anchor.as_deref() {
+                if let Some(delta) = anchored_delta(&term, stabilized, term.history_size(), signature)
+                {
+                    stabilized = ((stabilized as i64 + delta as i64).max(0) as usize)
+                        .min(term.history_size());
+                }
+            }
+            if stabilized != pinned {
+                self.store_view_offset(view - pinned + stabilized);
+            }
             // Re-render everything once the grid is reflowed.
             *self.dirty_rows.lock() = Vec::new();
             term.mark_fully_damaged();
@@ -2231,6 +2313,75 @@ mod tests {
         session.scroll_bottom();
         session.snapshot_into(&mut snap);
         assert_eq!(snap.display_offset, 0);
+    }
+
+    #[test]
+    fn resize_keeps_scrolled_viewport_on_content() {
+        // Each echo is 46-47 columns: it soft-wraps at 30 columns and fits on
+        // one line at 60, so resizing rewrites how many grid lines the same
+        // content occupies. A scroll offset that survives the resize as a raw
+        // line count lands on different content — widening even shrinks
+        // history until the offset clamps to the oldest line (the reported
+        // "console jumps to the top" on window resize).
+        let options = SpawnOptions {
+            cwd: std::env::temp_dir(),
+            cols: 30,
+            rows: 5,
+            command: Some(
+                "for i in $(seq 1 40); do echo row-$i-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; done; echo END-MARKER"
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        let session = spawn(options).expect("spawn");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while std::time::Instant::now() < deadline {
+            if !session.search("END-MARKER").is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        // Drain the shell prompt that trails the marker so no reader-thread
+        // output races the resizes below.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut snap = Snapshot::default();
+        let mut viewport = |session: &Session, snap: &mut Snapshot| {
+            session.snapshot_into(snap);
+            let mut text = String::new();
+            for row in 0..snap.rows {
+                for col in 0..snap.cols {
+                    text.push(snap.cell(row, col).ch);
+                }
+                text.push('\n');
+            }
+            text
+        };
+
+        let hits = session.search("row-20-");
+        assert!(!hits.is_empty(), "row-20 should be in scrollback");
+        session.scroll_to_line(hits[0].line);
+        assert!(
+            viewport(&session, &mut snap).contains("row-20-"),
+            "scrolled viewport should show row-20"
+        );
+
+        // Widen: the wrapped pairs unwrap and history shrinks. The line the
+        // user was reading must stay at the top of the viewport.
+        session.resize(60, 5);
+        let text = viewport(&session, &mut snap);
+        assert!(
+            text.lines().next().unwrap_or_default().contains("row-20-"),
+            "widening must keep the scrolled viewport on row-20: {text}"
+        );
+
+        // Narrow again: the lines re-wrap and history grows back.
+        session.resize(30, 5);
+        let text = viewport(&session, &mut snap);
+        assert!(
+            text.lines().next().unwrap_or_default().contains("row-20-"),
+            "narrowing must keep the scrolled viewport on row-20: {text}"
+        );
     }
 
     #[test]

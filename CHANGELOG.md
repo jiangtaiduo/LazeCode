@@ -10,6 +10,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Resizing the window no longer throws a scrolled-back console to the top of
+  its history. The scroll position is stored as a line count above the live
+  screen, but a resize rewraps the history — widening merges soft-wrapped
+  lines until the stored count exceeds what is left, and the snapshot clamp
+  then pins the view to the oldest line. The session now hands the offset to
+  the grid for the resize (rio-vt stabilizes the viewport around it) and
+  re-anchors the viewport on the exact line the user was reading by content
+  signature, so the line under your eyes stays put in both directions.
+
 - A console first shown while its full-screen program (omp) is streaming
   output no longer stays black until the program exits. A fresh pane has no
   previous frame, but the renderer still held presentation while the program

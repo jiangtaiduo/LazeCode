@@ -9,6 +9,7 @@ pub mod i18n;
 pub mod icons;
 pub mod icons_svg;
 pub mod image_cache;
+pub mod keybindings;
 pub mod log_refs;
 pub mod lsp_ui;
 pub mod overlays;

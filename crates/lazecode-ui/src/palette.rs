@@ -544,11 +544,9 @@ fn build_items(model: &AppModel, query: &str) -> Vec<PaletteItem> {
                     format!("Switch to {}", project.name)
                 },
                 subtitle: project.root.display().to_string(),
-                shortcut: if index < 5 {
-                    Some(format!("⌘{}", index + 1))
-                } else {
-                    None
-                },
+                // 不再显示 ⌘1..⌘5 假提示：⌘1-4 现在是顶栏工具的真实键位，
+                // 面板内切项目没有全局快捷键。
+                shortcut: None,
                 action: PaletteAction::SwitchProject(index),
             });
         }

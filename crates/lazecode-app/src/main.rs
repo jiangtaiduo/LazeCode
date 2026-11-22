@@ -339,8 +339,8 @@ unsafe fn perform_standard_titlebar_double_click(ns_window: *mut AnyObject) {
     if !domain.is_null() {
         let value: *mut AnyObject = unsafe { msg_send![domain, objectForKey: &*key] };
         // objc2 panics on messaging nil; the key may simply be unset.
-        let is_string: bool = !value.is_null()
-            && unsafe { msg_send![value, isKindOfClass: class!(NSString)] };
+        let is_string: bool =
+            !value.is_null() && unsafe { msg_send![value, isKindOfClass: class!(NSString)] };
         if is_string {
             let utf8: *const std::ffi::c_char = unsafe { msg_send![value, UTF8String] };
             if !utf8.is_null() {
@@ -898,16 +898,34 @@ impl LazeApp {
                             }
                         }
                     }
-                    "toggle-explorer" => {
-                        self.model.ui.sidebar_visible = !self.model.ui.sidebar_visible;
-                    }
-                    "toggle-console" => {
-                        self.model.ui.panel_visible = !self.model.ui.panel_visible;
-                    }
-                    "git-log" => {
-                        self.model.ui.panel_visible = true;
-                        self.model.ui.panel_tab = lazecode_core::PanelTab::Git;
-                        self.model.queue(lazecode_core::Command::RefreshLog);
+                    "tool-backtick" | "tool-backtick-shift" | "tool-1" | "tool-2" | "tool-3"
+                    | "tool-4" => {
+                        // 录入态下组合键被原生菜单消费，egui 收不到：直接结束
+                        // 录入，避免卡在等待。
+                        if self.runtime.keybind_capture.take().is_some() {
+                            continue;
+                        }
+                        // 按当前键位表把该组合键派发给拥有它的动作；设置页改键
+                        // 后原生层无需重建菜单即可保持正确。
+                        let binding = lazecode_ui::keybindings::Binding {
+                            modifiers: egui::Modifiers {
+                                command: true,
+                                shift: action == "tool-backtick-shift",
+                                ..Default::default()
+                            },
+                            key: match action {
+                                "tool-1" => egui::Key::Num1,
+                                "tool-2" => egui::Key::Num2,
+                                "tool-3" => egui::Key::Num3,
+                                "tool-4" => egui::Key::Num4,
+                                _ => egui::Key::Backtick,
+                            },
+                        };
+                        if let Some(tool) =
+                            lazecode_ui::keybindings::action_for_binding(&self.model, binding)
+                        {
+                            lazecode_ui::keybindings::run_tool(&mut self.model, tool);
+                        }
                     }
                     "palette" => {
                         self.runtime.open_palette();
@@ -1858,23 +1876,44 @@ fn build_menu(zh: bool) -> Option<Menu> {
         pick(zh, "View", "视图"),
         true,
         &[
+            // 顶栏工具的原生键等价：AppKit 在系统/egui 之前消费这些组合键
+            // （⌘`/⌘~ 不进菜单就会被系统的窗口切换吃掉）。派发在 poll_menu
+            // 里按当前键位表动态解析，设置页改键后依然正确。
             &MenuItem::with_id(
-                "toggle-explorer",
-                pick(zh, "Explorer", "资源管理器"),
+                "tool-backtick",
+                pick(zh, "Files", "文件"),
+                true,
+                accel(Code::Backquote),
+            ),
+            &MenuItem::with_id(
+                "tool-backtick-shift",
+                pick(zh, "Files", "文件"),
+                true,
+                accel_shift(Code::Backquote),
+            ),
+            &MenuItem::with_id(
+                "tool-1",
+                pick(zh, "Changes", "变更清单"),
                 true,
                 accel(Code::Digit1),
             ),
             &MenuItem::with_id(
-                "toggle-console",
-                pick(zh, "Console", "控制台"),
-                true,
-                accel(Code::Digit4),
-            ),
-            &MenuItem::with_id(
-                "git-log",
+                "tool-2",
                 pick(zh, "Git Log", "Git 日志"),
                 true,
-                accel(Code::Digit9),
+                accel(Code::Digit2),
+            ),
+            &MenuItem::with_id(
+                "tool-3",
+                pick(zh, "Terminal", "终端"),
+                true,
+                accel(Code::Digit3),
+            ),
+            &MenuItem::with_id(
+                "tool-4",
+                pick(zh, "Consoles", "控制台"),
+                true,
+                accel(Code::Digit4),
             ),
             &PredefinedMenuItem::separator(),
             &MenuItem::with_id(

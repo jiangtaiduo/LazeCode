@@ -282,6 +282,10 @@ pub struct Settings {
     /// Version the user explicitly ignored. Background checks keep finding
     /// it, but no badge or toast is shown. Empty means no ignored version.
     pub ignored_update_version: String,
+    /// 用户改过的快捷键覆盖表：动作 id（`files`/`git_log`…）→ 组合键串
+    /// （`Cmd+1`/`Ctrl+P`…）。缺省动作走编译期默认键。
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub keybindings: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Settings {
@@ -319,6 +323,7 @@ impl Default for Settings {
             auto_check_updates: true,
             last_update_check_time: 0,
             ignored_update_version: String::new(),
+            keybindings: std::collections::BTreeMap::new(),
         }
     }
 }

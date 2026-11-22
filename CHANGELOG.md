@@ -6,9 +6,17 @@ All notable changes to LazeCode are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.11] - 2026-11-22
 
 ### Added
+
+- A **Shortcuts** settings page: every app-level shortcut (the six titlebar
+  tools plus palette/save/undo/commit/find/goto-line/json tools/shelve and
+  the rest — 25 actions) can be rebound. Click Change, press the new combo
+  (Esc cancels, duplicates are rejected with a toast), or reset rows /
+  everything to the compiled-in defaults. Overrides persist in
+  `settings.toml` under `[keybindings]`, and titlebar tooltips always show
+  the current binding.
 
 - 21 colour skins (20 palettes read from the design moodboards plus the
   original Studio colours), each with a dark and a light variant. A skin
@@ -26,7 +34,51 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Studio's light diff rows now use light insert/delete tints, so dark editor
   text no longer sits on the old dark Monaco backgrounds.
 
+- Dark skin variants no longer read foggy. The moodboard anchors are dusty
+  pastels, and at pastel chroma on a mid-dark canvas the 20 new skins washed
+  out. Dark palettes now sink both surfaces by 12% lightness (the designed
+  bg/editor offset is preserved), lift token and semantic anchors to a 0.105
+  OKLCH chroma floor (hue kept), raise the secondary/caption text tiers and
+  the comment floor. Studio is untouched and light variants are unchanged.
+
+### Changed
+
+- Titlebar tools reordered and extended: Files → Changes → Git Log →
+  Terminal → Consoles → **Compare appended at the far right** (always
+  visible, dimmed until a branch-compare session exists). New default keys:
+  Files `⌘\``, Changes `⌘1`, Git Log `⌘2`, Terminal `⌘3`, Consoles `⌘4`,
+  Compare none. The previous defaults they displace (⌘1 sidebar, ⌘4 panel,
+  ⌘\` terminal, ⌘9 Git Log) are gone — the old actions stay reachable via
+  the tool buttons, and every binding can be restored or rebound in
+  Settings → Shortcuts. Titlebar tooltips and the command palette no longer
+  advertise shortcut labels that never existed (palette project rows).
+
+- The Consoles sidebar groups entries two levels deep — project → worktree →
+  console — and both group levels collapse via their header chevron (state
+  kept for the session, all expanded by default). Each console row now reuses
+  the project strip's activity probe: no foreground process shows a dim dot,
+  a running process shows a green check, and a process actively emitting
+  output shows a spinning red arc (project and worktree headers summarise the
+  same states as `N running` / `idle`). Running rows are titled by the actual
+  foreground process (e.g. `omp`) instead of a static `zsh`.
+
 ### Fixed
+
+- Titlebar tool shortcuts were shadowed by the native macOS menu, which still
+  carried the old accelerators: ⌘4 opened the bottom panel (showing Git Log)
+  instead of the Consoles sidebar, and ⌘`/⌘~ never reached the app because
+  the system window-cycling shortcut ate it when no menu item claimed it.
+  The View menu now carries the new tool scheme (⌘`, ⌘1–⌘4, plus a ⇧⌘`
+  variant for ⌘~) and dispatches each combo to whichever action currently
+  owns it in the keybinding table, so bindings changed in Settings →
+  Shortcuts work through the native layer too. Recording a shortcut while
+  the combo is claimed natively now cancels capture instead of hanging.
+
+- Titlebar worktree and branch chips sized their labels from character-count
+  estimates (`×8` / `×7.4` px), which starved short branch names into `th…`
+  and truncated CJK names early. Chip widths now come from the actual laid-out
+  text, and on narrow windows the worktree shrinks first, then the branch,
+  so the chips never run under the search/settings buttons.
 
 - Dragging the window could still throw a scrolled-back console to the top of
   its history. The previous fix re-anchored the viewport by matching the
@@ -102,8 +154,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   id pointing at a dead pane behind. The shell now reconciles the per-pane
   caches against the model once per frame instead of relying on every close
   path to clean up by hand.
-
-## [0.4.11] - 2026-11-18
 
 ### Added
 

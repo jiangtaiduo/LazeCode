@@ -1108,7 +1108,7 @@ fn draw_footer(
             {
                 rt.update_open = false;
                 rt.settings_open = true;
-                model.ui.settings_section = 5;
+                model.ui.settings_section = 6;
             }
             let secondary = Rect::from_min_size(
                 Pos2::new(primary.left() - gap - 80.0, y),

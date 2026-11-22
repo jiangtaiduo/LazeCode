@@ -377,7 +377,7 @@ fn main() -> anyhow::Result<()> {
         }
         "settings-updates" => {
             runtime.settings_open = true;
-            model.ui.settings_section = 5;
+            model.ui.settings_section = 6;
             model.settings.last_update_check_time = 1_763_260_000;
             model.settings.ignored_update_version = "0.4.5".into();
         }

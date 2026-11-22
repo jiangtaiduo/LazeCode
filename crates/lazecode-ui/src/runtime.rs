@@ -709,6 +709,11 @@ pub struct UiRuntime {
     pub tree_submenu: Option<(String, egui::Rect)>,
     pub branch_submenu: Option<BranchSubmenuState>,
     pub branch_sections_collapsed: std::collections::HashSet<String>,
+    /// 控制台侧栏两级分组的折叠键（`p:<项目根>` / `w:<worktree 路径>`；
+    /// 默认为空，即全部展开）。
+    pub consoles_collapsed: std::collections::HashSet<String>,
+    /// 设置页快捷键录入态：`Some(动作)` = 等待用户按下新组合键。
+    pub keybind_capture: Option<crate::keybindings::Action>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -813,6 +818,8 @@ impl Default for UiRuntime {
             tree_submenu: None,
             branch_submenu: None,
             branch_sections_collapsed: std::collections::HashSet::new(),
+            consoles_collapsed: std::collections::HashSet::new(),
+            keybind_capture: None,
         }
     }
 }

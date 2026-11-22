@@ -53,6 +53,12 @@ Everything else is derived in OKLCH:
   fitted until they clear a contrast target on the editor or the composited
   glass panel. Chroma is capped for body text and gamut-mapped for saturated
   tokens.
+- **Dark mode** counteracts the moodboards' dusty pastel anchors, which read
+  as fog on a deep canvas: both surfaces sink by 12% lightness together
+  (the designed bg/editor offset is preserved), token and semantic anchors
+  are lifted to a 0.105 OKLCH chroma floor (hue kept), and the secondary
+  text tiers plus the comment contrast floor rise. Light mode applies none
+  of these adjustments.
 - **Semantics** (green/amber/rose/blue/violet) come from the same seeds and
   feed diff rows, selection, conflict markers and ANSI-16.
 - **Terminal** keeps a dark canvas in both modes (PTY semantics); ANSI colours

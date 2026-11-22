@@ -1,25 +1,27 @@
-use egui::{Key, Modifiers, Ui};
-use lazecode_core::{AppModel, Command, PanelTab};
+//! 全局键盘快捷键：所有应用级键位经 `keybindings::resolved` 查表分发
+//! （编译期默认键 + `settings.toml` 覆盖），设置页录入态优先于正常分发。
 
+use egui::{InputState, Key, Ui};
+use lazecode_core::{AppModel, Command};
+
+use crate::keybindings::{self, Action};
 use crate::runtime::{DialogState, UiRuntime};
 
-fn command_only() -> Modifiers {
-    Modifiers {
-        command: true,
-        ..Default::default()
-    }
-}
-
-fn command_shift() -> Modifiers {
-    Modifiers {
-        command: true,
-        shift: true,
-        ..Default::default()
-    }
+/// 命中 `action` 当前绑定的组合键（含用户覆盖）。
+fn consumed(input: &mut InputState, model: &AppModel, action: Action) -> bool {
+    keybindings::resolved(model, action)
+        .is_some_and(|binding| input.consume_key(binding.modifiers, binding.key))
 }
 
 pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     let ctx = ui.ctx();
+
+    // 设置页正在录入新快捷键：吞掉这一帧按键并跳过正常分发（Esc 取消）。
+    if rt.keybind_capture.is_some() {
+        keybindings::capture_tick(ctx, model, rt);
+        return;
+    }
+
     let blocked = rt.blocks_input(model);
     let active_json_tab = model.active_project.and_then(|index| {
         let tab_id = model.projects[index].active_tab?;
@@ -35,9 +37,12 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         is_json.then_some((index, tab_id))
     });
     let mut open_palette = false;
-    let mut toggle_sidebar = false;
+    let mut toggle_files = false;
+    let mut toggle_changes = false;
+    let mut toggle_terminal_tool = false;
+    let mut toggle_consoles_tool = false;
+    let mut toggle_compare = false;
     let mut toggle_panel = false;
-    let mut toggle_terminal = false;
     let mut open_settings = false;
     let mut save = false;
     let mut new_terminal = false;
@@ -58,92 +63,90 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     let mut format_json = false;
     let mut minify_json = false;
     ctx.input_mut(|input| {
-        if input.consume_key(command_shift(), Key::A) {
+        // 命令面板在模态（设置/对话框/菜单）打开时仍可用，与原行为一致。
+        if consumed(input, model, Action::OpenPalette) {
             open_palette = true;
         }
         // ^P：稳定版 Group by Directory 切换（源控抽屉可见时）。控制台聚焦时
         // 让给 TUI（omp 用 Ctrl+P 切换模型），不在应用层吞掉。
         if !blocked
             && rt.terminal_focus.is_none()
-            && input.consume_key(egui::Modifiers::CTRL, Key::P)
+            && consumed(input, model, Action::ToggleTreeView)
         {
             toggle_tree_view = true;
         }
-        if !blocked && input.consume_key(command_only(), Key::Num1) {
-            toggle_sidebar = true;
+        // 顶栏工具键：文件 ⌘` / 变更 ⌘1 / Git Log ⌘2 / 终端 ⌘3 /
+        // 控制台侧栏 ⌘4 / Compare（默认无键）。
+        if !blocked && consumed(input, model, Action::Files) {
+            toggle_files = true;
         }
-        if !blocked && input.consume_key(command_only(), Key::Num4) {
+        if !blocked && consumed(input, model, Action::Changes) {
+            toggle_changes = true;
+        }
+        if !blocked && consumed(input, model, Action::GitLog) {
+            git_log = true;
+        }
+        if !blocked && consumed(input, model, Action::Terminal) {
+            toggle_terminal_tool = true;
+        }
+        if !blocked && consumed(input, model, Action::Consoles) {
+            toggle_consoles_tool = true;
+        }
+        if !blocked && consumed(input, model, Action::Compare) {
+            toggle_compare = true;
+        }
+        if !blocked && consumed(input, model, Action::TogglePanel) {
             toggle_panel = true;
         }
-        if !blocked
-            && (input.consume_key(command_only(), Key::Backtick)
-                || input.consume_key(Modifiers::ALT, Key::F12))
-        {
-            toggle_terminal = true;
-        }
-        if input.consume_key(command_only(), Key::Comma) {
+        if consumed(input, model, Action::OpenSettings) {
             open_settings = true;
         }
-        if !blocked && input.consume_key(command_only(), Key::S) {
+        if !blocked && consumed(input, model, Action::Save) {
             save = true;
         }
-        if !blocked && input.consume_key(command_shift(), Key::Z) {
+        if !blocked && consumed(input, model, Action::Redo) {
             redo = true;
-        } else if !blocked && input.consume_key(command_only(), Key::Z) {
+        } else if !blocked && consumed(input, model, Action::Undo) {
             undo = true;
         }
-        if !blocked && input.consume_key(command_only(), Key::K) {
+        if !blocked && consumed(input, model, Action::OpenCommit) {
             open_commit = true;
         }
-        if input.consume_key(command_only(), Key::W) {
+        if consumed(input, model, Action::CloseTab) {
             if blocked {
                 close_overlay = true;
             } else {
                 close_tab = true;
             }
         }
-        if !blocked && input.consume_key(command_shift(), Key::T) {
+        if !blocked && consumed(input, model, Action::NewTerminal) {
             new_terminal = true;
         }
-        if !blocked && input.consume_key(command_only(), Key::O) {
+        if !blocked && consumed(input, model, Action::OpenProject) {
             open_project = true;
         }
-        if !blocked && input.consume_key(command_only(), Key::Num9) {
-            git_log = true;
-        }
-        if input.consume_key(command_shift(), Key::F) {
+        if consumed(input, model, Action::Search) {
             search = true;
         }
-        let cmd_alt = Modifiers {
-            alt: true,
-            command: true,
-            mac_cmd: true,
-            ..Default::default()
-        };
-        let alt_shift = Modifiers {
-            alt: true,
-            shift: true,
-            ..Default::default()
-        };
-        if !blocked && active_json_tab.is_some() && input.consume_key(alt_shift, Key::F) {
+        if !blocked && active_json_tab.is_some() && consumed(input, model, Action::FormatJson) {
             format_json = true;
         }
-        if !blocked && active_json_tab.is_some() && input.consume_key(alt_shift, Key::M) {
+        if !blocked && active_json_tab.is_some() && consumed(input, model, Action::MinifyJson) {
             minify_json = true;
         }
-        if !blocked && input.consume_key(cmd_alt, Key::U) {
+        if !blocked && consumed(input, model, Action::UnshelveSilent) {
             unshelve_silent = true;
         }
-        if !blocked && input.consume_key(command_shift(), Key::U) {
+        if !blocked && consumed(input, model, Action::UnshelveDialog) {
             unshelve_dialog = true;
         }
-        if !blocked && input.consume_key(command_only(), Key::F) {
+        if !blocked && consumed(input, model, Action::Find) {
             find = true;
         }
-        if !blocked && input.consume_key(command_only(), Key::L) {
+        if !blocked && consumed(input, model, Action::GotoLine) {
             goto_line = true;
         }
-        if !blocked && input.consume_key(command_only(), Key::N) {
+        if !blocked && consumed(input, model, Action::NewFile) {
             new_file = true;
         }
         if input.key_pressed(Key::Escape) {
@@ -159,8 +162,20 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         rt.find.open = false;
         model.ui.command_palette_open = true;
     }
-    if toggle_sidebar {
-        model.ui.sidebar_visible = !model.ui.sidebar_visible;
+    if toggle_files {
+        keybindings::run_tool(model, Action::Files);
+    }
+    if toggle_changes {
+        keybindings::run_tool(model, Action::Changes);
+    }
+    if toggle_terminal_tool {
+        keybindings::run_tool(model, Action::Terminal);
+    }
+    if toggle_consoles_tool {
+        keybindings::run_tool(model, Action::Consoles);
+    }
+    if toggle_compare {
+        keybindings::run_tool(model, Action::Compare);
     }
     if toggle_panel {
         model.ui.panel_visible = !model.ui.panel_visible;
@@ -210,28 +225,7 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         rt.commit_tab = crate::runtime::CommitTab::Commit;
     }
     if git_log {
-        if model.ui.panel_visible && model.ui.panel_tab == PanelTab::Git {
-            model.ui.panel_visible = false;
-        } else {
-            model.ui.panel_visible = true;
-            model.ui.panel_tab = PanelTab::Git;
-            if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
-                model.ui.terminal_visible = false;
-            }
-            model.queue(Command::RefreshLog);
-        }
-    }
-    if toggle_terminal {
-        if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
-            if model.ui.terminal_visible {
-                model.ui.terminal_visible = false;
-            } else {
-                model.ui.terminal_visible = true;
-                model.ui.panel_visible = false;
-            }
-        } else {
-            model.ui.terminal_visible = !model.ui.terminal_visible;
-        }
+        keybindings::run_tool(model, Action::GitLog);
     }
     if undo {
         if let Some(project) = model.active_project_mut() {

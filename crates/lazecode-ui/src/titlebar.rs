@@ -85,14 +85,6 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         && model
             .active_project()
             .is_some_and(|project| project.compare_session.is_some());
-    let single_needs_terminal = single_active
-        && model.active_project().is_some_and(|project| {
-            project
-                .worktrees
-                .iter()
-                .all(|worktree| worktree.terminals.is_empty())
-        });
-    let terminal_needs_host = single_needs_terminal || !has_project;
 
     let mut tool_x = x + 14.0;
     let tool_y = top + 20.0;
@@ -108,17 +100,12 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         project_active,
         has_project && !single_active,
         None,
-        crate::tr!(model, "Project", "项目").to_string(),
+        tool_tooltip(model, "Files", "文件", crate::keybindings::Action::Files),
     );
     titlebar_control_hovered |= response.hovered();
     control_rects.push(response.rect);
     if response.clicked() {
-        if project_active {
-            model.ui.sidebar_visible = false;
-        } else {
-            model.ui.sidebar_view = SidebarView::Files;
-            model.ui.sidebar_visible = true;
-        }
+        crate::keybindings::run_tool(model, crate::keybindings::Action::Files);
     }
     tool_x += 34.0;
 
@@ -131,49 +118,14 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         commit_active,
         has_project && !single_active,
         (changes > 0).then_some(p.rose),
-        crate::tr!(model, "Commit", "提交").to_string(),
+        tool_tooltip(model, "Changes", "变更清单", crate::keybindings::Action::Changes),
     );
     titlebar_control_hovered |= response.hovered();
     control_rects.push(response.rect);
     if response.clicked() {
-        if commit_active {
-            model.ui.sidebar_visible = false;
-        } else {
-            model.ui.sidebar_view = SidebarView::Git;
-            model.ui.sidebar_visible = true;
-        }
+        crate::keybindings::run_tool(model, crate::keybindings::Action::Changes);
     }
     tool_x += 34.0;
-
-    if has_compare {
-        let response = toolbar_button(
-            ui,
-            theme,
-            Pos2::new(tool_x, tool_y),
-            "title-compare",
-            Icon::Compare,
-            compare_active,
-            true,
-            None,
-            crate::tr!(model, "Compare", "比较").to_string(),
-        );
-        titlebar_control_hovered |= response.hovered();
-        control_rects.push(response.rect);
-        if response.clicked() {
-            if compare_active {
-                model.ui.sidebar_view = SidebarView::Git;
-            } else {
-                model.ui.sidebar_view = SidebarView::Compare;
-                model.ui.sidebar_visible = true;
-                if let Some(project) = model.active_project_mut() {
-                    if let Some(session) = project.compare_session.as_mut() {
-                        session.minimized = false;
-                    }
-                }
-            }
-        }
-        tool_x += 34.0;
-    }
 
     let response = toolbar_button(
         ui,
@@ -184,21 +136,12 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         log_active,
         has_project && !single_active,
         None,
-        crate::tr!(model, "Git Log · ⌘9", "Git 日志 · ⌘9").to_string(),
+        tool_tooltip(model, "Git Log", "Git 日志", crate::keybindings::Action::GitLog),
     );
     titlebar_control_hovered |= response.hovered();
     control_rects.push(response.rect);
     if response.clicked() {
-        if log_active {
-            model.ui.panel_visible = false;
-        } else {
-            model.ui.panel_visible = true;
-            model.ui.panel_tab = PanelTab::Git;
-            if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
-                model.ui.terminal_visible = false;
-            }
-            model.queue(Command::RefreshLog);
-        }
+        crate::keybindings::run_tool(model, crate::keybindings::Action::GitLog);
     }
     tool_x += 34.0;
 
@@ -211,31 +154,12 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         terminal_active,
         true,
         None,
-        crate::tr!(model, "Terminal", "终端").to_string(),
+        tool_tooltip(model, "Terminal", "终端", crate::keybindings::Action::Terminal),
     );
     titlebar_control_hovered |= response.hovered();
     control_rects.push(response.rect);
     if response.clicked() {
-        if model.ui.terminal_placement == lazecode_core::TerminalPlacement::Bottom {
-            if terminal_active && terminal_needs_host {
-                // The dock is visible but empty: the first click should
-                // create the home-rooted console, not hide the dock.
-                model.queue(Command::NewTerminal);
-            } else if terminal_active {
-                model.ui.terminal_visible = false;
-            } else {
-                model.ui.terminal_visible = true;
-                model.ui.panel_visible = false;
-                if terminal_needs_host {
-                    model.queue(Command::NewTerminal);
-                }
-            }
-        } else {
-            model.ui.terminal_visible = !terminal_active;
-            if model.ui.terminal_visible && terminal_needs_host {
-                model.queue(Command::NewTerminal);
-            }
-        }
+        crate::keybindings::run_tool(model, crate::keybindings::Action::Terminal);
     }
     tool_x += 34.0;
 
@@ -248,23 +172,44 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         console_active,
         true,
         None,
-        crate::tr!(model, "Consoles · sidebar", "控制台 · 侧栏").to_string(),
+        tool_tooltip(model, "Consoles", "控制台", crate::keybindings::Action::Consoles),
     );
     titlebar_control_hovered |= response.hovered();
     control_rects.push(response.rect);
     if response.clicked() {
-        if console_active {
-            model.ui.sidebar_visible = false;
-        } else {
-            if !has_project || single_needs_terminal {
-                // No project, or the ad-hoc files workspace with no shell
-                // yet: create a console rooted at the user's home directory.
-                model.queue(Command::NewTerminal);
-            }
-            model.ui.sidebar_view = SidebarView::Consoles;
-            model.ui.sidebar_visible = true;
-        }
+        crate::keybindings::run_tool(model, crate::keybindings::Action::Consoles);
     }
+    tool_x += 34.0;
+
+    // Compare 常显（追加在工具组最右）：无比较会话时置灰不可点，避免按钮
+    // 随会话出现/消失导致整排工具跳动。
+    let response = toolbar_button(
+        ui,
+        theme,
+        Pos2::new(tool_x, tool_y),
+        "title-compare",
+        Icon::Compare,
+        compare_active,
+        has_compare,
+        None,
+        if has_compare {
+            tool_tooltip(model, "Compare", "比较", crate::keybindings::Action::Compare)
+        } else {
+            crate::tr!(
+                model,
+                "Compare · open a branch compare first",
+                "比较 · 请先打开分支比较"
+            )
+            .to_string()
+        },
+    );
+    titlebar_control_hovered |= response.hovered();
+    control_rects.push(response.rect);
+    if response.clicked() && has_compare {
+        crate::keybindings::run_tool(model, crate::keybindings::Action::Compare);
+    }
+    tool_x += 34.0;
+
     // Separate the action group from the project selector; the red-line
     // groups in the shell mock should never touch.
     x = tool_x + 24.0;
@@ -412,48 +357,6 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             crate::tr!(model, "no worktree", "无工作树").to_string()
         };
         let worktree_enabled = is_git && !is_single;
-        let wt_width = (worktree_name.chars().count() as f32 * 8.0 + 38.0).clamp(70.0, 180.0);
-        let worktree_rect = Rect::from_min_size(Pos2::new(x, top + 6.0), Vec2::new(wt_width, 28.0));
-        let worktree_response = ui.interact(
-            worktree_rect,
-            ui.scope_id().with("worktree-chip"),
-            Sense::click(),
-        );
-        titlebar_control_hovered |= worktree_response.hovered();
-        control_rects.push(worktree_response.rect);
-        if worktree_enabled && worktree_response.hovered() {
-            painter.rect_filled(worktree_rect, egui::CornerRadius::same(6), p.hover);
-        }
-        paint_icon(
-            &painter,
-            Rect::from_center_size(
-                Pos2::new(worktree_rect.left() + 14.0, worktree_rect.center().y),
-                Vec2::splat(15.0),
-            ),
-            Icon::Worktree,
-            if is_git { p.accent } else { p.text3 },
-        );
-        text_clipped(
-            &painter,
-            Rect::from_min_max(
-                Pos2::new(worktree_rect.left() + 28.0, worktree_rect.top()),
-                Pos2::new(worktree_rect.right() - 8.0, worktree_rect.bottom()),
-            ),
-            &worktree_name,
-            FontId::proportional(14.0),
-            p.text2,
-            Align2::LEFT_CENTER,
-        );
-        if worktree_response.clicked() && worktree_enabled {
-            rt.toggle_menu(MenuKind::Worktree, worktree_rect, None);
-        }
-        if worktree_enabled {
-            worktree_response.on_hover_text(crate::tr!(
-                model,
-                "Switch worktree · create linked checkouts with independent consoles",
-                "切换工作树 · 可创建独立控制台的关联检出"
-            ));
-        }
 
         let (conflicts, sequencer) = project
             .map(|p| (p.conflicts.clone(), p.sequencer.clone()))
@@ -524,11 +427,73 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         };
 
         let display_name = if op_active { &op_label } else { &branch };
-        let branch_width = (display_name.chars().count() as f32 * 7.4
-            + 58.0
+        // 两个 chip 都按实际排版宽度定宽：字符数估算（Latin ≈7.4–8px）对
+        // CJK（≈14px/字）和宽字符会提前截断，短名又被 96px 下限饿成 “th…”。
+        let wt_text_width = painter
+            .layout_no_wrap(worktree_name.clone(), FontId::proportional(14.0), p.text2)
+            .size()
+            .x;
+        let mut wt_width = (wt_text_width + 38.0).clamp(70.0, 180.0);
+        let branch_text_width = painter
+            .layout_no_wrap(display_name.clone(), FontId::proportional(14.0), p.text2)
+            .size()
+            .x;
+        let mut branch_width = (28.0 + branch_text_width + 36.0
             + usize::from(!op_active && ahead > 0) as f32 * 24.0
             + usize::from(!op_active && behind > 0) as f32 * 24.0)
             .clamp(96.0, 340.0);
+        // 窗口预算：chip 总宽不得盖过右侧搜索/设置按钮（op 进行时另留继续/
+        // 中止按钮的宽度）。空间不足先收工作树（下限 70）、再收分支（下限
+        // 70），超出部分由 text_clipped 的省略号兜底。
+        let chips_limit = rect.right() - 76.0 - if op_active { 64.0 } else { 0.0 };
+        let overflow = x + wt_width + 12.0 + branch_width - chips_limit;
+        if overflow > 0.0 {
+            let wt_shrink = (wt_width - 70.0).min(overflow);
+            wt_width -= wt_shrink;
+            branch_width = (branch_width - (overflow - wt_shrink)).max(70.0);
+        }
+        let worktree_rect = Rect::from_min_size(Pos2::new(x, top + 6.0), Vec2::new(wt_width, 28.0));
+        let worktree_response = ui.interact(
+            worktree_rect,
+            ui.scope_id().with("worktree-chip"),
+            Sense::click(),
+        );
+        titlebar_control_hovered |= worktree_response.hovered();
+        control_rects.push(worktree_response.rect);
+        if worktree_enabled && worktree_response.hovered() {
+            painter.rect_filled(worktree_rect, egui::CornerRadius::same(6), p.hover);
+        }
+        paint_icon(
+            &painter,
+            Rect::from_center_size(
+                Pos2::new(worktree_rect.left() + 14.0, worktree_rect.center().y),
+                Vec2::splat(15.0),
+            ),
+            Icon::Worktree,
+            if is_git { p.accent } else { p.text3 },
+        );
+        text_clipped(
+            &painter,
+            Rect::from_min_max(
+                Pos2::new(worktree_rect.left() + 28.0, worktree_rect.top()),
+                Pos2::new(worktree_rect.right() - 8.0, worktree_rect.bottom()),
+            ),
+            &worktree_name,
+            FontId::proportional(14.0),
+            p.text2,
+            Align2::LEFT_CENTER,
+        );
+        if worktree_response.clicked() && worktree_enabled {
+            rt.toggle_menu(MenuKind::Worktree, worktree_rect, None);
+        }
+        if worktree_enabled {
+            worktree_response.on_hover_text(crate::tr!(
+                model,
+                "Switch worktree · create linked checkouts with independent consoles",
+                "切换工作树 · 可创建独立控制台的关联检出"
+            ));
+        }
+
         let branch_rect = Rect::from_min_size(
             Pos2::new(worktree_rect.right() + 12.0, top + 6.0),
             Vec2::new(branch_width, 28.0),
@@ -853,6 +818,23 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
 
     rt.titlebar_controls.clear();
     rt.titlebar_controls.extend(control_rects);
+}
+
+/// 工具按钮提示：动作名 + 当前绑定（含用户覆盖）；未绑定只显示名称。
+fn tool_tooltip(
+    model: &AppModel,
+    en: &str,
+    zh: &str,
+    action: crate::keybindings::Action,
+) -> String {
+    let base = crate::tr!(model, en, zh).to_string();
+    match crate::keybindings::resolved(model, action) {
+        Some(binding) => format!(
+            "{base} · {}",
+            crate::keybindings::binding_display(Some(binding))
+        ),
+        None => base,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

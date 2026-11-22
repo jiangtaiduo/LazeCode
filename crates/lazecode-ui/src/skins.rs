@@ -572,6 +572,15 @@ fn shift(c: Color32, dl: f32, chroma_scale: f32) -> Color32 {
     })
 }
 
+/// Lift a colour's chroma to `floor`, keeping hue and lightness. Dark mode
+/// needs it: the moodboard seeds are dusty pastels, and at pastel chroma on
+/// a deep canvas they read as fog rather than colour.
+fn chroma_floor(c: Color32, floor: f32) -> Color32 {
+    let mut lch = lch_of(c);
+    lch.c = lch.c.max(floor);
+    lch_color(lch)
+}
+
 fn build(seed: Seeds, dark: bool) -> Palette {
     let bg_seed = rgb(seed.bg);
     let editor_seed = rgb(seed.editor);
@@ -579,15 +588,20 @@ fn build(seed: Seeds, dark: bool) -> Palette {
     let bg_lch = lch_of(bg_seed);
     let editor_lch = lch_of(editor_seed);
 
+    // Dark canvases sink together: scale both seeds' lightness by the same
+    // factor so the designed bg/editor offset survives while the moodboard's
+    // airy pastels stop reading as fog. Light mode is untouched.
+    let deep = if dark { 0.88 } else { 1.0 };
+
     // Neutral family: keep the designer's hue, tame the chroma so large
     // surfaces stay quiet.
     let neutral = Lch {
-        l: bg_lch.l,
+        l: bg_lch.l * deep,
         c: bg_lch.c.clamp(0.004, 0.045),
         h: bg_lch.h,
     };
     let editor = Lch {
-        l: editor_lch.l.clamp(if dark { 0.11 } else { 0.93 }, 0.97),
+        l: (editor_lch.l * deep).clamp(if dark { 0.11 } else { 0.93 }, 0.97),
         c: editor_lch.c.clamp(0.002, 0.04),
         h: editor_lch.h,
     };
@@ -630,7 +644,7 @@ fn build(seed: Seeds, dark: bool) -> Palette {
     let chrome = flatten(panel, bg);
     let text2 = fit(
         lch_color(Lch {
-            l: if dark { 0.72 } else { 0.47 },
+            l: if dark { 0.75 } else { 0.47 },
             c: 0.014,
             h: neutral.h,
         }),
@@ -641,7 +655,7 @@ fn build(seed: Seeds, dark: bool) -> Palette {
     );
     let text3 = fit(
         lch_color(Lch {
-            l: if dark { 0.62 } else { 0.55 },
+            l: if dark { 0.65 } else { 0.55 },
             c: 0.012,
             h: neutral.h,
         }),
@@ -682,11 +696,23 @@ fn build(seed: Seeds, dark: bool) -> Palette {
     let accent_soft_alpha = if dark { 46 } else { 31 };
     let accent_line_alpha = if dark { 115 } else { 102 };
 
-    let green = fit(rgb(seed.green), editor_bg, 4.5, dark, 0.6);
-    let amber = fit(rgb(seed.amber), editor_bg, 4.5, dark, 0.6);
-    let rose = fit(rgb(seed.rose), editor_bg, 4.6, dark, 0.6);
-    let blue = fit(rgb(seed.type_), editor_bg, 4.5, dark, 0.5);
-    let violet = fit(rgb(seed.keyword), editor_bg, 4.5, dark, 0.5);
+    // Token/semantic anchors: dark mode lifts their chroma to a floor (hue
+    // preserved) so dusty pastels read as colour instead of fog.
+    let anchor = |hex: u32| {
+        if dark {
+            chroma_floor(rgb(hex), 0.105)
+        } else {
+            rgb(hex)
+        }
+    };
+    let token =
+        |hex: u32, min: f32, cap_chroma: f32| fit(anchor(hex), editor_bg, min, dark, cap_chroma);
+
+    let green = token(seed.green, 4.5, 0.6);
+    let amber = token(seed.amber, 4.5, 0.6);
+    let rose = token(seed.rose, 4.6, 0.6);
+    let blue = token(seed.type_, 4.5, 0.5);
+    let violet = token(seed.keyword, 4.5, 0.5);
     let pink = mix(violet, white, 0.35);
 
     let running = fit(
@@ -702,17 +728,15 @@ fn build(seed: Seeds, dark: bool) -> Palette {
     );
 
     // Editor tokens: hue from the anchor, lightness fitted above the editor.
-    let token =
-        |hex: u32, min: f32, cap_chroma: f32| fit(rgb(hex), editor_bg, min, dark, cap_chroma);
     let tok_kw = token(seed.keyword, 4.8, 0.22);
     let tok_type = token(seed.type_, 4.8, 0.22);
     let tok_str = token(seed.string, 4.8, 0.22);
     let tok_num = token(seed.number, 4.8, 0.22);
     let tok_fn = tok_type;
     let tok_com = fit(
-        mix(text3, editor_bg, 0.15),
+        mix(text3, editor_bg, if dark { 0.10 } else { 0.15 }),
         editor_bg,
-        if dark { 3.6 } else { 3.4 },
+        if dark { 3.8 } else { 3.4 },
         dark,
         0.06,
     );
@@ -837,7 +861,7 @@ fn build(seed: Seeds, dark: bool) -> Palette {
         green,
         running,
         amber,
-        orange: fit(rgb(seed.amber), bg, 4.2, dark, 0.5),
+        orange: fit(anchor(seed.amber), bg, 4.2, dark, 0.5),
         rose,
         blue,
         violet,

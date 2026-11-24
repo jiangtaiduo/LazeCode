@@ -1416,10 +1416,11 @@ pub fn checkout_ref(root: &Path, spec: &str) -> Result<String> {
 
 /// Checkout a single file from a given revision (`git checkout <revision> -- <path>`).
 pub fn checkout_revision_path(root: &Path, revision: &str, path: &str) -> Result<()> {
-    validated_hash(revision)?;
+    let repo = discover(root)?;
+    let revision = resolve_committish(&repo, revision)?.to_string();
     let relative = crate::ops::validate_repo_path(path)?;
     let path = relative.to_string_lossy();
-    let output = builder(root, &["checkout", revision, "--", path.as_ref()])
+    let output = builder(root, &["checkout", &revision, "--", path.as_ref()])
         .output()
         .map_err(|e| anyhow!("git checkout file failed: {e}"))?;
     if !output.status.success() {

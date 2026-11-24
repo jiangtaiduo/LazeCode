@@ -2391,14 +2391,12 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     struct WorktreeGroup {
         name: String,
         key: String,
-        busy: usize,
         outputting: usize,
         rows: Vec<ConsoleRow>,
     }
     struct ProjectGroup {
         name: String,
         key: String,
-        busy: usize,
         outputting: usize,
         worktrees: Vec<WorktreeGroup>,
     }
@@ -2407,7 +2405,6 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         let mut group = ProjectGroup {
             name: project.name.clone(),
             key: format!("p:{}", project.root.display()),
-            busy: 0,
             outputting: 0,
             worktrees: Vec::new(),
         };
@@ -2415,7 +2412,6 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             let mut worktree_group = WorktreeGroup {
                 name: worktree.name.clone(),
                 key: format!("w:{}", worktree.path.display()),
-                busy: 0,
                 outputting: 0,
                 rows: Vec::new(),
             };
@@ -2447,10 +2443,11 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                     elapsed: format_elapsed(terminal.started.elapsed().as_secs()),
                 });
             }
-            worktree_group.busy = worktree_group.rows.iter().filter(|row| row.busy).count();
-            worktree_group.outputting =
-                worktree_group.rows.iter().filter(|row| row.outputting).count();
-            group.busy += worktree_group.busy;
+            worktree_group.outputting = worktree_group
+                .rows
+                .iter()
+                .filter(|row| row.outputting)
+                .count();
             group.outputting += worktree_group.outputting;
             group.worktrees.push(worktree_group);
         }
@@ -2476,8 +2473,14 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                         egui::RichText::new(if model.settings.language.is_zh() {
                             format!("{} 个进程运行于 {} 个项目", total, model.projects.len())
                         } else {
+                            let process = if total == 1 { "process" } else { "processes" };
+                            let project = if model.projects.len() == 1 {
+                                "project"
+                            } else {
+                                "projects"
+                            };
                             format!(
-                                "{total} processes running across {} projects",
+                                "{total} {process} running across {} {project}",
                                 model.projects.len()
                             )
                         })
@@ -2530,7 +2533,6 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                         model,
                         head_rect.right() - 10.0,
                         head_rect.center().y,
-                        group.busy,
                         group.outputting,
                         p,
                     );
@@ -2582,7 +2584,6 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                             model,
                             sub_rect.right() - 10.0,
                             sub_rect.center().y,
-                            worktree.busy,
                             worktree.outputting,
                             p,
                         );
@@ -2629,7 +2630,7 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                                 ui.painter(),
                                 Rect::from_min_max(
                                     Pos2::new(row_rect.left() + 56.0, row_rect.top() + 4.0),
-                                    Pos2::new(row_rect.right() - 95.0, row_rect.top() + 24.0),
+                                    Pos2::new(row_rect.right() - 62.0, row_rect.top() + 24.0),
                                 ),
                                 &row.name,
                                 FontId::proportional(11.5),
@@ -2640,7 +2641,7 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                                 ui.painter(),
                                 Rect::from_min_max(
                                     Pos2::new(row_rect.left() + 56.0, row_rect.top() + 25.0),
-                                    Pos2::new(row_rect.right() - 70.0, row_rect.bottom() - 3.0),
+                                    Pos2::new(row_rect.right() - 62.0, row_rect.bottom() - 3.0),
                                 ),
                                 &row.command,
                                 FontId::monospace(9.0),
@@ -2648,45 +2649,12 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                                 Align2::LEFT_CENTER,
                             );
                             ui.painter().text(
-                                Pos2::new(row_rect.right() - 42.0, row_rect.center().y),
+                                Pos2::new(row_rect.right() - 12.0, row_rect.center().y),
                                 Align2::RIGHT_CENTER,
                                 &row.elapsed,
                                 FontId::monospace(9.0),
                                 if row.busy { p.text2 } else { p.text3 },
                             );
-                            let action_rect = Rect::from_center_size(
-                                Pos2::new(row_rect.right() - 18.0, row_rect.center().y),
-                                Vec2::splat(22.0),
-                            );
-                            let action = ui.interact(
-                                action_rect,
-                                ui.scope_id().with(("console-action", row.terminal)),
-                                Sense::click(),
-                            );
-                            if action.hovered() {
-                                ui.painter().rect_filled(
-                                    action_rect,
-                                    egui::CornerRadius::same(5),
-                                    p.hover,
-                                );
-                            }
-                            paint_icon(
-                                ui.painter(),
-                                action_rect.shrink(6.0),
-                                if row.busy { Icon::Stop } else { Icon::Play },
-                                if row.busy { p.rose } else { p.green },
-                            );
-                            if action.clicked() {
-                                if row.busy {
-                                    if let Some(terminal) =
-                                        model.projects[row.project].term_by_id(row.terminal)
-                                    {
-                                        terminal.session.kill();
-                                    }
-                                } else {
-                                    model.queue(Command::RestartTerminal(row.terminal));
-                                }
-                            }
                             if response.clicked() {
                                 model.switch_project(row.project);
                                 model.projects[row.project].active_worktree = row.worktree;
@@ -2733,25 +2701,24 @@ fn consoles(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     );
 }
 
-/// 组头右侧的状态摘要：输出中红色（带小转圈）、运行中绿色 `N running`、
-/// 否则灰色 `idle`。与项目条 marquee 的状态语义一致。
+/// 组头右侧的状态摘要：只统计控制台条目前面红色转圈（正在输出）的数量。
+/// 没有红圈时显示灰色 `idle`。
 fn group_summary(
     ui: &Ui,
     model: &AppModel,
     right: f32,
     center_y: f32,
-    busy: usize,
     outputting: usize,
     p: crate::theme::Palette,
 ) {
-    let (text, color) = if busy > 0 {
+    let (text, color) = if outputting > 0 {
         (
             if model.settings.language.is_zh() {
-                format!("{busy} 个运行中")
+                format!("{outputting} 个运行中")
             } else {
-                format!("{busy} running")
+                format!("{outputting} running")
             },
-            if outputting > 0 { p.rose } else { p.running },
+            p.rose,
         )
     } else {
         (crate::tr!(model, "idle", "空闲").to_string(), p.text3)
@@ -3162,7 +3129,13 @@ pub fn compare_drawer(
     );
     let from8: String = session.from.chars().take(8).collect();
     let to8: String = session.to.chars().take(8).collect();
-    let title = if zh {
+    let title = if session.local {
+        if zh {
+            format!("{from8} 与本地之间的变更")
+        } else {
+            format!("Changes Between {from8} and Local")
+        }
+    } else if zh {
         format!("{from8} 与 {to8} 之间的变更")
     } else {
         format!("Changes Between {from8} and {to8}")
@@ -3187,11 +3160,6 @@ pub fn compare_drawer(
         model.queue(Command::CompareClose);
         return;
     }
-    let more_btn = Rect::from_min_size(
-        Pos2::new(head.right() - 48.0, head.center().y - 9.0),
-        Vec2::new(20.0, 18.0),
-    );
-    let _ = icon_16(ui, "cmp-more", more_btn, Icon::More, p.text3);
     let min_btn = Rect::from_min_size(
         Pos2::new(head.right() - 26.0, head.center().y - 9.0),
         Vec2::new(20.0, 18.0),
@@ -3218,7 +3186,14 @@ pub fn compare_drawer(
         Pos2::new(tb.left() + 18.0, tb.center().y),
         Vec2::new(20.0, 20.0),
     );
-    if icon_16(ui, "cmp-swap", swap_btn, Icon::Compare, p.text2) {
+    if icon_16_enabled(
+        ui,
+        "cmp-swap",
+        swap_btn,
+        Icon::Compare,
+        p.text2,
+        !session.local,
+    ) {
         model.queue(Command::CompareSwap);
     }
     let view_btn = Rect::from_center_size(
@@ -3298,7 +3273,13 @@ pub fn compare_drawer(
         ui.painter().text(
             body.center(),
             Align2::CENTER_CENTER,
-            if zh {
+            if session.local {
+                if zh {
+                    "该提交与本地工作区没有差异"
+                } else {
+                    "No differences between commit and local working tree"
+                }
+            } else if zh {
                 "两个版本之间没有差异"
             } else {
                 "No differences between versions"
@@ -3589,11 +3570,18 @@ pub fn compare_drawer(
                     if response.double_clicked() {
                         let target = row.path.clone();
                         model.ui.reveal_editor_area();
-                        model.queue(Command::OpenCompareCommitsDiff {
-                            from: session.from.clone(),
-                            to: session.to.clone(),
-                            path: target.clone(),
-                        });
+                        if session.local {
+                            model.queue(Command::OpenCompareWithLocalDiff {
+                                commit: session.from.clone(),
+                                path: target.clone(),
+                            });
+                        } else {
+                            model.queue(Command::OpenCompareCommitsDiff {
+                                from: session.from.clone(),
+                                to: session.to.clone(),
+                                path: target.clone(),
+                            });
+                        }
                         if let Some(session) = model.projects[index].compare_session.as_mut() {
                             session.selected = Some(target);
                         }
@@ -3655,7 +3643,12 @@ fn push_cmp_dirs(
     let mut level_files: Vec<&lazecode_git::CompareFile> = files
         .iter()
         .filter(|file| {
-            let rest = file.path.strip_prefix(prefix).unwrap_or(&file.path);
+            // 只收本层直接文件：不属于 prefix 的文件（尤其是根级
+            // CHANGELOG/latest.json）不能在每一层重复出现，否则同一
+            // 路径会生成重复的 egui ID。
+            let Some(rest) = file.path.strip_prefix(prefix) else {
+                return false;
+            };
             let rest = rest.strip_prefix('/').unwrap_or(rest);
             !rest.contains('/')
         })
@@ -4345,5 +4338,47 @@ fn stash_view(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
         if let Some(stash) = rt.stash_selected.clone() {
             model.queue(Command::StashPop(stash));
         }
+    }
+}
+
+#[cfg(test)]
+mod compare_tree_tests {
+    use super::*;
+
+    fn file(path: &str) -> lazecode_git::CompareFile {
+        lazecode_git::CompareFile {
+            path: path.to_string(),
+            status: 'M',
+            additions: 1,
+            deletions: 0,
+        }
+    }
+
+    #[test]
+    fn compare_tree_keeps_root_files_out_of_child_directories() {
+        let files = vec![
+            file("CHANGELOG.md"),
+            file("src/a.rs"),
+            file("src/nested/b.rs"),
+        ];
+        let mut rows = Vec::new();
+        push_cmp_dirs(&files, &HashSet::new(), "", 1, &mut rows, None);
+
+        let file_rows: Vec<&CmpRow> = rows.iter().filter(|row| row.dir.is_none()).collect();
+        assert_eq!(file_rows.len(), 3);
+        assert_eq!(
+            file_rows
+                .iter()
+                .filter(|row| row.path == "CHANGELOG.md")
+                .count(),
+            1
+        );
+        assert_eq!(
+            file_rows
+                .iter()
+                .filter(|row| row.path == "src/a.rs")
+                .count(),
+            1
+        );
     }
 }

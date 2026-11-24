@@ -331,7 +331,7 @@ fn popover_rect(rt: &mut UiRuntime, screen: Rect, anchor: Rect, width: f32, heig
 /// hairline border, heavy drop shadow.
 pub(crate) fn frame(ui: &Ui, rect: Rect, theme: &Theme) {
     let p = theme.palette;
-    dialog_shadow(ui.painter(), rect, 24.0, 80.0, 153);
+    dialog_shadow(ui.painter(), rect, theme, 12.0, 10.0, 32.0, 72);
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(12), p.dialog);
     ui.painter().rect_stroke(
@@ -347,7 +347,7 @@ pub(crate) fn frame(ui: &Ui, rect: Rect, theme: &Theme) {
 /// this lighter material instead.)
 pub(crate) fn menu_frame(ui: &Ui, rect: Rect, theme: &Theme) {
     let p = theme.palette;
-    dialog_shadow(ui.painter(), rect, 12.0, 40.0, 128);
+    dialog_shadow(ui.painter(), rect, theme, 8.0, 6.0, 20.0, 56);
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(8), p.menu_bg);
     ui.painter().rect_stroke(
@@ -358,21 +358,55 @@ pub(crate) fn menu_frame(ui: &Ui, rect: Rect, theme: &Theme) {
     );
 }
 
-/// Approximate a CSS drop shadow `0 {dy}px {blur}px rgba(0,0,0,a/255)` with
-/// a blurred rect edge (epaint's linear edge blur).
-pub(crate) fn dialog_shadow(painter: &egui::Painter, rect: Rect, dy: f32, blur: f32, alpha: u8) {
-    let shape = egui::epaint::RectShape {
-        rect: rect.translate(egui::vec2(0.0, dy)).expand(blur * 0.4),
-        corner_radius: egui::CornerRadius::same(16),
-        fill: Color32::from_black_alpha(alpha),
-        stroke: Stroke::NONE,
-        stroke_kind: egui::StrokeKind::Inside,
-        round_to_pixels: None,
-        blur_width: blur * 0.55,
-        brush: None,
-        angle: 0.0,
+/// Soft drop shadow built from a few concentric rounded rects. epaint's
+/// `blur_width` feathers only the outer edge, so a single large blurred rect
+/// leaves a solid dark ring; stacking low-alpha layers gives a real falloff
+/// instead. Light mode uses roughly half the alpha.
+pub(crate) fn dialog_shadow(
+    painter: &egui::Painter,
+    rect: Rect,
+    theme: &Theme,
+    radius: f32,
+    dy: f32,
+    spread: f32,
+    alpha: u8,
+) {
+    let base = if theme.dark {
+        alpha
+    } else {
+        (alpha as f32 * 0.65).round() as u8
     };
-    painter.add(egui::Shape::Rect(shape));
+    if base == 0 {
+        return;
+    }
+    // (expand, downward offset, share of base alpha); innermost first.
+    let layers = [
+        (0.00, 0.00, 0.32),
+        (0.15, 0.18, 0.24),
+        (0.32, 0.38, 0.20),
+        (0.52, 0.60, 0.15),
+        (0.75, 0.85, 0.09),
+    ];
+    for (expand_frac, offset_frac, alpha_frac) in layers {
+        let expand = spread * expand_frac;
+        let offset = dy * offset_frac;
+        let layer_alpha = (base as f32 * alpha_frac).round() as u8;
+        if layer_alpha == 0 {
+            continue;
+        }
+        let shape = egui::epaint::RectShape {
+            rect: rect.translate(egui::vec2(0.0, offset)).expand(expand),
+            corner_radius: egui::CornerRadius::same((radius + expand).round() as u8),
+            fill: Color32::from_black_alpha(layer_alpha),
+            stroke: Stroke::NONE,
+            stroke_kind: egui::StrokeKind::Inside,
+            round_to_pixels: None,
+            blur_width: 2.0,
+            brush: None,
+            angle: 0.0,
+        };
+        painter.add(egui::Shape::Rect(shape));
+    }
 }
 
 /// Stable context-menu row height (12px text + 2×5px padding).
@@ -1505,18 +1539,11 @@ fn draw_commit_menu(
                 }
             }
             1 => {
-                // 「与本地比较」：提交 ↔ 工作区。走 DiffSource::CompareWithLocal
-                // （path 空 = 取首个差异文件）；旧实现把 `{hash}::{file}`
-                // 传给 OpenDiff，被当成工作区路径打开，文件永远不存在。
-                let file = model.projects[index]
-                    .commit_details
-                    .as_ref()
-                    .and_then(|details| details.files.first())
-                    .map(|file| file.path.clone())
-                    .unwrap_or_default();
-                model.queue(Command::OpenCompareWithLocalDiff {
+                // 「与本地比较」：打开 Compare 抽屉，列出该提交与本地
+                // 工作区之间的全部差异文件（含未提交改动），而不是只开
+                // 单个文件 diff。
+                model.queue(Command::OpenCompareWithLocal {
                     commit: commit.id.clone(),
-                    path: file,
                 });
             }
             2 => {
@@ -1561,9 +1588,27 @@ fn draw_commit_menu(
                 };
             }
             10 => {
+                // `git rebase -i <onto>` lists the commits *after* onto,
+                // oldest first. The log is newest-first, so walk backwards
+                // from the clicked row to HEAD and reverse.
+                let mut todos = Vec::new();
+                if let Some(project) = model.projects.get(index) {
+                    if let Some(position) = project.log.iter().position(|row| row.id == commit.id) {
+                        for row in project.log[..position].iter().rev() {
+                            if row.parents.len() > 1 || row.in_head == Some(false) {
+                                continue;
+                            }
+                            todos.push(crate::runtime::RebaseTodoRow {
+                                action: "pick".to_string(),
+                                commit: row.id.clone(),
+                                message: row.message.lines().next().unwrap_or("").to_string(),
+                            });
+                        }
+                    }
+                }
                 rt.dialog = DialogState::InteractiveRebase {
                     onto: commit.id.clone(),
-                    todos: Vec::new(),
+                    todos,
                 };
             }
             11 => {
@@ -1724,9 +1769,8 @@ fn draw_tag_context_menu(
     if let Some(code) = action {
         match code {
             0 => model.queue(Command::CheckoutRevision(tag.to_string())),
-            1 => model.queue(Command::OpenCompareWithLocalDiff {
+            1 => model.queue(Command::OpenCompareWithLocal {
                 commit: tag.to_string(),
-                path: String::new(),
             }),
             2 => model.queue(Command::Merge {
                 ref_name: tag.to_string(),
@@ -1799,7 +1843,7 @@ fn draw_branch_context_menu(
                 crate::tr!(model, "Rebase current onto", "变基当前分支到此处"),
                 9,
             ),
-            (crate::tr!(model, "Set log filter", "设为日志过滤"), 2),
+            (crate::tr!(model, "Set log filter", "设为日志过滤"), 6),
             (crate::tr!(model, "Delete branch", "删除分支"), 3),
         ]
     } else {
@@ -1820,7 +1864,8 @@ fn draw_branch_context_menu(
             (crate::tr!(model, "Set log filter", "设为日志过滤"), 6),
         ]
     };
-    let is_fav = model.favorite_branches.contains(&name);
+    let favorite_root = model.projects[index].root.clone();
+    let is_fav = model.is_favorite_branch(&favorite_root, &name);
     let fav_label = if is_fav {
         crate::tr!(model, "Remove favorite", "取消收藏")
     } else {
@@ -1876,11 +1921,7 @@ fn draw_branch_context_menu(
     }
     let mut close = false;
     if toggle_fav {
-        if is_fav {
-            model.favorite_branches.remove(&name);
-        } else {
-            model.favorite_branches.insert(name.clone());
-        }
+        model.toggle_favorite_branch(&favorite_root, &name);
         model.save_workspace();
         close = true;
     }
@@ -2345,9 +2386,58 @@ fn draw_tree_context_menu(
                 };
             }
             11 => {
-                rt.dialog = DialogState::ConfirmDiscard {
-                    paths: vec![rel_path.to_string()],
-                };
+                let prefix = format!("{rel_path}/");
+                let changes: Vec<(String, bool)> = model.projects[project_idx]
+                    .active_git()
+                    .map(|git| {
+                        git.changes
+                            .iter()
+                            .map(|change| (change.path.clone(), change.untracked))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if is_dir {
+                    // `discard_file_changes` removes a directory recursively
+                    // when it has no HEAD entry. Expand the directory to its
+                    // changed tracked files instead, and never touch untracked
+                    // content from a Rollback command.
+                    let paths: Vec<String> = changes
+                        .iter()
+                        .filter(|(path, untracked)| {
+                            !untracked
+                                && (rel_path.is_empty()
+                                    || path == rel_path
+                                    || path.starts_with(&prefix))
+                        })
+                        .map(|(path, _)| path.clone())
+                        .collect();
+                    if paths.is_empty() {
+                        model.toast(
+                            crate::tr!(
+                                model,
+                                "No tracked changes under this folder",
+                                "该目录下没有已跟踪的更改"
+                            )
+                            .to_string(),
+                            ToastKind::Warning,
+                        );
+                    } else {
+                        rt.dialog = DialogState::ConfirmDiscard { paths };
+                    }
+                } else if changes
+                    .iter()
+                    .any(|(path, untracked)| *untracked && path == rel_path)
+                {
+                    // Untracked files have a trash-based Delete flow; Rollback
+                    // must not permanently unlink them.
+                    rt.dialog = DialogState::ConfirmDeleteUntracked {
+                        paths: vec![abs_path],
+                    };
+                } else {
+                    rt.dialog = DialogState::ConfirmDiscard {
+                        paths: vec![rel_path.to_string()],
+                    };
+                }
             }
             50 => {
                 let paths: Vec<std::path::PathBuf> = model
@@ -2407,9 +2497,14 @@ fn draw_tree_context_menu(
             211 => {
                 if let Ok(id) = model.open_file_in(project_idx, abs_path.clone()) {
                     rt.set_editor_focus(id);
+                    let root = model.projects[project_idx].active_root().to_path_buf();
+                    let blame = lazecode_git::blame(&root, rel_path).ok();
                     if let Some(tab) = model.projects[project_idx].tab_mut_by_id(id) {
                         if let lazecode_core::TabKind::File(file_tab) = &mut tab.kind {
                             file_tab.annotate = true;
+                            if file_tab.blame.is_none() {
+                                file_tab.blame = blame;
+                            }
                         }
                     }
                 }
@@ -2902,6 +2997,9 @@ fn draw_changelist_header_menu(
         return;
     };
     let is_default = name.eq_ignore_ascii_case("default") || name.eq_ignore_ascii_case("changes");
+    let unversioned = crate::tr!(model, "Unversioned Files", "未版本控制的文件");
+    let ignored = crate::tr!(model, "Ignored Files", "被忽略的文件");
+    let is_pseudo = name == unversioned || name == ignored;
     let zh = model.settings.language.is_zh();
     let mut items: Vec<ChangeMenuItem> = Vec::new();
     items.push(change_menu_item(
@@ -2914,7 +3012,7 @@ fn draw_changelist_header_menu(
         false,
         true,
     ));
-    if !is_default {
+    if !is_default && !is_pseudo {
         items.push(change_menu_item(
             if zh {
                 "删除变更列表…".to_string()
@@ -3328,17 +3426,17 @@ fn draw_commit_details_file_menu(
         ),
         (
             if zh {
-                "复制提交补丁"
+                "复制文件补丁"
             } else {
-                "Copy Commit Patch"
+                "Copy File Patch"
             },
             3,
         ),
         (
             if zh {
-                "创建补丁…"
+                "创建文件补丁…"
             } else {
-                "Create Patch…"
+                "Create File Patch…"
             },
             4,
         ),
@@ -3380,49 +3478,55 @@ fn draw_commit_details_file_menu(
                     path: file_path,
                 });
             }
-            2 => {
-                let root = model.projects[project_idx].active_root().to_path_buf();
-                let _ = lazecode_git::checkout_revision_path(&root, &commit_id, &file_path);
-                model.toast(
-                    if zh {
-                        "已从版本恢复该文件"
-                    } else {
-                        "Restored file from revision"
-                    },
-                    ToastKind::Success,
-                );
-            }
+            2 => model.queue(Command::GetFileFromRevision {
+                path: file_path,
+                revision: commit_id,
+            }),
             3 => {
                 let root = model.projects[project_idx].active_root().to_path_buf();
-                if let Ok(patch) = lazecode_git::commit_patch(&root, &commit_id) {
-                    ui.ctx().copy_text(patch);
-                    model.toast(
-                        if zh {
-                            "已将补丁复制到剪贴板"
-                        } else {
-                            "Patch copied to clipboard"
-                        },
-                        ToastKind::Info,
-                    );
+                match lazecode_git::commit_file_diff(&root, &commit_id, &file_path) {
+                    Ok(diff) => {
+                        let patch = lazecode_text::unified_patch(&diff.path, &diff.diff);
+                        ui.ctx().copy_text(patch);
+                        model.toast(
+                            if zh {
+                                "已将文件补丁复制到剪贴板"
+                            } else {
+                                "File patch copied to clipboard"
+                            },
+                            ToastKind::Info,
+                        );
+                    }
+                    Err(err) => model.toast(err.to_string(), ToastKind::Error),
                 }
             }
             4 => {
                 let root = model.projects[project_idx].active_root().to_path_buf();
-                if let Ok(patch) = lazecode_git::commit_patch(&root, &commit_id) {
-                    let default_name = format!("{}.patch", &commit_id[..commit_id.len().min(8)]);
-                    let target = dirs::desktop_dir()
-                        .unwrap_or_else(|| root.clone())
-                        .join(&default_name);
-                    if std::fs::write(&target, patch).is_ok() {
-                        model.toast(
-                            if zh {
-                                format!("补丁已保存至 {}", target.display())
-                            } else {
-                                format!("Patch saved to {}", target.display())
-                            },
-                            ToastKind::Success,
-                        );
+                match lazecode_git::commit_file_diff(&root, &commit_id, &file_path) {
+                    Ok(diff) => {
+                        let patch = lazecode_text::unified_patch(&diff.path, &diff.diff);
+                        let short = &commit_id[..commit_id.len().min(8)];
+                        let name = std::path::Path::new(&file_path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("file");
+                        let default_name = format!("{short}-{name}.patch");
+                        let target = dirs::desktop_dir()
+                            .unwrap_or_else(|| root.clone())
+                            .join(&default_name);
+                        match std::fs::write(&target, patch) {
+                            Ok(()) => model.toast(
+                                if zh {
+                                    format!("补丁已保存至 {}", target.display())
+                                } else {
+                                    format!("Patch saved to {}", target.display())
+                                },
+                                ToastKind::Success,
+                            ),
+                            Err(err) => model.toast(err.to_string(), ToastKind::Error),
+                        }
                     }
+                    Err(err) => model.toast(err.to_string(), ToastKind::Error),
                 }
             }
             _ => {}
@@ -3616,8 +3720,8 @@ fn draw_editor_context_menu(
     }
 }
 
-/// Change-file menu codes: 0..10 generic, 10+ move-to lists, 20/21 untracked,
-/// 22..24 new actions, 30..37 disabled placeholders, SEP divider, 100/101
+/// Change-file menu codes: 0..10 generic, 50..200 move-to lists, 20/21 untracked,
+/// 22..24 new actions, 30..37 extended actions, SEP divider, 100/101
 /// changelist headers.
 struct ChangeMenuItem {
     label: String,
@@ -3646,20 +3750,11 @@ fn change_menu_item(label: String, code: u8, danger: bool, enabled: bool) -> Cha
     }
 }
 
-fn change_menu_disabled(label: &str, code: u8) -> ChangeMenuItem {
-    ChangeMenuItem {
-        label: label.to_string(),
-        code,
-        danger: false,
-        enabled: false,
-    }
-}
-
-/// 菜单动作分发所需的上下文（从项目快照一次性取好）。
 struct ChangeMenuCtx {
     project_root: std::path::PathBuf,
     conflicts: Vec<lazecode_git::ConflictEntry>,
     paths: Vec<String>,
+    untracked: std::collections::HashSet<String>,
     single: bool,
     first: String,
     display_name: String,
@@ -3677,10 +3772,21 @@ fn change_menu_items(
     let first = paths.first().cloned().unwrap_or_default();
     let lists = lazecode_git::Changelists::open(project.active_root());
     let all_lists: Vec<String> = lists.lists().to_vec();
+    let untracked: std::collections::HashSet<String> = project
+        .active_git()
+        .map(|git| {
+            git.changes
+                .iter()
+                .filter(|change| change.untracked)
+                .map(|change| change.path.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     let ctx = ChangeMenuCtx {
         project_root: project.active_root().to_path_buf(),
         conflicts: project.conflicts.clone(),
         paths: paths.to_vec(),
+        untracked: untracked.clone(),
         single,
         first: first.clone(),
         display_name: first.rsplit('/').next().unwrap_or(&first).to_string(),
@@ -3691,16 +3797,7 @@ fn change_menu_items(
         .iter()
         .any(|entry| paths.iter().any(|path| path == &entry.path));
     // 稳定版 allUntracked 规则：所选文件全部是未跟踪才走未跟踪菜单。
-    let all_untracked = paths.iter().all(|path| {
-        project
-            .active_git()
-            .map(|git| {
-                git.changes
-                    .iter()
-                    .any(|change| change.path == *path && change.untracked)
-            })
-            .unwrap_or(false)
-    });
+    let all_untracked = paths.iter().all(|path| untracked.contains(path));
 
     let mut items: Vec<ChangeMenuItem> = Vec::new();
     let zh = model.settings.language.is_zh();
@@ -3786,21 +3883,25 @@ fn change_menu_items(
             false,
             true,
         ));
-        items.push(change_menu_disabled(
+        items.push(change_menu_item(
             if zh {
-                "在新标签页查看差异"
+                "在新标签页查看差异".to_string()
             } else {
-                "Show Diff in a New Tab"
+                "Show Diff in a New Tab".to_string()
             },
             30,
+            false,
+            true,
         ));
-        items.push(change_menu_disabled(
+        items.push(change_menu_item(
             if zh {
-                "与本地比较"
+                "与本地比较".to_string()
             } else {
-                "Compare with Local"
+                "Compare with Local".to_string()
             },
             31,
+            false,
+            true,
         ));
         items.push(change_menu_item(
             if zh {
@@ -3822,13 +3923,15 @@ fn change_menu_items(
             false,
             true,
         ));
-        items.push(change_menu_disabled(
+        items.push(change_menu_item(
             if zh {
-                "打开仓库版本"
+                "打开仓库版本".to_string()
             } else {
-                "Open Repository Version"
+                "Open Repository Version".to_string()
             },
             32,
+            false,
+            true,
         ));
         if conflicted {
             items.push(change_menu_item(
@@ -3854,29 +3957,35 @@ fn change_menu_items(
         true,
         true,
     ));
-    items.push(change_menu_disabled(
+    items.push(change_menu_item(
         if model.settings.language.is_zh() {
-            "拣选选中更改"
+            "拣选选中更改".to_string()
         } else {
-            "Cherry-Pick Selected Changes"
+            "Cherry-Pick Selected Changes".to_string()
         },
         33,
+        false,
+        true,
     ));
-    items.push(change_menu_disabled(
+    items.push(change_menu_item(
         if model.settings.language.is_zh() {
-            "提取选中更改到独立提交…"
+            "提取选中更改到独立提交…".to_string()
         } else {
-            "Extract Selected Changes to Separate Commit…"
+            "Extract Selected Changes to Separate Commit…".to_string()
         },
         34,
+        false,
+        true,
     ));
-    items.push(change_menu_disabled(
+    items.push(change_menu_item(
         if model.settings.language.is_zh() {
-            "丢弃选中更改"
+            "丢弃选中更改".to_string()
         } else {
-            "Drop Selected Changes"
+            "Drop Selected Changes".to_string()
         },
         35,
+        true,
+        true,
     ));
     if single {
         items.push(change_menu_item(
@@ -3889,16 +3998,16 @@ fn change_menu_items(
             false,
             true,
         ));
-    }
-    items.push(change_menu_disabled(
-        if model.settings.language.is_zh() {
-            "从版本获取"
-        } else {
-            "Get from Revision"
-        },
-        36,
-    ));
-    if single {
+        items.push(change_menu_item(
+            if model.settings.language.is_zh() {
+                "从版本获取…".to_string()
+            } else {
+                "Get from Revision…".to_string()
+            },
+            36,
+            false,
+            true,
+        ));
         items.push(change_menu_item(
             if model.settings.language.is_zh() {
                 "到此为止的历史".to_string()
@@ -3909,15 +4018,17 @@ fn change_menu_items(
             false,
             true,
         ));
+        items.push(change_menu_item(
+            if model.settings.language.is_zh() {
+                "显示与父提交的差异".to_string()
+            } else {
+                "Show Changes to Parents".to_string()
+            },
+            37,
+            false,
+            true,
+        ));
     }
-    items.push(change_menu_disabled(
-        if model.settings.language.is_zh() {
-            "显示与父提交的差异"
-        } else {
-            "Show Changes to Parents"
-        },
-        37,
-    ));
     change_menu_sep(&mut items);
     for (idx, list_name) in all_lists.iter().enumerate() {
         // 稳定版规则：所选文件已全部在该列表中 → 禁用（多选不再跳过）。
@@ -3928,7 +4039,7 @@ fn change_menu_items(
             } else {
                 format!("Move to {list_name}")
             },
-            10 + idx as u8,
+            50 + idx as u8,
             false,
             !all_in_list,
         ));
@@ -3978,6 +4089,16 @@ fn change_menu_items(
     (items, ctx)
 }
 
+fn discardable_paths(ctx: &ChangeMenuCtx) -> Vec<String> {
+    // The untracked branch has its own Delete-to-trash confirmation. A mixed
+    // selection must not silently delete an untracked file through Rollback.
+    ctx.paths
+        .iter()
+        .filter(|path| !ctx.untracked.contains(*path))
+        .cloned()
+        .collect()
+}
+
 /// 变更菜单动作分发（文件行与组头菜单共用；返回是否应关闭菜单）。
 fn apply_change_menu_action(
     ui: &Ui,
@@ -4017,10 +4138,22 @@ fn apply_change_menu_action(
             };
         }
         4 => {
-            // 统一确认弹窗（对齐稳定版 rollbackFileConfirm）。
-            rt.dialog = DialogState::ConfirmDiscard {
-                paths: ctx.paths.clone(),
-            };
+            // 统一确认弹窗（对齐稳定版 rollbackFileConfirm）。Mixed
+            // selections must not delete untracked files via Rollback.
+            let paths = discardable_paths(ctx);
+            if paths.is_empty() {
+                model.toast(
+                    crate::tr!(
+                        model,
+                        "Use Delete for untracked files",
+                        "未跟踪文件请使用「删除」"
+                    )
+                    .to_string(),
+                    ToastKind::Warning,
+                );
+            } else {
+                rt.dialog = DialogState::ConfirmDiscard { paths };
+            }
         }
         5 => {
             // Copy as Patch：HEAD→工作区补丁（含未跟踪文件）。
@@ -4092,8 +4225,80 @@ fn apply_change_menu_action(
                 loaded: false,
             };
         }
-        idx if (10..30).contains(&idx) => {
-            let target_idx = (idx - 10) as usize;
+        32 => model.queue(Command::OpenRepositoryVersion {
+            path: ctx.first.clone(),
+        }),
+        30 => model.queue(Command::OpenDiffNewTab(ctx.first.clone())),
+        31 => model.queue(Command::OpenIndexDiff(ctx.first.clone())),
+        33 => {
+            rt.dialog = DialogState::CherryPickChanges {
+                paths: ctx.paths.clone(),
+                target: String::new(),
+                error: None,
+            };
+        }
+        34 => {
+            rt.dialog = DialogState::ExtractChanges {
+                paths: ctx.paths.clone(),
+                value: String::new(),
+                error: None,
+            };
+        }
+        35 => {
+            let paths = discardable_paths(ctx);
+            if paths.is_empty() {
+                model.toast(
+                    crate::tr!(
+                        model,
+                        "Use Delete for untracked files",
+                        "未跟踪文件请使用「删除」"
+                    )
+                    .to_string(),
+                    ToastKind::Warning,
+                );
+            } else {
+                rt.dialog = DialogState::ConfirmDiscard { paths };
+            }
+        }
+        36 => {
+            rt.dialog = DialogState::GetFileFromRevision {
+                path: ctx.first.clone(),
+                revision: "HEAD".to_string(),
+                error: None,
+            };
+        }
+        37 => {
+            let project = &model.projects[project_idx];
+            let head_id = project
+                .git
+                .as_ref()
+                .and_then(|git| git.head.as_ref())
+                .map(|head| head.id.as_str());
+            let head_row = head_id.and_then(|id| project.log.iter().find(|commit| commit.id == id));
+            let parent = match head_row {
+                Some(row) => row.parents.first().cloned(),
+                // Log not loaded/filtered: let git resolve HEAD^ itself.
+                None => Some("HEAD^".to_string()),
+            };
+            if let Some(parent) = parent {
+                model.queue(Command::OpenCompareWithLocalDiff {
+                    commit: parent,
+                    path: ctx.first.clone(),
+                });
+            } else {
+                model.toast(
+                    crate::tr!(
+                        model,
+                        "The current branch has no parent commit",
+                        "当前分支没有父提交"
+                    )
+                    .to_string(),
+                    ToastKind::Warning,
+                );
+            }
+        }
+        idx if (50..=200).contains(&idx) => {
+            let target_idx = (idx - 50) as usize;
             if let Some(target_list) = ctx.all_lists.get(target_idx) {
                 model.queue(Command::ChangelistAssign {
                     paths: ctx.paths.clone(),
@@ -5832,9 +6037,8 @@ fn draw_branch_menu(
                     close = true;
                 }
                 2 => {
-                    model.queue(Command::OpenCompareWithLocalDiff {
+                    model.queue(Command::OpenCompareWithLocal {
                         commit: bname.clone(),
-                        path: String::new(),
                     });
                     close = true;
                 }
@@ -6143,6 +6347,7 @@ fn draw_conflict_tool(
             let root = model.projects[active].active_root().to_path_buf();
             match lazecode_git::mark_conflict_resolved(&root, path, Some(worktree)) {
                 Ok(()) => {
+                    model.queue(Command::ReloadGit);
                     model.queue(Command::RefreshLog);
                     model.toast(
                         if zh {
@@ -7653,7 +7858,7 @@ fn draw_interactive_rebase_dialog(
         start_btn,
         if zh { "开始变基" } else { "Start Rebase" },
         None,
-        true,
+        !todos.is_empty(),
         theme,
     )
     .clicked()
@@ -8275,6 +8480,40 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 "仅提交所选文件，并使用独立的提交信息。"
             ),
             480.0,
+            260.0,
+        ),
+        DialogState::GetFileFromRevision { .. } => (
+            crate::tr!(model, "Get from revision", "从版本获取"),
+            crate::tr!(
+                model,
+                "Restore the path from a branch, tag, or commit hash.",
+                "从分支、标签或提交哈希恢复该路径。"
+            ),
+            500.0,
+            230.0,
+        ),
+        DialogState::ExtractChanges { .. } => (
+            crate::tr!(
+                model,
+                "Extract selected changes to a separate commit",
+                "提取选中更改到独立提交"
+            ),
+            crate::tr!(
+                model,
+                "Commit only these changes; everything else stays uncommitted.",
+                "仅提交这些更改，其他更改保持未提交。"
+            ),
+            500.0,
+            290.0,
+        ),
+        DialogState::CherryPickChanges { .. } => (
+            crate::tr!(model, "Cherry-pick selected changes", "拣选选中更改"),
+            crate::tr!(
+                model,
+                "Move the selected working-tree changes onto the target branch.",
+                "将选中的工作区更改移动到目标分支。"
+            ),
+            500.0,
             260.0,
         ),
         DialogState::Unstash { .. } => ("", "", 500.0, 360.0),
@@ -9263,6 +9502,11 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             if crate::widgets::primary_button(ui, add_rect, form_label, None, true, theme).clicked()
             {
                 confirm_add_remote = true;
+                // The Remotes arm lives inside the footer's `if confirm`
+                // match; without also setting `confirm`, the Add/Save click
+                // only armed a flag that was then dropped at the end of the
+                // frame (the button looked alive but did nothing).
+                confirm = true;
             }
             if let Some(err) = error {
                 ui.painter().text(
@@ -9742,20 +9986,20 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
             ui.painter()
                 .rect_filled(list_rect, egui::CornerRadius::same(5), p.panel);
             let row_h = 22.0;
-            let visible = ((list_rect.height() / row_h) as usize).max(1);
-            // 简单滚动：egui ScrollArea 逐帧渲染即可。
+            let mut list_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(list_rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
             egui::ScrollArea::vertical()
                 .id_salt("unshelve-files")
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
+                .show(&mut list_ui, |ui| {
                     ui.set_width(list_rect.width());
-                    for (index, (path, selected)) in files.iter_mut().enumerate() {
-                        let row = Rect::from_min_size(
-                            Pos2::new(
-                                list_rect.left() + 4.0,
-                                list_rect.top() + 2.0 + index as f32 * row_h,
-                            ),
-                            Vec2::new(list_rect.width() - 8.0, row_h),
+                    for (path, selected) in files.iter_mut() {
+                        let (row, _) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), row_h),
+                            Sense::hover(),
                         );
                         let check = Rect::from_center_size(
                             Pos2::new(row.left() + 12.0, row.center().y),
@@ -9776,7 +10020,6 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                             Align2::LEFT_CENTER,
                         );
                     }
-                    let _ = visible;
                 });
             // 目标 changelist：现有列表单选 + 新建输入（项目可能已关闭，
             // 不 unwrap；无项目时只剩新建输入）。
@@ -9863,7 +10106,8 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 );
             }
         }
-        DialogState::CommitFiles { value, error, .. } => {
+        DialogState::CommitFiles { value, error, .. }
+        | DialogState::ExtractChanges { value, error, .. } => {
             let input = Rect::from_min_size(
                 Pos2::new(rect.left() + 22.0, rect.top() + 94.0),
                 Vec2::new(rect.width() - 44.0, 80.0),
@@ -9882,6 +10126,89 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                     .frame(egui::Frame::NONE)
                     .hint_text(crate::tr!(model, "Commit message", "提交信息"))
                     .font(FontId::proportional(12.0)),
+            );
+            response.request_focus();
+            if let Some(err) = error {
+                ui.painter().text(
+                    Pos2::new(input.left(), input.bottom() + 12.0),
+                    Align2::LEFT_CENTER,
+                    err,
+                    FontId::proportional(9.5),
+                    p.rose,
+                );
+            }
+        }
+        DialogState::GetFileFromRevision {
+            path,
+            revision,
+            error,
+        } => {
+            ui.painter().text(
+                Pos2::new(rect.left() + 22.0, rect.top() + 100.0),
+                Align2::LEFT_CENTER,
+                std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(path),
+                FontId::monospace(10.5),
+                p.text3,
+            );
+            let input = Rect::from_min_size(
+                Pos2::new(rect.left() + 22.0, rect.top() + 118.0),
+                Vec2::new(rect.width() - 44.0, 28.0),
+            );
+            ui.painter()
+                .rect_filled(input, egui::CornerRadius::same(5), p.panel2);
+            let response = ui.put(
+                input.shrink2(Vec2::new(8.0, 3.0)),
+                TextEdit::singleline(revision)
+                    .frame(egui::Frame::NONE)
+                    .hint_text(crate::tr!(
+                        model,
+                        "Revision (HEAD, tag, hash)",
+                        "版本（HEAD、标签、哈希）"
+                    ))
+                    .font(FontId::monospace(10.5)),
+            );
+            response.request_focus();
+            if let Some(err) = error {
+                ui.painter().text(
+                    Pos2::new(input.left(), input.bottom() + 12.0),
+                    Align2::LEFT_CENTER,
+                    err,
+                    FontId::proportional(9.5),
+                    p.rose,
+                );
+            }
+        }
+        DialogState::CherryPickChanges {
+            paths,
+            target,
+            error,
+        } => {
+            ui.painter().text(
+                Pos2::new(rect.left() + 22.0, rect.top() + 100.0),
+                Align2::LEFT_CENTER,
+                if model.settings.language.is_zh() {
+                    format!("{} 个文件", paths.len())
+                } else {
+                    format!("{} file(s)", paths.len())
+                },
+                FontId::proportional(10.0),
+                p.text3,
+            );
+            let input = Rect::from_min_size(
+                Pos2::new(rect.left() + 22.0, rect.top() + 118.0),
+                Vec2::new(rect.width() - 44.0, 28.0),
+            );
+            ui.painter()
+                .rect_filled(input, egui::CornerRadius::same(5), p.panel2);
+            let response = ui.put(
+                input.shrink2(Vec2::new(8.0, 3.0)),
+                TextEdit::singleline(target)
+                    .frame(egui::Frame::NONE)
+                    .hint_text(crate::tr!(model, "Target branch", "目标分支"))
+                    .font(FontId::monospace(10.5)),
             );
             response.request_focus();
             if let Some(err) = error {
@@ -9964,6 +10291,9 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         DialogState::DeleteChangelist { .. } => crate::tr!(model, "Delete", "删除"),
         DialogState::Unshelve { .. } => crate::tr!(model, "Unshelve", "恢复"),
         DialogState::CommitFiles { .. } => crate::tr!(model, "Commit", "提交"),
+        DialogState::ExtractChanges { .. } => crate::tr!(model, "Extract", "提取"),
+        DialogState::GetFileFromRevision { .. } => crate::tr!(model, "Restore", "恢复"),
+        DialogState::CherryPickChanges { .. } => crate::tr!(model, "Cherry-pick", "拣选"),
         _ => "Discard",
     };
     if primary_button(ui, confirm_rect, confirm_label, None, true, theme).clicked() {
@@ -10648,22 +10978,72 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                     }
                 }
             }
-            DialogState::CommitFiles { paths, value, .. } => {
+            DialogState::CommitFiles { paths, value, .. }
+            | DialogState::ExtractChanges { paths, value, .. } => {
                 let message = value.trim().to_string();
                 if message.is_empty() {
-                    rt.dialog = DialogState::CommitFiles {
-                        paths: paths.clone(),
-                        value: value.clone(),
-                        error: Some(
-                            crate::tr!(model, "Add a commit message first", "请先填写提交信息")
-                                .to_string(),
-                        ),
+                    let dialog = match &dialog {
+                        DialogState::ExtractChanges { paths, value, .. } => {
+                            DialogState::ExtractChanges {
+                                paths: paths.clone(),
+                                value: value.clone(),
+                                error: Some(
+                                    crate::tr!(
+                                        model,
+                                        "Add a commit message first",
+                                        "请先填写提交信息"
+                                    )
+                                    .to_string(),
+                                ),
+                            }
+                        }
+                        _ => DialogState::CommitFiles {
+                            paths: paths.clone(),
+                            value: value.clone(),
+                            error: Some(
+                                crate::tr!(model, "Add a commit message first", "请先填写提交信息")
+                                    .to_string(),
+                            ),
+                        },
                     };
+                    rt.dialog = dialog;
                     close = true;
                 } else {
                     model.queue(Command::CommitPaths {
                         paths: paths.clone(),
                         message,
+                    });
+                    close = true;
+                }
+            }
+            DialogState::GetFileFromRevision { path, revision, .. } => {
+                let revision = revision.trim().to_string();
+                if revision.is_empty() {
+                    if let DialogState::GetFileFromRevision { error, .. } = &mut dialog {
+                        *error =
+                            Some(crate::tr!(model, "Enter a revision", "请输入版本").to_string());
+                    }
+                } else {
+                    model.queue(Command::GetFileFromRevision {
+                        path: path.clone(),
+                        revision,
+                    });
+                    close = true;
+                }
+            }
+            DialogState::CherryPickChanges { paths, target, .. } => {
+                let target = target.trim().to_string();
+                if target.is_empty() {
+                    if let DialogState::CherryPickChanges { error, .. } = &mut dialog {
+                        *error = Some(
+                            crate::tr!(model, "Enter a target branch", "请输入目标分支")
+                                .to_string(),
+                        );
+                    }
+                } else {
+                    model.queue(Command::CherryPickChanges {
+                        paths: paths.clone(),
+                        target,
                     });
                     close = true;
                 }

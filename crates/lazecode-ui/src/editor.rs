@@ -2135,6 +2135,12 @@ fn draw_diff(
             .filter(|s| &s.from == from && &s.to == to)
             .map(|s| s.nav_order.clone())
             .unwrap_or_default(),
+        DiffSource::CompareWithLocal { commit, .. } => model.projects[index]
+            .compare_session
+            .as_ref()
+            .filter(|s| s.local && &s.from == commit)
+            .map(|s| s.nav_order.clone())
+            .unwrap_or_default(),
         DiffSource::Stash { stash, .. } => model.projects[index]
             .stash_details
             .get(stash)
@@ -2165,7 +2171,8 @@ fn draw_diff(
             .filter(|d| &d.info.id == commit)
             .map(|d| d.files.iter().map(|f| f.path.clone()).collect())
             .unwrap_or_default(),
-        DiffSource::Worktree { .. } => {
+        DiffSource::Worktree { .. } | DiffSource::Index { .. } => {
+            let include_untracked = matches!(diff_source, DiffSource::Worktree { .. });
             let project = &model.projects[index];
             let lists = lazecode_git::Changelists::open(project.active_root());
             let changes = project.changes();
@@ -2182,9 +2189,11 @@ fn draw_diff(
                     ordered.push(c.path.clone());
                 }
             }
-            for c in changes {
-                if c.untracked && !ordered.contains(&c.path) {
-                    ordered.push(c.path.clone());
+            if include_untracked {
+                for c in changes {
+                    if c.untracked && !ordered.contains(&c.path) {
+                        ordered.push(c.path.clone());
+                    }
                 }
             }
             ordered
@@ -2551,6 +2560,9 @@ fn draw_diff(
             }
         }
         DiffSource::Worktree { .. } => {
+            crate::tr!(model, "Working tree vs HEAD", "工作区 vs HEAD").to_string()
+        }
+        DiffSource::Index { .. } => {
             crate::tr!(model, "Working tree vs index", "工作区 vs 索引").to_string()
         }
     };
@@ -2760,11 +2772,18 @@ fn draw_diff(
                 to: to.clone(),
                 path: target,
             }),
+            DiffSource::CompareWithLocal { commit, .. } => {
+                Some(Command::OpenCompareWithLocalDiff {
+                    commit: commit.clone(),
+                    path: target,
+                })
+            }
             DiffSource::Commit { commit, .. } => Some(Command::OpenCommitDiff {
                 commit: commit.clone(),
                 path: target,
             }),
             DiffSource::Worktree { .. } => Some(Command::OpenDiff(target)),
+            DiffSource::Index { .. } => Some(Command::OpenIndexDiff(target)),
             _ => None,
         };
         if let Some(cmd) = cmd {
@@ -2827,6 +2846,13 @@ fn draw_diff(
                     "该文件没有未提交的改动"
                 )
             }
+            DiffSource::Index { .. } => {
+                crate::tr!(
+                    model,
+                    "The index and working tree are identical for this file",
+                    "该文件的索引与工作区内容相同"
+                )
+            }
             _ => crate::tr!(
                 model,
                 "This commit has no text difference",
@@ -2852,6 +2878,20 @@ fn draw_diff(
         );
         // Register for the shell's wheel interception (next frame).
         rt.menu_hit_rects.push(menu_rect);
+        // Register the outside-click catcher BEFORE the menu rows: egui gives
+        // the later interaction precedence, and the expanded rect overlaps
+        // the two rows. With the old order every row click only dismissed
+        // the menu, making Side by Side unreachable.
+        if ui
+            .interact(
+                rect.expand(40.0),
+                ui.scope_id().with("diff-mode-dismiss"),
+                Sense::click(),
+            )
+            .clicked()
+        {
+            rt.diff_mode_open = None;
+        }
         ui.painter()
             .rect_filled(menu_rect, egui::CornerRadius::same(6), p.menu_bg);
         ui.painter().rect_stroke(
@@ -2924,16 +2964,6 @@ fn draw_diff(
                 }
                 rt.diff_mode_open = None;
             }
-        }
-        if ui
-            .interact(
-                rect.expand(40.0),
-                ui.scope_id().with("diff-mode-dismiss"),
-                Sense::click(),
-            )
-            .clicked()
-        {
-            rt.diff_mode_open = None;
         }
     }
 

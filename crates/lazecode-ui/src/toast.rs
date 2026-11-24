@@ -54,7 +54,15 @@ pub fn draw(
             Vec2::new(width, TOAST_H),
         );
 
-        crate::overlays::dialog_shadow(ui.painter(), rect, 8.0, 28.0, (110.0 * alpha) as u8);
+        crate::overlays::dialog_shadow(
+            ui.painter(),
+            rect,
+            theme,
+            10.0,
+            5.0,
+            18.0,
+            (52.0 * alpha) as u8,
+        );
         ui.painter().rect_filled(
             rect,
             egui::CornerRadius::same(10),

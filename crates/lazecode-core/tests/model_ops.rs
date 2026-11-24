@@ -26,6 +26,30 @@ fn model() -> AppModel {
 }
 
 #[test]
+fn favorite_branch_keys_round_trip_through_workspace_toml() {
+    let key = "/tmp/repo-a\u{1}main".to_string();
+    let workspace = lazecode_core::WorkspaceFile {
+        favorite_branches: vec![key.clone()],
+        ..Default::default()
+    };
+    let text = toml::to_string(&workspace).unwrap();
+    let back: lazecode_core::WorkspaceFile = toml::from_str(&text).unwrap();
+    assert_eq!(back.favorite_branches, vec![key]);
+}
+
+#[test]
+fn favorite_branches_are_scoped_to_the_checkout() {
+    let mut model = model();
+    let first = PathBuf::from("/tmp/repo-a");
+    let second = PathBuf::from("/tmp/repo-b");
+    model.toggle_favorite_branch(&first, "main");
+    assert!(model.is_favorite_branch(&first, "main"));
+    assert!(!model.is_favorite_branch(&second, "main"));
+    model.toggle_favorite_branch(&first, "main");
+    assert!(!model.is_favorite_branch(&first, "main"));
+}
+
+#[test]
 fn opening_editor_hides_only_a_maximized_console() {
     let mut ui = UiState {
         terminal_visible: true,
@@ -979,14 +1003,13 @@ fn new_tab_diff_skips_the_singleton_reuse() {
         path: "a.txt".to_string(),
     });
     // The default diff tab is a singleton: a second source replaces it.
-    let reused = project.open_diff_source(lazecode_core::DiffSource::Worktree {
+    let source_b = lazecode_core::DiffSource::Worktree {
         path: "b.txt".to_string(),
-    });
+    };
+    let reused = project.open_diff_source(source_b.clone());
     assert_eq!(first, reused);
     // "Show Diff in a New Tab" must add a second diff tab instead.
-    let extra = project.open_diff_source_new_tab(lazecode_core::DiffSource::Worktree {
-        path: "b.txt".to_string(),
-    });
+    let extra = project.open_diff_source_new_tab(source_b.clone());
     assert_ne!(first, extra);
     let diffs = project
         .tabs
@@ -994,6 +1017,29 @@ fn new_tab_diff_skips_the_singleton_reuse() {
         .filter(|tab| matches!(tab.kind, TabKind::Diff(_)))
         .count();
     assert_eq!(diffs, 2);
+
+    // The background result must reach both same-source tabs; otherwise the
+    // new tab remains on its spinner while the old sibling gets the content.
+    let root = project.active_root().to_path_buf();
+    project.set_diff_for_source(
+        &root,
+        &source_b,
+        Ok(lazecode_git::FileDiff {
+            path: "b.txt".to_string(),
+            kind: lazecode_git::ChangeKind::Modified,
+            old_text: "b\n".to_string(),
+            new_text: "changed\n".to_string(),
+            diff: Default::default(),
+            binary: false,
+        }),
+    );
+    for tab in project.tabs.iter().filter_map(|tab| match &tab.kind {
+        TabKind::Diff(diff) if diff.source == source_b => Some(diff),
+        _ => None,
+    }) {
+        assert!(!tab.loading);
+        assert!(tab.diff.is_some());
+    }
 }
 
 #[test]

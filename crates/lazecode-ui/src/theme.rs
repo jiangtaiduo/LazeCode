@@ -1,12 +1,11 @@
 use egui::{
-    Color32, CornerRadius, FontDefinitions, FontFamily, FontId, FontTweak, Painter, Pos2, Rect,
-    Stroke, TextStyle,
+    Color32, CornerRadius, FontDefinitions, FontFamily, FontId, FontTweak, Stroke, TextStyle,
 };
 
 use lazecode_core::ThemeMode;
 
-/// Design tokens ported from the stable app's theme CSS; views never
-/// hard-code colours.
+/// Runtime design tokens shared by every view; views never hard-code colours.
+/// `skins.rs` fills this from the seven curated theme pairs.
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
     pub bg: Color32,
@@ -90,7 +89,7 @@ pub struct Palette {
     pub menu_bg: Color32,
     pub menu_border: Color32,
     pub menu_item_hover: Color32,
-    /// `--menu-item-active-text` (white in both variants).
+    /// Menu item text; checkmarks and labels use the same readable ink.
     pub menu_item_text: Color32,
     // --- scrims (--scrim-*) ---
     pub scrim_subtle: Color32,
@@ -108,231 +107,18 @@ pub struct Palette {
     /// LeftStrip active button fill — stable `.strip-btn.active`:
     /// `rgba(255,255,255,0.10)` dark / `rgba(0,0,0,0.08)` light.
     pub strip_active: Color32,
-    // --- window body gradient (stable body[data-variant]) ---
-    pub grad_a: Color32,
-    pub grad_b: Color32,
 }
 
 impl Palette {
-    /// Backwards-compatible constructor: the Studio skin.
+    /// Default dark palette (Graphite), used by tests and callers that only
+    /// know the mode.
     pub fn dark() -> Self {
-        Self::studio_dark()
+        crate::skins::palette(lazecode_core::ThemeSkin::Graphite, true)
     }
 
-    /// Backwards-compatible constructor: the Studio skin.
+    /// Default light palette (Graphite).
     pub fn light() -> Self {
-        Self::studio_light()
-    }
-
-    /// The original LazeCode palette (skin "Studio"), dark variant.
-    pub fn studio_dark() -> Self {
-        let rgba = |r: u8, g: u8, b: u8, a: u8| Color32::from_rgba_unmultiplied(r, g, b, a);
-        Self {
-            bg: Color32::from_rgb(0x23, 0x23, 0x26), // --bg-app
-            rail: rgba(20, 20, 22, 217),             // --bg-sidebar-strip
-            rail_border: rgba(255, 255, 255, 15),    // --border-subtle
-            rail_text: Color32::from_rgb(0xa1, 0xa1, 0xa6),
-            titlebar: rgba(40, 40, 43, 158), // --bg-header
-            panel: rgba(26, 26, 28, 184),    // --bg-bottom
-            panel2: Color32::from_rgb(0x19, 0x1a, 0x1c), // --bg-app-deep
-            sidebar: rgba(26, 26, 28, 173),  // --bg-sidebar
-            editor: Color32::from_rgb(0x1c, 0x1c, 0x1e), // --bg-editor
-            tabstrip: rgba(40, 40, 43, 158),
-            terminal_bg: Color32::from_rgb(0x1c, 0x1c, 0x1e), // --term-bg
-            statusbar: rgba(26, 26, 28, 184),
-            elev: Color32::from_rgb(0x2a, 0x2a, 0x2d), // --bg-tab-active
-            hover: rgba(255, 255, 255, 20),            // --overlay-hover
-            active: rgba(255, 255, 255, 36),           // --overlay-active
-            border: rgba(255, 255, 255, 48),           // --border-color 0.19 (清晰明显的窗口分割线)
-            border_soft: rgba(255, 255, 255, 30),      // 0.12
-            border_strong: rgba(255, 255, 255, 80),    // 0.31
-            current_line: Color32::from_rgb(0x23, 0x25, 0x29), // monaco lineHighlight
-            selection: rgba(10, 132, 255, 66),         // --bg-selected 0.26
-            text: Color32::from_rgb(0xe8, 0xe8, 0xea), // --text-primary
-            text2: Color32::from_rgb(0xaa, 0xaf, 0xb8), // PyCharm secondary text
-            text3: Color32::from_rgb(0x8c, 0x90, 0x99), // PyCharm muted text (high legibility)
-            text_bright: Color32::from_rgb(0xff, 0xff, 0xff),
-            accent: Color32::from_rgb(0x0a, 0x84, 0xff), // macOS dark blue
-            accent_on_fill: Color32::from_rgb(0xff, 0xff, 0xff),
-            accent_soft: rgba(10, 132, 255, 46),  // 0.18
-            accent_line: rgba(10, 132, 255, 115), // 0.45
-            accent_hover: Color32::from_rgb(0x40, 0x9c, 0xff),
-            accent_press: Color32::from_rgb(0x07, 0x67, 0xc4),
-            green: Color32::from_rgb(0x32, 0xd7, 0x4b), // --git-green
-            running: Color32::from_rgb(0x28, 0xc8, 0x40), // --tab-state-static
-            amber: Color32::from_rgb(0xff, 0x9f, 0x0a), // --warn / --git-tag
-            orange: Color32::from_rgb(0xf0, 0x88, 0x3e),
-            rose: Color32::from_rgb(0xff, 0x45, 0x3a), // --git-del
-            blue: Color32::from_rgb(0x64, 0xd2, 0xff), // --git-blue / --text-blue-mod
-            violet: Color32::from_rgb(0xbf, 0x5a, 0xf2), // --git-purple
-            pink: Color32::from_rgb(0xd2, 0xa8, 0xff),
-            diff_add: rgba(50, 215, 75, 46), // --git-add-bg 0.18
-            diff_add_strong: rgba(50, 215, 75, 89), // --git-add-line 0.35
-            diff_del: rgba(255, 69, 58, 46), // --git-del-bg 0.18
-            diff_del_strong: rgba(255, 69, 58, 89), // --git-del-line 0.35
-            diff_line_add: Color32::from_rgb(0x2c, 0x41, 0x34),
-            diff_line_del: Color32::from_rgb(0x48, 0x2b, 0x2b),
-            diff_char_add: Color32::from_rgb(0x38, 0x55, 0x42),
-            diff_char_del: Color32::from_rgb(0x5e, 0x34, 0x36),
-            jb_accent: Color32::from_rgb(0x35, 0x74, 0xf0),
-            balloon_bg: Color32::from_rgb(0x2b, 0x2d, 0x30), // PyCharm solid tooltip bg
-            balloon_text: Color32::from_rgb(0xdf, 0xe1, 0xe5),
-            conflict_bg: Color32::from_rgb(0x54, 0x26, 0x28), // --git-conflict-bg
-            tok_kw: Color32::from_rgb(0xcf, 0x8e, 0x6d),      // monaco ide-jetbrains-dark keyword
-            tok_type: Color32::from_rgb(0x56, 0xa8, 0xf5),    // type/function
-            tok_str: Color32::from_rgb(0x6a, 0xab, 0x73),     // string
-            tok_num: Color32::from_rgb(0x2a, 0xac, 0xb8),     // number
-            tok_fn: Color32::from_rgb(0x56, 0xa8, 0xf5),
-            tok_com: Color32::from_rgb(0x7a, 0x7e, 0x85), // comment (italic)
-            tok_punc: Color32::from_rgb(0xbc, 0xbe, 0xc4), // default foreground
-            tok_lit: Color32::from_rgb(0x2a, 0xac, 0xb8),
-            tok_var: Color32::from_rgb(0xbc, 0xbe, 0xc4),
-            tok_prop: Color32::from_rgb(0xbc, 0xbe, 0xc4),
-            tok_attr: Color32::from_rgb(0xcf, 0x8e, 0x6d),
-            git_ignored: Color32::from_rgb(0x72, 0x77, 0x82),
-            lane: [
-                Color32::from_rgb(0x3f, 0xb9, 0x50),
-                Color32::from_rgb(0xa3, 0x71, 0xf7),
-                Color32::from_rgb(0xf0, 0x88, 0x3e),
-                Color32::from_rgb(0x39, 0xc5, 0xcf),
-                Color32::from_rgb(0xe3, 0xb3, 0x41),
-                Color32::from_rgb(0x58, 0xa6, 0xff),
-                Color32::from_rgb(0xf8, 0x51, 0x49),
-                Color32::from_rgb(0xd2, 0xa8, 0xff),
-            ],
-            ansi: [
-                Color32::from_rgb(0x1d, 0x1f, 0x21),
-                Color32::from_rgb(0xcc, 0x66, 0x66),
-                Color32::from_rgb(0x98, 0xc3, 0x79),
-                Color32::from_rgb(0xf0, 0xc6, 0x74),
-                Color32::from_rgb(0x81, 0xa2, 0xbe),
-                Color32::from_rgb(0xb2, 0x94, 0xbb),
-                Color32::from_rgb(0x8a, 0xbe, 0xb8),
-                Color32::from_rgb(0xc5, 0xc8, 0xc6),
-                Color32::from_rgb(0x66, 0x66, 0x66),
-                Color32::from_rgb(0xd5, 0x4e, 0x53),
-                Color32::from_rgb(0xb9, 0xca, 0x76),
-                Color32::from_rgb(0xe7, 0xc5, 0x47),
-                Color32::from_rgb(0x7a, 0xa6, 0xda),
-                Color32::from_rgb(0xc6, 0x78, 0xdd),
-                Color32::from_rgb(0x70, 0xc0, 0xb0),
-                Color32::from_rgb(0xea, 0xea, 0xea),
-            ],
-            hairline: rgba(255, 255, 255, 15),
-            scrollbar: rgba(255, 255, 255, 46),           // 0.18
-            scrollbar_hover: rgba(255, 255, 255, 77),     // 0.30
-            menu_bg: Color32::from_rgb(0x1e, 0x1f, 0x22), // 100% opaque PyCharm menu bg
-            menu_border: Color32::from_rgb(0x43, 0x45, 0x4b),
-            menu_item_hover: rgba(10, 132, 255, 230), // 0.90
-            menu_item_text: Color32::from_rgb(0xff, 0xff, 0xff),
-            scrim_subtle: rgba(0, 0, 0, 71),             // 0.28
-            scrim: rgba(0, 0, 0, 107),                   // 0.42
-            scrim_strong: rgba(0, 0, 0, 140),            // 0.55
-            dialog: Color32::from_rgb(0x28, 0x28, 0x2b), // --bg-dialog
-            dialog_sidebar: Color32::from_rgb(0x20, 0x20, 0x23),
-            dialog_footer: Color32::from_rgb(0x22, 0x22, 0x25),
-            dialog_input: Color32::from_rgb(0x1c, 0x1c, 0x1f),
-            dialog_card: Color32::from_rgb(0x32, 0x32, 0x36),
-            selected_row: Color32::from_rgb(0x26, 0x41, 0x5f), // --bg-selected-row
-            win_close: Color32::from_rgb(0xff, 0x5f, 0x57),
-            strip_active: rgba(255, 255, 255, 26),       // 0.10
-            grad_a: Color32::from_rgb(0x2b, 0x2b, 0x3d), // body radial #2b2b3d
-            grad_b: Color32::from_rgb(0x1e, 0x1e, 0x20), // body radial #1e1e20
-        }
-    }
-
-    /// The original LazeCode palette (skin "Studio"), light variant.
-    pub fn studio_light() -> Self {
-        let rgba = |r: u8, g: u8, b: u8, a: u8| Color32::from_rgba_unmultiplied(r, g, b, a);
-        Self {
-            bg: Color32::from_rgb(0xe4, 0xe4, 0xe8),
-            rail: rgba(246, 246, 248, 209), // --bg-sidebar-strip
-            rail_border: rgba(0, 0, 0, 18), // 0.07
-            rail_text: Color32::from_rgb(0x6e, 0x6e, 0x73),
-            titlebar: rgba(246, 246, 248, 199), // 0.78
-            panel: rgba(250, 250, 252, 204),    // 0.80
-            panel2: Color32::from_rgb(0xe2, 0xe2, 0xe6),
-            sidebar: rgba(255, 255, 255, 209), // 0.82
-            editor: Color32::from_rgb(0xf7, 0xf7, 0xf9),
-            tabstrip: rgba(246, 246, 248, 199),
-            terminal_bg: Color32::from_rgb(0x1e, 0x1e, 0x20), // terminal stays dark
-            statusbar: rgba(250, 250, 252, 204),
-            elev: Color32::from_rgb(0xff, 0xff, 0xff),
-            hover: rgba(0, 0, 0, 15),         // 0.06
-            active: rgba(0, 0, 0, 31),        // 0.12
-            border: rgba(0, 0, 0, 48),        // 0.19
-            border_soft: rgba(0, 0, 0, 30),   // 0.12
-            border_strong: rgba(0, 0, 0, 85), // 0.33
-            current_line: Color32::from_rgb(0xee, 0xf1, 0xf6),
-            selection: rgba(10, 132, 255, 36), // 0.14
-            text: Color32::from_rgb(0x1d, 0x1d, 0x1f),
-            text2: Color32::from_rgb(0x5f, 0x5f, 0x66),
-            text3: Color32::from_rgb(0x74, 0x74, 0x7a),
-            text_bright: Color32::from_rgb(0x00, 0x00, 0x00),
-            accent: Color32::from_rgb(0x00, 0x71, 0xe3), // macOS light blue
-            accent_on_fill: Color32::from_rgb(0xff, 0xff, 0xff),
-            accent_soft: rgba(0, 113, 227, 31),  // 0.12
-            accent_line: rgba(0, 113, 227, 102), // 0.40
-            accent_hover: Color32::from_rgb(0x00, 0x77, 0xed),
-            accent_press: Color32::from_rgb(0x00, 0x68, 0xd0),
-            green: Color32::from_rgb(0x24, 0x8a, 0x3d),
-            running: Color32::from_rgb(0x28, 0xc8, 0x40),
-            amber: Color32::from_rgb(0xb2, 0x50, 0x00),
-            orange: Color32::from_rgb(0xb2, 0x50, 0x00),
-            rose: Color32::from_rgb(0xd7, 0x00, 0x15),
-            blue: Color32::from_rgb(0x00, 0x71, 0xe3),
-            violet: Color32::from_rgb(0x89, 0x44, 0xab),
-            pink: Color32::from_rgb(0x89, 0x44, 0xab),
-            diff_add: rgba(36, 138, 61, 31),        // 0.12
-            diff_add_strong: rgba(36, 138, 61, 89), // 0.35
-            diff_del: rgba(215, 0, 21, 31),         // 0.12
-            diff_del_strong: rgba(215, 0, 21, 77),  // 0.30
-            // Light diff rows must read against light surfaces; the old
-            // stable build reused the dark Monaco literals and put dark text
-            // on them, which was unreadable.
-            diff_line_add: Color32::from_rgb(0xdd, 0xf3, 0xe4),
-            diff_line_del: Color32::from_rgb(0xff, 0xe2, 0xe0),
-            diff_char_add: Color32::from_rgb(0xb8, 0xe6, 0xc4),
-            diff_char_del: Color32::from_rgb(0xff, 0xc9, 0xc6),
-            jb_accent: Color32::from_rgb(0x35, 0x74, 0xf0),
-            balloon_bg: Color32::from_rgb(0xff, 0xff, 0xff),
-            balloon_text: Color32::from_rgb(0x1e, 0x1f, 0x22),
-            conflict_bg: Color32::from_rgb(0xff, 0xdc, 0xdc),
-            tok_kw: Color32::from_rgb(0x9a, 0x34, 0xc4), // monaco ide-light keyword
-            tok_type: Color32::from_rgb(0x0b, 0x4f, 0x8a), // type/function
-            tok_str: Color32::from_rgb(0x0b, 0x75, 0x00), // string
-            tok_num: Color32::from_rgb(0x0b, 0x75, 0xc4), // number
-            tok_fn: Color32::from_rgb(0x0b, 0x4f, 0x8a),
-            tok_com: Color32::from_rgb(0x6f, 0x76, 0x80), // comment (italic)
-            tok_punc: Color32::from_rgb(0x5a, 0x5a, 0x60), // delimiter
-            tok_lit: Color32::from_rgb(0x0b, 0x75, 0xc4),
-            tok_var: Color32::from_rgb(0x1d, 0x1d, 0x1f),
-            tok_prop: Color32::from_rgb(0x0b, 0x4f, 0x8a),
-            tok_attr: Color32::from_rgb(0x9a, 0x34, 0xc4),
-            git_ignored: Color32::from_rgb(0x8e, 0x8e, 0x93),
-            lane: Palette::dark().lane, // stable GRAPH_PALETTE is theme-independent
-            ansi: Palette::dark().ansi, // terminal canvas stays dark in light theme
-            hairline: rgba(0, 0, 0, 18),
-            scrollbar: rgba(0, 0, 0, 56),       // 0.22
-            scrollbar_hover: rgba(0, 0, 0, 89), // 0.35
-            menu_bg: Color32::from_rgb(250, 250, 252),
-            menu_border: Color32::from_rgb(0xd1, 0xd3, 0xd8),
-            menu_item_hover: Color32::from_rgb(0x00, 0x71, 0xe3),
-            menu_item_text: Color32::from_rgb(0xff, 0xff, 0xff),
-            scrim_subtle: rgba(255, 255, 255, 115), // 0.45
-            scrim: rgba(255, 255, 255, 140),        // 0.55
-            scrim_strong: rgba(255, 255, 255, 166), // 0.65
-            dialog: Color32::from_rgb(0xff, 0xff, 0xff),
-            dialog_sidebar: Color32::from_rgb(0xf7, 0xf7, 0xf9),
-            dialog_footer: Color32::from_rgb(0xf2, 0xf2, 0xf4),
-            dialog_input: Color32::from_rgb(0xf7, 0xf7, 0xf9),
-            dialog_card: Color32::from_rgb(0xf2, 0xf2, 0xf5),
-            selected_row: Color32::from_rgb(0xcf, 0xe4, 0xff),
-            win_close: Color32::from_rgb(0xff, 0x5f, 0x57),
-            strip_active: rgba(0, 0, 0, 20),             // 0.08
-            grad_a: Color32::from_rgb(0xf2, 0xf2, 0xf5), // body linear start
-            grad_b: Color32::from_rgb(0xe6, 0xe6, 0xea), // body linear end
-        }
+        crate::skins::palette(lazecode_core::ThemeSkin::Graphite, false)
     }
 }
 
@@ -351,18 +137,10 @@ impl Theme {
         }
     }
 
-    /// Studio theme, used by tests and callers that only know the mode.
+    /// Default Graphite theme, used by tests and callers that only know the
+    /// mode.
     pub fn for_mode(mode: ThemeMode) -> Self {
-        match mode {
-            ThemeMode::Dark => Self {
-                dark: true,
-                palette: Palette::dark(),
-            },
-            ThemeMode::Light => Self {
-                dark: false,
-                palette: Palette::light(),
-            },
-        }
+        Self::new(mode, lazecode_core::ThemeSkin::Graphite)
     }
 
     pub fn apply(&self, ctx: &egui::Context) {
@@ -661,61 +439,6 @@ pub const BTN_H: f32 = 28.0;
 pub const STRIP_BTN: f32 = 32.0;
 /// Stable context-menu width (.branch-ctx-menu).
 pub const MENU_W: f32 = 260.0;
-
-/// Paint the window body gradient under everything, tinted by the active
-/// skin: dark skins use a radial glow around the gradient's tint colour,
-/// light skins a 160° linear wash.
-pub fn body_gradient(painter: &Painter, rect: Rect, theme: &Theme) {
-    let p = theme.palette;
-    let dark = theme.dark;
-    let cols = 8usize;
-    let rows = 5usize;
-    let color_at = |x: f32, y: f32| -> Color32 {
-        let lerp = |a: Color32, b: Color32, t: f32| {
-            let t = t.clamp(0.0, 1.0);
-            let mix = |av: u8, bv: u8| -> u8 { (av as f32 + (bv as f32 - av as f32) * t) as u8 };
-            Color32::from_rgba_unmultiplied(
-                mix(a.r(), b.r()),
-                mix(a.g(), b.g()),
-                mix(a.b(), b.b()),
-                255,
-            )
-        };
-        if dark {
-            // Elliptical radial: distance normalised by (1200px, 600px),
-            // colour stops at 0% and 58%, flat beyond.
-            let cx = rect.left() + rect.width() * 0.18;
-            let cy = rect.top() - rect.height() * 0.08;
-            let dx = (x - cx) / 1200.0;
-            let dy = (y - cy) / 600.0;
-            let t = ((dx * dx + dy * dy).sqrt() / 0.58).clamp(0.0, 1.0);
-            lerp(p.grad_a, p.grad_b, t)
-        } else {
-            // 160deg linear: direction (sin160°, -cos160°) with CSS y-down.
-            let dir = (160f32.to_radians().sin(), -160f32.to_radians().cos());
-            let diag = (rect.width() * dir.0.abs() + rect.height() * dir.1.abs()).max(1.0);
-            let local = (x - rect.left()) * dir.0 + (y - rect.top()) * dir.1;
-            lerp(p.grad_a, p.grad_b, local / diag)
-        }
-    };
-    let mut mesh = egui::Mesh::default();
-    for row in 0..=rows {
-        for col in 0..=cols {
-            let x = rect.left() + rect.width() * col as f32 / cols as f32;
-            let y = rect.top() + rect.height() * row as f32 / rows as f32;
-            mesh.colored_vertex(Pos2::new(x, y), color_at(x, y));
-        }
-    }
-    let stride = cols + 1;
-    for row in 0..rows {
-        for col in 0..cols {
-            let i = row * stride + col;
-            mesh.add_triangle(i as u32, i as u32 + 1, (i + stride + 1) as u32);
-            mesh.add_triangle(i as u32, (i + stride + 1) as u32, (i + stride) as u32);
-        }
-    }
-    painter.add(egui::Shape::Mesh(std::sync::Arc::new(mesh)));
-}
 
 #[cfg(test)]
 mod tests {

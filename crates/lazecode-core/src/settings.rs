@@ -10,108 +10,70 @@ pub enum ThemeMode {
     Light,
 }
 
-/// Colour skin (application chrome + text + editor syntax + terminal).
+/// Curated colour theme: one designed dark/light pair.
 ///
-/// A skin supplies both a dark and a light variant; `Settings::dark_skin`
-/// and `Settings::light_skin` remember the choice per mode. The variant list
-/// is the stable serialisation contract: never rename an existing entry.
+/// Canonical ids are the settings contract and must stay stable. Legacy skin
+/// ids are accepted as serde aliases so existing `settings.toml` files keep
+/// loading; saving always writes the new canonical id.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ThemeSkin {
-    /// Built-in palette shipped before skins (default, unchanged colours).
+    /// 石墨 — cool neutral chrome with an azure accent (default).
     #[default]
-    Studio,
-    /// 绣球蓝 — dusty blue petals on warm paper.
-    Hydrangea,
-    /// 庭园 — sage, moss and cream.
-    Garden,
-    /// 皇家紫 — lilac frost to midnight tyrian.
-    Royal,
-    /// 北境 — blue-grey architecture with oxide red.
-    Nordic,
-    /// 灯花 — lantern blossom ember and apricot.
-    Lantern,
-    /// 沙丘鼠尾草 — sand, sage and navy.
-    SandSage,
-    /// 梅岭 — misty plum ridge.
-    PlumRidge,
-    /// 枫桥 — maple bridge mooring.
-    Maple,
-    /// 金苇 — golden reeds by the river.
-    Reeds,
-    /// 紫暮山 — violet mountains at dusk.
-    VioletDusk,
-    /// 荷风 — lotus pond breeze.
-    Lotus,
-    /// 叠翠 — layered jade peaks.
-    Jade,
-    /// 里维埃拉 — deep riviera blue and terracotta.
-    Riviera,
-    /// 鸢尾田 — iris field.
+    #[serde(alias = "studio")]
+    Graphite,
+    /// 宣纸 — warm paper by day, cool ink by night, cinnabar accent.
+    RicePaper,
+    /// 苔原 — grey-green surfaces with a moss accent.
+    #[serde(alias = "garden", alias = "jade", alias = "lotus", alias = "sand-sage")]
+    Tundra,
+    /// 深海 — blue-black surfaces with a cyan accent.
+    #[serde(
+        alias = "hydrangea",
+        alias = "nordic",
+        alias = "riviera",
+        alias = "teal-lemon"
+    )]
+    Abyss,
+    /// 鸢尾 — violet-grey surfaces with an iris accent.
+    #[serde(alias = "royal", alias = "violet-dusk")]
     Iris,
-    /// 可可 — cacao and oat milk.
-    Cacao,
-    /// 苔金 — moss and gold.
-    MossGold,
-    /// 珊瑚海岸 — coral coast.
-    Coral,
-    /// 青柠海湾 — teal and lemon.
-    TealLemon,
-    /// 木槿 — hibiscus.
-    Hibiscus,
-    /// 野橄榄 — wild olive and saffron.
-    WildOlive,
+    /// 琥珀 — warm brown surfaces with a golden accent.
+    #[serde(
+        alias = "lantern",
+        alias = "maple",
+        alias = "cacao",
+        alias = "reeds",
+        alias = "moss-gold",
+        alias = "wild-olive"
+    )]
+    Amber,
+    /// 绯木 — rose-tinted surfaces with a crimson accent.
+    #[serde(alias = "coral", alias = "hibiscus", alias = "plum-ridge")]
+    Rosewood,
 }
 
 impl ThemeSkin {
-    pub const ALL: [ThemeSkin; 21] = [
-        ThemeSkin::Studio,
-        ThemeSkin::Hydrangea,
-        ThemeSkin::Garden,
-        ThemeSkin::Royal,
-        ThemeSkin::Nordic,
-        ThemeSkin::Lantern,
-        ThemeSkin::SandSage,
-        ThemeSkin::PlumRidge,
-        ThemeSkin::Maple,
-        ThemeSkin::Reeds,
-        ThemeSkin::VioletDusk,
-        ThemeSkin::Lotus,
-        ThemeSkin::Jade,
-        ThemeSkin::Riviera,
+    pub const ALL: [ThemeSkin; 7] = [
+        ThemeSkin::Graphite,
+        ThemeSkin::RicePaper,
+        ThemeSkin::Tundra,
+        ThemeSkin::Abyss,
         ThemeSkin::Iris,
-        ThemeSkin::Cacao,
-        ThemeSkin::MossGold,
-        ThemeSkin::Coral,
-        ThemeSkin::TealLemon,
-        ThemeSkin::Hibiscus,
-        ThemeSkin::WildOlive,
+        ThemeSkin::Amber,
+        ThemeSkin::Rosewood,
     ];
 
     /// Stable settings id (`kebab-case`, matches serde).
     pub fn id(self) -> &'static str {
         match self {
-            ThemeSkin::Studio => "studio",
-            ThemeSkin::Hydrangea => "hydrangea",
-            ThemeSkin::Garden => "garden",
-            ThemeSkin::Royal => "royal",
-            ThemeSkin::Nordic => "nordic",
-            ThemeSkin::Lantern => "lantern",
-            ThemeSkin::SandSage => "sand-sage",
-            ThemeSkin::PlumRidge => "plum-ridge",
-            ThemeSkin::Maple => "maple",
-            ThemeSkin::Reeds => "reeds",
-            ThemeSkin::VioletDusk => "violet-dusk",
-            ThemeSkin::Lotus => "lotus",
-            ThemeSkin::Jade => "jade",
-            ThemeSkin::Riviera => "riviera",
+            ThemeSkin::Graphite => "graphite",
+            ThemeSkin::RicePaper => "rice-paper",
+            ThemeSkin::Tundra => "tundra",
+            ThemeSkin::Abyss => "abyss",
             ThemeSkin::Iris => "iris",
-            ThemeSkin::Cacao => "cacao",
-            ThemeSkin::MossGold => "moss-gold",
-            ThemeSkin::Coral => "coral",
-            ThemeSkin::TealLemon => "teal-lemon",
-            ThemeSkin::Hibiscus => "hibiscus",
-            ThemeSkin::WildOlive => "wild-olive",
+            ThemeSkin::Amber => "amber",
+            ThemeSkin::Rosewood => "rosewood",
         }
     }
 }
@@ -241,10 +203,15 @@ impl Default for AgentSettings {
 #[serde(default)]
 pub struct Settings {
     pub theme: ThemeMode,
-    /// Skin remembered for dark mode.
-    pub dark_skin: ThemeSkin,
-    /// Skin remembered for light mode.
-    pub light_skin: ThemeSkin,
+    /// Selected theme pair. `None` only while reading a legacy file that
+    /// still stores `dark_skin` / `light_skin`.
+    #[serde(rename = "skin", default)]
+    pub theme_skin: Option<ThemeSkin>,
+    /// Legacy per-mode skin keys. Read once by `migrate_skin`, never written.
+    #[serde(default, skip_serializing)]
+    pub dark_skin: Option<ThemeSkin>,
+    #[serde(default, skip_serializing)]
+    pub light_skin: Option<ThemeSkin>,
     pub language: Language,
     /// Application UI font family. Empty means the language-aware system
     /// stack (SF Pro for English, PingFang SC first for Chinese).
@@ -292,8 +259,9 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: ThemeMode::Dark,
-            dark_skin: ThemeSkin::Studio,
-            light_skin: ThemeSkin::Studio,
+            theme_skin: Some(ThemeSkin::Graphite),
+            dark_skin: None,
+            light_skin: None,
             language: Language::English,
             ui_font: String::new(),
             lsp_enabled: false,
@@ -329,19 +297,27 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Skin selected for `mode` (each mode remembers its own).
-    pub fn skin(&self, mode: ThemeMode) -> ThemeSkin {
-        match mode {
-            ThemeMode::Dark => self.dark_skin,
-            ThemeMode::Light => self.light_skin,
-        }
+    /// Theme pair selected for both modes.
+    pub fn skin(&self) -> ThemeSkin {
+        self.theme_skin.unwrap_or_default()
     }
 
-    pub fn set_skin(&mut self, mode: ThemeMode, skin: ThemeSkin) {
-        match mode {
-            ThemeMode::Dark => self.dark_skin = skin,
-            ThemeMode::Light => self.light_skin = skin,
+    pub fn set_skin(&mut self, skin: ThemeSkin) {
+        self.theme_skin = Some(skin);
+    }
+
+    /// Fold legacy per-mode keys into the single paired selection. The active
+    /// mode wins; if only the other mode was set, it is used as a fallback.
+    fn migrate_skin(&mut self) {
+        if self.theme_skin.is_none() {
+            let (primary, fallback) = match self.theme {
+                ThemeMode::Dark => (self.dark_skin, self.light_skin),
+                ThemeMode::Light => (self.light_skin, self.dark_skin),
+            };
+            self.theme_skin = Some(primary.or(fallback).unwrap_or_default());
         }
+        self.dark_skin = None;
+        self.light_skin = None;
     }
 
     /// Push a successful commit message into the history (dedupe, cap 10).
@@ -373,6 +349,13 @@ impl Settings {
     }
 
     pub fn config_dir() -> PathBuf {
+        // Development / preview builds can run beside the stable app with an
+        // isolated settings, workspace and update directory.
+        if let Some(dir) = std::env::var_os("LAZECODE_CONFIG_DIR") {
+            if !dir.is_empty() {
+                return PathBuf::from(dir);
+            }
+        }
         dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("LazeCode")
@@ -417,6 +400,7 @@ impl Settings {
     }
 
     fn normalise(&mut self) {
+        self.migrate_skin();
         self.ui_font = self.ui_font.trim().to_string();
         self.editor.font_family = self.editor.font_family.trim().to_string();
         self.terminal.font_family = self.terminal.font_family.trim().to_string();
@@ -482,7 +466,8 @@ pub struct WorkspaceFile {
     pub terminal_height: Option<f32>,
     pub open_tabs: std::collections::BTreeMap<PathBuf, Vec<PathBuf>>,
     pub active_tabs: std::collections::BTreeMap<PathBuf, PathBuf>,
-    /// Favorite branches, decorated in the Git log branch tree.
+    /// Favorite branches keyed by `checkout root \u{1} branch`, decorated in
+    /// the Git log branch tree. Bare legacy names migrate to the active repo.
     pub favorite_branches: Vec<String>,
     /// Uncommitted commit message draft per project root.
     pub commit_drafts: std::collections::BTreeMap<PathBuf, String>,
@@ -617,10 +602,13 @@ update_public_key = \"\"\n",
         settings.terminal.graphics_cache_mb = 128;
         settings.ui_font = "PingFang SC".into();
         settings.theme = ThemeMode::Light;
-        settings.dark_skin = ThemeSkin::MossGold;
-        settings.light_skin = ThemeSkin::SandSage;
+        settings.set_skin(ThemeSkin::Amber);
         let text = toml::to_string_pretty(&settings).unwrap();
-        let back: Settings = toml::from_str(&text).unwrap();
+        assert!(text.contains("skin = \"amber\""), "{text}");
+        assert!(!text.contains("dark_skin"), "{text}");
+        assert!(!text.contains("light_skin"), "{text}");
+        let mut back: Settings = toml::from_str(&text).unwrap();
+        back.normalise();
         assert_eq!(back.editor.font_size, 15.0);
         assert_eq!(back.editor.font_family, "Menlo");
         assert_eq!(back.terminal.font_family, "SF Mono");
@@ -628,21 +616,75 @@ update_public_key = \"\"\n",
         assert_eq!(back.terminal.graphics_cache_mb, 128);
         assert_eq!(back.ui_font, "PingFang SC");
         assert_eq!(back.theme, ThemeMode::Light);
-        assert_eq!(back.skin(ThemeMode::Dark), ThemeSkin::MossGold);
-        assert_eq!(back.skin(ThemeMode::Light), ThemeSkin::SandSage);
+        assert_eq!(back.skin(), ThemeSkin::Amber);
     }
 
     #[test]
-    fn missing_skin_fields_keep_studio_per_mode() {
-        let back: Settings = toml::from_str("theme = \"dark\"\n").unwrap();
-        assert_eq!(back.dark_skin, ThemeSkin::Studio);
-        assert_eq!(back.light_skin, ThemeSkin::Studio);
-        // Every id round-trips through serde; ids are the settings contract.
+    fn default_skin_is_graphite() {
+        assert_eq!(Settings::default().skin(), ThemeSkin::Graphite);
+    }
+
+    #[test]
+    fn every_canonical_skin_id_round_trips() {
         for skin in ThemeSkin::ALL {
-            let text = format!("dark_skin = \"{}\"\n", skin.id());
-            let back: Settings = toml::from_str(&text).unwrap();
-            assert_eq!(back.dark_skin, skin, "{}", skin.id());
+            let text = format!("skin = \"{}\"\n", skin.id());
+            let mut back: Settings = toml::from_str(&text).unwrap();
+            back.normalise();
+            assert_eq!(back.skin(), skin, "{}", skin.id());
         }
+    }
+
+    #[test]
+    fn legacy_skin_ids_migrate_to_paired_themes() {
+        let cases = [
+            ("studio", ThemeSkin::Graphite),
+            ("hydrangea", ThemeSkin::Abyss),
+            ("garden", ThemeSkin::Tundra),
+            ("royal", ThemeSkin::Iris),
+            ("nordic", ThemeSkin::Abyss),
+            ("lantern", ThemeSkin::Amber),
+            ("sand-sage", ThemeSkin::Tundra),
+            ("plum-ridge", ThemeSkin::Rosewood),
+            ("maple", ThemeSkin::Amber),
+            ("reeds", ThemeSkin::Amber),
+            ("violet-dusk", ThemeSkin::Iris),
+            ("lotus", ThemeSkin::Tundra),
+            ("jade", ThemeSkin::Tundra),
+            ("riviera", ThemeSkin::Abyss),
+            ("iris", ThemeSkin::Iris),
+            ("cacao", ThemeSkin::Amber),
+            ("moss-gold", ThemeSkin::Amber),
+            ("coral", ThemeSkin::Rosewood),
+            ("teal-lemon", ThemeSkin::Abyss),
+            ("hibiscus", ThemeSkin::Rosewood),
+            ("wild-olive", ThemeSkin::Amber),
+        ];
+        for (legacy, expected) in cases {
+            let text =
+                format!("theme = \"dark\"\ndark_skin = \"{legacy}\"\nlight_skin = \"studio\"\n");
+            let mut back: Settings = toml::from_str(&text).unwrap();
+            back.normalise();
+            assert_eq!(back.skin(), expected, "{legacy}");
+            assert!(back.dark_skin.is_none(), "{legacy}");
+            assert!(back.light_skin.is_none(), "{legacy}");
+        }
+    }
+
+    #[test]
+    fn active_mode_wins_when_legacy_skins_differ() {
+        let mut back: Settings = toml::from_str(
+            "theme = \"light\"\ndark_skin = \"moss-gold\"\nlight_skin = \"sand-sage\"\n",
+        )
+        .unwrap();
+        back.normalise();
+        assert_eq!(back.skin(), ThemeSkin::Tundra);
+    }
+
+    #[test]
+    fn missing_skin_fields_fall_back_to_graphite() {
+        let mut back: Settings = toml::from_str("theme = \"dark\"\n").unwrap();
+        back.normalise();
+        assert_eq!(back.skin(), ThemeSkin::Graphite);
     }
 }
 

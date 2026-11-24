@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use lazecode_core::{AppModel, PanelTab, ProjectState, Settings, SidebarView, UiState};
+use lazecode_core::{
+    AppModel, PanelTab, ProjectState, Settings, SidebarView, ThemeMode, ThemeSkin, UiState,
+};
 use lazecode_ui::UiRuntime;
 use std::collections::HashSet;
 
@@ -39,6 +41,19 @@ fn main() -> anyhow::Result<()> {
     }
     if let Ok(font) = std::env::var("LAZE_TERMINAL_FONT") {
         settings.terminal.font_family = font;
+    }
+    // Visual harness override, e.g. LAZE_THEME=light LAZE_SKIN=tundra.
+    if let Ok(value) = std::env::var("LAZE_THEME") {
+        settings.theme = if value == "light" {
+            ThemeMode::Light
+        } else {
+            ThemeMode::Dark
+        };
+    }
+    if let Ok(value) = std::env::var("LAZE_SKIN") {
+        if let Some(skin) = ThemeSkin::ALL.into_iter().find(|skin| skin.id() == value) {
+            settings.set_skin(skin);
+        }
     }
     let mut pending_jump: Option<(u64, usize)> = None;
     let mut model = AppModel {
@@ -215,6 +230,40 @@ fn main() -> anyhow::Result<()> {
                 project.active_tab = Some(project.tabs[index].id);
             }
         }
+        if mode == "compare_local" {
+            if let Some(commit) = project.log.get(1).or_else(|| project.log.first()) {
+                let commit_id = commit.id.clone();
+                let root = project.active_root().to_path_buf();
+                if let Ok(files) = lazecode_git::compare_commit_to_worktree(&root, &commit_id) {
+                    let nav_order = lazecode_core::model::compare_nav_order(&files);
+                    let selected = files.first().map(|file| file.path.clone());
+                    project.compare_session = Some(lazecode_core::model::CompareSession {
+                        from: commit_id.clone(),
+                        to: String::new(),
+                        local: true,
+                        files,
+                        nav_order,
+                        group_by_dir: true,
+                        root_expanded: true,
+                        selected: selected.clone(),
+                        ..Default::default()
+                    });
+                    if let Some(path) = selected {
+                        let source = lazecode_core::DiffSource::CompareWithLocal {
+                            commit: commit_id.clone(),
+                            path: path.clone(),
+                        };
+                        project.open_diff_source(source.clone());
+                        if let Ok(diff) = lazecode_git::diff_ref_worktree(&root, &commit_id, &path)
+                        {
+                            project.set_diff_for_source(&root, &source, Ok(diff));
+                        }
+                    }
+                    model.ui.sidebar_view = SidebarView::Compare;
+                    model.ui.sidebar_visible = true;
+                }
+            }
+        }
         if let Some(commit) = project.log.first() {
             let id = commit.id.clone();
             project.selected_commit = Some(id.clone());
@@ -246,6 +295,12 @@ fn main() -> anyhow::Result<()> {
                 model.ui.terminal_visible = false;
                 model.ui.panel_visible = true;
                 model.ui.panel_height = 460.0;
+            }
+            "compare_local" => {
+                model.ui.sidebar_view = SidebarView::Compare;
+                model.ui.sidebar_visible = true;
+                model.ui.terminal_visible = false;
+                model.ui.panel_visible = false;
             }
             _ => {
                 model.ui.panel_visible = true;
@@ -360,6 +415,30 @@ fn main() -> anyhow::Result<()> {
                     reinstate_index: false,
                     error: None,
                 };
+            }
+        }
+        "close_terminal_dialog" => {
+            runtime.dialog = lazecode_ui::runtime::DialogState::ConfirmTerminalClose {
+                action: lazecode_ui::runtime::TerminalCloseAction::Pane(0),
+                commands: vec!["omp".to_string()],
+            };
+        }
+        "consoles_busy" => {
+            model.ui.sidebar_view = SidebarView::Consoles;
+            for project in &model.projects {
+                for worktree in &project.worktrees {
+                    for pane in worktree.terminals.iter().flat_map(|tab| tab.panes.iter()) {
+                        runtime.terminal_busy.insert(
+                            pane.id,
+                            lazecode_ui::runtime::TerminalBusyState {
+                                busy: true,
+                                outputting: true,
+                                commands: vec!["omp".to_string()],
+                                last_output_ms: None,
+                            },
+                        );
+                    }
+                }
             }
         }
         "settings" => runtime.settings_open = true,

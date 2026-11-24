@@ -856,13 +856,13 @@ pub fn stash_apply_with(root: &Path, stash: &str, options: &StashApplyOptions) -
         write_stash_index(&repo, &base, &index, &reinstate)?;
     }
     if !conflicts.is_empty() {
+        let paths: std::collections::BTreeSet<&str> = conflicts
+            .iter()
+            .map(|conflict| conflict.path.as_str())
+            .collect();
         return Err(anyhow!(
             "stash applied with conflicts: {}",
-            conflicts
-                .iter()
-                .map(|conflict| conflict.path.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            paths.into_iter().collect::<Vec<_>>().join(", ")
         ));
     }
     Ok("stash applied".to_string())

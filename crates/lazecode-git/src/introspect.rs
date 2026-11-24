@@ -463,6 +463,52 @@ pub fn commit_files(root: &Path, commit: &str) -> Result<Vec<CompareFile>> {
     Ok(merge_file_lists(&numstat, &name_status))
 }
 
+/// 所选 revision 与本地工作区之间的变更文件（提交↔工作区，包含已暂存/
+/// 未暂存的跟踪文件改动；未跟踪文件按新增计入，供 Compare 抽屉展示）。
+pub fn compare_commit_to_worktree(root: &Path, commit: &str) -> Result<Vec<CompareFile>> {
+    let mut files = diff_range_files(root, commit, None);
+    // `git diff <commit>` 不包含未跟踪文件；从同一次本地状态快照补齐，
+    // 路径已存在的（例如索引删除后又在工作区出现）不重复添加。
+    if let Ok(snapshot) = crate::status::snapshot(root) {
+        for change in snapshot.changes {
+            if !change.untracked || change.path.ends_with('/') {
+                continue;
+            }
+            if files.iter().any(|file| file.path == change.path) {
+                continue;
+            }
+            let additions = count_worktree_lines(&root.join(&change.path));
+            files.push(CompareFile {
+                path: change.path,
+                status: 'A',
+                additions,
+                deletions: 0,
+            });
+        }
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
+}
+
+fn count_worktree_lines(path: &Path) -> u32 {
+    // The count only feeds the +N badge; avoid reading huge untracked files.
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return 0;
+    };
+    if !metadata.is_file() || metadata.len() > 1024 * 1024 {
+        return 0;
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return 0;
+    };
+    if bytes.iter().take(8000).any(|byte| *byte == 0) {
+        return 0;
+    }
+    let newlines = bytes.iter().filter(|byte| **byte == b'\n').count();
+    let trailing = usize::from(!bytes.is_empty() && !bytes.ends_with(b"\n"));
+    u32::try_from(newlines + trailing).unwrap_or(u32::MAX)
+}
+
 /// 两个 revision 之间的变更文件（二点范围，用于详情列多选范围 diff）。
 pub fn compare_commits(root: &Path, base: &str, tip: &str) -> Result<Vec<CompareFile>> {
     Ok(diff_range_files(root, &format!("{base}..{tip}"), None))

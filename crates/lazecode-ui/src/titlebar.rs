@@ -118,7 +118,12 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         commit_active,
         has_project && !single_active,
         (changes > 0).then_some(p.rose),
-        tool_tooltip(model, "Changes", "变更清单", crate::keybindings::Action::Changes),
+        tool_tooltip(
+            model,
+            "Changes",
+            "变更清单",
+            crate::keybindings::Action::Changes,
+        ),
     );
     titlebar_control_hovered |= response.hovered();
     control_rects.push(response.rect);
@@ -136,7 +141,12 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         log_active,
         has_project && !single_active,
         None,
-        tool_tooltip(model, "Git Log", "Git 日志", crate::keybindings::Action::GitLog),
+        tool_tooltip(
+            model,
+            "Git Log",
+            "Git 日志",
+            crate::keybindings::Action::GitLog,
+        ),
     );
     titlebar_control_hovered |= response.hovered();
     control_rects.push(response.rect);
@@ -154,7 +164,12 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         terminal_active,
         true,
         None,
-        tool_tooltip(model, "Terminal", "终端", crate::keybindings::Action::Terminal),
+        tool_tooltip(
+            model,
+            "Terminal",
+            "终端",
+            crate::keybindings::Action::Terminal,
+        ),
     );
     titlebar_control_hovered |= response.hovered();
     control_rects.push(response.rect);
@@ -172,7 +187,12 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         console_active,
         true,
         None,
-        tool_tooltip(model, "Consoles", "控制台", crate::keybindings::Action::Consoles),
+        tool_tooltip(
+            model,
+            "Consoles",
+            "控制台",
+            crate::keybindings::Action::Consoles,
+        ),
     );
     titlebar_control_hovered |= response.hovered();
     control_rects.push(response.rect);
@@ -193,7 +213,12 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         has_compare,
         None,
         if has_compare {
-            tool_tooltip(model, "Compare", "比较", crate::keybindings::Action::Compare)
+            tool_tooltip(
+                model,
+                "Compare",
+                "比较",
+                crate::keybindings::Action::Compare,
+            )
         } else {
             crate::tr!(
                 model,
@@ -438,7 +463,9 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             .layout_no_wrap(display_name.clone(), FontId::proportional(14.0), p.text2)
             .size()
             .x;
-        let mut branch_width = (28.0 + branch_text_width + 36.0
+        let mut branch_width = (28.0
+            + branch_text_width
+            + 36.0
             + usize::from(!op_active && ahead > 0) as f32 * 24.0
             + usize::from(!op_active && behind > 0) as f32 * 24.0)
             .clamp(96.0, 340.0);
@@ -655,6 +682,9 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                         Some(lazecode_git::SequencerState::CherryPick { .. }) => {
                             model.queue(Command::ContinueCherryPick);
                         }
+                        Some(lazecode_git::SequencerState::Revert { .. }) => {
+                            model.queue(Command::RevertContinue);
+                        }
                         _ => {}
                     }
                 }
@@ -704,6 +734,9 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
                     }
                     Some(lazecode_git::SequencerState::CherryPick { .. }) => {
                         model.queue(Command::AbortCherryPick);
+                    }
+                    Some(lazecode_git::SequencerState::Revert { .. }) => {
+                        model.queue(Command::RevertAbort);
                     }
                     _ => {}
                 }

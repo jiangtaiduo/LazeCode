@@ -43,6 +43,7 @@ pub use changelists::Changelists;
 pub use dag::*;
 pub use diff::{
     commit_details, commit_file_diff, diff_commits, diff_ref_worktree, diff_two_files, file_diff,
+    index_file_diff,
 };
 pub use history::{
     amend_commit_message, checkout_ref, checkout_revision, checkout_revision_path, cherry_pick,
@@ -53,9 +54,9 @@ pub use history::{
     undo_commit_head, ConflictEntry, MergeFile3Way, RebaseStep, ResetMode, SequencerState,
 };
 pub use introspect::{
-    blame, commit_files, compare_branches, compare_commits, file_history, lfs_pull, lfs_status,
-    lfs_track, submodule_list, BlameLine, CompareBranches, CompareFile, CompareSide, HistoryEntry,
-    LfsStatus, SubmoduleEntry,
+    blame, commit_files, compare_branches, compare_commit_to_worktree, compare_commits,
+    file_history, lfs_pull, lfs_status, lfs_track, submodule_list, BlameLine, CompareBranches,
+    CompareFile, CompareSide, HistoryEntry, LfsStatus, SubmoduleEntry,
 };
 pub use log::{branches, head_ancestors, log, log_ref, tags};
 pub use model::*;

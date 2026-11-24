@@ -66,17 +66,7 @@ pub fn file_diff(root: &Path, path: &str) -> Result<FileDiff> {
     let old = old_entry
         .map(|entry| load_blob_capped(&repo, entry.oid))
         .unwrap_or_default();
-    let abs = safe_worktree_join(&workdir, path)?;
-    let exists = std::fs::symlink_metadata(&abs).is_ok();
-    let new = match std::fs::symlink_metadata(&abs) {
-        Ok(metadata) if metadata.file_type().is_symlink() => std::fs::read_link(&abs)
-            .map(|target| target.to_string_lossy().into_owned().into_bytes())
-            .unwrap_or_default(),
-        Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_DIFF_BYTES as u64 => {
-            std::fs::read(&abs).unwrap_or_default()
-        }
-        _ => Vec::new(),
-    };
+    let (new, exists) = worktree_file_bytes(&workdir, path)?;
     Ok(build_file_diff(
         path.to_string(),
         old,
@@ -84,6 +74,44 @@ pub fn file_diff(root: &Path, path: &str) -> Result<FileDiff> {
         old_entry.is_some(),
         exists,
     ))
+}
+
+/// Index stage-0 blob ↔ working tree. Used by the changes-list
+/// 「Compare with Local」 action, where HEAD↔worktree is the separate
+/// 「Compare Before with Local」 command.
+pub fn index_file_diff(root: &Path, path: &str) -> Result<FileDiff> {
+    validate_repo_path(path)?;
+    let repo = discover(root)?;
+    let workdir = workdir(&repo)?;
+    let index = repo.index_or_empty()?;
+    let old_entry = index.entry_by_path(path.into());
+    let old = old_entry
+        .map(|entry| load_blob_capped(&repo, entry.id))
+        .unwrap_or_default();
+    let (new, exists) = worktree_file_bytes(&workdir, path)?;
+    Ok(build_file_diff(
+        path.to_string(),
+        old,
+        new,
+        old_entry.is_some(),
+        exists,
+    ))
+}
+
+fn worktree_file_bytes(workdir: &Path, path: &str) -> Result<(Vec<u8>, bool)> {
+    let abs = safe_worktree_join(workdir, path)?;
+    let metadata = std::fs::symlink_metadata(&abs);
+    let exists = metadata.is_ok();
+    let bytes = match metadata {
+        Ok(meta) if meta.file_type().is_symlink() => std::fs::read_link(&abs)
+            .map(|target| target.to_string_lossy().into_owned().into_bytes())
+            .unwrap_or_default(),
+        Ok(meta) if meta.is_file() && meta.len() <= MAX_DIFF_BYTES as u64 => {
+            std::fs::read(&abs).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+    Ok((bytes, exists))
 }
 
 pub fn commit_file_diff(root: &Path, commit_spec: &str, path: &str) -> Result<FileDiff> {
@@ -209,30 +237,80 @@ pub fn diff_ref_worktree(root: &Path, ref_spec: &str, path: &str) -> Result<File
     let ref_id = resolve_commit(&repo, ref_spec)?;
     let ref_map = commit_tree_map(&repo, ref_id)?;
 
-    let target_path = if path.is_empty() {
-        let snap = crate::status::snapshot(root)?;
-        snap.changes
-            .first()
-            .map(|c| c.path.clone())
-            .unwrap_or_default()
-    } else {
+    if !path.is_empty() {
         validate_repo_path(path)?;
-        path.to_string()
-    };
-    if target_path.is_empty() {
-        return Ok(build_file_diff(
-            String::new(),
-            Vec::new(),
-            Vec::new(),
-            false,
-            false,
-        ));
+        let (diff, _) = diff_ref_worktree_path(&repo, &workdir, &ref_map, path)?;
+        return Ok(diff);
     }
-    let old_entry = ref_map.get(&target_path);
+
+    // No explicit path: find the first file that actually differs between
+    // the selected commit and the local working tree. Prefer files the commit
+    // itself touched, then files changed since it, then dirty files. Dirty
+    // files alone are not enough: a historical commit usually differs from
+    // HEAD even when the worktree is clean.
+    let commit = repo.find_commit(ref_id)?;
+    let parent_map = match commit.parent_ids().next().map(|id| id.detach()) {
+        Some(parent_id) => commit_tree_map(&repo, parent_id).unwrap_or_default(),
+        None => Default::default(),
+    };
+    let head_map = head_tree_map(&repo).unwrap_or_default();
+    let mut candidates = Vec::new();
+    for (path, entry) in &ref_map {
+        if parent_map.get(path) != Some(entry) {
+            push_candidate(&mut candidates, path);
+        }
+    }
+    for path in parent_map.keys() {
+        if !ref_map.contains_key(path) {
+            push_candidate(&mut candidates, path);
+        }
+    }
+    for (path, entry) in &ref_map {
+        if head_map.get(path) != Some(entry) {
+            push_candidate(&mut candidates, path);
+        }
+    }
+    for path in head_map.keys() {
+        if !ref_map.contains_key(path) {
+            push_candidate(&mut candidates, path);
+        }
+    }
+    for change in crate::status::snapshot(root)?.changes {
+        push_candidate(&mut candidates, &change.path);
+    }
+
+    for candidate in candidates {
+        let (diff, changed) = diff_ref_worktree_path(&repo, &workdir, &ref_map, &candidate)?;
+        if changed {
+            return Ok(diff);
+        }
+    }
+    Ok(build_file_diff(
+        String::new(),
+        Vec::new(),
+        Vec::new(),
+        false,
+        false,
+    ))
+}
+
+fn push_candidate(candidates: &mut Vec<String>, path: &str) {
+    if !candidates.iter().any(|candidate| candidate == path) {
+        candidates.push(path.to_string());
+    }
+}
+
+fn diff_ref_worktree_path(
+    repo: &gix::Repository,
+    workdir: &Path,
+    ref_map: &crate::tree::TreeMap,
+    target_path: &str,
+) -> Result<(FileDiff, bool)> {
+    let old_entry = ref_map.get(target_path);
     let old = old_entry
-        .map(|entry| load_blob_capped(&repo, entry.oid))
+        .map(|entry| load_blob_capped(repo, entry.oid))
         .unwrap_or_default();
-    let abs = safe_worktree_join(&workdir, &target_path)?;
+    let abs = safe_worktree_join(workdir, target_path)?;
     let exists = std::fs::symlink_metadata(&abs).is_ok();
     let new = match std::fs::symlink_metadata(&abs) {
         Ok(metadata) if metadata.file_type().is_symlink() => std::fs::read_link(&abs)
@@ -243,12 +321,16 @@ pub fn diff_ref_worktree(root: &Path, ref_spec: &str, path: &str) -> Result<File
         }
         _ => Vec::new(),
     };
-    Ok(build_file_diff(
-        target_path,
-        old,
-        new,
-        old_entry.is_some(),
-        exists,
+    let changed = old_entry.is_some() != exists || old != new;
+    Ok((
+        build_file_diff(
+            target_path.to_string(),
+            old,
+            new,
+            old_entry.is_some(),
+            exists,
+        ),
+        changed,
     ))
 }
 
@@ -320,7 +402,13 @@ pub fn commit_details(root: &Path, spec: &str) -> Result<CommitDetails> {
     let current_map = commit_tree_map(&repo, id)?;
     let paths: BTreeSet<&String> = parent_map.keys().chain(current_map.keys()).collect();
     let mut files = Vec::new();
-    for path in paths.into_iter().take(300) {
+    for path in paths {
+        // The cap must apply to *changed* files. Truncating the merged tree
+        // listing first silently dropped every change whose path sorted past
+        // the 300th entry (large repos showed an empty file list).
+        if files.len() >= 300 {
+            break;
+        }
         let old_entry: Option<&TreeEntry> = parent_map.get(path);
         let new_entry: Option<&TreeEntry> = current_map.get(path);
         let unchanged = match (old_entry, new_entry) {

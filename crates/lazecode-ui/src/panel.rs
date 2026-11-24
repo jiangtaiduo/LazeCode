@@ -56,6 +56,40 @@ pub(crate) fn format_commit_datetime(seconds: i64) -> String {
     }
 }
 
+/// Lay out wrapped text into `rect`, capped at `max_rows`, and clip it.
+/// Returns the painted galley height so the next block can flow below it.
+fn paint_wrapped_text(
+    ui: &Ui,
+    rect: Rect,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    max_rows: usize,
+) -> f32 {
+    if text.is_empty() || rect.width() <= 1.0 || rect.height() <= 1.0 || max_rows == 0 {
+        return 0.0;
+    }
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = rect.width();
+    job.wrap.max_rows = max_rows;
+    job.break_on_newline = true;
+    job.append(
+        text,
+        0.0,
+        egui::TextFormat {
+            font_id: font,
+            color,
+            ..Default::default()
+        },
+    );
+    let galley = ui.ctx().fonts_mut(|fonts| fonts.layout_job(job));
+    let height = galley.size().y.min(rect.height());
+    ui.painter()
+        .with_clip_rect(rect)
+        .galley(rect.left_top(), galley, color);
+    height
+}
+
 fn paint_quad_bezier(painter: &egui::Painter, p0: Pos2, p1: Pos2, p2: Pos2, stroke: Stroke) {
     const SEGMENTS: usize = 12;
     let mut points = Vec::with_capacity(SEGMENTS + 1);
@@ -1095,6 +1129,9 @@ fn draw_git_log(
                         Some(lazecode_git::SequencerState::CherryPick { .. }) => {
                             model.queue(Command::ContinueCherryPick);
                         }
+                        Some(lazecode_git::SequencerState::Revert { .. }) => {
+                            model.queue(Command::RevertContinue);
+                        }
                         _ => {}
                     }
                 } else {
@@ -1107,6 +1144,9 @@ fn draw_git_log(
                         }
                         Some(lazecode_git::SequencerState::CherryPick { .. }) => {
                             model.queue(Command::AbortCherryPick);
+                        }
+                        Some(lazecode_git::SequencerState::Revert { .. }) => {
+                            model.queue(Command::RevertAbort);
                         }
                         _ => {}
                     }
@@ -1713,9 +1753,10 @@ fn draw_git_log(
         Vec2::splat(24.0),
     );
     let star_target = model.projects[index].ref_selection.first().cloned();
+    let favorite_root = model.projects[index].root.clone();
     let is_starred = star_target
         .as_ref()
-        .is_some_and(|name| model.projects[index].favorites.contains(name));
+        .is_some_and(|name| model.is_favorite_branch(&favorite_root, name));
     let star_resp = icon_button(ui, star_rect, Icon::Star, is_starred, theme);
     if star_resp.hovered() {
         star_resp.show_tooltip_text(crate::tr!(
@@ -1726,11 +1767,8 @@ fn draw_git_log(
     }
     if star_resp.clicked() {
         if let Some(target) = star_target {
-            if model.projects[index].favorites.contains(&target) {
-                model.projects[index].favorites.remove(&target);
-            } else {
-                model.projects[index].favorites.insert(target);
-            }
+            model.toggle_favorite_branch(&favorite_root, &target);
+            model.save_workspace();
         }
     }
     tb_y += 25.0;
@@ -1779,28 +1817,7 @@ fn draw_git_log(
         tb_y + 2.5,
         Stroke::new(1.0, p.border_soft),
     );
-    tb_y += 6.0;
 
-    // 10. Jump Folding Arrow toggle (≡→)
-    let jump_rect = Rect::from_min_size(
-        Pos2::new(toolbar_rect.left() + 3.0, tb_y),
-        Vec2::splat(24.0),
-    );
-    let jump_resp = icon_button(ui, jump_rect, Icon::ShelveIn, true, theme);
-    if jump_resp.hovered() {
-        jump_resp.show_tooltip_text(crate::tr!(model, "Jump to Linked Commit", "跳转到关联提交"));
-    }
-    tb_y += 25.0;
-
-    // 11. View Options / Gear (👁)
-    let view_opt_rect = Rect::from_min_size(
-        Pos2::new(toolbar_rect.left() + 3.0, tb_y),
-        Vec2::splat(24.0),
-    );
-    let view_opt_resp = icon_button(ui, view_opt_rect, Icon::ViewOptions, false, theme);
-    if view_opt_resp.hovered() {
-        view_opt_resp.show_tooltip_text(crate::tr!(model, "View Options", "视图选项"));
-    }
     if show_branches {
         let splitter_rect = Rect::from_min_size(
             Pos2::new(branch_rect.right() - 3.0, body.top()),
@@ -2206,23 +2223,12 @@ fn draw_git_log(
                         }
                     } else if shift && !model.projects[index].selected_commits.is_empty() {
                         let anchor = model.projects[index].selected_commits[0].clone();
-                        let pos_anchor = model.projects[index]
-                            .log
-                            .iter()
-                            .position(|c| c.id == anchor)
-                            .unwrap_or(0);
-                        let pos_curr = model.projects[index]
-                            .log
-                            .iter()
-                            .position(|c| c.id == commit.id)
-                            .unwrap_or(0);
+                        let pos_anchor = filtered.iter().position(|c| c.id == anchor).unwrap_or(0);
+                        let pos_curr = filtered.iter().position(|c| c.id == commit.id).unwrap_or(0);
                         let start = pos_anchor.min(pos_curr);
                         let end = pos_anchor.max(pos_curr);
-                        model.projects[index].selected_commits = model.projects[index].log
-                            [start..=end]
-                            .iter()
-                            .map(|c| c.id.clone())
-                            .collect();
+                        model.projects[index].selected_commits =
+                            filtered[start..=end].iter().map(|c| c.id.clone()).collect();
                         select_commit = Some(commit.id.clone());
                     } else {
                         let project = &mut model.projects[index];
@@ -2297,6 +2303,7 @@ fn draw_branch_list(
     _tag_targets: &[(String, String)],
 ) {
     let p = theme.palette;
+    let favorite_root = model.projects[index].root.clone();
     ui.painter().rect_filled(rect, 0.0, p.panel);
     ui.painter().vline(
         rect.right() - 0.5,
@@ -2372,6 +2379,7 @@ fn draw_branch_list(
         model.projects[index].ref_dirs_expanded.clone();
     let mut toggle_dir: Option<String> = None;
     let mut open_menu: Option<(String, bool, Rect)> = None; // branch name + remote flag + anchor
+    let mut open_tag: Option<(String, Rect)> = None;
 
     let curr_branch = branches.iter().find(|b| b.name == current);
     let local_tree = lazecode_core::gitref::build_ref_tree(&local);
@@ -2485,7 +2493,7 @@ fn draw_branch_list(
                         );
                         let indent = 10.0 + 12.0 * row_ref.depth as f32;
                         let is_current = branch.name == current;
-                        let is_fav = model.favorite_branches.contains(&branch.name);
+                        let is_fav = model.is_favorite_branch(&favorite_root, &branch.name);
                         let response = ui.interact(
                             row,
                             ui.scope_id().with(("refrow", branch.name.clone())),
@@ -2763,6 +2771,13 @@ fn draw_branch_list(
                             FontId::proportional(12.5),
                             p.text,
                         );
+                        if response.secondary_clicked() {
+                            let anchor = ui
+                                .input(|i| i.pointer.hover_pos())
+                                .map(|p| Rect::from_min_size(p, Vec2::splat(1.0)))
+                                .unwrap_or(row);
+                            open_tag = Some((tag.clone(), anchor));
+                        }
                         y += row_h;
                     }
                 }
@@ -2790,7 +2805,13 @@ fn draw_branch_list(
             model.projects[index].ref_dirs_expanded.insert(dir);
         }
     }
-    if let Some((name, remote, anchor)) = open_menu {
+    if let Some((tag, anchor)) = open_tag {
+        rt.open_menu(
+            crate::runtime::MenuKind::TagContext { project: index },
+            anchor,
+            Some(tag),
+        );
+    } else if let Some((name, remote, anchor)) = open_menu {
         rt.open_menu(
             crate::runtime::MenuKind::BranchContext { project: index },
             anchor,
@@ -2899,17 +2920,6 @@ fn draw_commit_detail(
     }
     rx -= 22.0;
 
-    // 3. View options
-    let view_rect = Rect::from_min_size(
-        Pos2::new(rx - 20.0, header_rect.top() + 5.0),
-        Vec2::splat(20.0),
-    );
-    let view_resp = icon_button(ui, view_rect, Icon::ViewOptions, false, theme);
-    if view_resp.hovered() {
-        view_resp.show_tooltip_text(crate::tr!(model, "View Options", "视图选项"));
-    }
-    rx -= 22.0;
-
     // 2. Full commit diff
     let diff_rect = Rect::from_min_size(
         Pos2::new(rx - 20.0, header_rect.top() + 5.0),
@@ -2946,7 +2956,7 @@ fn draw_commit_detail(
     let card_h = model
         .ui
         .git_details_card_height
-        .clamp(60.0, (rect.height() - 90.0).max(60.0));
+        .clamp(88.0, (rect.height() - 90.0).max(88.0));
     let split_rect = Rect::from_min_size(
         Pos2::new(rect.left(), rect.bottom() - card_h - 4.0),
         Vec2::new(rect.width(), 6.0),
@@ -2962,7 +2972,7 @@ fn draw_commit_detail(
     if split_resp.dragged() {
         model.ui.git_details_card_height = (model.ui.git_details_card_height
             - split_resp.drag_delta().y)
-            .clamp(60.0, (rect.height() - 90.0).max(60.0));
+            .clamp(88.0, (rect.height() - 90.0).max(88.0));
     }
 
     let card_rect = Rect::from_min_max(Pos2::new(rect.left(), rect.bottom() - card_h), rect.max);
@@ -2973,37 +2983,72 @@ fn draw_commit_detail(
         Stroke::new(1.0, p.border_soft),
     );
 
-    // Card message
-    text_clipped(
-        ui.painter(),
+    // Card content: subject and body wrap to the available width; metadata
+    // sits in a compact footer so a taller card shows more message, not a
+    // growing empty gap.
+    let pad = 12.0;
+    let hash_h = 18.0;
+    let hash_center_y = card_rect.bottom() - 10.0 - hash_h * 0.5;
+    let hash_pill_rect = Rect::from_min_size(
+        Pos2::new(card_rect.left() + pad, hash_center_y - hash_h * 0.5),
+        Vec2::new(68.0, hash_h),
+    );
+    let author_h = 14.0;
+    let author_bottom = hash_pill_rect.top() - 4.0;
+    let author_rect = Rect::from_min_max(
+        Pos2::new(card_rect.left() + pad, author_bottom - author_h),
+        Pos2::new(card_rect.right() - pad, author_bottom),
+    );
+    let content_top = card_rect.top() + 8.0;
+    let content_bottom = author_rect.top() - 6.0;
+    let content_left = card_rect.left() + pad;
+    let content_right = card_rect.right() - pad;
+
+    let subject_font = FontId::proportional(13.0);
+    let subject_line_h = ui
+        .painter()
+        .layout_no_wrap("Ag".to_owned(), subject_font.clone(), p.text)
+        .size()
+        .y
+        .max(1.0);
+    let available_h = (content_bottom - content_top).max(0.0);
+    let subject_max_rows = if details.info.body.trim().is_empty() {
+        3
+    } else {
+        2
+    };
+    let subject_rows = ((available_h / subject_line_h).floor() as usize).clamp(1, subject_max_rows);
+    let subject_h = paint_wrapped_text(
+        ui,
         Rect::from_min_max(
-            Pos2::new(card_rect.left() + 12.0, card_rect.top() + 8.0),
-            Pos2::new(card_rect.right() - 12.0, card_rect.top() + 26.0),
+            Pos2::new(content_left, content_top),
+            Pos2::new(content_right, content_bottom),
         ),
         &details.info.message,
-        FontId::proportional(13.0),
+        subject_font,
         p.text,
-        Align2::LEFT_CENTER,
+        subject_rows,
     );
-    if !details.info.body.is_empty() {
-        text_clipped(
-            ui.painter(),
-            Rect::from_min_max(
-                Pos2::new(card_rect.left() + 12.0, card_rect.top() + 26.0),
-                Pos2::new(card_rect.right() - 12.0, card_rect.top() + 44.0),
-            ),
-            details.info.body.lines().next().unwrap_or(""),
-            FontId::proportional(12.0),
-            p.text3,
-            Align2::LEFT_CENTER,
-        );
+
+    let body_font = FontId::proportional(12.0);
+    let body_line_h = ui
+        .painter()
+        .layout_no_wrap("Ag".to_owned(), body_font.clone(), p.text3)
+        .size()
+        .y
+        .max(1.0);
+    let body_top = content_top + subject_h + 4.0;
+    let body_rect = Rect::from_min_max(
+        Pos2::new(content_left, body_top),
+        Pos2::new(content_right, content_bottom),
+    );
+    let body_rows = (body_rect.height() / body_line_h).floor() as usize;
+    let body = details.info.body.trim();
+    if body_rows > 0 && !body.is_empty() {
+        paint_wrapped_text(ui, body_rect, body, body_font, p.text3, body_rows);
     }
 
     // Card blue short hash pill
-    let hash_pill_rect = Rect::from_min_size(
-        Pos2::new(card_rect.left() + 12.0, card_rect.bottom() - 32.0),
-        Vec2::new(68.0, 18.0),
-    );
     let hash_resp = ui.interact(
         hash_pill_rect,
         ui.scope_id().with("card-hash-pill"),
@@ -3034,19 +3079,21 @@ fn draw_commit_detail(
         );
     }
 
-    // Author & Date
-    ui.painter().text(
-        Pos2::new(hash_pill_rect.right() + 8.0, hash_pill_rect.center().y),
-        Align2::LEFT_CENTER,
-        format!("{} <{}>", details.info.author, details.info.email),
-        FontId::proportional(12.0),
+    // Author line gets the full card width; the hash and date share the
+    // compact footer row below it.
+    text_clipped(
+        ui.painter(),
+        author_rect,
+        &format!("{} <{}>", details.info.author, details.info.email),
+        FontId::proportional(11.5),
         p.text3,
+        Align2::LEFT_CENTER,
     );
     ui.painter().text(
-        Pos2::new(card_rect.left() + 12.0, card_rect.bottom() - 10.0),
-        Align2::LEFT_CENTER,
+        Pos2::new(card_rect.right() - pad, hash_pill_rect.center().y),
+        Align2::RIGHT_CENTER,
         format_commit_datetime(details.info.time),
-        FontId::monospace(12.0),
+        FontId::monospace(10.5),
         p.text3,
     );
 

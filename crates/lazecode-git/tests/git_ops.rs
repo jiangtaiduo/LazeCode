@@ -179,6 +179,26 @@ fn commit_details_lists_files() {
 }
 
 #[test]
+fn commit_details_finds_changes_past_the_tree_listing_prefix() {
+    let dir = init();
+    let root = dir.path();
+    for i in 0..320 {
+        std::fs::write(root.join(format!("f{i:03}.txt")), "one\n").unwrap();
+    }
+    git(root, &["add", "-A"]);
+    lazecode_git::commit(root, "base", false).unwrap();
+
+    std::fs::write(root.join("f319.txt"), "one\ntwo\n").unwrap();
+    git(root, &["add", "-A"]);
+    lazecode_git::commit(root, "late path", false).unwrap();
+
+    let details = lazecode_git::commit_details(root, "HEAD").unwrap();
+    assert_eq!(details.info.message, "late path");
+    assert_eq!(details.files.len(), 1);
+    assert_eq!(details.files[0].path, "f319.txt");
+}
+
+#[test]
 fn amend_replaces_head() {
     let dir = init();
     std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
@@ -411,6 +431,112 @@ fn diff_sources_commit_and_ref_and_files() {
     let d_files = lazecode_git::diff_two_files(&f1, &f2).unwrap();
     assert_eq!(d_files.old_text, "hello\n");
     assert_eq!(d_files.new_text, "world\n");
+}
+
+#[test]
+fn diff_ref_worktree_empty_path_finds_a_real_difference() {
+    let dir = init();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "a1\n").unwrap();
+    std::fs::write(root.join("b.txt"), "b1\n").unwrap();
+    git(root, &["add", "a.txt", "b.txt"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    let base = git(root, &["rev-parse", "HEAD"]);
+
+    std::fs::write(root.join("a.txt"), "a2\n").unwrap();
+    std::fs::write(root.join("b.txt"), "b2\n").unwrap();
+    git(root, &["add", "a.txt", "b.txt"]);
+    git(root, &["commit", "-q", "-m", "next"]);
+
+    // Clean worktree, historical commit: the diff must compare the commit
+    // against HEAD's files, not only against the (empty) dirty list.
+    let clean = lazecode_git::diff_ref_worktree(root, &base, "").unwrap();
+    assert_eq!(clean.path, "a.txt");
+    assert_eq!(clean.old_text, "a1\n");
+    assert_eq!(clean.new_text, "a2\n");
+    assert!(!clean.diff.hunks.is_empty());
+
+    // If the first candidate was reverted to the commit's content, the
+    // next differing file must be selected instead of returning empty.
+    std::fs::write(root.join("a.txt"), "a1\n").unwrap();
+    let reverted = lazecode_git::diff_ref_worktree(root, &base, "").unwrap();
+    assert_eq!(reverted.path, "b.txt");
+    assert_eq!(reverted.old_text, "b1\n");
+    assert_eq!(reverted.new_text, "b2\n");
+    assert!(!reverted.diff.hunks.is_empty());
+}
+
+#[test]
+fn compare_commit_to_worktree_lists_committed_and_uncommitted_changes() {
+    let dir = init();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "a1\n").unwrap();
+    std::fs::write(root.join("b.txt"), "b1\n").unwrap();
+    git(root, &["add", "a.txt", "b.txt"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    let base = git(root, &["rev-parse", "HEAD"]);
+
+    std::fs::write(root.join("a.txt"), "a2\n").unwrap();
+    git(root, &["add", "a.txt"]);
+    git(root, &["commit", "-q", "-m", "next"]);
+
+    // Uncommitted edit plus an untracked file: both belong to the local side.
+    std::fs::write(root.join("b.txt"), "b2\n").unwrap();
+    std::fs::write(root.join("c.txt"), "c1\nc2\n").unwrap();
+
+    let files = lazecode_git::compare_commit_to_worktree(root, &base).unwrap();
+    let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(paths, ["a.txt", "b.txt", "c.txt"]);
+    assert_eq!(files[0].status, 'M');
+    assert_eq!(files[0].additions, 1);
+    assert_eq!(files[0].deletions, 1);
+    assert_eq!(files[1].status, 'M');
+    assert_eq!(files[1].additions, 1);
+    assert_eq!(files[1].deletions, 1);
+    assert_eq!(files[2].status, 'A');
+    assert_eq!(files[2].additions, 2);
+    assert_eq!(files[2].deletions, 0);
+}
+
+#[test]
+fn index_file_diff_compares_staged_blob_with_worktree() {
+    let dir = init();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "base\n").unwrap();
+    git(root, &["add", "a.txt"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    std::fs::write(root.join("a.txt"), "staged\n").unwrap();
+    git(root, &["add", "a.txt"]);
+    std::fs::write(root.join("a.txt"), "worktree\n").unwrap();
+
+    let staged = lazecode_git::index_file_diff(root, "a.txt").unwrap();
+    assert_eq!(staged.old_text, "staged\n");
+    assert_eq!(staged.new_text, "worktree\n");
+    assert!(!staged.diff.hunks.is_empty());
+
+    let head = lazecode_git::file_diff(root, "a.txt").unwrap();
+    assert_eq!(head.old_text, "base\n");
+    assert_eq!(head.new_text, "worktree\n");
+}
+
+#[test]
+fn checkout_revision_path_accepts_symbolic_revisions() {
+    let dir = init();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "v1\n").unwrap();
+    git(root, &["add", "a.txt"]);
+    git(root, &["commit", "-q", "-m", "one"]);
+    let first = git(root, &["rev-parse", "HEAD"]);
+    std::fs::write(root.join("a.txt"), "v2\n").unwrap();
+    git(root, &["add", "a.txt"]);
+    git(root, &["commit", "-q", "-m", "two"]);
+
+    lazecode_git::checkout_revision_path(root, &first, "a.txt").unwrap();
+    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "v1\n");
+    lazecode_git::checkout_revision_path(root, "HEAD", "a.txt").unwrap();
+    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "v2\n");
+    lazecode_git::checkout_revision_path(root, "HEAD~1", "a.txt").unwrap();
+    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "v1\n");
 }
 
 #[test]

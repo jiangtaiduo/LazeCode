@@ -451,6 +451,24 @@ pub enum DialogState {
         value: String,
         error: Option<String>,
     },
+    /// 「Get from Revision」：输入 revision，把单个路径恢复为该版本。
+    GetFileFromRevision {
+        path: String,
+        revision: String,
+        error: Option<String>,
+    },
+    /// 把选中的本地更改提取成一个独立提交（其余更改保持未提交）。
+    ExtractChanges {
+        paths: Vec<String>,
+        value: String,
+        error: Option<String>,
+    },
+    /// 把选中的本地更改拣选到另一个分支的工作区。
+    CherryPickChanges {
+        paths: Vec<String>,
+        target: String,
+        error: Option<String>,
+    },
     ShelfManager {
         shelves: Vec<lazecode_git::ShelfEntry>,
         selected: usize,

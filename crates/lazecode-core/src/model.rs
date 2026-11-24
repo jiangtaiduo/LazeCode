@@ -312,7 +312,7 @@ impl Default for UiState {
             git_branches_width: 210.0,
             git_details_width: 340.0,
             git_details_visible: true,
-            git_details_card_height: 90.0,
+            git_details_card_height: 132.0,
             git_jump_to_commit: None,
             git_log_compact: false,
             git_log_show_graph: true,
@@ -408,6 +408,11 @@ pub enum DiffSource {
     Worktree {
         path: String,
     },
+    /// Index (stage 0) ↔ working tree, for the changes-list
+    /// 「Compare with Local」 action.
+    Index {
+        path: String,
+    },
     Commit {
         commit: String,
         path: String,
@@ -493,6 +498,10 @@ pub fn is_image_path(path: &std::path::Path) -> bool {
 pub struct CompareSession {
     pub from: String,
     pub to: String,
+    /// `true` = `from` ↔ 本地工作区（Compare with Local）；此时 `to` 为空，
+    /// 文件清单来自提交树与工作区的全量比较，双击文件打开
+    /// `DiffSource::CompareWithLocal`。
+    pub local: bool,
     pub minimized: bool,
     pub loading: bool,
     pub files: Vec<lazecode_git::CompareFile>,
@@ -577,6 +586,7 @@ impl Tab {
                 .unwrap_or_else(|| "Image".to_string()),
             TabKind::Diff(diff) => match &diff.source {
                 DiffSource::Worktree { .. } => "Working Tree Diff".to_string(),
+                DiffSource::Index { .. } => "Index Diff".to_string(),
                 DiffSource::Commit { commit, .. } => {
                     format!("Diff ({})", &commit[..commit.len().min(7)])
                 }
@@ -906,7 +916,6 @@ pub struct ProjectState {
     /// Branch-tree multi-selection in click order: comparing exactly two uses
     /// the first as left and the second as right.
     pub ref_selection: Vec<String>,
-    pub favorites: std::collections::HashSet<String>,
     /// Directories whose children are hidden in the commit-details file tree.
     /// Empty means every directory is expanded.
     pub commit_file_dirs_collapsed: std::collections::HashSet<String>,
@@ -1012,7 +1021,6 @@ impl ProjectState {
             branch_query: String::new(),
             ref_dirs_expanded: std::collections::HashSet::new(),
             ref_selection: Vec::new(),
-            favorites: std::collections::HashSet::new(),
             commit_file_dirs_collapsed: std::collections::HashSet::new(),
             commit_files_root_collapsed: false,
             tags: Vec::new(),
@@ -1134,7 +1142,6 @@ impl ProjectState {
             // The branch tree starts fully expanded (PyCharm default):
             ref_dirs_expanded: init_dirs,
             ref_selection: Vec::new(),
-            favorites: std::collections::HashSet::new(),
             commit_file_dirs_collapsed: std::collections::HashSet::new(),
             commit_files_root_collapsed: false,
             tags,
@@ -1588,6 +1595,10 @@ impl ProjectState {
         self.checked_paths.clear();
         self.change_selection.clear();
         self.change_anchor = None;
+        // Conflicts/sequencer state is project-level but belongs to the active
+        // checkout; carrying it across a worktree switch showed a stale
+        // conflict banner over a clean tree.
+        self.refresh_conflicts();
     }
 
     /// Switch to an attached worktree or attach an existing one; returns whether
@@ -1889,6 +1900,7 @@ impl ProjectState {
         let worktree_root = self.active_root().to_path_buf();
         let is_img = match &source {
             DiffSource::Worktree { path }
+            | DiffSource::Index { path }
             | DiffSource::Commit { path, .. }
             | DiffSource::CompareWithLocal { path, .. }
             | DiffSource::CompareCommits { path, .. }
@@ -1901,6 +1913,7 @@ impl ProjectState {
         if is_img {
             let path_buf = match &source {
                 DiffSource::Worktree { path }
+                | DiffSource::Index { path }
                 | DiffSource::Commit { path, .. }
                 | DiffSource::CompareWithLocal { path, .. }
                 | DiffSource::CompareCommits { path, .. }
@@ -1929,6 +1942,7 @@ impl ProjectState {
         }
         let path = match &source {
             DiffSource::Worktree { path }
+            | DiffSource::Index { path }
             | DiffSource::Commit { path, .. }
             | DiffSource::CompareWithLocal { path, .. }
             | DiffSource::CompareCommits { path, .. }
@@ -2050,20 +2064,26 @@ impl ProjectState {
         source: &DiffSource,
         result: Result<FileDiff, String>,
     ) {
-        if let Some(tab) = self.tabs.iter_mut().find(|tab| {
+        // "Show Diff in a New Tab" can leave two tabs with the same source.
+        // Fill every match so the newly created tab cannot stay on its
+        // loading spinner while the older sibling receives the result.
+        for tab in self.tabs.iter_mut().filter(|tab| {
             tab.worktree == root
                 && matches!(&tab.kind, TabKind::Diff(diff) if &diff.source == source)
         }) {
             if let TabKind::Diff(diff) = &mut tab.kind {
                 diff.loading = false;
-                match result {
+                match &result {
                     Ok(file_diff) => {
-                        diff.diff = Some(file_diff);
+                        if diff.path.is_empty() {
+                            diff.path = file_diff.path.clone();
+                        }
+                        diff.diff = Some(file_diff.clone());
                         diff.error = None;
                     }
                     Err(err) => {
                         diff.diff = None;
-                        diff.error = Some(err);
+                        diff.error = Some(err.clone());
                     }
                 }
             }
@@ -2561,11 +2581,56 @@ impl AppModel {
             git_cmd_log: Vec::new(),
         };
         model.restore_workspace(workspace);
+        model.migrate_favorite_branches();
         if model.projects.is_empty() {
             model.ui.sidebar_visible = false;
             model.ui.panel_visible = false;
         }
         model
+    }
+
+    fn favorite_branch_key(root: &Path, branch: &str) -> String {
+        // Branch names repeat across projects; qualify persisted favourites
+        // with the checkout root so favouriting `main` in one repo cannot
+        // decorate every other project's `main`.
+        format!("{}\u{1}{branch}", root.display())
+    }
+
+    pub fn is_favorite_branch(&self, root: &Path, branch: &str) -> bool {
+        self.favorite_branches
+            .contains(&Self::favorite_branch_key(root, branch))
+    }
+
+    pub fn toggle_favorite_branch(&mut self, root: &Path, branch: &str) {
+        let key = Self::favorite_branch_key(root, branch);
+        if !self.favorite_branches.remove(&key) {
+            self.favorite_branches.insert(key);
+        }
+    }
+
+    fn migrate_favorite_branches(&mut self) {
+        // Older workspace files stored bare branch names globally. Apply them
+        // once to the active project instead of decorating every checkout.
+        let legacy: Vec<String> = self
+            .favorite_branches
+            .iter()
+            .filter(|key| !key.contains('\u{1}'))
+            .cloned()
+            .collect();
+        if legacy.is_empty() {
+            return;
+        }
+        let root = self
+            .active_project()
+            .map(|project| project.root.clone())
+            .or_else(|| self.projects.first().map(|project| project.root.clone()));
+        if let Some(root) = root {
+            for branch in legacy {
+                self.favorite_branches
+                    .insert(Self::favorite_branch_key(&root, &branch));
+            }
+        }
+        self.favorite_branches.retain(|key| key.contains('\u{1}'));
     }
 
     fn restore_workspace(&mut self, workspace: WorkspaceFile) {

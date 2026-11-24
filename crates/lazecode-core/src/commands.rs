@@ -59,6 +59,8 @@ pub enum Command {
     },
     MergeContinue,
     MergeAbort,
+    RevertContinue,
+    RevertAbort,
     Rebase {
         onto: String,
     },
@@ -218,6 +220,11 @@ pub enum Command {
         from: String,
         to: String,
     },
+    /// 打开「与本地比较」Compare 抽屉：所选提交 ↔ 本地工作区，列出全部
+    /// 差异文件（含未提交改动和未跟踪文件）。
+    OpenCompareWithLocal {
+        commit: String,
+    },
     /// 交换比较方向（工具栏 ⇆），重载文件清单并换向已打开的 diff。
     CompareSwap,
     /// 关闭会话：抽屉切回 Git 视图，diff 单例标签保留内容但导航清单失效。
@@ -226,6 +233,20 @@ pub enum Command {
     LogLoadMore,
     SelectCommit(String),
     OpenDiff(String),
+    /// Working-tree diff in an extra tab (bypasses the singleton diff tab).
+    OpenDiffNewTab(String),
+    /// Index stage-0 ↔ working tree (changes-list Compare with Local).
+    OpenIndexDiff(String),
+    /// Restore one path from an arbitrary revision.
+    GetFileFromRevision {
+        path: String,
+        revision: String,
+    },
+    /// Move selected local changes onto another branch's worktree.
+    CherryPickChanges {
+        paths: Vec<String>,
+        target: String,
+    },
     OpenCommitDiff {
         commit: String,
         path: String,
@@ -294,7 +315,6 @@ pub enum Command {
         title: String,
         command: String,
     },
-    RestartTerminal(u64),
     CloseTerminal(u64),
     /// Create a linked worktree from the chosen branch at `location`.
     CreateWorktree {

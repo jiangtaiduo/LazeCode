@@ -849,17 +849,63 @@ fn resolve(color: ColorSpec, p: &crate::theme::Palette) -> Color32 {
 fn indexed_color(index: u8, p: &crate::theme::Palette) -> Color32 {
     const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
     if index < 16 {
-        return p.ansi[index as usize];
+        return readable_on_terminal(p.ansi[index as usize], p);
     }
     if index < 232 {
         let offset = (index - 16) as usize;
         let r = LEVELS[offset / 36];
         let g = LEVELS[(offset % 36) / 6];
         let b = LEVELS[offset % 6];
-        return Color32::from_rgb(r, g, b);
+        return readable_on_terminal(Color32::from_rgb(r, g, b), p);
     }
     let value = 8 + (index - 232) * 10;
-    Color32::from_rgb(value, value, value)
+    readable_on_terminal(Color32::from_rgb(value, value, value), p)
+}
+
+fn luminance(c: Color32) -> f32 {
+    let linear = |v: u8| {
+        let v = v as f32 / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(c.r()) + 0.7152 * linear(c.g()) + 0.0722 * linear(c.b())
+}
+
+fn contrast(a: Color32, b: Color32) -> f32 {
+    let (la, lb) = (luminance(a), luminance(b));
+    let (hi, lo) = if la >= lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// The 6×6×6 cube and the grayscale ramp are authored for dark terminals.
+/// On a light canvas, darken low-contrast indexed colours toward the text
+/// colour so shell prompts and TUI output stay readable.
+fn readable_on_terminal(color: Color32, p: &crate::theme::Palette) -> Color32 {
+    let bg = p.terminal_bg;
+    if luminance(bg) <= 0.5 || contrast(color, bg) >= 3.5 {
+        return color;
+    }
+    let text = p.text;
+    for step in 1..=16 {
+        let t = step as f32 / 16.0;
+        let mix = |a: u8, b: u8| -> u8 {
+            (a as f32 + (b as f32 - a as f32) * t)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        let candidate = Color32::from_rgb(
+            mix(color.r(), text.r()),
+            mix(color.g(), text.g()),
+            mix(color.b(), text.b()),
+        );
+        if contrast(candidate, bg) >= 4.0 {
+            return candidate;
+        }
+    }
+    text
 }
 
 fn brighten(fg: Color32, spec: ColorSpec, p: &crate::theme::Palette) -> Color32 {
@@ -868,7 +914,11 @@ fn brighten(fg: Color32, spec: ColorSpec, p: &crate::theme::Palette) -> Color32 
             return p.ansi[index as usize + 8];
         }
     }
-    fg.gamma_multiply(1.12)
+    if luminance(p.terminal_bg) > 0.5 {
+        fg.gamma_multiply(0.88)
+    } else {
+        fg.gamma_multiply(1.12)
+    }
 }
 
 fn handle_input(
@@ -1667,6 +1717,23 @@ mod tests {
             egui::Color32::from_rgb(8, 8, 8)
         );
         assert_eq!(indexed_color(15, &palette), palette.ansi[15]);
+    }
+
+    #[test]
+    fn light_terminal_keeps_indexed_colours_readable() {
+        let palette = crate::theme::Theme::new(
+            lazecode_core::ThemeMode::Light,
+            lazecode_core::ThemeSkin::Graphite,
+        )
+        .palette;
+        for index in [16, 46, 196, 231, 244, 250, 255] {
+            let color = indexed_color(index, &palette);
+            let ratio = contrast(color, palette.terminal_bg);
+            assert!(
+                ratio >= 3.0,
+                "indexed {index} on light terminal is {ratio:.1}:1"
+            );
+        }
     }
 
     #[test]

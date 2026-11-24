@@ -146,6 +146,14 @@ fn log_query_fingerprint(query: &lazecode_core::LogQuery) -> String {
     )
 }
 
+/// Compact payload fingerprint for job keys. Mutating commands with different
+/// payloads must not be silently deduplicated by `spawn`.
+fn payload_hash<T: std::hash::Hash>(value: &T) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(value, &mut hasher);
+    std::hash::Hasher::finish(&hasher)
+}
+
 pub enum JobResult {
     ProjectLoaded {
         path: PathBuf,
@@ -161,6 +169,9 @@ pub enum JobResult {
     },
     CmpSessionLoaded {
         root: PathBuf,
+        from: String,
+        to: String,
+        local: bool,
         result: Result<Vec<lazecode_git::CompareFile>, String>,
     },
     LogLoaded {
@@ -266,6 +277,15 @@ pub struct JobQueue {
     /// Worktrees whose reload was requested mid-scan; re-queued when the running
     /// scan completes so watcher bursts coalesce.
     pending_trees: HashSet<PathBuf>,
+    /// Log/branch refreshes requested while the same query was in flight.
+    /// Dropping these would leave the panel showing pre-op data.
+    pending_log: HashSet<(PathBuf, usize)>,
+    pending_branches: HashSet<PathBuf>,
+    /// Diff/compare refreshes requested while the same key was in flight.
+    /// Without these, an operation that lands mid-load can leave the old
+    /// pre-operation content painted forever.
+    pending_diffs: HashSet<String>,
+    pending_compare_local: HashSet<String>,
     /// Cancel flags for the latest find-in-files per worktree, so rapid typing
     /// cannot leave a full-tree scan per keystroke running.
     search_cancels: HashMap<PathBuf, (u64, Arc<AtomicBool>)>,
@@ -281,6 +301,10 @@ impl JobQueue {
             in_flight: HashSet::new(),
             pending_git: HashSet::new(),
             pending_trees: HashSet::new(),
+            pending_log: HashSet::new(),
+            pending_branches: HashSet::new(),
+            pending_diffs: HashSet::new(),
+            pending_compare_local: HashSet::new(),
             search_cancels: HashMap::new(),
         }
     }
@@ -290,10 +314,10 @@ impl JobQueue {
         name: &'static str,
         key: String,
         job: impl FnOnce() -> JobResult + Send + 'static,
-    ) {
+    ) -> bool {
         if !self.in_flight.insert(key.clone()) {
             log::debug!("dropping duplicate {name} job for {key}");
-            return;
+            return false;
         }
         let tx = self.tx.clone();
         let notifier = self.notifier.clone();
@@ -319,6 +343,9 @@ impl JobQueue {
         if let Err(err) = thread {
             self.in_flight.remove(&key);
             log::error!("cannot spawn {name} job: {err}");
+            false
+        } else {
+            true
         }
     }
 
@@ -383,7 +410,8 @@ impl JobQueue {
             offset
         );
         let job_root = root.clone();
-        self.spawn("log", key, move || {
+        let pending_key = (root.clone(), offset);
+        let spawned = self.spawn("log", key, move || {
             let options = log_options_from_query(&query, &job_root, LOG_PAGE_SIZE, offset);
             let result = match lazecode_git::log(&job_root, options) {
                 Ok(commits) => {
@@ -400,12 +428,15 @@ impl JobQueue {
                 result,
             }
         });
+        if !spawned {
+            self.pending_log.insert(pending_key);
+        }
     }
 
     pub fn refresh_branches(&mut self, root: PathBuf) {
         let key = format!("branches:{}", root.display());
         let job_root = root.clone();
-        self.spawn("branches", key, move || {
+        let spawned = self.spawn("branches", key, move || {
             let result = lazecode_git::branches(&job_root).unwrap_or_default();
             let tags = lazecode_git::tags(&job_root).unwrap_or_default();
             JobResult::BranchesLoaded {
@@ -414,6 +445,9 @@ impl JobQueue {
                 tags,
             }
         });
+        if !spawned {
+            self.pending_branches.insert(root);
+        }
     }
 
     pub fn commit_details(&mut self, root: PathBuf, id: String) {
@@ -436,10 +470,13 @@ impl JobQueue {
         let key = format!("diff:{}:{source:?}", root.display());
         let job_root = root.clone();
         let job_source = source.clone();
-        self.spawn("diff", key, move || {
+        let spawned = self.spawn("diff", key.clone(), move || {
             let result = match &job_source {
                 DiffSource::Worktree { path } => {
                     lazecode_git::file_diff(&job_root, path).map_err(|err| err.to_string())
+                }
+                DiffSource::Index { path } => {
+                    lazecode_git::index_file_diff(&job_root, path).map_err(|err| err.to_string())
                 }
                 DiffSource::Commit { commit, path } => {
                     lazecode_git::commit_file_diff(&job_root, commit, path)
@@ -471,6 +508,29 @@ impl JobQueue {
                 result,
             }
         });
+        if !spawned {
+            self.pending_diffs.insert(key);
+        }
+    }
+
+    fn load_compare_local(&mut self, root: PathBuf, commit: String) {
+        let key = format!("cmplocal:{root:?}:{commit}");
+        let job_root = root.clone();
+        let job_commit = commit.clone();
+        let spawned = self.spawn("compare-local", key.clone(), move || {
+            let result = lazecode_git::compare_commit_to_worktree(&job_root, &job_commit)
+                .map_err(|err| err.to_string());
+            JobResult::CmpSessionLoaded {
+                root: job_root,
+                from: job_commit,
+                to: String::new(),
+                local: true,
+                result,
+            }
+        });
+        if !spawned {
+            self.pending_compare_local.insert(key);
+        }
     }
     #[allow(dead_code)]
     pub fn file_diff(&mut self, root: PathBuf, path: String) {
@@ -647,7 +707,7 @@ impl JobQueue {
                 if let Some(project) = model.active_project() {
                     let root = project.active_root().to_path_buf();
                     let zh = model.settings.language.is_zh();
-                    let key = format!("stage:{}", root.display());
+                    let key = format!("stage:{}:{}", root.display(), paths.join("\u{1}"));
                     let job_root = root.clone();
                     self.spawn("stage", key, move || {
                         let result = lazecode_git::stage(&job_root, &paths);
@@ -680,7 +740,7 @@ impl JobQueue {
                 if let Some(project) = model.active_project() {
                     let root = project.active_root().to_path_buf();
                     let zh = model.settings.language.is_zh();
-                    let key = format!("unstage:{}", root.display());
+                    let key = format!("unstage:{}:{}", root.display(), paths.join("\u{1}"));
                     let job_root = root.clone();
                     self.spawn("unstage", key, move || {
                         let result = lazecode_git::unstage(&job_root, &paths);
@@ -1077,7 +1137,7 @@ impl JobQueue {
                 }
                 let root = project.active_root().to_path_buf();
                 let zh = model.settings.language.is_zh();
-                let key = format!("checkout:{}", root.display());
+                let key = format!("checkout:{}:{name}", root.display());
                 let job_root = root.clone();
                 self.spawn("checkout", key, move || {
                     let result = lazecode_git::checkout_branch(&job_root, &name);
@@ -1115,7 +1175,11 @@ impl JobQueue {
                 };
                 let root = project.active_root().to_path_buf();
                 let zh = model.settings.language.is_zh();
-                let key = format!("branch:{}", root.display());
+                let key = format!(
+                    "branch:{}:{name}:{}:{checkout}",
+                    root.display(),
+                    start_point.as_deref().unwrap_or("")
+                );
                 let job_root = root.clone();
                 self.spawn("branch", key, move || {
                     let result = lazecode_git::create_branch_from(
@@ -1369,51 +1433,57 @@ impl JobQueue {
                     .active_project()
                     .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
-                self.spawn("push", format!("push:{root:?}:{branch}"), move || {
-                    let branch_result =
-                        lazecode_git::push(&root, &remote, &branch, set_upstream, force);
-                    let tags_result = if branch_result.is_ok() && push_tags {
-                        Some(lazecode_git::push_tags(&root, &remote))
-                    } else {
-                        None
-                    };
-                    let result = match (branch_result, tags_result) {
-                        (Ok(_text), Some(Err(err))) => {
-                            Err(anyhow::anyhow!("branch pushed, but tags failed: {err}"))
-                        }
-                        (Ok(text), _) => Ok(text),
-                        (Err(err), _) => Err(err),
-                    };
-                    match result {
-                        Ok(text) => JobResult::OpDone {
-                            root: root.clone(),
-                            message: {
-                                let trimmed = text.lines().last().unwrap_or("").to_string();
-                                if trimmed.is_empty() {
-                                    if zh {
-                                        format!("已推送到 {remote}")
+                self.spawn(
+                    "push",
+                    format!("push:{root:?}:{remote}:{branch}:{set_upstream}:{force}:{push_tags}"),
+                    move || {
+                        let branch_result =
+                            lazecode_git::push(&root, &remote, &branch, set_upstream, force);
+                        let tags_result = if branch_result.is_ok() && push_tags {
+                            Some(lazecode_git::push_tags(&root, &remote))
+                        } else {
+                            None
+                        };
+                        let result = match (branch_result, tags_result) {
+                            (Ok(_text), Some(Err(err))) => {
+                                Err(anyhow::anyhow!("branch pushed, but tags failed: {err}"))
+                            }
+                            (Ok(text), _) => Ok(text),
+                            (Err(err), _) => Err(err),
+                        };
+                        match result {
+                            Ok(text) => JobResult::OpDone {
+                                root: root.clone(),
+                                message: {
+                                    let trimmed = text.lines().last().unwrap_or("").to_string();
+                                    if trimmed.is_empty() {
+                                        if zh {
+                                            format!("已推送到 {remote}")
+                                        } else {
+                                            format!("Pushed to {remote}")
+                                        }
                                     } else {
-                                        format!("Pushed to {remote}")
+                                        trimmed
                                     }
-                                } else {
-                                    trimmed
-                                }
+                                },
+                                ok: true,
+                                refresh: true,
+                                reload_files: false,
+                                clear_commit_message: false,
                             },
-                            ok: true,
-                            refresh: true,
-                            reload_files: false,
-                            clear_commit_message: false,
-                        },
-                        Err(err) => JobResult::OpDone {
-                            root: root.clone(),
-                            message: err.to_string(),
-                            ok: false,
-                            refresh: false,
-                            reload_files: false,
-                            clear_commit_message: false,
-                        },
-                    }
-                });
+                            Err(err) => JobResult::OpDone {
+                                root: root.clone(),
+                                message: err.to_string(),
+                                ok: false,
+                                // A branch push may have succeeded before tag
+                                // pushing failed; refresh anyway.
+                                refresh: true,
+                                reload_files: false,
+                                clear_commit_message: false,
+                            },
+                        }
+                    },
+                );
             }
             Command::PushTag { remote, tag } => {
                 let root = model
@@ -1552,7 +1622,7 @@ impl JobQueue {
                     .unwrap_or_default();
                 self.spawn(
                     "remote-rename",
-                    format!("remote-rn:{root:?}:{from}"),
+                    format!("remote-rn:{root:?}:{from}:{to}"),
                     move || {
                         let ok = lazecode_git::remote_rename(&root, &from, &to);
                         let message = match &ok {
@@ -1577,7 +1647,7 @@ impl JobQueue {
                     .unwrap_or_default();
                 self.spawn(
                     "remote-url",
-                    format!("remote-url:{root:?}:{name}"),
+                    format!("remote-url:{root:?}:{name}:{url}"),
                     move || {
                         let ok = lazecode_git::remote_set_url(&root, &name, &url);
                         let message = match &ok {
@@ -1855,6 +1925,46 @@ impl JobQueue {
                     }
                 });
             }
+            Command::RevertContinue => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.active_root().to_path_buf())
+                    .unwrap_or_default();
+                self.spawn("revert-continue", format!("rvc:{root:?}"), move || {
+                    let result = lazecode_git::revert_continue(&root);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => "revert continuing".to_string(),
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
+            Command::RevertAbort => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.active_root().to_path_buf())
+                    .unwrap_or_default();
+                self.spawn("revert-abort", format!("rva:{root:?}"), move || {
+                    let result = lazecode_git::revert_abort(&root);
+                    JobResult::OpDone {
+                        root,
+                        message: match &result {
+                            Ok(_) => "revert aborted".to_string(),
+                            Err(err) => err.to_string(),
+                        },
+                        ok: result.is_ok(),
+                        refresh: true,
+                        reload_files: true,
+                        clear_commit_message: false,
+                    }
+                });
+            }
             Command::RevertCommit { hash } => {
                 let zh = model.settings.language.is_zh();
                 let root = model
@@ -1950,7 +2060,7 @@ impl JobQueue {
                 let message = message.clone();
                 self.spawn(
                     "squash",
-                    format!("sq:{root:?}:{}", hashes.len()),
+                    format!("sq:{root:?}:{}", payload_hash(&hashes)),
                     move || {
                         let result = lazecode_git::squash_commits(&root, &hashes, Some(&message));
                         JobResult::OpDone {
@@ -2418,16 +2528,23 @@ impl JobQueue {
                     .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 self.spawn("stash-clear", format!("stash-c:{root:?}"), move || {
-                    // 丢弃后索引前移，重复丢弃 stash@{0} 直到清空。
+                    // 丢弃后索引前移；先查列表，空列表是成功终点，而不是
+                    // 把 stash_drop 的「no entries」错误当成失败。
                     let mut dropped = 0usize;
                     let mut error = None;
                     loop {
+                        match lazecode_git::stash_list(&root) {
+                            Ok(list) if list.is_empty() => break,
+                            Ok(_) => {}
+                            Err(err) => {
+                                error = Some(err.to_string());
+                                break;
+                            }
+                        }
                         match lazecode_git::stash_drop(&root, "stash@{0}") {
                             Ok(_) => dropped += 1,
                             Err(err) => {
-                                if dropped == 0 {
-                                    error = Some(err.to_string());
-                                }
+                                error = Some(err.to_string());
                                 break;
                             }
                         }
@@ -2454,28 +2571,32 @@ impl JobQueue {
                     .map(|project| project.active_root().to_path_buf())
                     .unwrap_or_default();
                 let name = name.clone();
-                self.spawn("shelf-save", format!("shelf:{root:?}:{name}"), move || {
-                    // paths 空 = 全部已跟踪变更；否则只架藏给定路径
-                    // （对齐稳定版「只架藏勾选文件」）。
-                    let result = lazecode_git::shelf_save_paths(&root, &name, &paths);
-                    JobResult::OpDone {
-                        root,
-                        message: match &result {
-                            Ok(_) => {
-                                if zh {
-                                    format!("已贮藏为 {name}")
-                                } else {
-                                    format!("Shelved as {name}")
+                self.spawn(
+                    "shelf-save",
+                    format!("shelf:{root:?}:{name}:{}", payload_hash(&paths)),
+                    move || {
+                        // paths 空 = 全部已跟踪变更；否则只架藏给定路径
+                        // （对齐稳定版「只架藏勾选文件」）。
+                        let result = lazecode_git::shelf_save_paths(&root, &name, &paths);
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(_) => {
+                                    if zh {
+                                        format!("已贮藏为 {name}")
+                                    } else {
+                                        format!("Shelved as {name}")
+                                    }
                                 }
-                            }
-                            Err(err) => err.to_string(),
-                        },
-                        ok: result.is_ok(),
-                        refresh: true,
-                        reload_files: true,
-                        clear_commit_message: false,
-                    }
-                });
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: true,
+                            reload_files: true,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
             }
             Command::ShelfDelete(name) => {
                 let zh = model.settings.language.is_zh();
@@ -2608,7 +2729,11 @@ impl JobQueue {
                 let d_after = delete_after;
                 self.spawn(
                     "shelf-restore",
-                    format!("shelf-r:{root:?}:{name}"),
+                    format!(
+                        "shelf-r:{root:?}:{name}:{}:{}:{d_after}",
+                        payload_hash(&paths),
+                        payload_hash(&target_list)
+                    ),
                     move || {
                         // `paths` restores only selected files; `target_list`
                         // assigns them to that changelist (created if absent).
@@ -2642,7 +2767,11 @@ impl JobQueue {
                 let zh = model.settings.language.is_zh();
                 self.spawn(
                     "apply-patch",
-                    format!("apply:{}", root.display()),
+                    format!(
+                        "apply:{}:{}",
+                        root.display(),
+                        payload_hash(&(&patch, cached, reverse))
+                    ),
                     move || {
                         let result = lazecode_git::apply_patch(&root, &patch, cached, reverse);
                         match result {
@@ -2705,9 +2834,33 @@ impl JobQueue {
                     move || {
                         let result = lazecode_git::compare_commits(&root, &from, &to)
                             .map_err(|err| err.to_string());
-                        JobResult::CmpSessionLoaded { root, result }
+                        JobResult::CmpSessionLoaded {
+                            root,
+                            from,
+                            to,
+                            local: false,
+                            result,
+                        }
                     },
                 );
+            }
+            Command::OpenCompareWithLocal { commit } => {
+                let Some(project) = model.active_project_mut() else {
+                    return;
+                };
+                project.compare_session = Some(lazecode_core::model::CompareSession {
+                    from: commit.clone(),
+                    to: String::new(),
+                    local: true,
+                    loading: true,
+                    group_by_dir: true,
+                    root_expanded: true,
+                    ..Default::default()
+                });
+                let root = project.active_root().to_path_buf();
+                model.ui.sidebar_view = lazecode_core::model::SidebarView::Compare;
+                model.ui.sidebar_visible = true;
+                self.load_compare_local(root, commit);
             }
             Command::CompareSwap => {
                 let Some(project) = model.active_project_mut() else {
@@ -2716,6 +2869,9 @@ impl JobQueue {
                 let Some(session) = project.compare_session.as_mut() else {
                     return;
                 };
+                if session.local {
+                    return;
+                }
                 let old_from = session.from.clone();
                 let old_to = session.to.clone();
                 std::mem::swap(&mut session.from, &mut session.to);
@@ -2752,7 +2908,13 @@ impl JobQueue {
                     move || {
                         let result = lazecode_git::compare_commits(&root, &from, &to)
                             .map_err(|err| err.to_string());
-                        JobResult::CmpSessionLoaded { root, result }
+                        JobResult::CmpSessionLoaded {
+                            root,
+                            from,
+                            to,
+                            local: false,
+                            result,
+                        }
                     },
                 );
             }
@@ -2817,6 +2979,94 @@ impl JobQueue {
                     let root = project.active_root().to_path_buf();
                     self.diff_source(root, source);
                 }
+            }
+            Command::OpenDiffNewTab(path) => {
+                if let Some(project) = model.active_project_mut() {
+                    project.change_selection.clear();
+                    project.change_selection.insert(path.clone());
+                    project.change_anchor = Some(path.clone());
+                    let source = DiffSource::Worktree { path };
+                    project.open_diff_source_new_tab(source.clone());
+                    let root = project.active_root().to_path_buf();
+                    self.diff_source(root, source);
+                }
+            }
+            Command::OpenIndexDiff(path) => {
+                if let Some(project) = model.active_project_mut() {
+                    project.change_selection.clear();
+                    project.change_selection.insert(path.clone());
+                    project.change_anchor = Some(path.clone());
+                    let source = DiffSource::Index { path };
+                    project.open_diff_source(source.clone());
+                    let root = project.active_root().to_path_buf();
+                    self.diff_source(root, source);
+                }
+            }
+            Command::GetFileFromRevision { path, revision } => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.active_root().to_path_buf())
+                    .unwrap_or_default();
+                let zh = model.settings.language.is_zh();
+                self.spawn(
+                    "get-from-revision",
+                    format!("get-rev:{root:?}:{revision}:{path}"),
+                    move || {
+                        let result = lazecode_git::checkout_revision_path(&root, &revision, &path);
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(()) => {
+                                    if zh {
+                                        format!("已从 {revision} 恢复 {path}")
+                                    } else {
+                                        format!("Restored {path} from {revision}")
+                                    }
+                                }
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            // A failed checkout can still have touched paths
+                            // (for example, an untracked-file collision after
+                            // earlier writes). Refresh even on error.
+                            refresh: true,
+                            reload_files: true,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
+            }
+            Command::CherryPickChanges { paths, target } => {
+                let root = model
+                    .active_project()
+                    .map(|project| project.active_root().to_path_buf())
+                    .unwrap_or_default();
+                let zh = model.settings.language.is_zh();
+                let key_paths = paths.clone();
+                self.spawn(
+                    "cherry-pick-changes",
+                    format!(
+                        "cherry-changes:{root:?}:{target}:{}",
+                        payload_hash(&key_paths)
+                    ),
+                    move || {
+                        let result = cherry_pick_selected_changes(&root, &key_paths, &target);
+                        JobResult::OpDone {
+                            root,
+                            message: match &result {
+                                Ok(_) if zh => {
+                                    format!("已将选中更改移动到 {target}（未提交）")
+                                }
+                                Ok(message) => message.clone(),
+                                Err(err) => err.to_string(),
+                            },
+                            ok: result.is_ok(),
+                            refresh: true,
+                            reload_files: true,
+                            clear_commit_message: false,
+                        }
+                    },
+                );
             }
             Command::OpenCommitDiff { commit, path } => {
                 if let Some(project) = model.active_project_mut() {
@@ -3242,15 +3492,6 @@ impl JobQueue {
                     }
                 }
             }
-            Command::RestartTerminal(id) => {
-                let settings = model.settings.clone();
-                let notifier = model.notifier.clone();
-                if let Some(project) = model.active_project_mut() {
-                    if let Err(err) = project.restart_terminal(id, &settings, notifier) {
-                        model.toast(err, ToastKind::Error);
-                    }
-                }
-            }
             Command::CloseTerminal(id) => {
                 runtime.request_terminal_close(
                     model,
@@ -3312,7 +3553,7 @@ impl JobQueue {
                         }
                     }
                 }
-                let key = format!("worktree-add:{}", name);
+                let key = format!("worktree-add:{}:{name}", project_root.display());
                 let job_name = name.clone();
                 let branch_clone = branch.clone();
                 self.spawn("worktree-add", key, move || {
@@ -3422,7 +3663,7 @@ impl JobQueue {
                         runtime.forget_terminal(id);
                     }
                 }
-                let key = format!("worktree-remove:{}", name);
+                let key = format!("worktree-remove:{}:{name}", project_root.display());
                 let job_name = name.clone();
                 self.spawn("worktree-remove", key, move || {
                     let result =
@@ -3463,22 +3704,50 @@ impl JobQueue {
                     ToastKind::Error,
                 ),
             },
-            JobResult::CmpSessionLoaded { root, result } => {
+            JobResult::CmpSessionLoaded {
+                root,
+                from,
+                to,
+                local,
+                result,
+            } => {
+                let pending_key = local.then(|| format!("cmplocal:{root:?}:{from}"));
+                let rerun = pending_key
+                    .as_ref()
+                    .is_some_and(|key| self.pending_compare_local.remove(key));
+                let reload_commit = from.clone();
+                let mut reload = false;
                 if let Some(project) = model.project_mut_for_git_root(&root) {
                     if let Some(session) = project.compare_session.as_mut() {
-                        match result {
-                            Ok(files) => {
-                                session.nav_order = lazecode_core::model::compare_nav_order(&files);
-                                session.files = files;
-                                session.loading = false;
-                            }
-                            Err(_err) => {
-                                session.files.clear();
-                                session.nav_order.clear();
-                                session.loading = false;
+                        // A newer compare request may have replaced the
+                        // session while this job was running; drop the stale
+                        // file list instead of filling the wrong drawer.
+                        if session.from == from && session.to == to && session.local == local {
+                            if rerun {
+                                // A newer refresh was requested while this
+                                // scan ran; its result is the one to show.
+                                session.loading = true;
+                                reload = true;
+                            } else {
+                                match result {
+                                    Ok(files) => {
+                                        session.nav_order =
+                                            lazecode_core::model::compare_nav_order(&files);
+                                        session.files = files;
+                                        session.loading = false;
+                                    }
+                                    Err(_err) => {
+                                        session.files.clear();
+                                        session.nav_order.clear();
+                                        session.loading = false;
+                                    }
+                                }
                             }
                         }
                     }
+                }
+                if reload {
+                    self.load_compare_local(root, reload_commit);
                 }
             }
             JobResult::TreeLoaded { root, tree } => {
@@ -3511,6 +3780,7 @@ impl JobQueue {
                 }
             }
             JobResult::GitRefreshed { root, result } => {
+                let mut local_compare = None;
                 if let Some(project) = model.project_mut_for_git_root(&root) {
                     let worktree_index = project
                         .worktrees
@@ -3538,6 +3808,22 @@ impl JobQueue {
                         self.refresh_log(root.clone(), query, 0);
                         self.refresh_branches(root.clone());
                     }
+                    if project.active_root() == root {
+                        local_compare = project
+                            .compare_session
+                            .as_ref()
+                            .filter(|session| session.local)
+                            .map(|session| session.from.clone());
+                    }
+                }
+                if let Some(commit) = local_compare {
+                    if let Some(session) = model
+                        .project_mut_for_git_root(&root)
+                        .and_then(|project| project.compare_session.as_mut())
+                    {
+                        session.loading = true;
+                    }
+                    self.load_compare_local(root.clone(), commit);
                 }
                 if self.pending_git.remove(&root) {
                     self.refresh_git(root, None);
@@ -3550,6 +3836,7 @@ impl JobQueue {
                 offset,
                 result,
             } => {
+                let rerun = self.pending_log.remove(&(root.clone(), offset));
                 let Some(project) = model.project_mut_for_git_root(&root) else {
                     return;
                 };
@@ -3558,6 +3845,10 @@ impl JobQueue {
                 let stale = log_query_fingerprint(&project.log_query.clone())
                     != log_query_fingerprint(&query);
                 if stale {
+                    let latest = project.log_query.clone();
+                    if rerun {
+                        self.refresh_log(root, latest, offset);
+                    }
                     return;
                 }
                 match result {
@@ -3606,11 +3897,18 @@ impl JobQueue {
                 }
                 project.log_branch = branch;
                 project.log_loading = false;
+                if rerun {
+                    let latest = project.log_query.clone();
+                    self.refresh_log(root, latest, offset);
+                }
             }
             JobResult::BranchesLoaded { root, result, tags } => {
                 if let Some(project) = model.project_mut_for_git_root(&root) {
                     project.branches = result;
                     project.tags = tags;
+                }
+                if self.pending_branches.remove(&root) {
+                    self.refresh_branches(root);
                 }
             }
             JobResult::CommitDetails { root, id, result } => {
@@ -3626,6 +3924,9 @@ impl JobQueue {
                         Err(err) => {
                             if selected {
                                 project.commit_details = None;
+                                // Keep `commit_details_attempted` set: retrying
+                                // every poll would spin forever on a missing or
+                                // corrupt commit. Re-selecting the row clears it.
                                 error = Some(err);
                             }
                         }
@@ -3640,6 +3941,27 @@ impl JobQueue {
                 source,
                 result,
             } => {
+                // A refresh requested while this load was in flight is more
+                // recent than this result (stage/rollback/commit landed in
+                // between). Drop the stale payload and reload once.
+                let key = format!("diff:{}:{source:?}", root.display());
+                if self.pending_diffs.remove(&key) {
+                    let still_open = model
+                        .project_mut_for_git_root(&root)
+                        .is_some_and(|project| {
+                            project.tabs.iter().any(|tab| {
+                                tab.worktree == root
+                                    && matches!(
+                                        &tab.kind,
+                                        TabKind::Diff(diff) if diff.source == source
+                                    )
+                            })
+                        });
+                    if still_open {
+                        self.diff_source(root, source);
+                    }
+                    return;
+                }
                 if let Some(project) = model.project_mut_for_git_root(&root) {
                     project.set_diff_for_source(&root, &source, result);
                 }
@@ -3839,6 +4161,18 @@ impl JobQueue {
                         project.invalidate_stash_details();
                     }
                 }
+                if completion.key.starts_with("shelf")
+                    || completion.key.starts_with("cherry-changes")
+                {
+                    // Create/restore-delete/rename all change the shelf list;
+                    // it is otherwise loaded only once per checkout.
+                    runtime.shelf_loaded = None;
+                    runtime.shelf_entries.clear();
+                    runtime.shelf_deleted.clear();
+                    runtime.shelf_files_map.clear();
+                    runtime.shelf_selected = None;
+                    runtime.shelf_file_sel.clear();
+                }
                 model.toast(
                     message,
                     if ok {
@@ -3856,13 +4190,31 @@ impl JobQueue {
                     self.refresh_log(root.clone(), log_query, 0);
                     self.refresh_branches(root.clone());
                     let project = &mut model.projects[index];
+                    // Hunk stage/rollback, staging a file or a commit all
+                    // change what a worktree diff should show. Re-request
+                    // those tabs instead of leaving the pre-op diff painted.
+                    let mut stale_diffs = Vec::new();
                     // Sequencer/conflict state follows every git op, but only
                     // the checkout that actually ran the operation owns it.
                     let active_checkout = project.active_root() == root;
                     if active_checkout {
                         project.refresh_conflicts();
                     }
+                    let local_compare = if active_checkout {
+                        project
+                            .compare_session
+                            .as_ref()
+                            .filter(|session| session.local)
+                            .map(|session| session.from.clone())
+                    } else {
+                        None
+                    };
                     project.commit_details = None;
+                    // OpDone cleared the cached details; allow the next
+                    // ensure_selected_details poll to refetch them. Without
+                    // this the details column stays blank after stage/fetch/
+                    // commit until the user re-clicks the commit.
+                    project.commit_details_attempted = None;
                     if clear_commit_message {
                         if ok {
                             // 提交成功：入历史（去重、上限 10 条，对齐
@@ -3892,6 +4244,45 @@ impl JobQueue {
                             }
                         }
                     }
+                    for tab in &project.tabs {
+                        if tab.worktree != root {
+                            continue;
+                        }
+                        if let TabKind::Diff(diff) = &tab.kind {
+                            if matches!(
+                                diff.source,
+                                DiffSource::Worktree { .. }
+                                    | DiffSource::Index { .. }
+                                    | DiffSource::CompareWithLocal { .. }
+                            ) {
+                                stale_diffs.push(diff.source.clone());
+                            }
+                        }
+                    }
+                    for source in stale_diffs {
+                        if let Some(project) = model.project_mut_for_git_root(&root) {
+                            if let Some(tab) = project.tabs.iter_mut().find(|tab| {
+                                tab.worktree == root
+                                    && matches!(&tab.kind, TabKind::Diff(diff) if diff.source == source)
+                            }) {
+                                if let TabKind::Diff(diff) = &mut tab.kind {
+                                    diff.loading = true;
+                                    diff.error = None;
+                                }
+                            }
+                        }
+                        self.diff_source(root.clone(), source);
+                    }
+                    if let Some(commit) = local_compare {
+                        if let Some(project) = model.project_mut_for_git_root(&root) {
+                            if let Some(session) = project.compare_session.as_mut() {
+                                if session.local {
+                                    session.loading = true;
+                                }
+                            }
+                        }
+                        self.load_compare_local(root.clone(), commit);
+                    }
                 }
             }
             JobResult::Saved {
@@ -3901,6 +4292,7 @@ impl JobQueue {
                 result,
             } => {
                 let mut save_error = None;
+                let mut saved = false;
                 if let Some(project) = model.project_mut_for_git_root(&root) {
                     if let Some(tab) = project.tabs.iter_mut().find(
                         |tab| matches!(&tab.kind, TabKind::File(file) if file.doc.path == path),
@@ -3913,6 +4305,7 @@ impl JobQueue {
                                         file.doc.dirty = false;
                                     }
                                     file.stamp_disk();
+                                    saved = true;
                                 }
                             }
                         }
@@ -3927,6 +4320,27 @@ impl JobQueue {
                         },
                         ToastKind::Error,
                     );
+                }
+                if saved {
+                    let commit = model
+                        .project_mut_for_git_root(&root)
+                        .filter(|project| project.active_root() == root)
+                        .and_then(|project| {
+                            project
+                                .compare_session
+                                .as_ref()
+                                .filter(|session| session.local)
+                                .map(|session| session.from.clone())
+                        });
+                    if let Some(commit) = commit {
+                        if let Some(session) = model
+                            .project_mut_for_git_root(&root)
+                            .and_then(|project| project.compare_session.as_mut())
+                        {
+                            session.loading = true;
+                        }
+                        self.load_compare_local(root, commit);
+                    }
                 }
             }
             JobResult::WorktreeAdded {
@@ -4016,6 +4430,103 @@ struct SaveData {
     encoding: Option<&'static encoding_rs::Encoding>,
     eol: lazecode_fs::Eol,
     bom: bool,
+}
+
+/// Move only the selected local changes to `target` using a temporary shelf.
+/// Refuses to proceed if other local changes exist, so the target checkout
+/// cannot silently carry them across; restores the selected changes on the
+/// original branch if checkout fails.
+fn cherry_pick_selected_changes(
+    root: &std::path::Path,
+    paths: &[String],
+    target: &str,
+) -> anyhow::Result<String> {
+    let target = target.trim();
+    if target.is_empty() {
+        anyhow::bail!("target branch is empty");
+    }
+    if paths.is_empty() {
+        anyhow::bail!("no changes selected");
+    }
+    let snapshot = lazecode_git::snapshot(root)?;
+    let Some(current) = snapshot.branch.clone() else {
+        anyhow::bail!("cannot cherry-pick while HEAD is detached");
+    };
+    if current == target {
+        anyhow::bail!("already on branch '{target}'");
+    }
+    let selected: std::collections::BTreeSet<&str> = paths.iter().map(String::as_str).collect();
+    let changed: std::collections::BTreeSet<&str> = snapshot
+        .changes
+        .iter()
+        .map(|change| change.path.as_str())
+        .collect();
+    if changed.is_empty() {
+        anyhow::bail!("no local changes to cherry-pick");
+    }
+    if let Some(path) = changed.iter().find(|path| !selected.contains(**path)) {
+        anyhow::bail!(
+            "unselected local change would be carried to '{target}': {path}; \
+             commit, stash, or include it first"
+        );
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let temp = format!("lazecode-cherry-pick-{stamp}");
+    let shelf_exists = |name: &str| {
+        lazecode_git::shelf_list(root)
+            .map(|shelves| shelves.iter().any(|shelf| shelf.name == name))
+            .unwrap_or(false)
+    };
+    if shelf_exists(&temp) {
+        anyhow::bail!("temporary shelf '{temp}' already exists; nothing was moved");
+    }
+    // Shelve first: this reverts exactly the selected paths, leaving a clean
+    // worktree for the target checkout.
+    if let Err(err) = lazecode_git::shelf_save_paths(root, &temp, paths) {
+        if !shelf_exists(&temp) {
+            return Err(anyhow::anyhow!(
+                "could not prepare selected changes: {err}; nothing was moved"
+            ));
+        }
+        // `shelf_save_paths` writes the shelf before retracting the paths. If
+        // a retraction failed midway, the shelf is the only complete copy of
+        // the selection; try to put it back instead of claiming nothing moved.
+        return Err(match shelf_restore_scoped(root, &temp, None, None, true) {
+            Ok(()) => anyhow::anyhow!(
+                "could not prepare selected changes: {err}; changes restored on '{current}'"
+            ),
+            Err(restore_err) => anyhow::anyhow!(
+                "could not prepare selected changes: {err}; also failed to restore them: \
+                 {restore_err} (shelf '{temp}' was kept)"
+            ),
+        });
+    }
+    if let Err(err) = lazecode_git::checkout_branch(root, target) {
+        let restore = shelf_restore_scoped(root, &temp, None, None, true);
+        return Err(match restore {
+            Ok(()) => {
+                anyhow::anyhow!(
+                    "cannot check out '{target}': {err}; changes restored on '{current}'"
+                )
+            }
+            Err(restore_err) => anyhow::anyhow!(
+                "cannot check out '{target}': {err}; also failed to restore changes on \
+                 '{current}': {restore_err} (shelf '{temp}' was kept)"
+            ),
+        });
+    }
+    match shelf_restore_scoped(root, &temp, None, None, true) {
+        Ok(()) => Ok(format!(
+            "Moved selected changes from '{current}' onto '{target}' (uncommitted)"
+        )),
+        Err(err) => Err(anyhow::anyhow!(
+            "changes were moved to '{target}' but applying them did not complete cleanly: \
+             {err}; inspect the worktree and shelf '{temp}'"
+        )),
+    }
 }
 
 /// Restore a shelf (all or `paths` only) into `target_list` (created if
@@ -4661,6 +5172,116 @@ mod tests {
             git_ok(&root, &["remote", "get-url", "upstream"]),
             remote.to_str().unwrap()
         );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    #[test]
+    fn cherry_pick_selected_changes_moves_only_selected_changes() {
+        let (root, remote) = temp_repo("cherry-changes");
+        git_ok(&root, &["init", "-q", "-b", "main"]);
+        git_ok(&root, &["config", "user.name", "T"]);
+        git_ok(&root, &["config", "user.email", "t@e"]);
+        commit(&root, "a.txt", "base\n", "base");
+        git_ok(&root, &["branch", "target"]);
+
+        // An unselected change must block the move instead of leaking onto
+        // the target branch.
+        std::fs::write(root.join("a.txt"), "selected\n").unwrap();
+        std::fs::write(root.join("b.txt"), "other\n").unwrap();
+        let err = cherry_pick_selected_changes(&root, &["a.txt".to_string()], "target")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unselected"), "{err}");
+        assert_eq!(git_ok(&root, &["branch", "--show-current"]), "main");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "selected\n"
+        );
+
+        std::fs::remove_file(root.join("b.txt")).unwrap();
+        let message =
+            cherry_pick_selected_changes(&root, &["a.txt".to_string()], "target").unwrap();
+        assert!(message.contains("target"), "{message}");
+        assert_eq!(git_ok(&root, &["branch", "--show-current"]), "target");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "selected\n"
+        );
+        assert!(lazecode_git::shelf_list(&root).unwrap().is_empty());
+        git_ok(&root, &["checkout", "-f", "main"]);
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "base\n"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    #[test]
+    fn cherry_pick_moves_untracked_files_and_restores_on_checkout_failure() {
+        let (root, remote) = temp_repo("cherry-untracked");
+        git_ok(&root, &["init", "-q", "-b", "main"]);
+        git_ok(&root, &["config", "user.name", "T"]);
+        git_ok(&root, &["config", "user.email", "t@e"]);
+        commit(&root, "a.txt", "base\n", "base");
+        git_ok(&root, &["branch", "target"]);
+
+        std::fs::write(root.join("a.txt"), "selected\n").unwrap();
+        std::fs::write(root.join("new.txt"), "untracked\n").unwrap();
+        let paths = ["a.txt".to_string(), "new.txt".to_string()];
+        let message = cherry_pick_selected_changes(&root, &paths, "target").unwrap();
+        assert!(message.contains("target"), "{message}");
+        assert_eq!(git_ok(&root, &["branch", "--show-current"]), "target");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "selected\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("new.txt")).unwrap(),
+            "untracked\n"
+        );
+        assert!(lazecode_git::shelf_list(&root).unwrap().is_empty());
+
+        // A failed checkout must put the selection back on the original
+        // branch and remove the temporary shelf.
+        git_ok(&root, &["checkout", "-f", "main"]);
+        std::fs::remove_file(root.join("new.txt")).unwrap();
+        std::fs::write(root.join("a.txt"), "rollback\n").unwrap();
+        let err = cherry_pick_selected_changes(&root, &["a.txt".to_string()], "missing-branch")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("cannot check out"), "{err}");
+        assert_eq!(git_ok(&root, &["branch", "--show-current"]), "main");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "rollback\n"
+        );
+        assert!(lazecode_git::shelf_list(&root).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    #[test]
+    fn stash_clear_command_drops_every_entry_and_reports_success() {
+        let (root, remote) = temp_repo("stash-clear");
+        git_ok(&root, &["init", "-q", "-b", "main"]);
+        git_ok(&root, &["config", "user.name", "T"]);
+        git_ok(&root, &["config", "user.email", "t@e"]);
+        commit(&root, "a.txt", "base\n", "base");
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        git_ok(&root, &["stash", "push", "-q", "-m", "one"]);
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        git_ok(&root, &["stash", "push", "-q", "-m", "two"]);
+        assert_eq!(lazecode_git::stash_list(&root).unwrap().len(), 2);
+
+        let (mut model, mut runtime, mut queue) = open_command_model(&root);
+        run_command(&mut queue, &mut model, &mut runtime, Command::StashClear);
+        assert!(lazecode_git::stash_list(&root).unwrap().is_empty());
+        assert!(model
+            .toasts
+            .last()
+            .is_some_and(|toast| toast.message.contains('2')));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&remote);
     }

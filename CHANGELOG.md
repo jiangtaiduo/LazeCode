@@ -6,6 +6,73 @@ All notable changes to LazeCode are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.12] - 2026-11-24
+
+### Added
+
+- Seven curated theme pairs replace the 21 near-duplicate skins: Graphite,
+  Rice Paper, Tundra, Abyss, Iris, Amber and Rosewood. Each pair is designed
+  as a dark/light unit; one selection applies to both modes.
+- Settings → Appearance now shows seven dual-preview cards instead of a
+  21-row dropdown, with the dark and light miniatures visible side by side.
+- The tracked-file context menu's remaining stable placeholders are now
+  functional: **Show Diff in a New Tab**, **Compare with Local** (index ↔
+  working tree), **Cherry-Pick Selected Changes** (moves only the selected
+  changes to a target branch via a temporary shelf and refuses to carry
+  unselected edits), **Extract Selected Changes to a Separate Commit…**,
+  **Drop Selected Changes**, **Get from Revision…**, and **Show Changes to
+  Parents**.
+- Light mode now uses a light terminal canvas and a light-mode ANSI-16; the
+  256-colour cube and grayscale ramp are darkened when they would fall below
+  readable contrast.
+- The snapshot harness accepts `LAZE_THEME=dark|light` and
+  `LAZE_SKIN=<id>` for deterministic theme review.
+
+### Changed
+
+- Theme selection is a single `skin` setting. Legacy `dark_skin` /
+  `light_skin` values are read once and migrated; every old skin id remains a
+  serde alias, so existing `settings.toml` files keep loading.
+- The default theme is **Graphite** (the refined Studio neutral family).
+- Main chrome is opaque and the full-window gradient is gone. Accent is
+  reserved for actions/focus/selection; semantic and syntax role hues stay
+  fixed across themes.
+- Old ids map to the nearest curated family (`studio` → Graphite, `nordic` /
+  `riviera` / `teal-lemon` → Abyss, `garden` / `jade` / `lotus` / `sand-sage`
+  → Tundra, `royal` / `violet-dusk` → Iris, warm/gold skins → Amber,
+  `coral` / `hibiscus` / `plum-ridge` → Rosewood).
+- Consoles sidebar: removed the nonfunctional per-row kill/restart icons.
+  Project and worktree group summaries now count only consoles showing the
+  red output spinner, not every busy console.
+- Git commit detail card: subject and body wrap to the card width, the author
+  gets a full-width line, hash and date share a compact footer, and the default
+  card height grows from 90px to 132px so the message is readable without
+  dragging the splitter first.
+
+### Fixed
+
+- Light terminal prompts and indexed 256-colour output no longer disappear
+  against a light canvas.
+- Rollback/Drop on a mixed selection no longer permanently deletes untracked
+  files; rolling back a directory expands to its changed tracked files instead
+  of removing the directory recursively.
+- The local Compare drawer refreshes after saves and Git operations, and
+  **Get from Revision** accepts `HEAD`, tags and branches and refreshes even
+  when the checkout fails partway. File-level patch actions are now labelled
+  **Copy File Patch** / **Create File Patch…**.
+- The Compare drawer now opens a file diff on double-click only; a single
+  click selects the row, matching the project tree and diff views.
+- Dialog, menu and toast shadows use a layered low-alpha penumbra instead of a
+  single 60%-black blurred rect, removing the hard rectangular halo (and the
+  light-mode shadow is roughly half as strong).
+- Commit/branch/tag context menu → **Compare with local** now opens the
+  Compare drawer with every file changed between the selected revision and
+  the local working tree, including commits made since that revision,
+  uncommitted tracked edits and untracked files. Double-clicking a file opens
+  its revision↔worktree diff, and the diff's previous/next-file navigation
+  follows the whole drawer list. Root-level files are no longer repeated
+  under every directory in the drawer tree.
+
 ## [0.4.11] - 2026-11-22
 
 ### Added

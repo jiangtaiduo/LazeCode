@@ -321,6 +321,20 @@ fn draw_tree(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Them
                     ui.painter()
                         .rect_filled(draw_rect, egui::CornerRadius::same(4), p.hover);
                 }
+                // The active editor file keeps its own marker, independent of
+                // the multi-selection: locating a tab must not wipe the work
+                // set, and a stale selection must not hide where the active
+                // file lives.
+                if active_rel.as_ref().is_some_and(|rel| rel == &row.path) {
+                    ui.painter().rect_filled(
+                        Rect::from_min_size(
+                            Pos2::new(draw_rect.left() + 1.0, draw_rect.top() + 3.0),
+                            Vec2::new(2.0, ROW_H - 6.0),
+                        ),
+                        egui::CornerRadius::same(1),
+                        p.accent,
+                    );
+                }
                 if let Some((target_rel, quiet)) = &target_reveal {
                     if &row.path == target_rel {
                         if *quiet {

@@ -7880,6 +7880,14 @@ fn draw_interactive_rebase_dialog(
     }
 }
 
+/// Rename only accepts a single path component. Allowing `../other` here
+/// would turn a rename into a silent move outside the current directory.
+fn is_plain_name(name: &str) -> bool {
+    let mut components = std::path::Path::new(name).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+}
+
 /// 把一批路径移入系统废纸篓并收尾（对齐稳定版 deletePathsToTrash）：
 /// 逐个 trash、关闭已删除路径下的编辑器标签、按删除数量/失败名单提示，
 /// 最后刷新活动项目快照让变更列表收窄。目录路径会连带关闭其下所有标签。
@@ -7943,6 +7951,84 @@ fn delete_paths_to_trash(model: &mut AppModel, paths: &[std::path::PathBuf]) {
         );
     }
     model.queue(Command::ReloadGit);
+}
+
+/// Open buffers with unsaved edits covered by `paths` (a directory covers its
+/// children). The trash recovers the file on disk, but not the in-memory
+/// edits, so the delete confirmation has to name them.
+fn dirty_paths_under(model: &AppModel, paths: &[std::path::PathBuf]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for project in &model.projects {
+        for tab in &project.tabs {
+            let TabKind::File(file) = &tab.kind else {
+                continue;
+            };
+            if !file.doc.dirty {
+                continue;
+            }
+            let covered = paths.iter().any(|path| {
+                file.doc.path == *path || (path.is_dir() && file.doc.path.starts_with(path))
+            });
+            if covered {
+                let name = file.doc.title();
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Amber banner above the confirmation buttons: deleting files must never
+/// silently drop edits that only exist in memory.
+fn paint_unsaved_delete_warning(
+    ui: &Ui,
+    model: &AppModel,
+    theme: &Theme,
+    rect: Rect,
+    paths: &[std::path::PathBuf],
+) {
+    let dirty = dirty_paths_under(model, paths);
+    if dirty.is_empty() {
+        return;
+    }
+    let zh = model.settings.language.is_zh();
+    let mut list = dirty
+        .iter()
+        .take(3)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(if zh { "、" } else { ", " });
+    if dirty.len() > 3 {
+        if zh {
+            list.push_str(&format!(" 等 {} 个文件", dirty.len()));
+        } else {
+            list.push_str(&format!(" (+{})", dirty.len() - 3));
+        }
+    }
+    let text = if zh {
+        format!("有未保存的修改，删除后将无法恢复：{list}")
+    } else {
+        format!("Unsaved edits will be lost: {list}")
+    };
+    let band = Rect::from_min_max(
+        Pos2::new(rect.left() + 22.0, rect.bottom() - 80.0),
+        Pos2::new(rect.right() - 22.0, rect.bottom() - 56.0),
+    );
+    ui.painter().rect_filled(
+        band,
+        egui::CornerRadius::same(4),
+        theme.palette.amber.gamma_multiply(0.14),
+    );
+    text_clipped(
+        ui.painter(),
+        band.shrink2(Vec2::new(8.0, 4.0)),
+        &text,
+        FontId::proportional(10.5),
+        theme.palette.amber,
+        Align2::LEFT_CENTER,
+    );
 }
 
 fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme, screen: Rect) {
@@ -9696,6 +9782,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                 p.rose,
                 Align2::LEFT_CENTER,
             );
+            paint_unsaved_delete_warning(ui, model, theme, rect, std::slice::from_ref(path));
         }
         DialogState::ConfirmDeleteUntracked { paths } => {
             // 与 ConfirmDiscard 同款路径预览：前若干条 + 计数收尾。
@@ -9729,6 +9816,7 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                     p.text3,
                 );
             }
+            paint_unsaved_delete_warning(ui, model, theme, rect, paths);
         }
         DialogState::StashCreate {
             message,
@@ -10648,16 +10736,60 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                             crate::tr!(model, "Name cannot be empty", "名称不能为空").to_string(),
                         ),
                     };
+                } else if !is_plain_name(name) {
+                    rt.dialog = DialogState::RenamePath {
+                        old_path: old_path.clone(),
+                        value: value.clone(),
+                        error: Some(
+                            crate::tr!(
+                                model,
+                                "Enter a file name, not a path",
+                                "请输入文件名，不要包含路径"
+                            )
+                            .to_string(),
+                        ),
+                    };
+                } else if old_path.file_name() == Some(std::ffi::OsStr::new(name)) {
+                    rt.dialog = DialogState::RenamePath {
+                        old_path: old_path.clone(),
+                        value: value.clone(),
+                        error: Some(crate::tr!(model, "Name unchanged", "名称未改变").to_string()),
+                    };
                 } else if let Some(parent) = old_path.parent() {
                     let target = parent.join(name);
-                    if let Err(e) = std::fs::rename(old_path, &target) {
-                        rt.dialog = DialogState::RenamePath {
-                            old_path: old_path.clone(),
-                            value: value.clone(),
-                            error: Some(e.to_string()),
-                        };
-                    } else {
-                        close = true;
+                    match lazecode_fs::rename_no_overwrite(old_path, &target) {
+                        Err(lazecode_fs::RenameError::TargetExists { is_dir: true }) => {
+                            rt.dialog = DialogState::RenamePath {
+                                old_path: old_path.clone(),
+                                value: value.clone(),
+                                error: Some(
+                                    crate::tr!(model, "Directory already exists", "目录已存在")
+                                        .to_string(),
+                                ),
+                            };
+                        }
+                        Err(lazecode_fs::RenameError::TargetExists { is_dir: false }) => {
+                            rt.dialog = DialogState::RenamePath {
+                                old_path: old_path.clone(),
+                                value: value.clone(),
+                                error: Some(
+                                    crate::tr!(model, "File already exists", "文件已存在")
+                                        .to_string(),
+                                ),
+                            };
+                        }
+                        Err(lazecode_fs::RenameError::Io(e)) => {
+                            rt.dialog = DialogState::RenamePath {
+                                old_path: old_path.clone(),
+                                value: value.clone(),
+                                error: Some(e.to_string()),
+                            };
+                        }
+                        Ok(()) => {
+                            model.retarget_path(old_path, &target);
+                            model.note_recent_file(target);
+                            close = true;
+                        }
                     }
                 } else {
                     close = true;
@@ -11052,7 +11184,13 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
         }
     }
     if !close {
-        rt.dialog = dialog;
+        // Confirmation branches replace `rt.dialog` with an error-bearing
+        // variant and leave the dialog open. Only restore the pre-draw state
+        // when no branch produced a replacement; unconditionally assigning
+        // `dialog` here would silently discard every validation message.
+        if matches!(&rt.dialog, DialogState::None) {
+            rt.dialog = dialog;
+        }
     } else {
         rt.branch_create_error = None;
     }

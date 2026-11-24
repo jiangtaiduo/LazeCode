@@ -340,7 +340,6 @@ pub(crate) struct Shared {
     last_resize_ms: AtomicU64,
     last_notify_ms: AtomicU64,
     pending_notify: AtomicBool,
-    timer_running: AtomicBool,
     wake: AtomicU64,
     size: Mutex<(u16, u16)>,
     /// Lines scrolled above the live screen (0 = live view). Owned here so the
@@ -357,37 +356,16 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    /// Coalesce reader wakes to one per 16ms; explicit state changes go
-    /// through immediately, and a trailing batch arms a one-shot timer.
+    /// Coalesce reader wakes to one per 16ms frame budget. When a batch lands
+    /// inside the window it only sets `pending_notify`; the reader loop's
+    /// short poll (and its own top-of-loop check) delivers the trailing wake,
+    /// so no thread is spawned per window.
     fn notify_output(self: &Arc<Self>) {
         self.wake.fetch_add(1, Ordering::Relaxed);
         let now = now_ms();
         let last = self.last_notify_ms.load(Ordering::Relaxed);
         if now.saturating_sub(last) < 16 {
             self.pending_notify.store(true, Ordering::Relaxed);
-            if !self.timer_running.swap(true, Ordering::Relaxed) {
-                let shared = Arc::clone(self);
-                let _ = std::thread::Builder::new()
-                    .name("lazecode-term-wake".to_string())
-                    .spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(16));
-                        if shared.pending_notify.swap(false, Ordering::Relaxed) {
-                            shared.last_notify_ms.store(now_ms(), Ordering::Relaxed);
-                            if let Some(notifier) = &shared.notifier {
-                                notifier.notify();
-                            }
-                        }
-                        shared.timer_running.store(false, Ordering::Relaxed);
-                        // A reader that observed `timer_running` just before the
-                        // store above would strand its batch; drain once more.
-                        if shared.pending_notify.swap(false, Ordering::Relaxed) {
-                            shared.last_notify_ms.store(now_ms(), Ordering::Relaxed);
-                            if let Some(notifier) = &shared.notifier {
-                                notifier.notify();
-                            }
-                        }
-                    });
-            }
             return;
         }
         if self
@@ -395,6 +373,23 @@ impl Shared {
             .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
+            if let Some(notifier) = &self.notifier {
+                notifier.notify();
+            }
+        }
+    }
+
+    /// Deliver a coalesced batch once the frame window has elapsed.
+    fn flush_pending_output(&self) {
+        if !self.pending_notify.load(Ordering::Relaxed) {
+            return;
+        }
+        let now = now_ms();
+        if now.saturating_sub(self.last_notify_ms.load(Ordering::Relaxed)) < 16 {
+            return;
+        }
+        if self.pending_notify.swap(false, Ordering::Relaxed) {
+            self.last_notify_ms.store(now.max(1), Ordering::Relaxed);
             if let Some(notifier) = &self.notifier {
                 notifier.notify();
             }
@@ -805,7 +800,7 @@ fn viewport_anchor(
 ) -> Option<(usize, Vec<char>, Vec<char>)> {
     // Line(0) is the top live row; the viewport top sits `pinned` rows above
     // it. Only history rows (Line ≤ -1) can carry the anchor.
-    let limit = (term.screen_lines() as usize - 1).min(pinned - 1);
+    let limit = (term.screen_lines() - 1).min(pinned - 1);
     let mut span = Vec::new();
     for below in 0..=limit {
         let line = -(pinned as i32) + below as i32;
@@ -1012,16 +1007,24 @@ fn is_shell_name(name: &str, shell: &str) -> bool {
         )
 }
 
-fn busy_from_entries(entries: &[(u32, String)], _shell_pid: Option<u32>, shell: &str) -> BusyInfo {
+/// One tty-attached process: the kernel's short command (login shells keep
+/// their `-` prefix there, which is how an idle login shell is recognised)
+/// and the display name (full executable path).
+struct TtyProcess {
+    comm: String,
+    name: String,
+}
+
+fn busy_from_processes(entries: &[TtyProcess], _shell_pid: Option<u32>, shell: &str) -> BusyInfo {
     let mut commands = Vec::new();
-    for (_pid, name) in entries {
-        let name = name.trim();
+    for process in entries {
+        let name = process.name.trim();
         if name.is_empty() {
             continue;
         }
         // Match by name, not pid: macOS may re-exec or rename the shell, and
         // the recorded spawn pid no longer identifies it.
-        if is_shell_name(name, shell) {
+        if is_shell_name(process.comm.trim(), shell) || is_shell_name(name, shell) {
             continue;
         }
         let short = name.rsplit('/').next().unwrap_or(name).to_string();
@@ -1038,6 +1041,17 @@ fn busy_from_entries(entries: &[(u32, String)], _shell_pid: Option<u32>, shell: 
     }
 }
 
+fn busy_from_entries(entries: &[(u32, String)], shell_pid: Option<u32>, shell: &str) -> BusyInfo {
+    let processes: Vec<TtyProcess> = entries
+        .iter()
+        .map(|(_, name)| TtyProcess {
+            comm: name.clone(),
+            name: name.clone(),
+        })
+        .collect();
+    busy_from_processes(&processes, shell_pid, shell)
+}
+
 #[cfg(test)]
 fn parse_busy_output(stdout: &str, shell_pid: Option<u32>, shell: &str) -> BusyInfo {
     let entries: Vec<(u32, String)> = stdout
@@ -1052,14 +1066,128 @@ fn parse_busy_output(stdout: &str, shell_pid: Option<u32>, shell: &str) -> BusyI
     busy_from_entries(&entries, shell_pid, shell)
 }
 
-/// Probe all targets with one `ps` snapshot: anything on the tty besides the
-/// idle shell is a command (`zsh -lc omp` exec'd omp over the shell pid).
-pub fn probe_busy_many(targets: &[BusyTarget]) -> Vec<BusyInfo> {
-    #[cfg(unix)]
-    {
-        if targets.is_empty() {
+/// One row of a single process-table snapshot.
+struct ProcessRow {
+    /// Controlling tty device id, 0 when the process has no terminal.
+    tdev: u32,
+    /// Kernel `p_comm`: short name, `-` prefixed for login shells.
+    comm: String,
+    /// Full executable path (or the short command name as a fallback).
+    name: String,
+}
+
+/// Snapshot every process once, without spawning `ps`.
+///
+/// `ps -axo pid=,tty=,comm= -ww` costs 20-40ms of kernel time on a busy Mac,
+/// and the activity dot polls every two seconds for the lifetime of the app.
+/// `proc_listallpids` + `proc_pidinfo` + `proc_pidpath` answer the same three
+/// questions (pid, controlling tty, executable) with per-process syscalls and
+/// no fork/exec.
+#[cfg(target_os = "macos")]
+fn process_table() -> Vec<ProcessRow> {
+    use std::ffi::CStr;
+
+    const PIDPATH_MAX: usize = 4096;
+    let mut pids: Vec<libc::c_int> = vec![0; 4096];
+    loop {
+        let bytes = (pids.len() * std::mem::size_of::<libc::c_int>()) as libc::c_int;
+        let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+        if count <= 0 {
             return Vec::new();
         }
+        let count = count as usize;
+        if count < pids.len() {
+            pids.truncate(count);
+            break;
+        }
+        pids.resize(pids.len() * 2, 0);
+    }
+
+    let mut rows = Vec::with_capacity(pids.len());
+    let mut path = [0 as libc::c_char; PIDPATH_MAX];
+    for pid in pids {
+        if pid <= 0 {
+            continue;
+        }
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let got = unsafe {
+            libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size)
+        };
+        if got != size {
+            continue;
+        }
+        let len = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), PIDPATH_MAX as u32) };
+        let comm: String = {
+            let raw: Vec<u8> = info
+                .pbi_comm
+                .iter()
+                .take_while(|c| **c != 0)
+                .map(|c| *c as u8)
+                .collect();
+            String::from_utf8_lossy(&raw).into_owned()
+        };
+        let name = if len > 0 {
+            unsafe { CStr::from_ptr(path.as_ptr()) }
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            // The kernel hides some paths (other users, protected binaries);
+            // the 16-byte `comm` still identifies those.
+            comm.clone()
+        };
+        rows.push(ProcessRow {
+            tdev: info.e_tdev,
+            comm,
+            name,
+        });
+    }
+    rows
+}
+
+/// Match one target's tty against the snapshot: anything attached to that
+/// terminal besides the idle shell is a running command.
+#[cfg(target_os = "macos")]
+fn busy_from_table(table: &[ProcessRow], target: &BusyTarget) -> BusyInfo {
+    use std::os::unix::fs::MetadataExt;
+    let Some(tty) = target.tty.as_deref() else {
+        return BusyInfo::default();
+    };
+    // The device number of `/dev/ttysNNN` is exactly what `e_tdev` reports.
+    let Ok(dev) = std::fs::metadata(tty).map(|meta| meta.rdev() as u32) else {
+        return BusyInfo::default();
+    };
+    let entries: Vec<TtyProcess> = table
+        .iter()
+        .filter(|row| row.tdev == dev)
+        .map(|row| TtyProcess {
+            comm: row.comm.clone(),
+            name: row.name.clone(),
+        })
+        .collect();
+    busy_from_processes(&entries, target.shell_pid, &target.shell)
+}
+
+/// Probe all targets with one process-table snapshot: anything on the tty
+/// besides the idle shell is a command (`zsh -lc omp` exec'd omp over the
+/// shell pid).
+pub fn probe_busy_many(targets: &[BusyTarget]) -> Vec<BusyInfo> {
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let table = process_table();
+        if !table.is_empty() {
+            return targets
+                .iter()
+                .map(|target| busy_from_table(&table, target))
+                .collect();
+        }
+        // libproc unavailable (sandboxed build): fall back to `ps` below.
+    }
+    #[cfg(unix)]
+    {
         let output = match std::process::Command::new("ps")
             .args(["-axo", "pid=,tty=,comm=", "-ww"])
             .output()
@@ -1204,6 +1332,164 @@ fn graphics_placements_into(term: &Crosswords<Proxy>, out: &mut Vec<ImagePlaceme
             }),
     );
     out.sort_by_key(|placement| (placement.z_index, placement.row, placement.col));
+}
+
+/// Full-history search shared by the synchronous and background entry points.
+fn search_all(
+    term: &FairMutex<Crosswords<Proxy>>,
+    spool: &Mutex<SpoolState>,
+    query: &str,
+    cancel: &AtomicBool,
+) -> Vec<TerminalMatch> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let (mut matches, hot_base) = search_hot(term, query, cancel);
+    if cancel.load(Ordering::Relaxed) {
+        return matches;
+    }
+    let needle = query.to_lowercase();
+    let mut spool = spool.lock();
+    if let Some(store) = spool.store.as_mut() {
+        let remaining = 2_000usize.saturating_sub(matches.len());
+        if remaining > 0 {
+            store.search(
+                &needle,
+                remaining,
+                |id, col, len| {
+                    let line = id as i64 - hot_base;
+                    matches.push(TerminalMatch {
+                        line: line.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+                        col,
+                        len,
+                    });
+                },
+                Some(cancel),
+            );
+        }
+    }
+    matches.sort_by_key(|hit| (hit.line, hit.col));
+    matches
+}
+
+/// Hot-grid scan; also returns the id of the first screen row so cold hits
+/// can be placed in the same absolute space.
+fn search_hot(
+    term: &FairMutex<Crosswords<Proxy>>,
+    query: &str,
+    cancel: &AtomicBool,
+) -> (Vec<TerminalMatch>, i64) {
+    let term = term.lock();
+    let hot_base = term.grid.lines_evicted() as i64 + term.history_size() as i64;
+    let cols = term.grid.columns();
+    let rows = term.grid.screen_lines();
+    let history = term.history_size() as i32;
+    let mut regex = match RegexSearch::new(query) {
+        Ok(regex) => regex,
+        // Invalid regex: fall back to plain literal scan.
+        Err(_) => {
+            let needle = query.to_lowercase();
+            return (search_literal_locked(&term, &needle, cancel), hot_base);
+        }
+    };
+    let start = Pos {
+        row: Line(-history),
+        col: Column(0),
+    };
+    let end = Pos {
+        row: Line(rows as i32 - 1),
+        col: Column(cols.saturating_sub(1)),
+    };
+    let mut matches = Vec::new();
+    // Origin: scan starts at `start` and stops at `end`; the ring wraps
+    // once past `end`, so a loop that always advances and clamps to the
+    // [start, end] window bounds the enumeration deterministically.
+    let mut origin = start;
+    while let Some(hit) = term.regex_search_right(&mut regex, origin, end) {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let line = hit.start().row.0;
+        if line < start.row.0 || line > end.row.0 {
+            break;
+        }
+        let start_col = hit.start().col.0;
+        let len = hit.end().col.0.saturating_sub(start_col) + 1;
+        matches.push(TerminalMatch {
+            line,
+            col: start_col.min(cols.saturating_sub(1)),
+            len,
+        });
+        if matches.len() >= 2_000 {
+            break;
+        }
+        // Advance origin just past this hit; same-row hits chain, and one
+        // past the end column rolls to the next line's column 0 via the
+        // grid's own cursor math in regex_search_right's reverse DFA.
+        if hit.end().col.0 + 1 >= cols {
+            if hit.end().row.0 >= end.row.0 {
+                break;
+            }
+            origin = Pos {
+                row: Line(hit.end().row.0 + 1),
+                col: Column(0),
+            };
+        } else {
+            origin = Pos {
+                row: hit.end().row,
+                col: Column(hit.end().col.0 + 1),
+            };
+        }
+        if origin.row.0 > end.row.0 {
+            break;
+        }
+    }
+    (matches, hot_base)
+}
+
+/// Literal scan used when the query is not a valid regex.
+fn search_literal_locked(
+    term: &Crosswords<Proxy>,
+    needle: &str,
+    cancel: &AtomicBool,
+) -> Vec<TerminalMatch> {
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let cols = term.grid.columns();
+    let rows = term.grid.screen_lines();
+    let history = term.history_size() as i32;
+    let mut matches = Vec::new();
+    let mut cells = vec![CellData::default(); cols];
+    let styles = term.grid.styles();
+    let extras = &term.grid.extras_table;
+    let mut spans = Vec::new();
+    for line_index in -history..rows as i32 {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        fill_row(&term.grid[Line(line_index)], styles, extras, &mut cells);
+        let (text, columns) = crate::cold::row_text(&cells);
+        spans.clear();
+        crate::cold::find_matches(
+            &text,
+            &columns,
+            needle,
+            2_000usize.saturating_sub(matches.len()),
+            &mut spans,
+        );
+        for (col, len) in spans.iter().copied() {
+            matches.push(TerminalMatch {
+                line: line_index,
+                col,
+                len,
+            });
+        }
+        if matches.len() >= 2_000 {
+            break;
+        }
+    }
+    matches
 }
 
 impl Session {
@@ -1616,131 +1902,43 @@ impl Session {
     /// Case-insensitive search over hot grid plus cold spool; hits map to
     /// absolute line indices (negative = history).
     pub fn search(&self, query: &str) -> Vec<TerminalMatch> {
-        if query.is_empty() {
-            return Vec::new();
-        }
-        let (mut matches, hot_base) = self.search_hot(query);
-        let needle = query.to_lowercase();
-        let mut spool = self.spool.lock();
-        if let Some(store) = spool.store.as_mut() {
-            let remaining = 2_000usize.saturating_sub(matches.len());
-            store.search(&needle, remaining, |id, col, len| {
-                let line = id as i64 - hot_base;
-                matches.push(TerminalMatch {
-                    line: line.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
-                    col,
-                    len,
-                });
-            });
-        }
-        matches.sort_by_key(|hit| (hit.line, hit.col));
-        matches
+        let cancel = AtomicBool::new(false);
+        search_all(&self.term, &self.spool, query, &cancel)
     }
 
-    /// Hot-grid scan; also returns the id of the first screen row so cold hits
-    /// can be placed in the same absolute space.
-    fn search_hot(&self, query: &str) -> (Vec<TerminalMatch>, i64) {
-        let term = self.term.lock();
-        let hot_base = term.grid.lines_evicted() as i64 + term.history_size() as i64;
-        let cols = term.grid.columns();
-        let rows = term.grid.screen_lines();
-        let history = term.history_size() as i32;
-        let mut regex = match RegexSearch::new(query) {
-            Ok(regex) => regex,
-            // Invalid regex: fall back to plain literal scan.
-            Err(_) => {
-                let needle = query.to_lowercase();
-                return (self.search_literal_locked(&term, &needle), hot_base);
-            }
-        };
-        let start = Pos {
-            row: Line(-history),
-            col: Column(0),
-        };
-        let end = Pos {
-            row: Line(rows as i32 - 1),
-            col: Column(cols.saturating_sub(1)),
-        };
-        let mut matches = Vec::new();
-        // Origin: scan starts at `start` and stops at `end`; the ring wraps
-        // once past `end`, so a loop that always advances and clamps to the
-        // [start, end] window bounds the enumeration deterministically.
-        let mut origin = start;
-        while let Some(hit) = term.regex_search_right(&mut regex, origin, end) {
-            let line = hit.start().row.0;
-            if line < start.row.0 || line > end.row.0 {
-                break;
-            }
-            let start_col = hit.start().col.0;
-            let len = hit.end().col.0.saturating_sub(start_col) + 1;
-            matches.push(TerminalMatch {
-                line,
-                col: start_col.min(cols.saturating_sub(1)),
-                len,
-            });
-            if matches.len() >= 2_000 {
-                break;
-            }
-            // Advance origin just past this hit; same-row hits chain, and one
-            // past the end column rolls to the next line's column 0 via the
-            // grid's own cursor math in regex_search_right's reverse DFA.
-            if hit.end().col.0 + 1 >= cols {
-                if hit.end().row.0 >= end.row.0 {
-                    break;
+    /// Search on a worker thread. The receiver yields the hits (or nothing
+    /// when cancelled); the returned flag stops the scan early, and dropping
+    /// the receiver makes the final send fail.
+    ///
+    /// A scan walks the whole retained history, so running it inline on the
+    /// UI thread cost one full pass per keystroke (~70ms at 43k lines,秒级 at
+    /// the cold byte cap).
+    pub fn search_async(
+        &self,
+        query: String,
+    ) -> (
+        std::sync::mpsc::Receiver<Vec<TerminalMatch>>,
+        Arc<AtomicBool>,
+    ) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let term = self.term.clone();
+        let spool = self.spool.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let thread_cancel = cancel.clone();
+        let spawned = std::thread::Builder::new()
+            .name("lazecode-term-search".to_string())
+            .spawn(move || {
+                let matches = search_all(&term, &spool, &query, &thread_cancel);
+                if !thread_cancel.load(Ordering::Relaxed) {
+                    let _ = tx.send(matches);
                 }
-                origin = Pos {
-                    row: Line(hit.end().row.0 + 1),
-                    col: Column(0),
-                };
-            } else {
-                origin = Pos {
-                    row: hit.end().row,
-                    col: Column(hit.end().col.0 + 1),
-                };
-            }
-            if origin.row.0 > end.row.0 {
-                break;
-            }
+            });
+        if spawned.is_err() {
+            // `tx` lived inside the failed closure and is dropped with it, so
+            // the caller's receiver disconnects and the pending state ends.
+            log::warn!("cannot spawn terminal search worker");
         }
-        (matches, hot_base)
-    }
-
-    /// Literal scan used when the query is not a valid regex.
-    fn search_literal_locked(&self, term: &Crosswords<Proxy>, needle: &str) -> Vec<TerminalMatch> {
-        if needle.is_empty() {
-            return Vec::new();
-        }
-        let cols = term.grid.columns();
-        let rows = term.grid.screen_lines();
-        let history = term.history_size() as i32;
-        let mut matches = Vec::new();
-        let mut cells = vec![CellData::default(); cols];
-        let styles = term.grid.styles();
-        let extras = &term.grid.extras_table;
-        let mut spans = Vec::new();
-        for line_index in -history..rows as i32 {
-            fill_row(&term.grid[Line(line_index)], styles, extras, &mut cells);
-            let (text, columns) = crate::cold::row_text(&cells);
-            spans.clear();
-            crate::cold::find_matches(
-                &text,
-                &columns,
-                needle,
-                2_000usize.saturating_sub(matches.len()),
-                &mut spans,
-            );
-            for (col, len) in spans.iter().copied() {
-                matches.push(TerminalMatch {
-                    line: line_index,
-                    col,
-                    len,
-                });
-            }
-            if matches.len() >= 2_000 {
-                break;
-            }
-        }
-        matches
+        (rx, cancel)
     }
 
     /// Scrollback occupancy across the hot grid and the cold spool.
@@ -2033,7 +2231,6 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
         last_resize_ms: AtomicU64::new(0),
         last_notify_ms: AtomicU64::new(0),
         pending_notify: AtomicBool::new(false),
-        timer_running: AtomicBool::new(false),
         wake: AtomicU64::new(0),
         size: Mutex::new((cols, rows)),
         view_offset: AtomicUsize::new(0),
@@ -2102,6 +2299,20 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
                 if reader_cancel_thread.load(Ordering::Relaxed) {
                     break;
                 }
+                // Trailing wake for a batch that landed inside the 16ms
+                // frame window. This runs on the reader instead of a timer
+                // thread per window.
+                reader_shared.flush_pending_output();
+                // Finish a spool rewrite here: the copy runs on its own
+                // thread, and the swap must not happen while the VT lock is
+                // held (UI snapshots share that lock). Polling on every loop
+                // iteration also picks results up once output pauses.
+                {
+                    let mut spool = reader_spool.lock();
+                    if let Some(store) = spool.store.as_mut() {
+                        store.poll_compaction();
+                    }
+                }
                 #[cfg(unix)]
                 {
                     let mut pollfd = libc::pollfd {
@@ -2109,7 +2320,14 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
                         events: libc::POLLIN,
                         revents: 0,
                     };
-                    let ready = unsafe { libc::poll(&mut pollfd, 1, 100) };
+                    // A pending coalesced batch must be delivered at the next
+                    // frame boundary, so poll no longer than the window.
+                    let timeout = if reader_shared.pending_notify.load(Ordering::Relaxed) {
+                        16
+                    } else {
+                        100
+                    };
+                    let ready = unsafe { libc::poll(&mut pollfd, 1, timeout) };
                     if ready < 0 {
                         if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
                         {
@@ -2434,7 +2652,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         let mut snap = Snapshot::default();
-        let mut viewport = |session: &Session, snap: &mut Snapshot| {
+        let viewport = |session: &Session, snap: &mut Snapshot| {
             session.snapshot_into(snap);
             let mut text = String::new();
             for row in 0..snap.rows {
@@ -2536,7 +2754,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         let mut snap = Snapshot::default();
-        let mut viewport = |session: &Session, snap: &mut Snapshot| {
+        let viewport = |session: &Session, snap: &mut Snapshot| {
             session.snapshot_into(snap);
             let mut text = String::new();
             for row in 0..snap.rows {
@@ -2602,7 +2820,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(200));
 
         let mut snap = Snapshot::default();
-        let mut viewport = |session: &Session, snap: &mut Snapshot| {
+        let viewport = |session: &Session, snap: &mut Snapshot| {
             session.snapshot_into(snap);
             let mut text = String::new();
             for row in 0..snap.rows {
@@ -2720,17 +2938,40 @@ mod tests {
         idle_options.scrollback = 32;
         let idle = spawn(idle_options).unwrap();
         let targets = [busy.busy_target(), idle.busy_target()];
-        let mut infos = Vec::new();
-        for _ in 0..100 {
-            infos = probe_busy_many(&targets);
-            if infos.first().is_some_and(|info| info.busy) {
-                break;
+        // Wait for the *exec'd command*, not merely "busy": a login shell can
+        // spawn transient children while sourcing dotfiles, and any of those
+        // legitimately counts as a command for one probe round.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let infos = loop {
+            let probed = probe_busy_many(&targets);
+            let saw_sleep = probed
+                .first()
+                .is_some_and(|info| info.commands.iter().any(|command| command == "sleep"));
+            if saw_sleep {
+                break probed;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "sleep was never reported on the busy tty: {probed:?}"
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        };
         assert_eq!(infos.len(), 2);
         assert!(infos[0].busy, "exec'd sleep must be busy: {infos:?}");
-        assert!(!infos[1].busy, "idle shell must stay idle: {infos:?}");
+        // The idle pane's shell may still be sourcing dotfiles while the busy
+        // one is checked; wait for it to settle.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let idle_info = probe_busy_many(&targets).swap_remove(1);
+            if !idle_info.busy {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "idle shell never settled: {idle_info:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         busy.kill();
         idle.kill();
     }
@@ -3553,18 +3794,40 @@ fn busy_probe_detects_exec_and_batch_mapping() {
     options.scrollback = 32;
     let session = spawn(options).unwrap();
     let target = session.busy_target();
-    let mut info = BusyInfo::default();
-    for _ in 0..100 {
-        info = probe_busy_many(std::slice::from_ref(&target))
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let info = loop {
+        let info = probe_busy_many(std::slice::from_ref(&target))
             .into_iter()
             .next()
             .unwrap_or_default();
-        if info.busy {
-            break;
+        // Wait for the exec'd command itself: a login shell may spawn
+        // transient children while sourcing dotfiles, and those legitimately
+        // report as commands for one probe round.
+        if info.commands.iter().any(|command| command == "sleep") {
+            break info;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sleep was never reported busy: {info:?}"
+        );
         std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    };
     assert!(info.busy, "exec'd command must be reported busy: {info:?}");
     assert!(info.commands.iter().any(|command| command == "sleep"));
     session.kill();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn process_table_lists_this_process() {
+    let table = process_table();
+    let exe = std::env::current_exe().expect("own executable path");
+    let name = exe.file_name().expect("executable file name");
+    let name = name.to_string_lossy();
+    assert!(
+        table
+            .iter()
+            .any(|row| row.name.rsplit('/').next() == Some(name.as_ref())),
+        "own executable {name} missing from the process table"
+    );
 }

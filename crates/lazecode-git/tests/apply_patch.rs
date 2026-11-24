@@ -62,3 +62,13 @@ fn apply_patch_rejects_broken_and_empty() {
         .to_string();
     assert!(err.contains("does not apply"), "{err}");
 }
+
+#[test]
+fn generated_patch_reverts_a_no_newline_file() {
+    let dir = repo();
+    let path = dir.path().join("testbb.txt");
+    std::fs::write(&path, b"123123").unwrap();
+    let patch = lazecode_text::unified_patch("testbb.txt", &lazecode_text::diff_text("", "123123"));
+    apply_patch(dir.path(), &patch, false, true).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"");
+}

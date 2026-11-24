@@ -249,6 +249,56 @@ pub fn write_text_file(
     write_atomic(path, &bytes)
 }
 
+/// Rename a file or directory without replacing an existing entry. The
+/// platform rename(2) silently replaces files on Unix; this guard makes a
+/// collision an explicit error. A case-only rename (same inode) is allowed.
+pub fn rename_no_overwrite(from: &Path, to: &Path) -> std::result::Result<(), RenameError> {
+    if from == to {
+        return Ok(());
+    }
+    match std::fs::symlink_metadata(to) {
+        Ok(metadata) => {
+            if !same_entry(from, to) {
+                return Err(RenameError::TargetExists {
+                    is_dir: metadata.is_dir(),
+                });
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(RenameError::Io(err)),
+    }
+    std::fs::rename(from, to).map_err(RenameError::Io)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RenameError {
+    #[error("target already exists")]
+    TargetExists { is_dir: bool },
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+fn same_entry(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        match (a.canonicalize(), b.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 /// Write bytes through a sibling temporary file + fsync + rename so a crash
 /// never leaves a partially written file.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -425,6 +475,31 @@ mod tests {
         let path = dir.path().join("a.bin");
         std::fs::write(&path, b"abc\0def").unwrap();
         assert!(matches!(read_text_file(&path), Err(FsError::Binary { .. })));
+    }
+
+    #[test]
+    fn rename_never_overwrites_an_existing_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("a.txt");
+        let existing = dir.path().join("b.txt");
+        std::fs::write(&source, b"a").unwrap();
+        std::fs::write(&existing, b"b").unwrap();
+
+        let error = rename_no_overwrite(&source, &existing).unwrap_err();
+        assert!(matches!(error, RenameError::TargetExists { is_dir: false }));
+        assert_eq!(std::fs::read(&source).unwrap(), b"a");
+        assert_eq!(std::fs::read(&existing).unwrap(), b"b");
+
+        let target_dir = dir.path().join("target-dir");
+        std::fs::create_dir(&target_dir).unwrap();
+        let error = rename_no_overwrite(&source, &target_dir).unwrap_err();
+        assert!(matches!(error, RenameError::TargetExists { is_dir: true }));
+        assert_eq!(std::fs::read(&source).unwrap(), b"a");
+
+        let renamed = dir.path().join("renamed.txt");
+        rename_no_overwrite(&source, &renamed).unwrap();
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&renamed).unwrap(), b"a");
     }
 }
 

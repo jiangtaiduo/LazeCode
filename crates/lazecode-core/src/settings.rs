@@ -516,6 +516,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn terminal_defaults_match_the_settings_choices() {
+        let terminal = TerminalSettings::default();
+        assert_eq!(terminal.scrollback, 10_000);
+        assert_eq!(terminal.graphics_cache_mb, 64);
+    }
+
+    #[test]
     fn updater_settings_default_on_and_round_trip() {
         let settings = Settings::default();
         // Updates ship configured: signed manifest endpoint plus pinned key,

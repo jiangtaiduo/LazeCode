@@ -483,7 +483,9 @@ pub fn conflict(model: &AppModel, action: Action, candidate: Binding) -> Option<
 /// 反查当前拥有 `candidate` 组合键的动作（原生菜单加速键按此派发，
 /// 用户在设置页改键后原生层依然正确）。
 pub fn action_for_binding(model: &AppModel, candidate: Binding) -> Option<Action> {
-    ALL_ACTIONS.into_iter().find(|&action| resolved(model, action) == Some(candidate))
+    ALL_ACTIONS
+        .into_iter()
+        .find(|&action| resolved(model, action) == Some(candidate))
 }
 
 /// 设置页录入态：下一次非修饰键按下即成为 `Some(action)` 的新键。
@@ -553,7 +555,9 @@ pub fn capture_tick(ctx: &egui::Context, model: &mut AppModel, rt: &mut UiRuntim
 /// 都走这里，保证两路行为一致。
 pub fn run_tool(model: &mut AppModel, action: Action) {
     let has_project = model.active_project().is_some();
-    let single_active = model.active_project().is_some_and(|project| project.is_single_file);
+    let single_active = model
+        .active_project()
+        .is_some_and(|project| project.is_single_file);
     let single_needs_terminal = single_active
         && model.active_project().is_some_and(|project| {
             project
@@ -622,8 +626,7 @@ pub fn run_tool(model: &mut AppModel, action: Action) {
             }
         }
         Action::Consoles => {
-            let active = model.ui.sidebar_visible
-                && model.ui.sidebar_view == SidebarView::Consoles;
+            let active = model.ui.sidebar_visible && model.ui.sidebar_view == SidebarView::Consoles;
             if active {
                 model.ui.sidebar_visible = false;
             } else {
@@ -703,7 +706,7 @@ mod tests {
         assert_eq!(parse_binding(""), None);
         assert_eq!(parse_binding("Cmd+NotAKey"), None);
         assert_eq!(
-            parse_binding("Cmd+1").map(|binding| binding_string(binding)),
+            parse_binding("Cmd+1").map(binding_string),
             Some("Cmd+1".to_string())
         );
     }

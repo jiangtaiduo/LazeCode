@@ -6,6 +6,56 @@ All notable changes to LazeCode are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Case-only renames (`readme.md` → `README.md`) now retarget open tabs, tab
+  titles, the tree selection, reveal requests and the recent-files list. The
+  old code canonicalised the vanished path first, which on the default
+  case-insensitive macOS filesystem resolves to the *new* name and made the
+  rename look like a no-op.
+- An IME composition that loses its text surface no longer leaves stale state
+  behind: macOS ends the composition without emitting the events egui
+  observes, so the next Enter could be swallowed and the old preedit injected
+  into another field. The filter now drops the composition as soon as no
+  surface asks for IME input.
+- Delete confirmations name open buffers with unsaved edits, for single files
+  and batch deletes: the trash recovers the file on disk, not the in-memory
+  edits, and the tree-delete path had no dirty-buffer guard.
+- Locating the active tab no longer wipes the tree's multi-selection (batch
+  actions depend on it); the active file gets its own accent marker instead.
+- Switching projects or worktrees clears the tree selection, reveal request
+  and locate flash: rows are relative to the visible checkout, so a
+  carried-over selection could batch-delete same-named files in the wrong
+  worktree.
+- Release builds keep unwinding. Four background paths isolate panics with
+  `catch_unwind` (VT parser, Git jobs, activity probes, updater); `panic =
+  "abort"` turned any one of them into a process exit that lost every unsaved
+  buffer.
+
+### Performance
+
+- Find in terminal scans on a worker after a 120 ms input debounce instead of
+  walking the whole scrollback on the UI thread for each keystroke (measured
+  73 ms at 10k hot + 34k cold rows); superseded scans are cancelled.
+- Cold-scrollback rewrites copy the live rows on a worker and swap them in a
+  short spool-lock section, so compaction no longer blocks the per-frame
+  screen probe (a 260k-line burst previously stalled it up to ~114 ms per
+  rewrite). A write rate that outruns the copier still pays one in-place
+  rewrite, halved by shedding the oldest cold rows.
+- The Git log view caches its filtered commit list, lane layout and author
+  list, and compiles a regex filter once instead of once per commit field per
+  frame.
+- The console activity probe reads the process table in-process
+  (`proc_listallpids`/`proc_pidinfo`/`proc_pidpath`) instead of spawning
+  `ps -axo …` every two seconds (20–40 ms of kernel time on a busy Mac); an
+  occluded window skips the probe entirely.
+- Terminal reflow is debounced to one per drag pause: a resize no longer
+  rewraps the scrollback and raises SIGWINCH on every frame.
+- The PTY wake coalescer delivers its trailing frame from the reader loop
+  instead of spawning a thread per 16 ms window.
+
 ## [0.4.12] - 2026-11-24
 
 ### Added

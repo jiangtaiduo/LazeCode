@@ -6,7 +6,10 @@ pub mod search;
 pub mod tree;
 pub mod watch;
 
-pub use file::{move_to_trash, Eol, TextFile, MAX_FILE_BYTES, MAX_FORCE_FILE_BYTES};
+pub use file::{
+    move_to_trash, rename_no_overwrite, Eol, RenameError, TextFile, MAX_FILE_BYTES,
+    MAX_FORCE_FILE_BYTES,
+};
 pub use search::{compile_regex, replace_in_files, search_in_files, SearchHit, SearchOptions};
 pub use tree::{
     load_tree, load_tree_filtered, load_tree_with_expanded, FileTree, NodeKind, TreeNode,

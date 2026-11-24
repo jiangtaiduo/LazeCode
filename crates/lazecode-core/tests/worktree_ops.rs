@@ -2,7 +2,7 @@
 //! model, spawn a console rooted at the worktree, then remove the worktree
 //! (which must also kill its consoles).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
@@ -302,4 +302,44 @@ fn pane_layout_is_isolated_per_project_and_worktree() {
 
     let _ = std::fs::remove_dir_all(&linked);
     let _ = std::fs::remove_dir_all(&root_a);
+}
+
+#[test]
+fn switching_worktrees_clears_the_checkout_scoped_tree_selection() {
+    // Tree rows are relative to the visible checkout. A selection carried
+    // into another worktree would resolve same-named paths against the wrong
+    // checkout when a batch action (delete/discard) runs.
+    let dir = repo();
+    let settings = Settings::default();
+    let project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
+    let (mut model, index) = model(project);
+    model.sync_worktree_view();
+
+    let linked = dir.path().join("wt-select");
+    git(
+        dir.path(),
+        &["worktree", "add", "-q", "-b", "select", "wt-select"],
+    );
+    let linked = linked.canonicalize().unwrap();
+    model.projects[index].attach_worktree(WorktreeState::load(
+        "wt-select".to_string(),
+        linked.clone(),
+        false,
+        &settings.ignored_patterns,
+    ));
+
+    model.ui.tree_selection.insert(PathBuf::from("main.rs"));
+    model.ui.tree_selected = Some(PathBuf::from("main.rs"));
+    model.ui.tree_reveal = Some((PathBuf::from("main.rs"), true));
+
+    model.sync_worktree_view();
+    assert_eq!(model.ui.view_target.as_deref(), Some(linked.as_path()));
+    assert!(
+        model.ui.tree_selection.is_empty(),
+        "the previous checkout's multi-selection must not leak"
+    );
+    assert_eq!(model.ui.tree_selected, None);
+    assert_eq!(model.ui.tree_reveal, None);
+
+    let _ = std::fs::remove_dir_all(&linked);
 }

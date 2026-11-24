@@ -12,6 +12,13 @@ use crate::session::{CellData, ColorSpec};
 /// Compact once the dead bytes in the file exceed this and outnumber the live
 /// rows.
 const COMPACT_MIN_BYTES: u64 = 1 << 20;
+/// Rows appended while a background rewrite runs may be re-appended to the new
+/// file before the swap; beyond this the rewrite falls back to an in-place
+/// copy. 2k rows is a few ms of extra spool-lock work at full-width rows.
+const COMPACT_TAIL_MAX_ROWS: usize = 2_048;
+/// Absolute disk ceiling before the rewrite is forced in place: a session that
+/// never pauses must not grow its spool without bound.
+const COMPACT_FORCE_FACTOR: u64 = 2;
 
 static NEXT_FILE: AtomicU64 = AtomicU64::new(1);
 
@@ -22,6 +29,19 @@ struct Entry {
     id: u64,
     offset: u64,
     len: u32,
+}
+
+/// Result of copying the live rows into a fresh file.
+struct CompactCopy {
+    tmp: PathBuf,
+    written: u64,
+    /// `(row id, offset in the new file)`, ordered by id.
+    rows: Vec<(u64, u64)>,
+}
+
+/// A rewrite copying live rows off the reader's critical path.
+struct CompactJob {
+    handle: std::thread::JoinHandle<std::io::Result<CompactCopy>>,
 }
 
 /// A bounded, disk-backed row store.
@@ -38,6 +58,8 @@ pub struct ColdStore {
     line_budget: usize,
     byte_budget: usize,
     first_id: u64,
+    /// Rewrite in flight; finished by `poll_compaction`.
+    compact_job: Option<CompactJob>,
 }
 
 impl ColdStore {
@@ -70,6 +92,7 @@ impl ColdStore {
             line_budget,
             byte_budget,
             first_id: 0,
+            compact_job: None,
         })
     }
 
@@ -170,17 +193,189 @@ impl ColdStore {
             self.first_id = front.id;
         }
         if self.dead_bytes > COMPACT_MIN_BYTES && self.dead_bytes > self.live_bytes as u64 {
-            if let Err(err) = self.compact() {
+            self.schedule_compaction();
+        }
+    }
+
+    /// Start a rewrite on a worker, or force it in place once the file grew
+    /// far past the payload budget (continuous output never pauses long enough
+    /// for the async swap, and disk use must stay bounded).
+    fn schedule_compaction(&mut self) {
+        if self.compact_job.is_some() {
+            return;
+        }
+        if self.dead_bytes > COMPACT_FORCE_FACTOR * self.byte_budget as u64 {
+            // A write rate that outruns the copier also makes the copy itself
+            // the bottleneck. Cold history is evictable by design, so shed the
+            // oldest half before the in-place rewrite: it holds the spool lock
+            // for half as long and still bounds the file.
+            let live_target = (self.byte_budget / 2).max(4096) as u64;
+            let line_target = (self.line_budget / 2).max(1);
+            while self.entries.len() > line_target || self.live_bytes as u64 > live_target {
+                let Some(entry) = self.entries.pop_front() else {
+                    break;
+                };
+                self.live_bytes = self.live_bytes.saturating_sub(entry.len as usize);
+                self.dead_bytes += entry.len as u64;
+            }
+            if let Some(front) = self.entries.front() {
+                self.first_id = front.id;
+            }
+            if let Err(err) = self.compact_sync() {
                 log::warn!("cold scrollback spool compaction failed: {err}");
                 // The store stays consistent across a failed compact, so
                 // retrying is safe; halving avoids firing on every eviction.
                 self.dead_bytes /= 2;
             }
+            return;
+        }
+        let entries: Vec<Entry> = self.entries.iter().copied().collect();
+        if entries.is_empty() {
+            return;
+        }
+        // The worker reads through its own handle: the store keeps serving
+        // rows and appending to the old file while the copy runs.
+        let source = self.path.clone();
+        let tmp = self.path.with_extension("compact");
+        let spawned = std::thread::Builder::new()
+            .name("lazecode-cold-compact".to_string())
+            .spawn(move || copy_live_rows(&source, &tmp, &entries));
+        match spawned {
+            Ok(handle) => self.compact_job = Some(CompactJob { handle }),
+            Err(err) => log::warn!("cannot spawn cold spool compaction: {err}"),
         }
     }
 
+    /// Finish a background rewrite if its worker completed. Callers hold the
+    /// spool lock but not the VT lock, so the swap never blocks screen
+    /// snapshots.
+    pub(crate) fn poll_compaction(&mut self) {
+        let Some(job) = self.compact_job.take() else {
+            return;
+        };
+        if !job.handle.is_finished() {
+            self.compact_job = Some(job);
+            return;
+        }
+        let tmp = self.path.with_extension("compact");
+        let mut copy = match job.handle.join() {
+            Ok(Ok(copy)) => copy,
+            Ok(Err(err)) => {
+                log::warn!("cold scrollback spool compaction failed: {err}");
+                let _ = std::fs::remove_file(&tmp);
+                self.dead_bytes /= 2;
+                return;
+            }
+            Err(_) => {
+                log::warn!("cold scrollback spool compaction panicked");
+                let _ = std::fs::remove_file(&tmp);
+                self.dead_bytes /= 2;
+                return;
+            }
+        };
+        // Match every live row against the copied snapshot. Rows appended (or
+        // re-spooled) while the worker ran live only in the old file; ids are
+        // ordered but not contiguous, so this is a binary search, not
+        // arithmetic. A bounded tail is re-appended to keep the rewrite.
+        let mut offsets: Vec<u64> = Vec::with_capacity(self.entries.len());
+        let mut tail: Vec<(usize, Entry)> = Vec::new();
+        for (index, entry) in self.entries.iter().enumerate() {
+            match copy.rows.binary_search_by_key(&entry.id, |(id, _)| *id) {
+                Ok(found) => offsets.push(copy.rows[found].1),
+                Err(_) => {
+                    offsets.push(u64::MAX);
+                    tail.push((index, *entry));
+                }
+            }
+        }
+        if tail.len() > COMPACT_TAIL_MAX_ROWS {
+            // Output outran the worker. Falling back to the in-place copy
+            // keeps disk use bounded; it holds the spool lock (not the VT
+            // lock), so per-frame screen probe stays cheap.
+            let _ = std::fs::remove_file(&tmp);
+            if let Err(err) = self.compact_sync() {
+                log::warn!("cold scrollback spool compaction failed: {err}");
+                self.dead_bytes /= 2;
+            }
+            return;
+        }
+        if let Err(err) = self.append_tail(&mut copy, &mut offsets, &tail) {
+            log::warn!("cold scrollback spool tail copy failed: {err}");
+            let _ = std::fs::remove_file(&tmp);
+            self.dead_bytes /= 2;
+            return;
+        }
+        if let Err(err) = self.install(&copy.tmp, copy.written, offsets) {
+            log::warn!("cold scrollback spool swap failed: {err}");
+            let _ = std::fs::remove_file(&tmp);
+            self.dead_bytes /= 2;
+            return;
+        }
+        // The rewrite copied every row that was live at snapshot time; rows
+        // evicted since then are stale in the new file. One more pass (cheap:
+        // only live rows) converges instead of waiting for the next megabyte
+        // of dead bytes.
+        if self.dead_bytes > (self.live_bytes as u64) / 2 {
+            self.schedule_compaction();
+        }
+    }
+
+    /// Re-append rows newer than the snapshot to the rewritten file.
+    fn append_tail(
+        &mut self,
+        copy: &mut CompactCopy,
+        offsets: &mut [u64],
+        tail: &[(usize, Entry)],
+    ) -> std::io::Result<()> {
+        if tail.is_empty() {
+            return Ok(());
+        }
+        let mut dest = OpenOptions::new().append(true).open(&copy.tmp)?;
+        let mut buffer = vec![0u8; 64 * 1024];
+        for (index, entry) in tail {
+            self.file.seek(SeekFrom::Start(entry.offset))?;
+            let mut remaining = entry.len as usize;
+            offsets[*index] = copy.written;
+            while remaining > 0 {
+                let take = remaining.min(buffer.len());
+                self.file.read_exact(&mut buffer[..take])?;
+                dest.write_all(&buffer[..take])?;
+                copy.written += take as u64;
+                remaining -= take;
+            }
+        }
+        dest.flush()?;
+        dest.sync_all()?;
+        Ok(())
+    }
+
+    /// Swap the rewritten file in and re-point every row offset.
+    fn install(&mut self, tmp: &Path, written: u64, offsets: Vec<u64>) -> std::io::Result<()> {
+        std::fs::remove_file(&self.path)?;
+        std::fs::rename(tmp, &self.path)?;
+        let file = OpenOptions::new().read(true).write(true).open(&self.path)?;
+        drop(std::mem::replace(&mut self.file, file));
+        if offsets.len() != self.entries.len() {
+            // The store was reset while the worker ran; keep it consistent
+            // instead of binding rows to unknown offsets.
+            log::warn!("cold scrollback spool changed under compaction; dropping spool");
+            self.clear();
+            return Err(std::io::Error::other("entry set changed during compaction"));
+        }
+        for (entry, offset) in self.entries.iter_mut().zip(offsets) {
+            entry.offset = offset;
+        }
+        self.file_len = written;
+        // The copy also holds rows that were live at snapshot time but have
+        // been evicted (or re-spooled) since, plus the re-appended tail, so
+        // the file is not garbage-free yet.
+        self.dead_bytes = written.saturating_sub(self.live_bytes as u64);
+        Ok(())
+    }
+
     /// Copy live rows into a fresh file; offsets switch only after success.
-    fn compact(&mut self) -> std::io::Result<()> {
+    /// Runs on the reader only as the over-budget fallback.
+    fn compact_sync(&mut self) -> std::io::Result<()> {
         let tmp_path = self.path.with_extension("compact");
         let mut tmp = OpenOptions::new()
             .write(true)
@@ -258,12 +453,14 @@ impl ColdStore {
     }
 
     /// Case-insensitive scan over retained rows; `emit` gets the absolute row
-    /// id plus column span, stopping after `limit` hits.
+    /// id plus column span, stopping after `limit` hits or when `cancel` is
+    /// set (the scan runs on a worker for the find bar).
     pub fn search(
         &mut self,
         needle_lower: &str,
         limit: usize,
         mut emit: impl FnMut(u64, usize, usize),
+        cancel: Option<&std::sync::atomic::AtomicBool>,
     ) {
         if needle_lower.is_empty() || limit == 0 {
             return;
@@ -273,6 +470,11 @@ impl ColdStore {
         for entry in self.entries.iter() {
             if hits >= limit {
                 break;
+            }
+            if let Some(cancel) = cancel {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
             }
             if entry.len == 0 {
                 continue;
@@ -310,9 +512,48 @@ impl ColdStore {
         self.live_bytes = 0;
         self.dead_bytes = 0;
         self.file_len = 0;
+        // A rewrite that started before this reset must not install rows that
+        // no longer exist. The handle is detached; a rare leftover temp file
+        // is swept at the next launch like any other stale spool.
+        self.compact_job = None;
+        let _ = std::fs::remove_file(self.path.with_extension("compact"));
         let _ = self.file.set_len(0);
         let _ = self.file.seek(SeekFrom::Start(0));
     }
+}
+
+/// Worker side of an asynchronous rewrite: copy the live rows through an
+/// independent read handle so the store keeps serving rows and appending to
+/// the old file meanwhile.
+fn copy_live_rows(source: &Path, tmp: &Path, entries: &[Entry]) -> std::io::Result<CompactCopy> {
+    let mut src = File::open(source)?;
+    let mut dest = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(tmp)?;
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut written = 0u64;
+    let mut rows = Vec::with_capacity(entries.len());
+    for entry in entries {
+        src.seek(SeekFrom::Start(entry.offset))?;
+        let mut remaining = entry.len as usize;
+        rows.push((entry.id, written));
+        while remaining > 0 {
+            let take = remaining.min(buffer.len());
+            src.read_exact(&mut buffer[..take])?;
+            dest.write_all(&buffer[..take])?;
+            written += take as u64;
+            remaining -= take;
+        }
+    }
+    dest.flush()?;
+    dest.sync_all()?;
+    Ok(CompactCopy {
+        tmp: tmp.to_path_buf(),
+        written,
+        rows,
+    })
 }
 
 impl Drop for ColdStore {
@@ -679,9 +920,14 @@ mod tests {
         ];
         store.append_rows(100, &rows);
         let mut hits = Vec::new();
-        store.search("marker", 10, |id, col, len| {
-            hits.push((id, col, len));
-        });
+        store.search(
+            "marker",
+            10,
+            |id, col, len| {
+                hits.push((id, col, len));
+            },
+            None,
+        );
         assert_eq!(hits, vec![(100, 6, 6), (102, 0, 6)]);
     }
 
@@ -696,5 +942,62 @@ mod tests {
         assert_eq!(store.file_bytes(), 0);
         drop(store);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn async_compaction_rewrites_the_file_and_keeps_every_live_row() {
+        // 8 live rows, 1MiB payload budget, ~23MB written: dead bytes cross
+        // the rewrite threshold well below the forced-in-place ceiling, so
+        // the background path is the one exercised.
+        let mut store = ColdStore::create(8, 1 << 20).expect("create");
+        let payload = "x".repeat(180);
+        let rows: Vec<Vec<u8>> = (0..12_000u64)
+            .map(|id| encode_row(&row(&format!("{id:06}{payload}"))))
+            .collect();
+        for (chunk_index, chunk) in rows.chunks(64).enumerate() {
+            store.append_rows(chunk_index as u64 * 64, chunk);
+        }
+        let before = store.file_bytes();
+        assert!(
+            before > COMPACT_MIN_BYTES,
+            "dead bytes should have accumulated, file={before}"
+        );
+        let live = store.len();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            store.poll_compaction();
+            if store.file_bytes() <= store.bytes() as u64 + 4096 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "compaction never finished: file={} live={}",
+                store.file_bytes(),
+                store.bytes()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(
+            store.file_bytes() < before,
+            "rewrite must shrink the file: {} -> {}",
+            before,
+            store.file_bytes()
+        );
+        // Every retained row must still decode to its own id.
+        let first = store.first_id().expect("live rows");
+        for id in first..first + live as u64 {
+            let cells = store
+                .get_by_id(id)
+                .unwrap_or_else(|| panic!("row {id} lost"));
+            let text: String = cells
+                .iter()
+                .filter(|cell| cell.ch != '\0')
+                .map(|cell| cell.ch)
+                .collect();
+            assert!(
+                text.starts_with(&format!("{id:06}")),
+                "row {id} bound to the wrong payload: {text:?}"
+            );
+        }
     }
 }

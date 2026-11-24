@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use egui::{Rect, Vec2};
 use lazecode_core::ThemeMode;
 use lazecode_terminal::{Session, Snapshot, SpawnOptions};
-use lazecode_ui::runtime::{TermSearchState, TermSelection};
+use lazecode_ui::runtime::{TermResizeGate, TermSearchState, TermSelection};
 use lazecode_ui::terminal::GraphicsCache;
 use lazecode_ui::theme::Theme;
 
@@ -59,6 +59,7 @@ fn first_draw_while_tui_holds_sync_update_is_not_blank() {
     let mut snapshot = Snapshot::default(); // fresh pane: no previous frame
     let mut selection: Option<TermSelection> = None;
     let mut search = TermSearchState::default();
+    let mut resize = TermResizeGate::default();
     let mut preedit = String::new();
     let mut wheel = 0.0f32;
     let mut graphics = GraphicsCache::default();
@@ -94,6 +95,7 @@ fn first_draw_while_tui_holds_sync_update_is_not_blank() {
                 &mut snapshot,
                 &mut selection,
                 &mut search,
+                &mut resize,
                 false,
                 &mut preedit,
                 &mut wheel,
@@ -147,6 +149,7 @@ fn draw_once(
 ) {
     let mut selection: Option<TermSelection> = None;
     let mut search = TermSearchState::default();
+    let mut resize = TermResizeGate::default();
     let mut preedit = String::new();
     let mut wheel = 0.0f32;
     let mut graphics = GraphicsCache::default();
@@ -173,6 +176,7 @@ fn draw_once(
             snapshot,
             &mut selection,
             &mut search,
+            &mut resize,
             false,
             &mut preedit,
             &mut wheel,

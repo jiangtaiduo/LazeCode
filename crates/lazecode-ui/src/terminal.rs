@@ -11,7 +11,7 @@ use lazecode_terminal::{
 };
 
 use crate::icons::{paint as paint_icon, Icon};
-use crate::runtime::{TermSearchState, TermSelection};
+use crate::runtime::{TermResizeGate, TermSearchState, TermSelection};
 use crate::theme::Theme;
 use crate::widgets::char_width;
 
@@ -189,6 +189,7 @@ pub fn draw(
     snapshot: &mut Snapshot,
     selection: &mut Option<TermSelection>,
     search: &mut TermSearchState,
+    resize: &mut TermResizeGate,
     focus: bool,
     preedit: &mut String,
     wheel_accum: &mut f32,
@@ -231,11 +232,19 @@ pub fn draw(
     // frame: rio-vt ends the update on resize, and the rest of the frame then
     // lands as an incoherent grid. Resize after ESU instead.
     if resize_needed && sync_hold.is_none() {
-        session.resize(cols as u16, rows as u16);
-        // Absolute selection endpoints cannot survive reflow.
-        *selection = None;
-        *wheel_accum = 0.0;
-        sync_hold = session.sync_update_hold();
+        let target = (cols as u16, rows as u16);
+        if resize.should_apply(target) {
+            session.resize(target.0, target.1);
+            // Absolute selection endpoints cannot survive reflow.
+            *selection = None;
+            *wheel_accum = 0.0;
+            sync_hold = session.sync_update_hold();
+        } else {
+            // Keep the previous width until the drag pauses: reflowing every
+            // frame rewraps the whole scrollback and SIGWINCHes TUIs.
+            ui.ctx()
+                .request_repaint_after(resize.remaining() + std::time::Duration::from_millis(1));
+        }
     }
     // Hold the last complete frame while the program is inside a synchronized
     // update (DEC 2026) and for a short settle window after a resize. omp
@@ -408,11 +417,7 @@ pub fn draw(
             selection.as_ref(),
         );
         if ui.input(|input| input.modifiers.command && input.key_pressed(Key::F)) {
-            search.open = true;
-            search.focus_requested = true;
-            search.query.clear();
-            search.matches.clear();
-            search.index = 0;
+            search.open_bar();
         }
     }
 
@@ -1285,15 +1290,15 @@ fn draw_search(
         state.focus_requested = false;
     }
     if response.changed() {
-        state.matches = session.search(&state.query);
-        state.index = 0;
+        state.query_changed();
+    }
+    if state.pump_search(session, ui.ctx()) {
         if let Some(hit) = state.matches.first() {
             session.scroll_to_line(hit.line);
         }
     }
     if ui.input(|input| input.key_pressed(Key::Escape)) {
-        state.open = false;
-        state.matches.clear();
+        state.close_bar();
         return;
     }
     if ui.input(|input| input.key_pressed(Key::Enter)) && !state.matches.is_empty() {

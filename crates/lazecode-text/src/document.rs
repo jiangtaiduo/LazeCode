@@ -779,6 +779,20 @@ impl Document {
         self.highlighter.ensure(&self.rope, first, last);
     }
 
+    /// Point an open buffer at its new path after the file was renamed on
+    /// disk. The text, undo history and cursor stay intact; only the path,
+    /// syntax detection and read-only bit follow the name.
+    pub fn retarget(&mut self, path: PathBuf) {
+        if self.path == path {
+            return;
+        }
+        let first_line = self.rope.line(0).to_string();
+        self.path = path;
+        self.highlighter =
+            SyntaxHighlighter::with_first_line(&self.path, first_line.lines().next());
+        self.read_only = file_is_read_only(&self.path);
+    }
+
     /// Re-read the file from disk after an external change. Undo history is
     /// discarded because the old rope no longer matches the file.
     pub fn reload(&mut self) -> anyhow::Result<()> {
@@ -1097,6 +1111,31 @@ mod tests {
         assert_eq!(doc.line_count(), 3);
         assert!(!doc.dirty);
         assert!(!doc.undo());
+    }
+
+    #[test]
+    fn retarget_keeps_buffer_and_saves_to_the_new_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old.rs");
+        let new = dir.path().join("new.rs");
+        std::fs::write(&old, "fn old() {}\n").unwrap();
+        let mut doc = Document::open(&old, 4, true).unwrap();
+        doc.set_cursor(Cursor { line: 0, col: 3 }, false);
+        doc.insert_text("_dirty");
+        std::fs::rename(&old, &new).unwrap();
+
+        doc.retarget(new.clone());
+        assert_eq!(doc.path, new);
+        assert_eq!(doc.text(), "fn _dirtyold() {}\n");
+        assert!(doc.dirty);
+        assert_eq!(doc.highlighter.language_name(), Some("Rust"));
+
+        doc.save().unwrap();
+        assert!(!old.exists());
+        assert_eq!(
+            std::fs::read_to_string(&new).unwrap(),
+            "fn _dirtyold() {}\n"
+        );
     }
 
     #[test]

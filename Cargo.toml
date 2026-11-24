@@ -68,7 +68,9 @@ flate2 = "1"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# Keep unwinding. Background work (VT parsing, Git jobs, probes, updater)
+# isolates panics with `catch_unwind`; aborting would turn any one of those
+# into a process exit that discards every unsaved editor buffer.
 strip = true
 
 [profile.dev]

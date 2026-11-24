@@ -287,6 +287,30 @@ fn font_picker(
     }
 }
 
+fn option_button(
+    ui: &mut Ui,
+    rect: Rect,
+    label: &str,
+    selected: bool,
+    icon: Option<Icon>,
+    theme: &Theme,
+) -> egui::Response {
+    if selected {
+        primary_button(ui, rect, label, icon, true, theme)
+    } else {
+        secondary_button(ui, rect, label, icon, theme)
+    }
+}
+
+fn scrollback_options(current: usize) -> Vec<usize> {
+    let mut options = vec![5_000usize, 10_000, 20_000, 50_000];
+    if !options.contains(&current) {
+        options.push(current);
+        options.sort_unstable();
+    }
+    options
+}
+
 fn heading(ui: &mut Ui, theme: &Theme, rect: Rect, title: &str, subtitle: &str) {
     let p = theme.palette;
     ui.painter().text(
@@ -400,29 +424,32 @@ fn appearance(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
         Pos2::new(dark_rect.right() + 8.0, y - 13.0),
         Vec2::new(96.0, 26.0),
     );
-    if secondary_button(
+    let is_dark = model.settings.theme == ThemeMode::Dark;
+    if option_button(
         ui,
         dark_rect,
         crate::tr!(model, "Dark", "深色"),
+        is_dark,
         Some(Icon::Moon),
         theme,
     )
     .clicked()
-        && model.settings.theme != ThemeMode::Dark
+        && !is_dark
     {
         model.settings.theme = ThemeMode::Dark;
         rt.applied_theme = None;
         model.save_settings();
     }
-    if secondary_button(
+    if option_button(
         ui,
         light_rect,
         crate::tr!(model, "Light", "浅色"),
+        !is_dark,
         Some(Icon::Sun),
         theme,
     )
     .clicked()
-        && model.settings.theme != ThemeMode::Light
+        && is_dark
     {
         model.settings.theme = ThemeMode::Light;
         rt.applied_theme = None;
@@ -548,15 +575,12 @@ fn appearance(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &The
         Pos2::new(en_rect.right() + 8.0, y - 13.0),
         Vec2::new(70.0, 26.0),
     );
-    if secondary_button(ui, en_rect, "English", None, theme).clicked()
-        && model.settings.language != Language::English
-    {
+    let is_english = model.settings.language == Language::English;
+    if option_button(ui, en_rect, "English", is_english, None, theme).clicked() && !is_english {
         model.set_language(Language::English);
         rt.fonts_dirty = true;
     }
-    if secondary_button(ui, zh_rect, "中文", None, theme).clicked()
-        && model.settings.language != Language::Chinese
-    {
+    if option_button(ui, zh_rect, "中文", !is_english, None, theme).clicked() && is_english {
         model.set_language(Language::Chinese);
         rt.fonts_dirty = true;
     }
@@ -797,9 +821,16 @@ fn terminal(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         p.text2,
     );
     let mut x = rect.left() + 160.0;
-    for value in [5_000usize, 10_000, 20_000, 50_000] {
+    let current_scrollback = model.settings.terminal.scrollback;
+    for value in scrollback_options(current_scrollback) {
+        let selected = current_scrollback == value;
+        let label = if value % 1000 == 0 {
+            format!("{}k", value / 1000)
+        } else {
+            format!("{:.1}k", value as f64 / 1000.0)
+        };
         let button = Rect::from_min_size(Pos2::new(x, y - 13.0), Vec2::new(60.0, 26.0));
-        if secondary_button(ui, button, &format!("{}k", value / 1000), None, theme).clicked() {
+        if option_button(ui, button, &label, selected, None, theme).clicked() && !selected {
             model.settings.terminal.scrollback = value;
             model.save_settings();
         }
@@ -817,12 +848,8 @@ fn terminal(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     for value in [32usize, 64, 128, 256] {
         let button = Rect::from_min_size(Pos2::new(x, y - 13.0), Vec2::new(60.0, 26.0));
         let selected = model.settings.terminal.graphics_cache_mb == value;
-        let response = if selected {
-            primary_button(ui, button, &format!("{value} MB"), None, true, theme)
-        } else {
-            secondary_button(ui, button, &format!("{value} MB"), None, theme)
-        };
-        if response.clicked() {
+        let response = option_button(ui, button, &format!("{value} MB"), selected, None, theme);
+        if response.clicked() && !selected {
             model.settings.terminal.graphics_cache_mb = value;
             model.save_settings();
         }
@@ -889,25 +916,15 @@ fn terminal(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         Pos2::new(rect.left() + 160.0, y - 13.0),
         Vec2::new(96.0, 26.0),
     );
-    let b_resp = if is_bottom {
-        primary_button(
-            ui,
-            bottom_btn,
-            crate::tr!(model, "Bottom", "底部"),
-            None,
-            true,
-            theme,
-        )
-    } else {
-        secondary_button(
-            ui,
-            bottom_btn,
-            crate::tr!(model, "Bottom", "底部"),
-            None,
-            theme,
-        )
-    };
-    if b_resp.clicked() {
+    let b_resp = option_button(
+        ui,
+        bottom_btn,
+        crate::tr!(model, "Bottom", "底部"),
+        is_bottom,
+        None,
+        theme,
+    );
+    if b_resp.clicked() && !is_bottom {
         model.ui.terminal_placement = lazecode_core::TerminalPlacement::Bottom;
         model.save_workspace();
     }
@@ -915,25 +932,15 @@ fn terminal(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         Pos2::new(bottom_btn.right() + 8.0, y - 13.0),
         Vec2::new(96.0, 26.0),
     );
-    let r_resp = if !is_bottom {
-        primary_button(
-            ui,
-            right_btn,
-            crate::tr!(model, "Right", "右侧"),
-            None,
-            true,
-            theme,
-        )
-    } else {
-        secondary_button(
-            ui,
-            right_btn,
-            crate::tr!(model, "Right", "右侧"),
-            None,
-            theme,
-        )
-    };
-    if r_resp.clicked() {
+    let r_resp = option_button(
+        ui,
+        right_btn,
+        crate::tr!(model, "Right", "右侧"),
+        !is_bottom,
+        None,
+        theme,
+    );
+    if r_resp.clicked() && is_bottom {
         model.ui.terminal_placement = lazecode_core::TerminalPlacement::Right;
         model.save_workspace();
     }
@@ -941,7 +948,11 @@ fn terminal(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     ui.painter().text(
         Pos2::new(rect.left(), y),
         Align2::LEFT_CENTER,
-        "Sessions run in their own threads; the grid holds up to the selected scrollback in RAM.",
+        crate::tr!(
+            model,
+            "RAM holds the selected scrollback; older rows spill to disk (8× lines / 64 MB) and evict oldest first.",
+            "内存保留所选行数；更早的行写入磁盘（8 倍行数 / 64 MB），超出后淘汰最旧行。"
+        ),
         FontId::proportional(10.0),
         p.text3,
     );
@@ -1738,5 +1749,15 @@ mod skin_ui_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn scrollback_options_keep_default_and_custom_value_selectable() {
+        let defaults = scrollback_options(10_000);
+        assert_eq!(defaults, vec![5_000, 10_000, 20_000, 50_000]);
+        let custom = scrollback_options(100_000);
+        assert_eq!(custom, vec![5_000, 10_000, 20_000, 50_000, 100_000]);
+        let odd = scrollback_options(1_500);
+        assert_eq!(odd, vec![1_500, 5_000, 10_000, 20_000, 50_000]);
     }
 }

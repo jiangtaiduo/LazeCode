@@ -8,7 +8,7 @@ use lazecode_git::{
 };
 
 use crate::icons::{paint as paint_icon, Icon};
-use crate::runtime::UiRuntime;
+use crate::runtime::{GitLogCache, UiRuntime};
 use crate::theme::Theme;
 use crate::widgets::{icon_button, text_clipped};
 
@@ -576,6 +576,7 @@ pub fn draw_terminal_dock(
         let snapshot = rt_ref.terminal_snapshots.entry(*pane_id).or_default();
         let selection = rt_ref.terminal_selections.entry(*pane_id).or_insert(None);
         let search = rt_ref.terminal_search.entry(*pane_id).or_default();
+        let resize = rt_ref.terminal_resize.entry(*pane_id).or_default();
         let preedit = rt_ref.terminal_preedit.entry(*pane_id).or_default();
         let wheel_accum = rt_ref.terminal_wheel.entry(*pane_id).or_insert(0.0);
         let graphics = rt_ref.terminal_graphics.entry(*pane_id).or_default();
@@ -588,6 +589,7 @@ pub fn draw_terminal_dock(
             snapshot,
             selection,
             search,
+            resize,
             focus,
             preedit,
             wheel_accum,
@@ -993,11 +995,12 @@ fn draw_git_log(
     }
     let p = theme.palette;
     // Take owned clones of everything the painter needs — the body mutates
-    // via model.projects[index] elsewhere.
-    let (log, branches, current_branch, selected, details, _log_branch, query, error) = {
+    // via model.projects[index] elsewhere. The commit list itself is not
+    // cloned: the derived view below is cached and only the filtered subset
+    // is cloned when the inputs change.
+    let (branches, current_branch, selected, details, _log_branch, query, error) = {
         let project = &model.projects[index];
         (
-            project.log.clone(),
             project.branches.clone(),
             project.branch(),
             project.selected_commit.clone(),
@@ -1006,6 +1009,108 @@ fn draw_git_log(
             project.log_query.clone(),
             project.log_error.clone(),
         )
+    };
+
+    // Filter constants and the derived view (filtered list + lane layout +
+    // author chip list) are recomputed only when the log, the filter or the
+    // graph toggle changes: doing it per frame recompiled a regex per commit
+    // and cloned lane strings for every row.
+    let date_since = match query.date {
+        lazecode_core::DatePreset::All => (query.since > 0).then_some(query.since),
+        lazecode_core::DatePreset::Today => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            Some(now - (now % 86400))
+        }
+        lazecode_core::DatePreset::Week => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            Some(now.saturating_sub(7 * 86400))
+        }
+        lazecode_core::DatePreset::Month => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            Some(now.saturating_sub(30 * 86400))
+        }
+    };
+    let author_filter = query.author.trim().to_string();
+    let show_graph = model.ui.git_log_show_graph;
+    let cache_key = format!(
+        "{index}|{}|{date_since:?}|{author_filter}|{}|{}|{}|{show_graph}",
+        model.projects[index].log_generation, query.text, query.case_sensitive, query.use_regex,
+    );
+    let cache = rt.git_log_cache.take();
+    let (filtered, dag, authors) = match cache {
+        Some(cached) if cached.key == cache_key => (cached.filtered, cached.dag, cached.authors),
+        _ => {
+            // The query itself never changes while this closure runs, so the
+            // needle is lowered once and the regex is compiled once.
+            let needle = if query.case_sensitive {
+                query.text.clone()
+            } else {
+                query.text.to_lowercase()
+            };
+            let regex = (query.use_regex && !needle.is_empty())
+                .then(|| lazecode_fs::compile_regex(&needle, false).ok())
+                .flatten();
+            let matches_query = |haystack: &str| {
+                if needle.is_empty() {
+                    return true;
+                }
+                if query.use_regex {
+                    return regex
+                        .as_ref()
+                        .is_some_and(|regex| !haystack.is_empty() && regex.is_match(haystack));
+                }
+                if query.case_sensitive {
+                    haystack.contains(&needle)
+                } else {
+                    haystack.to_lowercase().contains(&needle)
+                }
+            };
+            let filtered: Vec<CommitInfo> = {
+                let log = &model.projects[index].log;
+                log.iter()
+                    .filter(|commit| {
+                        if let Some(since) = date_since {
+                            if commit.time < since {
+                                return false;
+                            }
+                        }
+                        if !author_filter.is_empty()
+                            && !commit.author.eq_ignore_ascii_case(&author_filter)
+                        {
+                            return false;
+                        }
+                        matches_query(&commit.message)
+                            || matches_query(&commit.author)
+                            || needle.is_empty()
+                            || commit.id.starts_with(&needle)
+                            || commit.refs.iter().any(|label| matches_query(&label.label))
+                    })
+                    .cloned()
+                    .collect()
+            };
+            let dag = if show_graph {
+                lazecode_git::compute_dag(&filtered)
+            } else {
+                lazecode_git::dag::DagLayout::default()
+            };
+            let authors: Vec<String> = {
+                let mut set = std::collections::BTreeSet::new();
+                for commit in &filtered {
+                    set.insert(commit.author.clone());
+                }
+                set.into_iter().take(24).collect()
+            };
+            (filtered, dag, authors)
+        }
     };
 
     // Sequencer/conflict banner.
@@ -1355,14 +1460,14 @@ fn draw_git_log(
 
     let count_text = if model.projects[index].log_paging {
         if model.settings.language.is_zh() {
-            format!("{} 个提交...", log.len())
+            format!("{} 个提交...", model.projects[index].log.len())
         } else {
-            format!("{} commits...", log.len())
+            format!("{} commits...", model.projects[index].log.len())
         }
     } else if model.settings.language.is_zh() {
-        format!("{} 个提交", log.len())
+        format!("{} 个提交", model.projects[index].log.len())
     } else {
-        format!("{} commits", log.len())
+        format!("{} commits", model.projects[index].log.len())
     };
     let gal = ui
         .painter()
@@ -1420,13 +1525,6 @@ fn draw_git_log(
     }
 
     // Author chip
-    let authors: Vec<String> = {
-        let mut set = std::collections::BTreeSet::new();
-        for commit in log.iter() {
-            set.insert(commit.author.clone());
-        }
-        set.into_iter().take(24).collect()
-    };
     let author_label = if query.author.is_empty() {
         if model.settings.language.is_zh() {
             "👤 全部作者".to_string()
@@ -1902,77 +2000,13 @@ fn draw_git_log(
         );
     }
 
-    let date_since = match model.projects[index].log_query.date {
-        lazecode_core::DatePreset::All => (model.projects[index].log_query.since > 0)
-            .then_some(model.projects[index].log_query.since),
-        lazecode_core::DatePreset::Today => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            Some(now - (now % 86400))
-        }
-        lazecode_core::DatePreset::Week => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            Some(now.saturating_sub(7 * 86400))
-        }
-        lazecode_core::DatePreset::Month => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            Some(now.saturating_sub(30 * 86400))
-        }
-    };
-    let author_filter = model.projects[index].log_query.author.trim().to_string();
-
-    let filtered: Vec<CommitInfo> = log
-        .into_iter()
-        .filter(|commit| {
-            if let Some(since) = date_since {
-                if commit.time < since {
-                    return false;
-                }
-            }
-            if !author_filter.is_empty() && !commit.author.eq_ignore_ascii_case(&author_filter) {
-                return false;
-            }
-            let query = if model.projects[index].log_query.case_sensitive {
-                model.projects[index].log_query.text.clone()
-            } else {
-                model.projects[index].log_query.text.to_lowercase()
-            };
-            let matches_query = |haystack: String| {
-                if query.is_empty() {
-                    return true;
-                }
-                let haystack = if model.projects[index].log_query.case_sensitive {
-                    haystack
-                } else {
-                    haystack.to_lowercase()
-                };
-                if model.projects[index].log_query.use_regex {
-                    if let Ok(re) = lazecode_fs::compile_regex(&query, false) {
-                        return !haystack.is_empty() && re.is_match(&haystack);
-                    }
-                    return false;
-                }
-                haystack.contains(&query)
-            };
-            matches_query(commit.message.clone())
-                || matches_query(commit.author.clone())
-                || (query.is_empty() || commit.id.starts_with(&query))
-                || commit
-                    .refs
-                    .iter()
-                    .any(|label| matches_query(label.label.clone()))
-        })
-        .collect();
-
     if let Some(error) = error {
+        rt.git_log_cache = Some(GitLogCache {
+            key: cache_key,
+            filtered,
+            dag,
+            authors,
+        });
         ui.painter().text(
             Pos2::new(list_rect.left() + 20.0, list_rect.top() + 30.0),
             Align2::LEFT_CENTER,
@@ -1983,12 +2017,6 @@ fn draw_git_log(
         return;
     }
 
-    let show_graph = model.ui.git_log_show_graph;
-    let dag = if show_graph {
-        lazecode_git::compute_dag(&filtered)
-    } else {
-        lazecode_git::dag::DagLayout::default()
-    };
     let dag_width = if show_graph {
         (10.0 + (dag.max_lane + 1) as f32 * LANE_W).max(40.0)
     } else {
@@ -2287,6 +2315,14 @@ fn draw_git_log(
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_millis(33));
     }
+    // Reuse the derived view across frames; the key covers the log
+    // generation, the whole filter and the graph toggle.
+    rt.git_log_cache = Some(GitLogCache {
+        key: cache_key,
+        filtered,
+        dag,
+        authors,
+    });
 }
 
 #[allow(clippy::too_many_arguments)]

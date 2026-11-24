@@ -1069,3 +1069,100 @@ fn repository_version_snapshot_opens_a_read_only_titled_tab() {
         _ => panic!("expected a file tab"),
     }
 }
+
+#[test]
+fn renaming_open_files_and_directories_retargets_tabs() {
+    let dir = tempfile::tempdir().unwrap();
+    let old_dir = dir.path().join("old-dir");
+    let new_dir = dir.path().join("new-dir");
+    std::fs::create_dir(&old_dir).unwrap();
+    let old_file = old_dir.join("note.txt");
+    std::fs::write(&old_file, "hello\n").unwrap();
+
+    let settings = Settings::default();
+    let mut project = ProjectState::single_files();
+    let tab_id = project.open_file(old_file.clone(), &settings).unwrap();
+
+    std::fs::rename(&old_dir, &new_dir).unwrap();
+    assert!(project.retarget_path(&old_dir, &new_dir));
+
+    let tab = project.tab_by_id(tab_id).unwrap();
+    let TabKind::File(file) = &tab.kind else {
+        panic!("expected file tab");
+    };
+    assert_eq!(
+        file.doc.path,
+        new_dir.canonicalize().unwrap().join("note.txt")
+    );
+    assert_eq!(tab.title(), "note.txt");
+    assert!(
+        !file.disk_changed(),
+        "retarget must stamp the new path, not report the old one as deleted"
+    );
+    assert_eq!(file.doc.text(), "hello\n");
+}
+
+#[test]
+fn case_only_rename_retargets_open_tabs() {
+    // macOS volumes are case-insensitive by default: the old path still
+    // resolves after `readme.md` became `README.md`, so retargeting must not
+    // compare the canonicalised old path (it folds to the new case).
+    let dir = tempfile::tempdir().unwrap();
+    let old = dir.path().join("readme.md");
+    let new = dir.path().join("README.md");
+    std::fs::write(&old, "hello\n").unwrap();
+
+    let settings = Settings::default();
+    let mut project = ProjectState::single_files();
+    let tab_id = project.open_file(old.clone(), &settings).unwrap();
+
+    std::fs::rename(&old, &new).unwrap();
+    assert!(
+        project.retarget_path(&old, &new),
+        "a case-only rename must retarget the open tab"
+    );
+
+    let tab = project.tab_by_id(tab_id).unwrap();
+    let TabKind::File(file) = &tab.kind else {
+        panic!("expected file tab");
+    };
+    assert_eq!(file.doc.path, new.canonicalize().unwrap());
+    assert_eq!(tab.title(), "README.md");
+    assert!(
+        !file.disk_changed(),
+        "retarget must stamp the renamed path, not report it as deleted"
+    );
+}
+
+#[test]
+fn locating_the_active_tab_keeps_the_tree_multi_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "b\n").unwrap();
+    let settings = Settings::default();
+    let mut project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
+    let a = project
+        .open_file(dir.path().join("a.txt"), &settings)
+        .unwrap();
+    let b = project
+        .open_file(dir.path().join("b.txt"), &settings)
+        .unwrap();
+    project.activate_tab(a);
+
+    let mut model = model();
+    model.projects.push(project);
+    model.active_project = Some(0);
+    model.ui.tree_selected = Some(PathBuf::from("b.txt"));
+    model.ui.tree_selection.insert(PathBuf::from("b.txt"));
+
+    model.locate_active_file(true);
+
+    assert_eq!(model.ui.tree_selected, Some(PathBuf::from("a.txt")));
+    assert_eq!(
+        model.ui.tree_selection,
+        HashSet::from([PathBuf::from("b.txt")]),
+        "locating must not wipe the batch-action selection"
+    );
+    assert_eq!(model.ui.tree_reveal, Some((PathBuf::from("a.txt"), true)));
+    let _ = b;
+}

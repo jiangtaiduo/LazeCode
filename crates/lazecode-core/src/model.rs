@@ -908,6 +908,10 @@ pub struct ProjectState {
     pub git: Option<RepoSnapshot>,
     pub git_error: Option<String>,
     pub log: Vec<CommitInfo>,
+    /// Bumped whenever `log` changes. The Git-log view derives its filtered
+    /// list and lane layout from it and caches both on this generation, so a
+    /// per-frame recompute cannot go stale.
+    pub log_generation: u64,
     pub log_error: Option<String>,
     pub branches: Vec<BranchInfo>,
     pub branch_query: String,
@@ -1016,6 +1020,7 @@ impl ProjectState {
             git: None,
             git_error: None,
             log: Vec::new(),
+            log_generation: 0,
             log_error: None,
             branches: Vec::new(),
             branch_query: String::new(),
@@ -1136,6 +1141,7 @@ impl ProjectState {
             git,
             git_error,
             log,
+            log_generation: 0,
             log_error,
             branches,
             branch_query: String::new(),
@@ -1440,6 +1446,7 @@ impl ProjectState {
                     self.log = log;
                 }
                 self.log_error = None;
+                self.log_generation = self.log_generation.wrapping_add(1);
                 if !self
                     .log
                     .iter()
@@ -1679,6 +1686,95 @@ impl ProjectState {
         self.checked_paths.clear();
         self.change_selection.clear();
         self.change_anchor = None;
+    }
+
+    /// Point open tabs and path-keyed project state at a renamed file or
+    /// directory. The caller performs the filesystem rename first; this keeps
+    /// buffers, tab titles and Git-relative selections consistent so the file
+    /// watcher does not try to reload the old path.
+    pub fn retarget_path(&mut self, old: &Path, new: &Path) -> bool {
+        let old = canonical_after_rename(old);
+        let new = new.canonicalize().unwrap_or_else(|_| new.to_path_buf());
+        if old == new {
+            return false;
+        }
+        let mut changed = false;
+        for tab in &mut self.tabs {
+            let worktree = tab.worktree.clone();
+            let old_rel = relative_slash(&old, &worktree);
+            let new_rel = relative_slash(&new, &worktree);
+            match &mut tab.kind {
+                TabKind::File(file) => {
+                    if let Some(path) = retarget_absolute(&file.doc.path, &old, &new) {
+                        file.doc.retarget(path);
+                        file.stamp_disk();
+                        changed = true;
+                    }
+                }
+                TabKind::Image(image) => {
+                    if let Some(path) = retarget_absolute(&image.path, &old, &new) {
+                        image.path = path;
+                        changed = true;
+                    }
+                }
+                TabKind::Diff(diff) => {
+                    if let DiffSource::Files { old_path, new_path } = &mut diff.source {
+                        if let Some(path) = retarget_absolute(old_path, &old, &new) {
+                            *old_path = path;
+                            changed = true;
+                        }
+                        if let Some(path) = retarget_absolute(new_path, &old, &new) {
+                            *new_path = path;
+                            changed = true;
+                        }
+                    } else if let Some(path) = diff_source_path(&mut diff.source) {
+                        if let Some(updated) =
+                            retarget_relative(path, old_rel.as_deref(), new_rel.as_deref())
+                        {
+                            *path = updated;
+                            changed = true;
+                        }
+                    }
+                    if let Some(updated) =
+                        retarget_relative(&diff.path, old_rel.as_deref(), new_rel.as_deref())
+                    {
+                        diff.path = updated;
+                        changed = true;
+                    }
+                }
+                TabKind::Compare(_) => {}
+            }
+        }
+        let old_rel = relative_slash(&old, &self.root);
+        let new_rel = relative_slash(&new, &self.root);
+        let retarget_set = |set: &mut HashSet<String>| {
+            if old_rel.is_none() || new_rel.is_none() {
+                return false;
+            }
+            let mut changed = false;
+            let mut next = HashSet::with_capacity(set.len());
+            for path in set.drain() {
+                match retarget_relative(&path, old_rel.as_deref(), new_rel.as_deref()) {
+                    Some(updated) => {
+                        changed = true;
+                        next.insert(updated);
+                    }
+                    None => {
+                        next.insert(path);
+                    }
+                }
+            }
+            *set = next;
+            changed
+        };
+        changed |= retarget_set(&mut self.checked_paths);
+        changed |= retarget_set(&mut self.change_selection);
+        let mut expanded = HashSet::with_capacity(self.expanded.len());
+        for path in self.expanded.drain() {
+            expanded.insert(retarget_absolute(&path, &old, &new).unwrap_or(path));
+        }
+        self.expanded = expanded;
+        changed
     }
 
     pub fn tab_by_id(&self, id: u64) -> Option<&Tab> {
@@ -2903,6 +2999,47 @@ impl AppModel {
         self.recent_files.truncate(12);
     }
 
+    /// Keep every path-keyed piece of UI state in sync after a rename. This is
+    /// deliberately broader than tabs: the tree selection, reveal request and
+    /// recent-files list must not keep pointing at the old name.
+    pub fn retarget_path(&mut self, old: &Path, new: &Path) {
+        let old = canonical_after_rename(old);
+        let new = new.canonicalize().unwrap_or_else(|_| new.to_path_buf());
+        if old == new {
+            return;
+        }
+        let settings = &self.settings;
+        for project in &mut self.projects {
+            project.retarget_path(&old, &new);
+        }
+        if let Some(index) = self.active_project {
+            if let Some(project) = self.projects.get_mut(index) {
+                project.reload_tree(settings);
+            }
+        }
+        if let Some(path) = self.ui.tree_selected.take() {
+            self.ui.tree_selected = Some(retarget_absolute(&path, &old, &new).unwrap_or(path));
+        }
+        let mut selection = std::collections::HashSet::with_capacity(self.ui.tree_selection.len());
+        for path in self.ui.tree_selection.drain() {
+            selection.insert(retarget_absolute(&path, &old, &new).unwrap_or(path));
+        }
+        self.ui.tree_selection = selection;
+        if let Some((path, center)) = self.ui.tree_reveal.take() {
+            self.ui.tree_reveal =
+                Some((retarget_absolute(&path, &old, &new).unwrap_or(path), center));
+        }
+        if let Some((path, at)) = self.ui.locate_flash.take() {
+            self.ui.locate_flash = Some((retarget_absolute(&path, &old, &new).unwrap_or(path), at));
+        }
+        let mut recent = Vec::with_capacity(self.recent_files.len());
+        for path in self.recent_files.drain(..) {
+            recent.push(retarget_absolute(&path, &old, &new).unwrap_or(path));
+        }
+        self.recent_files = recent;
+        self.save_workspace();
+    }
+
     pub fn forget_recent_file(&mut self, path: &Path) {
         self.recent_files.retain(|recent| recent != path);
         self.save_workspace();
@@ -3138,6 +3275,14 @@ impl AppModel {
         if let Some(previous) = self.ui.view_target.take() {
             self.ui.worktree_views.insert(previous, current);
         }
+        // Tree rows are relative paths scoped to the visible checkout. A
+        // selection carried into another worktree would highlight nothing and,
+        // worse, let batch actions (delete/discard) resolve same-named paths
+        // against the wrong checkout.
+        self.ui.tree_selection.clear();
+        self.ui.tree_selected = None;
+        self.ui.tree_reveal = None;
+        self.ui.locate_flash = None;
         let Some(path) = target else {
             return;
         };
@@ -3286,6 +3431,11 @@ impl AppModel {
             .strip_prefix(project.active_root())
             .unwrap_or(&file_path)
             .to_path_buf();
+        // Locating is navigation, not a selection change: batch actions
+        // (delete/discard) depend on the multi-selection, so it must survive a
+        // tab click. The tree paints the active file with its own accent bar
+        // (`sidebar.rs`), which is what makes the active tab locatable without
+        // destroying the user's work set.
         self.ui.tree_selected = Some(rel.clone());
         self.ui.tree_reveal = Some((rel.clone(), quiet));
         if !quiet {
@@ -3482,6 +3632,66 @@ impl AppModel {
 /// show one actionable "initialize" empty state.
 fn is_not_a_git_repository(message: &str) -> bool {
     message.contains("not a Git repository")
+}
+
+fn retarget_absolute(path: &Path, old: &Path, new: &Path) -> Option<PathBuf> {
+    if path == old {
+        return Some(new.to_path_buf());
+    }
+    path.strip_prefix(old).ok().map(|rest| new.join(rest))
+}
+
+/// Canonicalise the surviving parent and re-attach the *original* file name.
+///
+/// The old path itself is gone after a rename, and canonicalising it is not
+/// only useless but wrong on the default (case-insensitive) macOS filesystem:
+/// `canonicalize("…/readme.md")` still succeeds after `readme.md` became
+/// `README.md` and folds the name to the new case, making a case-only rename
+/// compare equal and skip every retarget.
+fn canonical_after_rename(path: &Path) -> PathBuf {
+    let Some(parent) = path.parent() else {
+        return path.to_path_buf();
+    };
+    let Some(name) = path.file_name() else {
+        return path.to_path_buf();
+    };
+    parent
+        .canonicalize()
+        .map(|parent| parent.join(name))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn relative_slash(path: &Path, root: &Path) -> Option<String> {
+    path.strip_prefix(root)
+        .ok()
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+}
+
+fn retarget_relative(value: &str, old: Option<&str>, new: Option<&str>) -> Option<String> {
+    let old = old?;
+    let new = new?;
+    if value == old {
+        return Some(new.to_string());
+    }
+    let rest = value.strip_prefix(old)?.strip_prefix('/')?;
+    Some(if rest.is_empty() {
+        new.to_string()
+    } else {
+        format!("{new}/{rest}")
+    })
+}
+
+fn diff_source_path(source: &mut DiffSource) -> Option<&mut String> {
+    match source {
+        DiffSource::Files { .. } => None,
+        DiffSource::Worktree { path }
+        | DiffSource::Index { path }
+        | DiffSource::Commit { path, .. }
+        | DiffSource::CompareWithLocal { path, .. }
+        | DiffSource::CompareCommits { path, .. }
+        | DiffSource::Stash { path, .. }
+        | DiffSource::StashBeforeLocal { path, .. } => Some(path),
+    }
 }
 
 fn initials_of(name: &str) -> String {

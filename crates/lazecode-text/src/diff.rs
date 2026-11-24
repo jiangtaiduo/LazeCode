@@ -19,6 +19,12 @@ pub struct DiffLine {
 pub struct DiffHunk {
     pub header: String,
     pub lines: Vec<DiffLine>,
+    /// The old side of this hunk reaches EOF and the original text has no
+    /// trailing newline. `unified_patch` must emit `\ No newline at end of
+    /// file`, otherwise reverse-applying an untracked file's last line fails.
+    pub old_no_eol: bool,
+    /// Same for the new side.
+    pub new_no_eol: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -173,8 +179,16 @@ pub fn diff_text_with_context(old: &str, new: &str, context: usize) -> TextDiff 
         }
         let old_start = old_start.unwrap_or(0);
         let new_start = new_start.unwrap_or(0);
+        let old_last = lines.iter().filter_map(|line| line.old_lineno).max();
+        let new_last = lines.iter().filter_map(|line| line.new_lineno).max();
         result.hunks.push(DiffHunk {
             header: format!("@@ -{old_start},{old_count} +{new_start},{new_count} @@"),
+            old_no_eol: !old.is_empty()
+                && !old.ends_with('\n')
+                && old_last == Some(old_lines.len() as u32),
+            new_no_eol: !new.is_empty()
+                && !new.ends_with('\n')
+                && new_last == Some(new_lines.len() as u32),
             lines,
         });
     }
@@ -195,7 +209,15 @@ pub fn unified_patch(path: &str, diff: &TextDiff) -> String {
     for hunk in &diff.hunks {
         out.push_str(&hunk.header);
         out.push('\n');
-        for line in &hunk.lines {
+        let last_old = hunk
+            .lines
+            .iter()
+            .rposition(|line| line.old_lineno.is_some());
+        let last_new = hunk
+            .lines
+            .iter()
+            .rposition(|line| line.new_lineno.is_some());
+        for (index, line) in hunk.lines.iter().enumerate() {
             let sign = match line.kind {
                 DiffLineKind::Context => ' ',
                 DiffLineKind::Add => '+',
@@ -204,6 +226,11 @@ pub fn unified_patch(path: &str, diff: &TextDiff) -> String {
             out.push(sign);
             out.push_str(&line.text);
             out.push('\n');
+            if (hunk.old_no_eol && last_old == Some(index))
+                || (hunk.new_no_eol && last_new == Some(index))
+            {
+                out.push_str("\\ No newline at end of file\n");
+            }
         }
     }
     out
@@ -296,6 +323,20 @@ mod tests {
         assert!(diff.hunks.is_empty());
         assert_eq!(diff.additions, 0);
         assert_eq!(diff.deletions, 0);
+    }
+
+    #[test]
+    fn unified_patch_marks_missing_final_newline() {
+        let added = unified_patch("testbb.txt", &diff_text("", "123123"));
+        assert!(
+            added.contains("+123123\n\\ No newline at end of file\n"),
+            "{added}"
+        );
+        let removed = unified_patch("testbb.txt", &diff_text("123123", ""));
+        assert!(
+            removed.contains("-123123\n\\ No newline at end of file\n"),
+            "{removed}"
+        );
     }
 }
 

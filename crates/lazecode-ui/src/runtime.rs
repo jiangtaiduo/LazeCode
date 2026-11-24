@@ -92,6 +92,91 @@ pub fn console_outputting(
     !after_resize || was_outputting
 }
 
+/// Derived Git-log view: the filtered commit list, its lane layout and the
+/// author-chip list. Recomputing all three per frame dominated the log view's
+/// frame time (a regex filter recompiled the pattern per commit and the lane
+/// layout cloned lane strings per row), so they are cached until the log, the
+/// filter or the graph toggle changes.
+pub struct GitLogCache {
+    /// `project index | log generation | filter fingerprint | show graph`.
+    pub key: String,
+    pub filtered: Vec<lazecode_git::CommitInfo>,
+    pub dag: lazecode_git::DagLayout,
+    pub authors: Vec<String>,
+}
+
+/// Debounce window for terminal reflow while a pane is being resized.
+const TERM_RESIZE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// Per-pane reflow gate. Resizing rewraps the whole scrollback and raises
+/// SIGWINCH, so a drag that changes the size on every frame both hitches the
+/// UI (proportional to the retained history) and storms full-screen TUIs with
+/// repaints. The first layout applies immediately; later size changes apply
+/// once the target has been stable for the debounce window.
+#[derive(Clone, Copy, Debug)]
+pub struct TermResizeGate {
+    /// Size last handed to the session.
+    applied: Option<(u16, u16)>,
+    /// Newest target seen while a reflow is deferred.
+    seen: Option<(u16, u16)>,
+    seen_at: std::time::Instant,
+}
+
+impl Default for TermResizeGate {
+    fn default() -> Self {
+        Self {
+            applied: None,
+            seen: None,
+            seen_at: std::time::Instant::now(),
+        }
+    }
+}
+
+impl TermResizeGate {
+    /// Feed the pane's current target; true when the session should reflow now.
+    pub fn should_apply(&mut self, target: (u16, u16)) -> bool {
+        if self.seen != Some(target) {
+            self.seen = Some(target);
+            self.seen_at = std::time::Instant::now();
+            if self.applied.is_none() {
+                self.applied = Some(target);
+                return true;
+            }
+            return false;
+        }
+        if self.applied == Some(target) {
+            return false;
+        }
+        if self.seen_at.elapsed() >= TERM_RESIZE_DEBOUNCE {
+            self.applied = Some(target);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Time left before the deferred target may be applied.
+    pub fn remaining(&self) -> std::time::Duration {
+        TERM_RESIZE_DEBOUNCE.saturating_sub(self.seen_at.elapsed())
+    }
+
+    /// Forget the applied size (a different session now owns this pane id).
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// One background scan for the terminal find bar.
+struct PendingTermSearch {
+    query: String,
+    rx: std::sync::mpsc::Receiver<Vec<lazecode_terminal::TerminalMatch>>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Find-in-terminal state. The scan walks the whole retained history, so it
+/// runs on a worker after an input debounce instead of inline on the UI
+/// thread (one full pass per keystroke cost ~70ms at 43k lines and seconds at
+/// the cold byte cap).
 #[derive(Default)]
 pub struct TermSearchState {
     pub open: bool,
@@ -99,6 +184,108 @@ pub struct TermSearchState {
     pub matches: Vec<lazecode_terminal::TerminalMatch>,
     pub index: usize,
     pub focus_requested: bool,
+    /// Earliest time the next scan may start (input debounce).
+    pending_at: Option<std::time::Instant>,
+    /// Scan currently running; superseding it cancels the worker.
+    inflight: Option<PendingTermSearch>,
+}
+
+/// Input debounce for the find bar: one scan per typing burst.
+const TERM_SEARCH_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(120);
+
+impl TermSearchState {
+    /// Open the find bar with an empty query.
+    pub fn open_bar(&mut self) {
+        self.open = true;
+        self.focus_requested = true;
+        self.query.clear();
+        self.index = 0;
+        self.matches.clear();
+        self.pending_at = None;
+        self.cancel_inflight();
+    }
+
+    /// Close the find bar: drop results and stop any running scan.
+    pub fn close_bar(&mut self) {
+        self.open = false;
+        self.pending_at = None;
+        self.cancel_inflight();
+        self.matches.clear();
+        self.index = 0;
+    }
+
+    /// Record a query edit: restart the debounce window.
+    pub fn query_changed(&mut self) {
+        self.index = 0;
+        self.matches.clear();
+        self.pending_at = Some(std::time::Instant::now() + TERM_SEARCH_DEBOUNCE);
+        self.cancel_inflight();
+    }
+
+    /// Start the debounced scan and apply finished results. Returns whether
+    /// `matches` changed.
+    pub fn pump_search(
+        &mut self,
+        session: &lazecode_terminal::Session,
+        ctx: &egui::Context,
+    ) -> bool {
+        let mut changed = false;
+        if self.query.trim().is_empty() {
+            self.pending_at = None;
+            self.cancel_inflight();
+            if !self.matches.is_empty() {
+                self.matches.clear();
+                changed = true;
+            }
+            return changed;
+        }
+        if let Some(at) = self.pending_at {
+            let now = std::time::Instant::now();
+            if now >= at {
+                self.pending_at = None;
+                self.cancel_inflight();
+                let (rx, cancel) = session.search_async(self.query.clone());
+                self.inflight = Some(PendingTermSearch {
+                    query: self.query.clone(),
+                    rx,
+                    cancel,
+                });
+            } else {
+                ctx.request_repaint_after(at - now + std::time::Duration::from_millis(1));
+            }
+        }
+        if let Some(pending) = self.inflight.take() {
+            match pending.rx.try_recv() {
+                Ok(matches) => {
+                    if pending.query == self.query {
+                        self.matches = matches;
+                        self.index = 0;
+                        changed = true;
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.inflight = Some(pending);
+                    ctx.request_repaint_after(std::time::Duration::from_millis(16));
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+            }
+        }
+        changed
+    }
+
+    fn cancel_inflight(&mut self) {
+        if let Some(pending) = self.inflight.take() {
+            pending
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+impl Drop for TermSearchState {
+    fn drop(&mut self) {
+        self.cancel_inflight();
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -613,12 +800,16 @@ pub struct UiRuntime {
     pub terminal_preedit: HashMap<u64, String>,
     /// Fractional trackpad wheel remainder per terminal session.
     pub terminal_wheel: HashMap<u64, f32>,
+    /// Reflow debounce per pane (a drag must not rewrap the scrollback per frame).
+    pub terminal_resize: HashMap<u64, TermResizeGate>,
     /// Last snapshot wake counter per terminal; skips rebuilding unchanged grids.
     pub terminal_wake: HashMap<u64, u64>,
     /// egui textures for each pane's kitty graphics images.
     pub terminal_graphics: HashMap<u64, crate::terminal::GraphicsCache>,
     /// Per-pane process activity from the 2s background probe.
     pub terminal_busy: HashMap<u64, TerminalBusyState>,
+    /// Filtered Git-log view + lane layout, reused until its inputs change.
+    pub git_log_cache: Option<GitLogCache>,
     /// Set by the app shell: wakes the event loop when an off-thread close/
     /// quit probe finishes, so the confirmation dialog lands next frame
     /// instead of waiting for the next poll deadline.
@@ -687,6 +878,16 @@ pub struct UiRuntime {
     pub last_revealed_tab: Option<u64>,
     pub last_revealed_cmp_file: Option<String>,
     pub ime_preedit: String,
+    /// True while a Chinese/Japanese/Korean IME owns an uncommitted
+    /// composition. Enter must select the candidate, not confirm the dialog
+    /// or insert a newline.
+    pub ime_composing: bool,
+    /// Whether the previous frame had a surface asking egui for IME input.
+    /// A composition cannot outlive that focus: winit clears its marked text
+    /// on `set_ime_allowed(false)` (and on input-source changes) without
+    /// emitting `Preedit("")`/`Commit`, and egui-winit drops `Ime::Disabled`,
+    /// so the filter itself must treat the next frame as composition-free.
+    pub ime_focus_seen: bool,
     // --- 提交抽屉（稳定版 CommitDrawer）状态 ---
     /// Commit / Shelf 页签。
     pub commit_tab: CommitTab,
@@ -770,9 +971,11 @@ impl Default for UiRuntime {
             terminal_scroll_fraction: HashMap::new(),
             terminal_preedit: HashMap::new(),
             terminal_wheel: HashMap::new(),
+            terminal_resize: HashMap::new(),
             terminal_wake: HashMap::new(),
             terminal_graphics: HashMap::new(),
             terminal_busy: HashMap::new(),
+            git_log_cache: None,
             wake_notifier: None,
             new_ignore_pattern: String::new(),
             commit_view_menu_frame: 0,
@@ -817,6 +1020,8 @@ impl Default for UiRuntime {
             last_revealed_tab: None,
             last_revealed_cmp_file: None,
             ime_preedit: String::new(),
+            ime_composing: false,
+            ime_focus_seen: false,
             commit_tab: CommitTab::Commit,
             commit_tree_view: false,
             commit_show_ignored: false,
@@ -843,6 +1048,99 @@ impl Default for UiRuntime {
 }
 
 impl UiRuntime {
+    /// Chinese/Japanese/Korean IMEs can report the Enter that leaves a
+    /// composition as a plain key event without an `ImeEvent::Commit` (macOS
+    /// Shuangpin does). Every text surface treats Enter as "confirm", so when
+    /// a composition is active: commit the preedit text into the focused
+    /// field, drop the key, and let the next Enter confirm the dialog.
+    ///
+    /// If the IME does send its own `Commit` in the same frame, keep that text
+    /// untouched. Either way the Enter that ends composition is suppressed;
+    /// the next Enter confirms normally.
+    pub fn filter_ime_enter(&mut self, ui: &egui::Ui) {
+        // Nothing asked for IME input last frame, so any composition state is
+        // stale: winit cleared its marked text without telling egui (see
+        // `ime_focus_seen`). Dropping it here is what keeps a later Enter from
+        // committing a preedit that no longer exists on screen.
+        if !self.ime_focus_seen {
+            self.ime_composing = false;
+            self.ime_preedit.clear();
+        }
+        let mut composing = self.ime_composing;
+        let mut preedit = self.ime_preedit.clone();
+        let mut ime_activity = false;
+        let mut committed = false;
+        let pointer_pressed = ui.input(|input| input.pointer.any_pressed());
+        ui.input(|input| {
+            for event in &input.events {
+                match event {
+                    egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) => {
+                        preedit = text.clone();
+                        composing = !text.is_empty();
+                        ime_activity = true;
+                    }
+                    egui::Event::Ime(egui::ImeEvent::Commit(_)) => {
+                        preedit.clear();
+                        composing = false;
+                        ime_activity = true;
+                        committed = true;
+                    }
+                    egui::Event::Key {
+                        key: egui::Key::Escape,
+                        pressed: true,
+                        ..
+                    } => {
+                        preedit.clear();
+                        composing = false;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        if pointer_pressed {
+            preedit.clear();
+            composing = false;
+        }
+        let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
+        if enter_pressed && composing {
+            // macOS/egui-winit reports the Enter that leaves a composition as
+            // a plain key event, without an ImeEvent::Commit. Synthesize the
+            // commit so the preedit text lands in the field, then drop the
+            // key so it cannot also press the dialog's confirm button.
+            if !committed && !preedit.is_empty() {
+                // Chinese IME preedits separate syllables with spaces (for
+                // example `test c c d`). A direct Enter commit is the user's
+                // literal text, so those separators must not leak into file
+                // names or editor content.
+                let text = preedit.replace(' ', "");
+                ui.input_mut(|input| {
+                    input
+                        .events
+                        .push(egui::Event::Ime(egui::ImeEvent::Commit(text)));
+                });
+            }
+            preedit.clear();
+            composing = false;
+            ime_activity = true;
+        }
+        if composing || ime_activity {
+            ui.input_mut(|input| {
+                input.events.retain(|event| {
+                    !matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::Enter,
+                            pressed: true,
+                            ..
+                        }
+                    )
+                });
+            });
+        }
+        self.ime_preedit = preedit;
+        self.ime_composing = composing;
+    }
+
     /// Decode the packaged application icon once and reuse it in the
     /// titlebar and the empty-workspace page.
     pub fn app_icon_texture(&mut self, ctx: &egui::Context) -> egui::TextureId {
@@ -1517,6 +1815,7 @@ impl UiRuntime {
         self.terminal_preedit.clear();
         self.terminal_wheel.clear();
         self.terminal_graphics.clear();
+        self.terminal_resize.clear();
         // Keep `terminal_busy`: switching projects must not make a running
         // green ring disappear until the next 2s probe. Entries are keyed by
         // globally unique pane ids and `forget_terminal` removes closed ones.
@@ -1534,6 +1833,7 @@ impl UiRuntime {
         self.terminal_graphics.remove(&id);
         self.terminal_busy.remove(&id);
         self.terminal_scroll_fraction.remove(&id);
+        self.terminal_resize.remove(&id);
         if self.terminal_focus == Some(id) {
             self.terminal_focus = None;
         }
@@ -1563,6 +1863,7 @@ impl UiRuntime {
         self.terminal_graphics.retain(|id, _| alive(id));
         self.terminal_busy.retain(|id, _| alive(id));
         self.terminal_scroll_fraction.retain(|id, _| alive(id));
+        self.terminal_resize.retain(|id, _| alive(id));
         if self.terminal_focus.is_some_and(|id| !alive(&id)) {
             self.terminal_focus = None;
         }
@@ -1648,5 +1949,126 @@ mod tests {
     fn stale_output_or_idle_console_stays_dark() {
         assert!(!console_outputting(true, Some(2_500), None, None, false));
         assert!(!console_outputting(false, Some(100), None, None, false));
+    }
+
+    fn enter_event() -> egui::Event {
+        egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn preedit_event(text: &str) -> egui::Event {
+        egui::Event::Ime(egui::ImeEvent::Preedit {
+            text: text.to_string(),
+            active_range_chars: None,
+        })
+    }
+
+    fn filter_frame(rt: &mut UiRuntime, events: Vec<egui::Event>) -> (bool, Option<String>) {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(800.0, 600.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut enter = false;
+        let mut commit = None;
+        let mut output = ctx.run_ui(input, |ui| {
+            rt.filter_ime_enter(ui);
+            enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
+            commit = ui.input(|input| {
+                input.events.iter().find_map(|event| match event {
+                    egui::Event::Ime(egui::ImeEvent::Commit(text)) => Some(text.clone()),
+                    _ => None,
+                })
+            });
+        });
+        output.textures_delta.clear();
+        (enter, commit)
+    }
+
+    #[test]
+    fn ime_preedit_enter_commits_instead_of_confirming() {
+        let mut rt = UiRuntime::default();
+        let (enter, commit) = filter_frame(&mut rt, vec![preedit_event("ce"), enter_event()]);
+        assert!(!enter, "Enter must not confirm the dialog");
+        assert_eq!(
+            commit.as_deref(),
+            Some("ce"),
+            "Enter must commit the preedit text"
+        );
+        let (enter, _) = filter_frame(&mut rt, vec![enter_event()]);
+        assert!(enter, "the next Enter confirms normally");
+    }
+
+    #[test]
+    fn ime_direct_enter_strips_preedit_separators() {
+        let mut rt = UiRuntime::default();
+        let (enter, commit) =
+            filter_frame(&mut rt, vec![preedit_event("test c c d"), enter_event()]);
+        assert!(!enter, "Enter must not confirm the dialog");
+        assert_eq!(
+            commit.as_deref(),
+            Some("testccd"),
+            "IME syllable separators must not reach the text field"
+        );
+    }
+
+    #[test]
+    fn ime_commit_enter_is_not_a_confirm() {
+        let mut rt = UiRuntime::default();
+        let (enter, commit) = filter_frame(
+            &mut rt,
+            vec![
+                preedit_event("ce"),
+                egui::Event::Ime(egui::ImeEvent::Commit("测".into())),
+                enter_event(),
+            ],
+        );
+        assert!(
+            !enter,
+            "the Enter that commits a candidate must not confirm"
+        );
+        assert_eq!(
+            commit.as_deref(),
+            Some("测"),
+            "the IME's own commit must not be replaced"
+        );
+    }
+
+    #[test]
+    fn plain_enter_still_confirms() {
+        let mut rt = UiRuntime::default();
+        let (enter, _) = filter_frame(&mut rt, vec![enter_event()]);
+        assert!(enter);
+    }
+
+    #[test]
+    fn losing_ime_focus_drops_a_stale_composition() {
+        // Frame N: a text field holds IME focus and the IME reports a preedit.
+        let mut rt = UiRuntime {
+            ime_focus_seen: true,
+            ..UiRuntime::default()
+        };
+        let (enter, _) = filter_frame(&mut rt, vec![preedit_event("ce")]);
+        assert!(!enter);
+        assert!(rt.ime_composing);
+
+        // Frame N+1: the focused surface is gone. winit cleared its marked
+        // text without an event egui can see, so the Enter must be a real
+        // confirm and must not commit the stale preedit.
+        rt.ime_focus_seen = false;
+        let (enter, commit) = filter_frame(&mut rt, vec![enter_event()]);
+        assert!(enter, "a stale preedit must not swallow the next Enter");
+        assert_eq!(commit, None, "a stale preedit must not be committed");
+        assert!(!rt.ime_composing);
+        assert!(rt.ime_preedit.is_empty());
     }
 }

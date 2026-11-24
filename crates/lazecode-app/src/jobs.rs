@@ -3872,6 +3872,7 @@ impl JobQueue {
                             project.log.extend(commits);
                         }
                         project.log_seed = lanes;
+                        project.log_generation = project.log_generation.wrapping_add(1);
                         project.log_loaded = project.log.len();
                         project.log_paging = false;
                         if !project

@@ -175,6 +175,7 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
 
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     rt.frame_count = rt.frame_count.wrapping_add(1);
+    rt.filter_ime_enter(ui);
     // A focused console/editor owns the keyboard, but egui still runs Tab
     // focus navigation over clickable widgets and treats Enter/Space on the
     // focused widget as a click (FAKE_PRIMARY_CLICKED). Tab completion or

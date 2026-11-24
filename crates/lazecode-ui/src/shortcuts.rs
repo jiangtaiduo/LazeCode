@@ -69,9 +69,7 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         }
         // ^P：稳定版 Group by Directory 切换（源控抽屉可见时）。控制台聚焦时
         // 让给 TUI（omp 用 Ctrl+P 切换模型），不在应用层吞掉。
-        if !blocked
-            && rt.terminal_focus.is_none()
-            && consumed(input, model, Action::ToggleTreeView)
+        if !blocked && rt.terminal_focus.is_none() && consumed(input, model, Action::ToggleTreeView)
         {
             toggle_tree_view = true;
         }

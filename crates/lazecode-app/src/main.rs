@@ -624,6 +624,15 @@ impl LazeApp {
         install_titlebar_double_click_monitor(window.as_ref());
 
         let egui_ctx = egui::Context::default();
+        #[cfg(target_os = "macos")]
+        {
+            // egui defaults to 300 ms, but macOS often reports a slower
+            // system double-click interval (500 ms by default here). Without
+            // this, a double-click that AppKit accepts is split into two
+            // single clicks by egui, so file rows never open.
+            let system_delay = NSEvent::doubleClickInterval();
+            lazecode_ui::set_max_double_click_delay(&egui_ctx, system_delay);
+        }
         lazecode_ui::install_fonts(&egui_ctx, &self.model.settings);
         egui_ctx.style_mut_of(egui::Theme::Dark, |style| {
             style.animation_time = 0.08;
@@ -898,7 +907,11 @@ impl LazeApp {
                             }
                         }
                     }
-                    "tool-backtick" | "tool-backtick-shift" | "tool-1" | "tool-2" | "tool-3"
+                    "tool-backtick"
+                    | "tool-backtick-shift"
+                    | "tool-1"
+                    | "tool-2"
+                    | "tool-3"
                     | "tool-4" => {
                         // 录入态下组合键被原生菜单消费，egui 收不到：直接结束
                         // 录入，避免卡在等待。
@@ -1233,6 +1246,11 @@ impl LazeApp {
         if self.busy_in_flight || self.last_busy_poll.elapsed() < Duration::from_secs(2) {
             return;
         }
+        // The dots only exist on screen; an occluded window must not keep
+        // walking the process table every two seconds.
+        if self.pacer.occluded {
+            return;
+        }
         self.last_busy_poll = std::time::Instant::now();
 
         let mut targets: Vec<BusyProbeTarget> = Vec::new();
@@ -1390,6 +1408,10 @@ impl LazeApp {
         let output = ctx.run_ui(raw_input, |ui| {
             lazecode_ui::draw(ui, &mut self.model, &mut self.runtime);
         });
+        // `filter_ime_enter` needs to know whether the frame that just ran had
+        // an IME-enabled text surface: losing it ends the composition without
+        // any event egui can observe.
+        self.runtime.ime_focus_seen = output.platform_output.ime.is_some();
         self.repaint_after = output
             .viewport_output
             .get(&egui::ViewportId::ROOT)

@@ -517,6 +517,49 @@ fn main() -> anyhow::Result<()> {
                 error: None,
             };
         }
+        "push_dialog" => {
+            let commit = |id: &str, message: &str, author: &str| lazecode_git::CommitInfo {
+                id: id.to_string(),
+                short: id[..7.min(id.len())].to_string(),
+                message: message.to_string(),
+                body: String::new(),
+                author: author.to_string(),
+                email: "dev@example.com".to_string(),
+                time: 1_763_000_000,
+                parents: Vec::new(),
+                in_head: Some(true),
+                refs: Vec::new(),
+                lane: 0,
+                lane_count: 1,
+                edges: Vec::new(),
+            };
+            runtime.dialog = lazecode_ui::runtime::DialogState::Push {
+                remote: "origin".to_string(),
+                branch: "feat-expert-mode".to_string(),
+                set_upstream: true,
+                force: false,
+                push_tags: false,
+                remotes: vec![
+                    lazecode_git::RemoteInfo {
+                        name: "origin".to_string(),
+                        url: "git@github.com:jiangtaiduo/LazeCode.git".to_string(),
+                    },
+                    lazecode_git::RemoteInfo {
+                        name: "upstream".to_string(),
+                        url: "https://github.com/example/LazeCode.git".to_string(),
+                    },
+                ],
+                pending: vec![
+                    commit(
+                        "0123456789abcdef",
+                        "feat(ui): split the context menus",
+                        "Ann",
+                    ),
+                    commit("fedcba9876543210", "fix(git): keep merge base", "Bo"),
+                ],
+                status: None,
+            };
+        }
         "single_menu" | "project_menu" => {
             runtime.open_menu(
                 lazecode_ui::MenuKind::Project,

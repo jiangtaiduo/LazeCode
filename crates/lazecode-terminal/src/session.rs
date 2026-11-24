@@ -3358,7 +3358,13 @@ mod tests {
         let path = session.cold_path().expect("spool enabled");
         assert!(path.exists());
         drop(session);
-        assert!(!path.exists(), "closing the session must delete the spool");
+        // The reader thread owns a clone of the spool, so the file disappears
+        // when that thread notices the cancel flag and exits, not when
+        // `drop` returns. Wait for it instead of racing the teardown.
+        assert!(
+            wait_until(|| !path.exists(), std::time::Duration::from_secs(10)),
+            "closing the session must delete the spool"
+        );
     }
 
     fn echo_session(rows: u16) -> Session {

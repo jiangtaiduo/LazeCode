@@ -10668,6 +10668,19 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                             crate::tr!(model, "Name cannot be empty", "名称不能为空").to_string(),
                         ),
                     };
+                } else if !is_plain_name(name) {
+                    rt.dialog = DialogState::NewFile {
+                        dir: dir.clone(),
+                        value: value.clone(),
+                        error: Some(
+                            crate::tr!(
+                                model,
+                                "Enter a file name, not a path",
+                                "请输入文件名，不要包含路径"
+                            )
+                            .to_string(),
+                        ),
+                    };
                 } else {
                     let target = dir.join(name);
                     if target.exists() {
@@ -10700,6 +10713,19 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                         value: value.clone(),
                         error: Some(
                             crate::tr!(model, "Name cannot be empty", "名称不能为空").to_string(),
+                        ),
+                    };
+                } else if !is_plain_name(name) {
+                    rt.dialog = DialogState::NewDirectory {
+                        dir: dir.clone(),
+                        value: value.clone(),
+                        error: Some(
+                            crate::tr!(
+                                model,
+                                "Enter a directory name, not a path",
+                                "请输入目录名，不要包含路径"
+                            )
+                            .to_string(),
                         ),
                     };
                 } else {
@@ -10787,7 +10813,11 @@ fn draw_dialog(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Th
                         }
                         Ok(()) => {
                             model.retarget_path(old_path, &target);
-                            model.note_recent_file(target);
+                            // Recent files lists files; a renamed directory
+                            // would open as an error.
+                            if target.is_file() {
+                                model.note_recent_file(target);
+                            }
                             close = true;
                         }
                     }

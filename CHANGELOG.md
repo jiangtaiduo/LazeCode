@@ -33,6 +33,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `catch_unwind` (VT parser, Git jobs, activity probes, updater); `panic =
   "abort"` turned any one of them into a process exit that lost every unsaved
   buffer.
+- A VT reset (`RIS`) starts a new cold-scrollback epoch instead of blocking
+  new spooling behind the old id watermark and showing pre-reset lines.
+- Closing a console sends SIGHUP and gives the process group a short grace
+  period before SIGKILL, so login shells can flush their history.
+- New File / New Directory now reject path separators like Rename does, and
+  renaming a directory no longer adds it to Recent files.
+- Shell resolution refuses executables inside the temp directory and states
+  exactly what it checks (known login shell by name, executable, not temp).
+- The kitty image queue is capped by entry count as well as payload bytes, so
+  a flood of tiny images cannot grow it without bound.
+- Editor and settings saves use `F_FULLFSYNC` on macOS and fsync the parent
+  directory after the rename, so a power loss cannot lose the file that was
+  just saved.
+- The updater re-hashes the staged artifact immediately before installing it
+  and keeps only the two newest `.app` backups.
 
 ### Performance
 
@@ -55,6 +70,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rewraps the scrollback and raises SIGWINCH on every frame.
 - The PTY wake coalescer delivers its trailing frame from the reader loop
   instead of spawning a thread per 16 ms window.
+- LSP document reconciliation runs only when the open document set or a buffer
+  revision changes; protocol events still drain every frame.
 
 ## [0.4.12] - 2026-11-24
 

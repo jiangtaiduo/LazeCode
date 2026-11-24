@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::fd::FromRawFd;
@@ -315,15 +316,33 @@ struct SpoolState {
     spooled_through: u64,
     hot_cap: usize,
     slack: usize,
+    /// Last `lines_evicted` observed. A decrease means the VT grid was reset
+    /// (`RIS`) and the absolute row-id space restarted at zero.
+    last_evicted: u64,
 }
 
 /// Textures awaiting upload/drop, bounded by the graphics budget (only the
-/// active pane drains it).
+/// active pane drains it) and by an entry cap: per-entry overhead is not part
+/// of the pixel-byte budget, so a flood of tiny images would otherwise grow
+/// the queue without bound.
 #[derive(Default)]
 struct GraphicsQueue {
-    images: Vec<KittyImage>,
+    images: VecDeque<KittyImage>,
     bytes: usize,
     generation: u64,
+}
+
+/// Upper bound for `GraphicsQueue::images` regardless of the payload bytes.
+const GRAPHICS_QUEUE_MAX_ENTRIES: usize = 512;
+
+/// Drop oldest pending images until both budgets hold.
+fn trim_graphics_queue(images: &mut VecDeque<KittyImage>, bytes: &mut usize, byte_cap: usize) {
+    while *bytes > byte_cap || images.len() > GRAPHICS_QUEUE_MAX_ENTRIES {
+        let Some(dropped) = images.pop_front() else {
+            break;
+        };
+        *bytes = bytes.saturating_sub(dropped.rgba.len());
+    }
 }
 
 pub(crate) struct Shared {
@@ -417,7 +436,7 @@ impl Proxy {
         if queues.pending_images.is_empty() {
             return;
         }
-        let mut queue = self.shared.graphics.lock();
+        let queue = &mut *self.shared.graphics.lock();
         let queue_cap = self.shared.graphics_queue_bytes;
         for (id, data) in queues.pending_images {
             let width = data.width;
@@ -443,7 +462,7 @@ impl Proxy {
             queue.generation += 1;
             let generation = queue.generation;
             let bytes = rgba.len();
-            queue.images.push(KittyImage {
+            queue.images.push_back(KittyImage {
                 id,
                 width,
                 height,
@@ -452,11 +471,8 @@ impl Proxy {
             });
             queue.bytes += bytes;
             // Only the active pane's draw drains this queue; drop the oldest
-            // payloads when a background console outruns the budget.
-            while queue.bytes > queue_cap && !queue.images.is_empty() {
-                let dropped = queue.images.remove(0);
-                queue.bytes = queue.bytes.saturating_sub(dropped.rgba.len());
-            }
+            // payloads when a background console outruns either budget.
+            trim_graphics_queue(&mut queue.images, &mut queue.bytes, queue_cap);
         }
         self.shared.notify();
     }
@@ -862,6 +878,23 @@ fn anchored_row(
     None
 }
 
+/// A VT reset (`RIS`) reinitialises the grid, so `lines_evicted` restarts at
+/// zero while the spool's watermark still points past the old epoch. Without
+/// this, the new stream would not spool a single row until its id caught up
+/// and cold reads would keep showing pre-reset lines.
+fn reset_epoch_if_rewound(spool: &mut SpoolState, evicted: u64) -> bool {
+    if evicted >= spool.last_evicted {
+        spool.last_evicted = evicted;
+        return false;
+    }
+    if let Some(store) = spool.store.as_mut() {
+        store.clear();
+    }
+    spool.spooled_through = evicted;
+    spool.last_evicted = evicted;
+    true
+}
+
 /// Max bytes fed to the parser between spool observations; one byte scrolls at
 /// most one line, so the ring's slack is never exceeded.
 const PARSE_SLICE: usize = 1024;
@@ -874,11 +907,12 @@ fn spool_scrollback(
     view_offset: &AtomicUsize,
     total_before: u64,
 ) {
+    let evicted = term.grid.lines_evicted();
+    reset_epoch_if_rewound(spool, evicted);
     let Some(store) = spool.store.as_mut() else {
         return;
     };
     let hot = term.history_size();
-    let evicted = term.grid.lines_evicted();
     if hot > spool.hot_cap {
         let floor = evicted + (hot - spool.hot_cap) as u64;
         if spool.spooled_through < evicted {
@@ -2000,7 +2034,7 @@ impl Session {
     /// Take newly decoded kitty images for texture upload.
     pub fn take_graphics_updates(&self) -> Vec<KittyImage> {
         let mut queue = self.shared.graphics.lock();
-        let images = std::mem::take(&mut queue.images);
+        let images = queue.images.drain(..).collect();
         // The byte counter must track the pending payloads only; leaving the
         // taken images counted would make the cap evict live images after
         // the next drain.
@@ -2034,8 +2068,8 @@ impl Session {
     fn terminate(&self) {
         let was_running = self.shared.running.swap(false, Ordering::SeqCst);
         self.reader_cancel.store(true, Ordering::SeqCst);
+        let mut groups = Vec::new();
         if was_running {
-            let mut groups = Vec::new();
             if let Some(pgid) = self.pgid.filter(|pgid| *pgid > 1) {
                 groups.push(pgid);
             }
@@ -2050,10 +2084,11 @@ impl Session {
             }
             groups.sort_unstable();
             groups.dedup();
-            for pgid in groups {
+            // Polite first: a shell writes its history and jobs on SIGHUP, and
+            // a SIGKILL right behind it leaves no chance to run that handler.
+            for pgid in &groups {
                 unsafe {
-                    libc::kill(-pgid, libc::SIGHUP);
-                    libc::kill(-pgid, libc::SIGKILL);
+                    libc::kill(-*pgid, libc::SIGHUP);
                 }
             }
             let _ = self.killer.lock().kill();
@@ -2061,6 +2096,19 @@ impl Session {
         // Closing the master forces a terminal hangup for processes that
         // ignored the signals above; the reader has its own cancellation flag.
         let _ = self.master.lock().take();
+        if was_running && !groups.is_empty() {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+            while std::time::Instant::now() < deadline
+                && groups.iter().any(|pgid| group_is_alive(*pgid))
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            for pgid in groups {
+                unsafe {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+            }
+        }
         self.shared.notify();
     }
 
@@ -2077,9 +2125,20 @@ impl Drop for Session {
 
 const ALLOWED_SHELLS: &[&str] = &["zsh", "bash", "fish", "sh", "nu", "pwsh"];
 
-/// Console programs are user-configured, but only known login shells are
-/// accepted; anything else falls back to `/bin/zsh` instead of executing an
-/// arbitrary path supplied by repository content or a stale setting.
+/// Whether any process in `pgid`'s group still exists (`ESRCH` = gone).
+fn group_is_alive(pgid: i32) -> bool {
+    let result = unsafe { libc::kill(-pgid, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// Resolve the login shell for a console.
+///
+/// The candidate (settings or `$SHELL`) must be a known login shell by *file
+/// name*; an absolute path is only accepted when it exists, is executable and
+/// does not live in a world-writable temp directory (so a stale setting cannot
+/// point at `/tmp/…/zsh`). Anything else resolves through the standard bin
+/// directories and finally `/bin/zsh`. The settings file is user-authored, so
+/// this is a hygiene guard, not a security boundary.
 fn resolve_shell(requested: Option<String>) -> String {
     let requested = requested
         .filter(|shell| !shell.trim().is_empty())
@@ -2101,15 +2160,42 @@ fn resolve_shell(requested: Option<String>) -> String {
     }
     let path = std::path::Path::new(&candidate);
     if path.is_absolute() && path.is_file() {
-        return candidate;
+        let temp = std::env::temp_dir();
+        let temp = temp.canonicalize().unwrap_or(temp);
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if canonical.starts_with(&temp) {
+            log::warn!("refusing shell '{candidate}' inside the temp directory");
+        } else if is_executable(&canonical) {
+            return canonical.to_string_lossy().into_owned();
+        }
     }
-    for dir in ["/bin", "/usr/bin", "/opt/homebrew/bin", "/usr/local/bin"] {
+    for dir in [
+        "/bin",
+        "/usr/bin",
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/opt/local/bin",
+    ] {
         let path = std::path::Path::new(dir).join(name);
         if path.is_file() {
             return path.to_string_lossy().into_owned();
         }
     }
     "/bin/zsh".to_string()
+}
+
+fn is_executable(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
@@ -2266,6 +2352,7 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
         spooled_through: 0,
         hot_cap,
         slack,
+        last_evicted: 0,
     }));
     let mut term = Crosswords::new(
         CrosswordsSize::new(cols as usize, rows as usize),
@@ -3830,4 +3917,77 @@ fn process_table_lists_this_process() {
             .any(|row| row.name.rsplit('/').next() == Some(name.as_ref())),
         "own executable {name} missing from the process table"
     );
+}
+
+#[test]
+fn graphics_queue_caps_entries_not_only_bytes() {
+    let small = |id: u32| KittyImage {
+        id,
+        width: 1,
+        height: 1,
+        rgba: Arc::from([0u8, 0, 0, 0].as_slice()),
+        generation: id as u64,
+    };
+    let mut images: VecDeque<KittyImage> = (0..GRAPHICS_QUEUE_MAX_ENTRIES as u32 + 10)
+        .map(small)
+        .collect();
+    let mut bytes = images.len() * 4;
+    // 4-byte payloads stay far under any byte cap; the entry cap must still
+    // bound the queue, otherwise per-entry overhead grows without limit.
+    trim_graphics_queue(&mut images, &mut bytes, 1 << 30);
+    assert_eq!(images.len(), GRAPHICS_QUEUE_MAX_ENTRIES);
+    assert_eq!(bytes, GRAPHICS_QUEUE_MAX_ENTRIES * 4);
+    assert_eq!(images.front().map(|image| image.id), Some(10));
+    // The byte cap still evicts oldest-first.
+    trim_graphics_queue(&mut images, &mut bytes, 16);
+    assert_eq!(bytes, 16);
+    assert_eq!(images.len(), 4);
+}
+
+#[test]
+fn temp_directory_shells_are_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fake = dir.path().join("zsh");
+    std::fs::write(&fake, b"#!/bin/sh\n").expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let resolved = resolve_shell(Some(fake.to_string_lossy().into_owned()));
+    assert_ne!(std::path::Path::new(&resolved), fake.as_path());
+    assert!(resolved.ends_with("zsh"), "{resolved}");
+    assert_eq!(resolve_shell(Some("/bin/zsh".to_string())), "/bin/zsh");
+    assert_eq!(
+        resolve_shell(Some("/tmp/not-a-shell".to_string())),
+        "/bin/zsh"
+    );
+}
+
+#[test]
+fn vt_reset_restarts_the_cold_epoch() {
+    let mut store = crate::cold::ColdStore::create(10, 1 << 20).expect("create");
+    let row = vec![CellData::default(); 4];
+    store.append_rows(0, &[crate::cold::encode_row(&row)]);
+    let mut spool = SpoolState {
+        store: Some(store),
+        spooled_through: 5_000,
+        hot_cap: 10,
+        slack: 4,
+        last_evicted: 5_000,
+    };
+    // `RIS` rewinds `lines_evicted`: the spool must start a new epoch instead
+    // of waiting for ids to catch up past the old watermark.
+    assert!(reset_epoch_if_rewound(&mut spool, 3));
+    assert_eq!(spool.spooled_through, 3);
+    assert_eq!(spool.last_evicted, 3);
+    assert_eq!(
+        spool.store.as_ref().map(|store| store.len()),
+        Some(0),
+        "pre-reset cold rows must be dropped"
+    );
+    // Monotonic progress keeps the watermark and the store.
+    assert!(!reset_epoch_if_rewound(&mut spool, 9));
+    assert_eq!(spool.spooled_through, 3);
+    assert_eq!(spool.last_evicted, 9);
 }

@@ -277,10 +277,13 @@ Not implemented (explicit):
 - Bottom-dock height and right-dock width/placement persist across launches.
 - Cold/disk scrollback (`lazecode-terminal/src/cold.rs`): evicted rows are
   spooled to a bounded append-only file with stable absolute row ids,
-  rehydrated for scroll/search, compacted when dead bytes dominate (the new
-  layout commits only after the rewrite succeeds), and deleted on session
-  close; spool files of dead processes are swept at startup. Row ids are
-  ordered but not contiguous — id gaps from resize/reflow self-eviction and
+  rehydrated for scroll/search, compacted on a worker thread when dead bytes
+  dominate (the copy runs off the VT lock; the new layout commits only after
+  the rewrite succeeds, re-appending a bounded tail), and deleted on session
+  close; spool files of dead processes are swept at startup. A write rate that
+  outruns the copier falls back to one in-place rewrite after shedding the
+  oldest half. Row ids are ordered but not contiguous — id gaps from
+  resize/reflow self-eviction, a VT reset (which starts a new epoch) and
   zero-length placeholders for oversized rows keep `get_by_id` exact via a
   binary search. Hot memory plateaus at the configured history.
 - Kitty graphics: rio-vt parses APC transmit/place/delete with chunking,

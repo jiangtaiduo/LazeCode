@@ -231,6 +231,13 @@ impl UpdateState {
                 progress.phase = Some(UpdatePhase::Installing);
                 progress.staged = Some(dest.clone());
             });
+            // Hash what is actually on disk right before installing: the
+            // download hashed its own bytes, but the installer is a separate
+            // step and a retry may reuse a file staged earlier.
+            if let Err(err) = updater::verify_staged_artifact(&manifest, &dest) {
+                job.with(|progress| progress.error = Some(err.to_string()));
+                return;
+            }
             let target = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("LazeCode"));
             match updater::install_artifact(&dest, &target, kind) {
                 Ok(report) => {
@@ -261,8 +268,15 @@ impl UpdateState {
         };
         let kind = outcome.manifest.artifact_kind();
         let version = outcome.manifest.version.clone();
+        let manifest = outcome.manifest.clone();
         self.error = None;
         self.start(UpdatePhase::Installing, move |job| {
+            // The staged file may have been written minutes ago; re-hash it
+            // before it replaces the running bundle.
+            if let Err(err) = updater::verify_staged_artifact(&manifest, &staged) {
+                job.with(|progress| progress.error = Some(err.to_string()));
+                return;
+            }
             let target = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("LazeCode"));
             match updater::install_artifact(&staged, &target, kind) {
                 Ok(report) => {

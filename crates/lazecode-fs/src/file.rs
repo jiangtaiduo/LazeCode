@@ -299,6 +299,41 @@ fn same_entry(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Flush the file to the device. On macOS `fsync(2)` only reaches the drive
+/// cache; `F_FULLFSYNC` is what survives a power loss. Volumes that reject it
+/// (some network filesystems) fall back to `fsync`.
+fn sync_file(file: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::io::AsRawFd;
+        if unsafe { libc::fcntl(file.as_raw_fd(), libc::F_FULLFSYNC) } == -1 {
+            return file.sync_all();
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        file.sync_all()
+    }
+}
+
+/// Make a completed rename durable by flushing the directory entry. Without
+/// this a crash shortly after "saved" can leave the old file (or none) after
+/// a power loss.
+fn sync_dir(dir: &Path) {
+    #[cfg(unix)]
+    {
+        match std::fs::File::open(dir) {
+            Ok(handle) => {
+                if let Err(err) = handle.sync_all() {
+                    log::debug!("cannot fsync {}: {err}", dir.display());
+                }
+            }
+            Err(err) => log::debug!("cannot open {} for fsync: {err}", dir.display()),
+        }
+    }
+}
+
 /// Write bytes through a sibling temporary file + fsync + rename so a crash
 /// never leaves a partially written file.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -342,7 +377,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
             path: tmp.clone(),
             source,
         })?;
-        file.sync_all().map_err(|source| FsError::Write {
+        sync_file(&file).map_err(|source| FsError::Write {
             path: tmp.clone(),
             source,
         })?;
@@ -354,7 +389,9 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         std::fs::rename(&tmp, path).map_err(|source| FsError::Write {
             path: path.to_path_buf(),
             source,
-        })
+        })?;
+        sync_dir(dir);
+        Ok(())
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -394,7 +431,7 @@ pub fn write_atomic_locked(path: &Path, bytes: &[u8]) -> Result<()> {
             path: lock_path.clone(),
             source,
         })?;
-        lock.sync_all().map_err(|source| FsError::Write {
+        sync_file(&lock).map_err(|source| FsError::Write {
             path: lock_path.clone(),
             source,
         })?;
@@ -406,7 +443,9 @@ pub fn write_atomic_locked(path: &Path, bytes: &[u8]) -> Result<()> {
         std::fs::rename(&lock_path, path).map_err(|source| FsError::Write {
             path: path.to_path_buf(),
             source,
-        })
+        })?;
+        sync_dir(dir);
+        Ok(())
     })();
     // Only clean up when this call created the lock; removing a foreign
     // writer's lock would break git's exclusion protocol.

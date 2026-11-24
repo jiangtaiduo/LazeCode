@@ -786,10 +786,15 @@ impl Document {
         if self.path == path {
             return;
         }
-        let first_line = self.rope.line(0).to_string();
+        // Only a shebang/short prefix matters for syntax detection. A
+        // minified single-line file must not be copied wholesale on rename.
+        let probe = {
+            let line = self.rope.line(0);
+            let end = line.len_chars().min(256);
+            line.slice(..end).to_string()
+        };
         self.path = path;
-        self.highlighter =
-            SyntaxHighlighter::with_first_line(&self.path, first_line.lines().next());
+        self.highlighter = SyntaxHighlighter::with_first_line(&self.path, probe.lines().next());
         self.read_only = file_is_read_only(&self.path);
     }
 

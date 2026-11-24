@@ -342,6 +342,34 @@ pub fn download_and_verify_limited(
     result
 }
 
+/// Re-check a staged artifact against the manifest's SHA-256.
+///
+/// `download_and_verify` already hashed the bytes it wrote, but the installer
+/// is a separate step: a retry installs a file staged minutes ago, and the
+/// staging directory is a plain directory in Application Support. Re-hashing
+/// (one streaming read) closes that window for the price of reading the file
+/// once more on the worker thread.
+pub fn verify_staged_artifact(manifest: &Manifest, staged: &Path) -> Result<(), UpdateError> {
+    let mut file = std::fs::File::open(staged).map_err(io_error)?;
+    let mut hasher = ring::digest::Context::new(&SHA256);
+    let mut buffer = vec![0u8; DOWNLOAD_CHUNK];
+    loop {
+        let read = file.read(&mut buffer).map_err(io_error)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual = to_hex(hasher.finish().as_ref());
+    if actual != manifest.sha256 {
+        return Err(UpdateError::ChecksumMismatch {
+            expected: manifest.sha256.clone(),
+            actual,
+        });
+    }
+    Ok(())
+}
+
 /// Where downloaded artifacts are staged.
 pub fn staging_dir() -> PathBuf {
     crate::settings::Settings::config_dir().join("updates")
@@ -540,10 +568,48 @@ pub fn install_app_bundle(staged: &Path, target: &Path) -> Result<InstallReport,
         )));
     }
     let _ = std::fs::remove_dir_all(&local);
+    // Every update leaves a `.LazeCode.app.bak-*` sibling; without pruning
+    // they accumulate one full bundle per release in /Applications.
+    prune_bundle_backups(&target_bundle);
     Ok(InstallReport {
         target: target_bundle,
         backup: Some(backup),
     })
+}
+
+/// Keep the newest two `.NAME.bak-*` siblings of `bundle`.
+fn prune_bundle_backups(bundle: &Path) {
+    const KEEP: usize = 2;
+    let Some(parent) = bundle.parent() else {
+        return;
+    };
+    let Some(name) = bundle.file_name() else {
+        return;
+    };
+    let prefix = format!(".{}.bak-", name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let mut backups: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let file_name = entry.file_name().to_string_lossy().into_owned();
+            if !file_name.starts_with(&prefix) {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, entry.path()))
+        })
+        .collect();
+    if backups.len() <= KEEP {
+        return;
+    }
+    backups.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    for (_, path) in backups.into_iter().skip(KEEP) {
+        if let Err(err) = std::fs::remove_dir_all(&path) {
+            log::warn!("cannot prune old bundle backup {}: {err}", path.display());
+        }
+    }
 }
 
 struct ExtractedBundle {
@@ -1157,6 +1223,10 @@ mod tests {
 
         fn join(&self, name: &str) -> std::path::PathBuf {
             self.0.join(name)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
         }
     }
 
@@ -1777,5 +1847,53 @@ mod tests {
         let generated = Ed25519KeyPair::generate_pkcs8(&rng).unwrap();
         let pair = Ed25519KeyPair::from_pkcs8(generated.as_ref()).unwrap();
         assert_eq!(pair.public_key().as_ref().len(), 32);
+    }
+
+    #[test]
+    fn staged_artifact_is_reverified_before_install() {
+        let dir = TempDir::new();
+        let artifact = dir.join("payload");
+        std::fs::write(&artifact, b"payload").unwrap();
+        let (manifest, _key) = signed_manifest("0.8.0", &artifact);
+        verify_staged_artifact(&manifest, &artifact).unwrap();
+
+        // A retry installs a file staged earlier; anything that replaced it
+        // since must be refused.
+        std::fs::write(&artifact, b"tampered after staging").unwrap();
+        assert!(matches!(
+            verify_staged_artifact(&manifest, &artifact),
+            Err(UpdateError::ChecksumMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn bundle_backups_are_pruned_to_the_newest_two() {
+        let dir = TempDir::new();
+        let bundle = dir.join("LazeCode.app");
+        std::fs::create_dir_all(&bundle).unwrap();
+        let mut backups = Vec::new();
+        for index in 0..4 {
+            let path = dir.join(&format!(".LazeCode.app.bak-{index}"));
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("marker"), b"x").unwrap();
+            backups.push(path);
+            // Distinct mtimes so the "newest two" choice is deterministic.
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        prune_bundle_backups(&bundle);
+        let remaining: Vec<std::path::PathBuf> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".LazeCode.app.bak-")
+            })
+            .map(|entry| entry.path())
+            .collect();
+        assert_eq!(remaining.len(), 2, "{remaining:?}");
+        assert!(remaining.contains(&backups[2]));
+        assert!(remaining.contains(&backups[3]));
     }
 }

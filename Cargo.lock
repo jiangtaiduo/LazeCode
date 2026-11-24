@@ -3964,6 +3964,7 @@ dependencies = [
  "encoding_rs",
  "globset",
  "ignore",
+ "libc",
  "log",
  "notify",
  "regex",

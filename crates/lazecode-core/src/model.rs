@@ -3348,6 +3348,30 @@ impl AppModel {
             return;
         }
         self.lsp.poll();
+        // Reconciliation builds per-server keys and can clone a whole buffer
+        // for a full-text sync, so it runs only when the open document set or
+        // a buffer revision changed. Protocol events above still drain every
+        // frame.
+        let signature = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for project in &self.projects {
+                project.root.hash(&mut hasher);
+                for worktree in &project.worktrees {
+                    worktree.path.hash(&mut hasher);
+                }
+                for tab in &project.tabs {
+                    if let TabKind::File(file) = &tab.kind {
+                        file.doc.path.hash(&mut hasher);
+                        file.doc.revision.hash(&mut hasher);
+                    }
+                }
+            }
+            hasher.finish()
+        };
+        if !self.lsp.note_reconcile_signature(signature) {
+            return;
+        }
         let mut active = HashSet::new();
         {
             let lsp = &mut self.lsp;

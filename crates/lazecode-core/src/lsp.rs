@@ -625,6 +625,9 @@ pub struct LspManager {
     pub last_error: Option<String>,
     /// Bumped whenever diagnostics change so the UI can cheaply notice.
     pub diagnostics_generation: u64,
+    /// Signature of the document set/revisions that was last reconciled, so
+    /// `sync_lsp` can skip per-frame key building and full-text syncs.
+    reconcile_signature: Option<u64>,
 }
 
 impl LspManager {
@@ -645,6 +648,7 @@ impl LspManager {
             notifier,
             last_error: None,
             diagnostics_generation: 0,
+            reconcile_signature: None,
         }
     }
 
@@ -677,6 +681,18 @@ impl LspManager {
         self.documents.clear();
         self.diagnostics.clear();
         self.failed.clear();
+        // Re-enabling must re-open every buffer even if nothing else changed.
+        self.reconcile_signature = None;
+    }
+
+    /// Record the current document-set signature; true when it differs from
+    /// the last reconciled one (i.e. reconciliation is due).
+    pub fn note_reconcile_signature(&mut self, signature: u64) -> bool {
+        if self.reconcile_signature == Some(signature) {
+            return false;
+        }
+        self.reconcile_signature = Some(signature);
+        true
     }
 
     pub fn server_count(&self) -> usize {

@@ -2,6 +2,7 @@
 
 use super::prelude::*;
 use super::{file_tone, side_head, SideAction, HEAD_H, ROW_H};
+use std::path::Path;
 
 pub(super) fn explorer(
     ui: &mut Ui,
@@ -88,7 +89,7 @@ pub(super) fn draw_tree(
         .active_project
         .expect("sidebar drawn without an active project");
     let filter = model.ui.tree_filter.to_lowercase();
-    let (rows, changes, truncated): (Vec<VisibleRow>, HashMap<String, char>, bool) = {
+    let (rows, changes): (Vec<VisibleRow>, HashMap<String, char>) = {
         let project = &model.projects[active_index];
         let tree = project.active_tree();
         let changes = project
@@ -125,7 +126,7 @@ pub(super) fn draw_tree(
                 }
             }
         }
-        (rows, changes, tree.truncated)
+        (rows, changes)
     };
 
     let show_filter = !model.ui.tree_filter.is_empty();
@@ -170,37 +171,6 @@ pub(super) fn draw_tree(
         Rect::from_min_max(Pos2::new(rect.left(), input_rect.bottom() + 4.0), rect.max)
     } else {
         Rect::from_min_max(Pos2::new(rect.left(), rect.top() + 2.0), rect.max)
-    };
-    let list_rect = if truncated {
-        let warn_rect = Rect::from_min_size(
-            Pos2::new(list_rect.left() + 8.0, list_rect.top() + 2.0),
-            Vec2::new(list_rect.width() - 16.0, 22.0),
-        );
-        ui.painter()
-            .rect_filled(warn_rect, egui::CornerRadius::same(4), p.panel2);
-        ui.painter().rect_stroke(
-            warn_rect,
-            egui::CornerRadius::same(4),
-            Stroke::new(1.0, p.amber),
-            StrokeKind::Inside,
-        );
-        ui.painter().text(
-            Pos2::new(warn_rect.left() + 8.0, warn_rect.center().y),
-            Align2::LEFT_CENTER,
-            crate::tr!(
-                model,
-                "Tree truncated: some files are not shown",
-                "文件树已截断：部分文件未显示"
-            ),
-            FontId::proportional(11.0),
-            p.amber,
-        );
-        Rect::from_min_max(
-            Pos2::new(list_rect.left(), warn_rect.bottom() + 4.0),
-            list_rect.max,
-        )
-    } else {
-        list_rect
     };
     let _active_tab = model.projects[active_index].active_tab;
     let active_rel = model.projects[active_index]
@@ -516,12 +486,7 @@ pub(super) fn draw_tree(
                                 let project = &mut model.projects[active_index];
                                 project.root_expanded = !project.root_expanded;
                             } else {
-                                let project = &mut model.projects[active_index];
-                                if project.expanded.contains(&row.path) {
-                                    project.expanded.remove(&row.path);
-                                } else {
-                                    project.expanded.insert(row.path.clone());
-                                }
+                                toggle_folder(model, active_index, &row.path);
                             }
                         }
                         NodeKind::File => {
@@ -572,12 +537,7 @@ pub(super) fn draw_tree(
                                 let project = &mut model.projects[active_index];
                                 project.root_expanded = !project.root_expanded;
                             } else {
-                                let project = &mut model.projects[active_index];
-                                if project.expanded.contains(&row.path) {
-                                    project.expanded.remove(&row.path);
-                                } else {
-                                    project.expanded.insert(row.path.clone());
-                                }
+                                toggle_folder(model, active_index, &row.path);
                             }
                         }
                     }
@@ -587,6 +547,16 @@ pub(super) fn draw_tree(
     });
     if target_reveal.is_some() {
         model.ui.tree_reveal = None;
+    }
+}
+
+fn toggle_folder(model: &mut AppModel, index: usize, rel: &Path) {
+    let project = &mut model.projects[index];
+    if project.expanded.contains(rel) {
+        project.expanded.remove(rel);
+    } else {
+        project.expanded.insert(rel.to_path_buf());
+        project.ensure_tree_children(rel, &model.settings.ignored_patterns);
     }
 }
 
@@ -613,5 +583,61 @@ fn collect_matches(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lazecode_core::{ProjectState, Settings, UiState};
+
+    #[test]
+    fn expanding_a_folder_loads_its_skipped_children() {
+        let root = std::env::temp_dir().join(format!("lazecode-ui-lazy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("late")).unwrap();
+        std::fs::write(root.join("late/child.txt"), "").unwrap();
+
+        let settings = Settings::default();
+        let project = ProjectState::open(root.clone(), &settings, None).unwrap();
+        let mut model = AppModel {
+            settings: settings.clone(),
+            projects: Vec::new(),
+            active_project: None,
+            ui: UiState::default(),
+            toasts: Vec::new(),
+            recent: Vec::new(),
+            recent_files: Vec::new(),
+            commands: Vec::new(),
+            notifier: None,
+            lsp: lazecode_core::LspManager::new(false, None),
+            should_quit: false,
+            version: "test",
+            favorite_branches: HashSet::new(),
+            git_cmd_log: Vec::new(),
+        };
+        model.projects.push(project);
+        model.active_project = Some(0);
+        {
+            let node = lazecode_fs::tree::find_mut(
+                &mut model.projects[0].active_worktree_mut().tree,
+                Path::new("late"),
+            )
+            .unwrap();
+            node.children.clear();
+            node.children_loaded = false;
+        }
+
+        toggle_folder(&mut model, 0, Path::new("late"));
+
+        let node = lazecode_fs::tree::find_mut(
+            &mut model.projects[0].active_worktree_mut().tree,
+            Path::new("late"),
+        )
+        .unwrap();
+        assert!(node.children_loaded);
+        assert_eq!(node.children.len(), 1);
+        assert_eq!(node.children[0].name, "child.txt");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

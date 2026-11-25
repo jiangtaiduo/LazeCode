@@ -822,7 +822,7 @@ impl AppModel {
         };
         let file_path = std::path::PathBuf::from(file_path_str);
         project.root_expanded = true;
-        project.expand_parents(&file_path);
+        project.expand_parents(&file_path, &self.settings.ignored_patterns);
         project.reload_tree(&self.settings);
 
         let rel = file_path

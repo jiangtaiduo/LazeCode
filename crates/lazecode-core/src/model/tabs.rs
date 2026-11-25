@@ -77,7 +77,7 @@ impl ProjectState {
             });
             if visible {
                 self.set_active_tab(id);
-                self.expand_parents(&path);
+                self.expand_parents(&path, &settings.ignored_patterns);
             }
             return Ok(id);
         }
@@ -108,7 +108,7 @@ impl ProjectState {
         });
         if visible {
             self.set_active_tab(id);
-            self.expand_parents(&path);
+            self.expand_parents(&path, &settings.ignored_patterns);
         }
         Ok(id)
     }

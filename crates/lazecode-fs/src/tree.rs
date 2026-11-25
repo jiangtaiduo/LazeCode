@@ -8,6 +8,8 @@ pub struct TreeNode {
     pub path: PathBuf,
     pub kind: NodeKind,
     pub children: Vec<TreeNode>,
+    /// False when a bounded scan skipped this folder; expansion loads it.
+    pub children_loaded: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,104 +63,157 @@ pub fn load_tree_with_expanded(
     if !root.is_dir() {
         return tree;
     }
-
-    fn scan_dir_recursive(
-        root: &Path,
-        rel: &Path,
-        expanded: Option<&HashSet<PathBuf>>,
-        custom_ignored: Option<&[String]>,
-        budget: &mut usize,
-        max_entries: usize,
-    ) -> Vec<TreeNode> {
-        let full_dir = if rel.as_os_str().is_empty() {
-            root.to_path_buf()
-        } else {
-            root.join(rel)
-        };
-        let Ok(read_dir) = std::fs::read_dir(&full_dir) else {
-            return Vec::new();
-        };
-
-        let mut children = Vec::new();
-        let mut descend: Vec<(usize, PathBuf)> = Vec::new();
-        for entry in read_dir.flatten() {
-            if *budget >= max_entries {
-                break;
-            }
-            let file_name = entry.file_name();
-            let name = file_name.to_string_lossy();
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            if crate::is_ignored_pattern(&name, is_dir, custom_ignored) {
-                continue;
-            }
-            *budget += 1;
-            let entry_rel = if rel.as_os_str().is_empty() {
-                PathBuf::from(&*name)
-            } else {
-                rel.join(&*name)
-            };
-            if is_dir {
-                let should_descend = match expanded {
-                    Some(exp) => exp.contains(&entry_rel),
-                    None => name != "target" && name != "dist" && rel.components().count() < 16,
-                };
-                children.push(TreeNode {
-                    name: name.into_owned(),
-                    path: entry_rel.clone(),
-                    kind: NodeKind::Folder,
-                    children: Vec::new(),
-                });
-                if should_descend {
-                    descend.push((children.len() - 1, entry_rel));
-                }
-            } else {
-                children.push(TreeNode {
-                    name: name.into_owned(),
-                    path: entry_rel,
-                    kind: NodeKind::File,
-                    children: Vec::new(),
-                });
-            }
-        }
-        // Descend only after every sibling is in `children`: a deep subtree
-        // must not consume the shared budget before the next entry is read.
-        for (index, entry_rel) in descend {
-            children[index].children = scan_dir_recursive(
-                root,
-                &entry_rel,
-                expanded,
-                custom_ignored,
-                budget,
-                max_entries,
-            );
-        }
-
-        children.sort_by(|a, b| {
-            let a_folder = a.kind == NodeKind::Folder;
-            let b_folder = b.kind == NodeKind::Folder;
-            b_folder
-                .cmp(&a_folder)
-                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-                .then_with(|| a.name.cmp(&b.name))
-        });
-
-        children
-    }
-
     let mut budget = 0usize;
-    tree.nodes = scan_dir_recursive(
+    let mut truncated = false;
+    let (nodes, _) = scan_dir_recursive(
         root,
         Path::new(""),
         expanded,
         custom_ignored,
         &mut budget,
         max_entries,
+        &mut truncated,
     );
-    if budget >= max_entries {
-        tree.truncated = true;
-    }
+    tree.nodes = nodes;
+    tree.truncated = truncated;
     tree.file_count = crate::file_count(&tree);
     tree
+}
+
+/// Read one directory's direct children without descending into them.
+/// A bounded full scan can leave folders unloaded; the explorer uses this
+/// when the user expands a folder.
+pub fn load_children(
+    dir: &Path,
+    custom_ignored: Option<&[String]>,
+    max_entries: usize,
+) -> Vec<TreeNode> {
+    if !dir.is_dir() {
+        return Vec::new();
+    }
+    let expanded = HashSet::new();
+    let mut budget = 0usize;
+    let mut truncated = false;
+    scan_dir_recursive(
+        dir,
+        Path::new(""),
+        Some(&expanded),
+        custom_ignored,
+        &mut budget,
+        max_entries,
+        &mut truncated,
+    )
+    .0
+}
+
+/// Find a node by its project-relative path.
+pub fn find_mut<'a>(tree: &'a mut FileTree, rel: &Path) -> Option<&'a mut TreeNode> {
+    fn walk<'a>(nodes: &'a mut [TreeNode], rel: &Path) -> Option<&'a mut TreeNode> {
+        for node in nodes {
+            if node.path == rel {
+                return Some(node);
+            }
+            if let Some(found) = walk(&mut node.children, rel) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    walk(&mut tree.nodes, rel)
+}
+
+/// Scan one directory's direct children, deferring subtrees to the caller.
+/// Returns the nodes and whether this directory itself was read fully.
+fn scan_dir_recursive(
+    root: &Path,
+    rel: &Path,
+    expanded: Option<&HashSet<PathBuf>>,
+    custom_ignored: Option<&[String]>,
+    budget: &mut usize,
+    max_entries: usize,
+    truncated: &mut bool,
+) -> (Vec<TreeNode>, bool) {
+    let full_dir = if rel.as_os_str().is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(rel)
+    };
+    let Ok(read_dir) = std::fs::read_dir(&full_dir) else {
+        return (Vec::new(), false);
+    };
+
+    let mut children = Vec::new();
+    let mut descend: Vec<(usize, PathBuf)> = Vec::new();
+    let mut complete = true;
+    for entry in read_dir.flatten() {
+        if *budget >= max_entries {
+            complete = false;
+            *truncated = true;
+            break;
+        }
+        let file_name = entry.file_name();
+        let name = file_name.to_string_lossy();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if crate::is_ignored_pattern(&name, is_dir, custom_ignored) {
+            continue;
+        }
+        *budget += 1;
+        let entry_rel = if rel.as_os_str().is_empty() {
+            PathBuf::from(&*name)
+        } else {
+            rel.join(&*name)
+        };
+        if is_dir {
+            let should_descend = match expanded {
+                Some(exp) => exp.contains(&entry_rel),
+                None => name != "target" && name != "dist" && rel.components().count() < 16,
+            };
+            children.push(TreeNode {
+                name: name.into_owned(),
+                path: entry_rel.clone(),
+                kind: NodeKind::Folder,
+                children: Vec::new(),
+                children_loaded: false,
+            });
+            if should_descend {
+                descend.push((children.len() - 1, entry_rel));
+            }
+        } else {
+            children.push(TreeNode {
+                name: name.into_owned(),
+                path: entry_rel,
+                kind: NodeKind::File,
+                children: Vec::new(),
+                children_loaded: false,
+            });
+        }
+    }
+    // Descend only after every sibling is in `children`: a deep subtree must
+    // not consume the shared budget before the next entry is read.
+    for (index, entry_rel) in descend {
+        let (sub_children, sub_complete) = scan_dir_recursive(
+            root,
+            &entry_rel,
+            expanded,
+            custom_ignored,
+            budget,
+            max_entries,
+            truncated,
+        );
+        children[index].children = sub_children;
+        children[index].children_loaded = sub_complete;
+    }
+
+    children.sort_by(|a, b| {
+        let a_folder = a.kind == NodeKind::Folder;
+        let b_folder = b.kind == NodeKind::Folder;
+        b_folder
+            .cmp(&a_folder)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    (children, complete)
 }
 
 /// Flatten the tree into the rows that are currently visible. Folders only
@@ -298,5 +353,28 @@ mod tests {
                 "missing top-level entry {expected}: {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn truncated_folder_children_load_on_demand() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("big")).unwrap();
+        for index in 0..100 {
+            std::fs::write(root.join("big").join(format!("{index}.bin")), "").unwrap();
+        }
+        std::fs::create_dir(root.join("late")).unwrap();
+        std::fs::write(root.join("late/child.txt"), "x").unwrap();
+
+        let mut tree = load_tree_filtered(root, 32, None);
+        assert!(tree.truncated);
+        assert!(tree.nodes.iter().any(|node| node.name == "late"));
+        let late = find_mut(&mut tree, Path::new("late")).unwrap();
+        assert!(late.children.is_empty());
+        assert!(!late.children_loaded);
+
+        let children = load_children(&root.join("late"), None, 1000);
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].name, "child.txt");
     }
 }

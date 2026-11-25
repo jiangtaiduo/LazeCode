@@ -2,6 +2,7 @@
 //! attach/switch and path retargeting.
 
 use super::*;
+use lazecode_fs::tree::NodeKind;
 
 impl ProjectState {
     /// Virtual "Single files" workspace for files chosen via Open: no tree,
@@ -250,7 +251,30 @@ impl ProjectState {
         // presentation-only change and cannot trigger a synchronous rescan.
         let tree =
             lazecode_fs::tree::load_tree_filtered(&root, 20_000, Some(&settings.ignored_patterns));
+        let expanded: Vec<PathBuf> = self.expanded.iter().cloned().collect();
         self.active_worktree_mut().tree = tree;
+        // A fresh bounded scan can skip folders that were already open; keep
+        // them populated so expansion still shows their contents.
+        for rel in expanded {
+            self.ensure_tree_children(&rel, &settings.ignored_patterns);
+        }
+    }
+
+    /// Fill a folder's direct children when the bounded scan skipped them.
+    pub fn ensure_tree_children(&mut self, rel: &Path, ignored_patterns: &[String]) -> bool {
+        let root = self.active_root().to_path_buf();
+        let tree = &mut self.active_worktree_mut().tree;
+        let Some(node) = lazecode_fs::tree::find_mut(tree, rel) else {
+            return false;
+        };
+        if node.kind != NodeKind::Folder || node.children_loaded {
+            return false;
+        }
+        node.children =
+            lazecode_fs::tree::load_children(&root.join(rel), Some(ignored_patterns), 20_000);
+        node.children_loaded = true;
+        tree.file_count = lazecode_fs::file_count(tree);
+        true
     }
 
     /// Recreate watchers after the ignore list changed. Watchers keep a
@@ -825,7 +849,7 @@ impl ProjectState {
     }
 
     /// Expand every ancestor directory of `path` in the tree view.
-    pub fn expand_parents(&mut self, path: &Path) {
+    pub fn expand_parents(&mut self, path: &Path, ignored_patterns: &[String]) {
         let Ok(rel) = path.strip_prefix(self.active_root()) else {
             return;
         };
@@ -836,6 +860,7 @@ impl ProjectState {
                 continue;
             }
             self.expanded.insert(current.clone());
+            self.ensure_tree_children(&current, ignored_patterns);
         }
     }
 }

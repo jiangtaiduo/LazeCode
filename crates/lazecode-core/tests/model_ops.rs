@@ -155,6 +155,39 @@ fn open_applies_ignore_patterns_to_the_main_worktree_tree() {
 }
 
 #[test]
+fn expand_parents_loads_children_skipped_by_the_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::create_dir_all(root.join("src/nested")).unwrap();
+    std::fs::write(root.join("src/nested/app.rs"), "").unwrap();
+    let settings = Settings::default();
+    let mut project = ProjectState::open(root.clone(), &settings, None).unwrap();
+
+    // A bounded scan can leave a folder in the tree with no children loaded.
+    {
+        let node = lazecode_fs::tree::find_mut(
+            &mut project.active_worktree_mut().tree,
+            std::path::Path::new("src/nested"),
+        )
+        .unwrap();
+        node.children.clear();
+        node.children_loaded = false;
+    }
+
+    project.expand_parents(&root.join("src/nested/app.rs"), &settings.ignored_patterns);
+
+    let node = lazecode_fs::tree::find_mut(
+        &mut project.active_worktree_mut().tree,
+        std::path::Path::new("src/nested"),
+    )
+    .unwrap();
+    assert!(node.children_loaded);
+    assert_eq!(node.children.len(), 1);
+    assert_eq!(node.children[0].name, "app.rs");
+    assert_eq!(project.active_tree().file_count, 1);
+}
+
+#[test]
 fn bad_shell_setting_does_not_drop_the_project() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("a.txt"), "hello\n").unwrap();

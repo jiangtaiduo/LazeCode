@@ -612,6 +612,14 @@ fn main() -> anyhow::Result<()> {
                 error: None,
             };
         }
+        "file_history_dialog" => {
+            runtime.dialog = lazecode_ui::runtime::DialogState::FileHistory {
+                path: "crates/lazecode-ui/src/overlays/dialogs.rs".to_string(),
+                entries: Vec::new(),
+                selected: 0,
+                loaded: true,
+            };
+        }
         "single_menu" | "project_menu" => {
             runtime.open_menu(
                 lazecode_ui::MenuKind::Project,

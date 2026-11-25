@@ -98,7 +98,7 @@ pub(super) fn draw_compare_user_menu(
         Some(sides) => sides.right.commits.clone(),
         None => Vec::new(),
     };
-    let mut authors = crate::compare::unique_authors(&commits);
+    let mut authors: Vec<String> = crate::compare::unique_authors(&commits);
     authors.insert(0, crate::tr!(model, "All authors", "全部作者").to_string());
     let height = (authors.len() as f32 * 24.0 + 20.0).min(320.0);
     let rect = popover_rect(rt, screen, menu.anchor, 200.0, height);
@@ -123,7 +123,11 @@ pub(super) fn draw_compare_user_menu(
             Align2::LEFT_CENTER,
         );
         if response.clicked() {
-            picked = Some(if i == 0 { None } else { Some(author.clone()) });
+            picked = Some(if i == 0 {
+                None
+            } else {
+                Some(author.to_string())
+            });
         }
     }
     if let Some(pick) = picked {
@@ -248,7 +252,7 @@ pub(super) fn draw_compare_ref_menu(
             Align2::LEFT_CENTER,
         );
         if response.clicked() {
-            picked = Some(if i == 0 { None } else { Some(name.clone()) });
+            picked = Some(if i == 0 { None } else { Some(name.to_string()) });
         }
     }
     if let Some(pick) = picked {

@@ -1026,7 +1026,13 @@ fn state_reload(model: &mut AppModel) {
 }
 
 /// h18 内嵌小开关（cb-toggle：.* / Cc，active accent-soft+蓝）。
-fn cb_toggle(ui: &mut Ui, rect: Rect, key: (&'static str, u8), label: &str, active: bool) -> bool {
+pub(super) fn cb_toggle(
+    ui: &mut Ui,
+    rect: Rect,
+    key: (&'static str, u8),
+    label: &str,
+    active: bool,
+) -> bool {
     let p = crate::theme::Palette::dark();
     let response = ui.interact(rect, ui.scope_id().with(key), Sense::click());
     if response.hovered() {

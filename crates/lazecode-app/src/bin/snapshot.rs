@@ -560,6 +560,43 @@ fn main() -> anyhow::Result<()> {
                 status: None,
             };
         }
+        "pull_dialog" => {
+            runtime.dialog = lazecode_ui::runtime::DialogState::Pull {
+                mode: lazecode_git::PullMode::Rebase,
+                status: None,
+            };
+        }
+        "remotes_dialog" => {
+            runtime.dialog = lazecode_ui::runtime::DialogState::Remotes {
+                remotes: vec![
+                    lazecode_git::RemoteInfo {
+                        name: "origin".to_string(),
+                        url: "git@github.com:jiangtaiduo/LazeCode.git".to_string(),
+                    },
+                    lazecode_git::RemoteInfo {
+                        name: "upstream".to_string(),
+                        url: "https://github.com/example/LazeCode.git".to_string(),
+                    },
+                ],
+                new_name: "backup".to_string(),
+                new_url: "https://gitlab.com/example/lazecode.git".to_string(),
+                editing: None,
+                error: None,
+            };
+        }
+        "reset_dialog" => {
+            runtime.dialog = lazecode_ui::runtime::DialogState::Reset {
+                hash: "0123456".to_string(),
+                mode: lazecode_git::ResetMode::Mixed,
+            };
+        }
+        "new_tag_dialog" => {
+            runtime.dialog = lazecode_ui::runtime::DialogState::NewTag {
+                commit: "0123456".to_string(),
+                value: "v0.4.13".to_string(),
+                error: None,
+            };
+        }
         "single_menu" | "project_menu" => {
             runtime.open_menu(
                 lazecode_ui::MenuKind::Project,

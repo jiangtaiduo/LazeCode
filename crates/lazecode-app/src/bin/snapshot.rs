@@ -605,6 +605,13 @@ fn main() -> anyhow::Result<()> {
                 error: None,
             };
         }
+        "new_file_dialog" => {
+            runtime.dialog = lazecode_ui::runtime::DialogState::NewFile {
+                dir: project_root.clone(),
+                value: "notes.md".to_string(),
+                error: None,
+            };
+        }
         "single_menu" | "project_menu" => {
             runtime.open_menu(
                 lazecode_ui::MenuKind::Project,

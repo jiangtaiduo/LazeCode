@@ -183,7 +183,10 @@ fn expand_parents_loads_children_skipped_by_the_scan() {
     .unwrap();
     assert!(node.children_loaded);
     assert_eq!(node.children.len(), 1);
-    assert_eq!(node.children[0].name, "app.rs");
+    assert_eq!(
+        node.children[0].path,
+        std::path::Path::new("src/nested/app.rs")
+    );
     assert_eq!(project.active_tree().file_count, 1);
 }
 

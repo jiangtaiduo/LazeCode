@@ -637,7 +637,7 @@ mod tests {
         .unwrap();
         assert!(node.children_loaded);
         assert_eq!(node.children.len(), 1);
-        assert_eq!(node.children[0].name, "child.txt");
+        assert_eq!(node.children[0].path, Path::new("late/child.txt"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

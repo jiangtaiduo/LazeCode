@@ -271,7 +271,7 @@ impl ProjectState {
             return false;
         }
         node.children =
-            lazecode_fs::tree::load_children(&root.join(rel), Some(ignored_patterns), 20_000);
+            lazecode_fs::tree::load_children(&root, rel, Some(ignored_patterns), 20_000);
         node.children_loaded = true;
         tree.file_count = lazecode_fs::file_count(tree);
         true

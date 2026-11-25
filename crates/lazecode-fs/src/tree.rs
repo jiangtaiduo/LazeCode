@@ -84,10 +84,16 @@ pub fn load_tree_with_expanded(
 /// A bounded full scan can leave folders unloaded; the explorer uses this
 /// when the user expands a folder.
 pub fn load_children(
-    dir: &Path,
+    root: &Path,
+    rel: &Path,
     custom_ignored: Option<&[String]>,
     max_entries: usize,
 ) -> Vec<TreeNode> {
+    let dir = if rel.as_os_str().is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(rel)
+    };
     if !dir.is_dir() {
         return Vec::new();
     }
@@ -95,8 +101,8 @@ pub fn load_children(
     let mut budget = 0usize;
     let mut truncated = false;
     scan_dir_recursive(
-        dir,
-        Path::new(""),
+        root,
+        rel,
         Some(&expanded),
         custom_ignored,
         &mut budget,
@@ -363,8 +369,8 @@ mod tests {
         for index in 0..100 {
             std::fs::write(root.join("big").join(format!("{index}.bin")), "").unwrap();
         }
-        std::fs::create_dir(root.join("late")).unwrap();
-        std::fs::write(root.join("late/child.txt"), "x").unwrap();
+        std::fs::create_dir_all(root.join("late/nested")).unwrap();
+        std::fs::write(root.join("late/nested/deep.txt"), "x").unwrap();
 
         let mut tree = load_tree_filtered(root, 32, None);
         assert!(tree.truncated);
@@ -373,8 +379,11 @@ mod tests {
         assert!(late.children.is_empty());
         assert!(!late.children_loaded);
 
-        let children = load_children(&root.join("late"), None, 1000);
+        let children = load_children(root, Path::new("late"), None, 1000);
         assert_eq!(children.len(), 1);
-        assert_eq!(children[0].name, "child.txt");
+        assert_eq!(children[0].path, Path::new("late/nested"));
+        let deep = load_children(root, Path::new("late/nested"), None, 1000);
+        assert_eq!(deep.len(), 1);
+        assert_eq!(deep[0].path, Path::new("late/nested/deep.txt"));
     }
 }

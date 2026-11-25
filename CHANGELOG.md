@@ -10,6 +10,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The file tree no longer drops top-level entries when a large subtree
+  exhausts the 20,000-entry scan budget: siblings are now read before any
+  directory is descended into, and a truncated tree shows a visible warning
+  instead of silently rendering an incomplete list.
 - Case-only renames (`readme.md` → `README.md`) now retarget open tabs, tab
   titles, the tree selection, reveal requests and the recent-files list. The
   old code canonicalised the vanished path first, which on the default

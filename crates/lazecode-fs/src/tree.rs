@@ -16,7 +16,7 @@ pub enum NodeKind {
     Folder,
 }
 
-/// A fully scanned project tree, respecting `.gitignore` and friends.
+/// A project tree scanned under the application's configured ignore patterns.
 #[derive(Clone, Debug, Default)]
 pub struct FileTree {
     pub nodes: Vec<TreeNode>,
@@ -32,7 +32,8 @@ impl FileTree {
 
 const DEFAULT_MAX_ENTRIES: usize = 20_000;
 
-/// Scan `root` into a nested tree (hidden, ignored and `.git` skipped).
+/// Scan `root` into a nested tree (ignored entries skipped). Siblings are read
+/// before any subtree, so a large directory cannot hide later entries.
 /// Exceeding `max_entries` marks the result `truncated`.
 pub fn load_tree(root: &Path) -> FileTree {
     load_tree_filtered(root, DEFAULT_MAX_ENTRIES, None)
@@ -79,6 +80,7 @@ pub fn load_tree_with_expanded(
         };
 
         let mut children = Vec::new();
+        let mut descend: Vec<(usize, PathBuf)> = Vec::new();
         for entry in read_dir.flatten() {
             if *budget >= max_entries {
                 break;
@@ -100,24 +102,15 @@ pub fn load_tree_with_expanded(
                     Some(exp) => exp.contains(&entry_rel),
                     None => name != "target" && name != "dist" && rel.components().count() < 16,
                 };
-                let sub_children = if should_descend {
-                    scan_dir_recursive(
-                        root,
-                        &entry_rel,
-                        expanded,
-                        custom_ignored,
-                        budget,
-                        max_entries,
-                    )
-                } else {
-                    Vec::new()
-                };
                 children.push(TreeNode {
                     name: name.into_owned(),
-                    path: entry_rel,
+                    path: entry_rel.clone(),
                     kind: NodeKind::Folder,
-                    children: sub_children,
+                    children: Vec::new(),
                 });
+                if should_descend {
+                    descend.push((children.len() - 1, entry_rel));
+                }
             } else {
                 children.push(TreeNode {
                     name: name.into_owned(),
@@ -126,6 +119,18 @@ pub fn load_tree_with_expanded(
                     children: Vec::new(),
                 });
             }
+        }
+        // Descend only after every sibling is in `children`: a deep subtree
+        // must not consume the shared budget before the next entry is read.
+        for (index, entry_rel) in descend {
+            children[index].children = scan_dir_recursive(
+                root,
+                &entry_rel,
+                expanded,
+                custom_ignored,
+                budget,
+                max_entries,
+            );
         }
 
         children.sort_by(|a, b| {
@@ -266,5 +271,32 @@ mod tests {
         assert!(names.contains(&"README.md"));
         assert!(names.contains(&"target"));
         assert!(names.contains(&".github"));
+    }
+
+    #[test]
+    fn budget_exhaustion_keeps_every_top_level_entry() {
+        // A directory scanned early must not eat the budget before the
+        // remaining root entries are even read (readdir order is arbitrary).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for name in ["first.txt", "sentinel.txt", "last.txt"] {
+            std::fs::write(root.join(name), "").unwrap();
+        }
+        for folder in ["a_big", "b_big"] {
+            std::fs::create_dir(root.join(folder)).unwrap();
+            for index in 0..100 {
+                std::fs::write(root.join(folder).join(format!("{index}.bin")), "").unwrap();
+            }
+        }
+
+        let tree = load_tree_filtered(root, 64, None);
+        assert!(tree.truncated, "fixture should exhaust the scan budget");
+        let names: Vec<&str> = tree.nodes.iter().map(|node| node.name.as_str()).collect();
+        for expected in ["first.txt", "sentinel.txt", "last.txt", "a_big", "b_big"] {
+            assert!(
+                names.contains(&expected),
+                "missing top-level entry {expected}: {names:?}"
+            );
+        }
     }
 }

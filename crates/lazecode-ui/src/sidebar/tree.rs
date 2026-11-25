@@ -88,7 +88,7 @@ pub(super) fn draw_tree(
         .active_project
         .expect("sidebar drawn without an active project");
     let filter = model.ui.tree_filter.to_lowercase();
-    let (rows, changes): (Vec<VisibleRow>, HashMap<String, char>) = {
+    let (rows, changes, truncated): (Vec<VisibleRow>, HashMap<String, char>, bool) = {
         let project = &model.projects[active_index];
         let tree = project.active_tree();
         let changes = project
@@ -125,7 +125,7 @@ pub(super) fn draw_tree(
                 }
             }
         }
-        (rows, changes)
+        (rows, changes, tree.truncated)
     };
 
     let show_filter = !model.ui.tree_filter.is_empty();
@@ -170,6 +170,37 @@ pub(super) fn draw_tree(
         Rect::from_min_max(Pos2::new(rect.left(), input_rect.bottom() + 4.0), rect.max)
     } else {
         Rect::from_min_max(Pos2::new(rect.left(), rect.top() + 2.0), rect.max)
+    };
+    let list_rect = if truncated {
+        let warn_rect = Rect::from_min_size(
+            Pos2::new(list_rect.left() + 8.0, list_rect.top() + 2.0),
+            Vec2::new(list_rect.width() - 16.0, 22.0),
+        );
+        ui.painter()
+            .rect_filled(warn_rect, egui::CornerRadius::same(4), p.panel2);
+        ui.painter().rect_stroke(
+            warn_rect,
+            egui::CornerRadius::same(4),
+            Stroke::new(1.0, p.amber),
+            StrokeKind::Inside,
+        );
+        ui.painter().text(
+            Pos2::new(warn_rect.left() + 8.0, warn_rect.center().y),
+            Align2::LEFT_CENTER,
+            crate::tr!(
+                model,
+                "Tree truncated: some files are not shown",
+                "文件树已截断：部分文件未显示"
+            ),
+            FontId::proportional(11.0),
+            p.amber,
+        );
+        Rect::from_min_max(
+            Pos2::new(list_rect.left(), warn_rect.bottom() + 4.0),
+            list_rect.max,
+        )
+    } else {
+        list_rect
     };
     let _active_tab = model.projects[active_index].active_tab;
     let active_rel = model.projects[active_index]

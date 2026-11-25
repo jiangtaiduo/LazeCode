@@ -597,6 +597,14 @@ fn main() -> anyhow::Result<()> {
                 error: None,
             };
         }
+        "new_branch_dialog" => {
+            runtime.dialog = lazecode_ui::runtime::DialogState::NewBranch {
+                value: "feat/new-branch".to_string(),
+                start_point: Some("main".to_string()),
+                checkout: true,
+                error: None,
+            };
+        }
         "single_menu" | "project_menu" => {
             runtime.open_menu(
                 lazecode_ui::MenuKind::Project,

@@ -1310,6 +1310,39 @@ pub(super) fn draw_git_log(
 
     let painter = ui.painter().with_clip_rect(list_rect);
     painter.rect_filled(list_rect, 0.0, p.panel);
+
+    // Keyboard: ↑/↓/Home/End move the active commit while the pointer is over
+    // the log table. The existing jump target centres the row, and the normal
+    // SelectCommit path refreshes the detail pane.
+    let keys_free = !rt.blocks_input(model) && !rt.typing_surface_owns_keys(model, ui.ctx());
+    if keys_free {
+        if let Some(mv) = crate::list_nav::hovered_move(ui, list_rect) {
+            let current = {
+                let project = &model.projects[index];
+                project
+                    .selected_commit
+                    .as_ref()
+                    .and_then(|id| filtered.iter().position(|c| &c.id == id))
+                    .or_else(|| {
+                        project
+                            .selected_commits
+                            .first()
+                            .and_then(|id| filtered.iter().position(|c| &c.id == id))
+                    })
+            };
+            if let Some(next) = crate::list_nav::stepped(current, filtered.len(), mv) {
+                let id = filtered[next].id.clone();
+                {
+                    let project = &mut model.projects[index];
+                    project.selected_commits = vec![id.clone()];
+                    project.selected_commit = Some(id.clone());
+                }
+                model.queue(Command::SelectCommit(id.clone()));
+                model.ui.git_jump_to_commit = Some(id);
+            }
+        }
+    }
+
     let mut select_commit = None;
     let jump_target = model.ui.git_jump_to_commit.take();
     let mut jump_to = None;

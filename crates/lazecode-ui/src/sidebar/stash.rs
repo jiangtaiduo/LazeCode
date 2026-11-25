@@ -255,261 +255,292 @@ pub(super) fn stash_view(
     let mut select_stash: Option<String> = None;
     let mut select_file: Option<(String, String)> = None;
     let mut open_diff: Option<(String, String)> = None;
+
+    // Keyboard: ↑/↓/Home/End step the stash entries (file/dir rows stay
+    // mouse-only) and expand the new selection so its files load.
+    let keys_free = !rt.blocks_input(model) && !rt.typing_surface_owns_keys(model, ui.ctx());
+    let mut nav_scroll: Option<f32> = None;
+    if keys_free {
+        if let Some(mv) = crate::list_nav::hovered_move(ui, list) {
+            let entries: Vec<(usize, String)> = rows
+                .iter()
+                .enumerate()
+                .filter_map(|(index, row)| match row {
+                    StashRow::Stash { name, .. } => Some((index, name.clone())),
+                    _ => None,
+                })
+                .collect();
+            let current = rt
+                .stash_selected
+                .as_ref()
+                .and_then(|sel| entries.iter().position(|(_, name)| name == sel));
+            if let Some(next) = crate::list_nav::stepped(current, entries.len(), mv) {
+                let (row_index, name) = entries[next].clone();
+                rt.stash_selected = Some(name.clone());
+                rt.stash_file_sel = None;
+                rt.stash_expanded.insert(name);
+                nav_scroll = Some((row_index as f32 * 24.0 - list.height() * 0.5 + 12.0).max(0.0));
+            }
+        }
+    }
+
     crate::app_ui::region(ui, list, "stash-rows", |ui| {
-        egui::ScrollArea::vertical()
+        let mut area = egui::ScrollArea::vertical()
             .id_salt("stash-scroll")
-            .auto_shrink([false, false])
-            .show_rows(ui, 24.0, rows.len(), |ui, range| {
-                for row_index in range {
-                    let Some(row) = rows.get(row_index) else {
-                        continue;
-                    };
-                    match row {
-                        StashRow::Stash {
-                            name,
-                            message,
-                            branch,
-                            selected,
-                            expanded,
-                        } => {
-                            let (rect, response) = ui.allocate_exact_size(
-                                Vec2::new(ui.available_width(), 24.0),
-                                Sense::click(),
+            .auto_shrink([false, false]);
+        if let Some(offset) = nav_scroll {
+            area = area.vertical_scroll_offset(offset);
+        }
+        area.show_rows(ui, 24.0, rows.len(), |ui, range| {
+            for row_index in range {
+                let Some(row) = rows.get(row_index) else {
+                    continue;
+                };
+                match row {
+                    StashRow::Stash {
+                        name,
+                        message,
+                        branch,
+                        selected,
+                        expanded,
+                    } => {
+                        let (rect, response) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 24.0),
+                            Sense::click(),
+                        );
+                        if *selected || response.hovered() {
+                            ui.painter().rect_filled(
+                                rect.shrink2(Vec2::new(2.0, 1.0)),
+                                egui::CornerRadius::same(4),
+                                if *selected { p.selected_row } else { p.hover },
                             );
-                            if *selected || response.hovered() {
-                                ui.painter().rect_filled(
-                                    rect.shrink2(Vec2::new(2.0, 1.0)),
-                                    egui::CornerRadius::same(4),
-                                    if *selected { p.selected_row } else { p.hover },
-                                );
-                            }
-                            // 条目折叠箭头：多条贮藏各自展开/折叠。
+                        }
+                        // 条目折叠箭头：多条贮藏各自展开/折叠。
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(rect.left() + 10.0, rect.center().y),
+                                Vec2::splat(11.0),
+                            ),
+                            if *expanded {
+                                Icon::ChevronDown
+                            } else {
+                                Icon::ChevronRight
+                            },
+                            p.text3,
+                        );
+                        let badge_w = branch
+                            .as_ref()
+                            .map(|name| {
+                                (name.chars().count() as f32 * 6.2 + 30.0).min(rect.width() * 0.45)
+                            })
+                            .unwrap_or(0.0);
+                        text_clipped(
+                            ui.painter(),
+                            Rect::from_min_max(
+                                Pos2::new(rect.left() + 24.0, rect.top()),
+                                Pos2::new(rect.right() - badge_w - 8.0, rect.bottom()),
+                            ),
+                            message,
+                            FontId::proportional(12.5),
+                            if *selected { p.text_bright } else { p.text },
+                            Align2::LEFT_CENTER,
+                        );
+                        if let Some(branch) = branch {
+                            let badge_rect = Rect::from_min_max(
+                                Pos2::new(rect.right() - badge_w - 6.0, rect.top() + 3.0),
+                                Pos2::new(rect.right() - 6.0, rect.bottom() - 3.0),
+                            );
+                            ui.painter().rect_filled(
+                                badge_rect,
+                                egui::CornerRadius::same(4),
+                                p.panel2,
+                            );
                             paint_icon(
                                 ui.painter(),
                                 Rect::from_center_size(
-                                    Pos2::new(rect.left() + 10.0, rect.center().y),
+                                    Pos2::new(badge_rect.left() + 10.0, badge_rect.center().y),
                                     Vec2::splat(11.0),
                                 ),
-                                if *expanded {
-                                    Icon::ChevronDown
-                                } else {
-                                    Icon::ChevronRight
-                                },
+                                Icon::Branch,
                                 p.text3,
                             );
-                            let badge_w = branch
-                                .as_ref()
-                                .map(|name| {
-                                    (name.chars().count() as f32 * 6.2 + 30.0)
-                                        .min(rect.width() * 0.45)
-                                })
-                                .unwrap_or(0.0);
                             text_clipped(
                                 ui.painter(),
                                 Rect::from_min_max(
-                                    Pos2::new(rect.left() + 24.0, rect.top()),
-                                    Pos2::new(rect.right() - badge_w - 8.0, rect.bottom()),
+                                    Pos2::new(badge_rect.left() + 18.0, badge_rect.top()),
+                                    Pos2::new(badge_rect.right() - 4.0, badge_rect.bottom()),
                                 ),
-                                message,
-                                FontId::proportional(12.5),
-                                if *selected { p.text_bright } else { p.text },
-                                Align2::LEFT_CENTER,
-                            );
-                            if let Some(branch) = branch {
-                                let badge_rect = Rect::from_min_max(
-                                    Pos2::new(rect.right() - badge_w - 6.0, rect.top() + 3.0),
-                                    Pos2::new(rect.right() - 6.0, rect.bottom() - 3.0),
-                                );
-                                ui.painter().rect_filled(
-                                    badge_rect,
-                                    egui::CornerRadius::same(4),
-                                    p.panel2,
-                                );
-                                paint_icon(
-                                    ui.painter(),
-                                    Rect::from_center_size(
-                                        Pos2::new(badge_rect.left() + 10.0, badge_rect.center().y),
-                                        Vec2::splat(11.0),
-                                    ),
-                                    Icon::Branch,
-                                    p.text3,
-                                );
-                                text_clipped(
-                                    ui.painter(),
-                                    Rect::from_min_max(
-                                        Pos2::new(badge_rect.left() + 18.0, badge_rect.top()),
-                                        Pos2::new(badge_rect.right() - 4.0, badge_rect.bottom()),
-                                    ),
-                                    branch,
-                                    FontId::proportional(10.5),
-                                    p.text2,
-                                    Align2::LEFT_CENTER,
-                                );
-                            }
-                            if response.clicked() {
-                                select_stash = Some(name.clone());
-                                toggle = Some(name.clone());
-                            }
-                            if response.secondary_clicked() {
-                                rt.stash_selected = Some(name.clone());
-                                rt.stash_file_sel = None;
-                                rt.open_menu(
-                                    crate::runtime::MenuKind::StashEntryMenu {
-                                        project: project_index,
-                                    },
-                                    rect,
-                                    Some(name.clone()),
-                                );
-                            }
-                        }
-                        StashRow::Root { .. } | StashRow::Dir { .. } => {
-                            let (stash, key, kind, label, count, depth, expanded) = match row {
-                                StashRow::Root {
-                                    stash,
-                                    key,
-                                    kind,
-                                    label,
-                                    count,
-                                    expanded,
-                                } => (stash, key, Some(kind), label, count, 0usize, expanded),
-                                StashRow::Dir {
-                                    stash,
-                                    key,
-                                    label,
-                                    count,
-                                    depth,
-                                    expanded,
-                                    ..
-                                } => (stash, key, None, label, count, *depth, expanded),
-                                _ => unreachable!(),
-                            };
-                            let (rect, response) = ui.allocate_exact_size(
-                                Vec2::new(ui.available_width(), 24.0),
-                                Sense::click(),
-                            );
-                            if response.hovered() {
-                                ui.painter().rect_filled(
-                                    rect.shrink2(Vec2::new(2.0, 1.0)),
-                                    egui::CornerRadius::same(4),
-                                    p.hover,
-                                );
-                            }
-                            let x = rect.left() + 10.0 + depth as f32 * 12.0;
-                            paint_icon(
-                                ui.painter(),
-                                Rect::from_center_size(
-                                    Pos2::new(x + 4.0, rect.center().y),
-                                    Vec2::splat(11.0),
-                                ),
-                                if *expanded {
-                                    Icon::ChevronDown
-                                } else {
-                                    Icon::ChevronRight
-                                },
-                                p.text3,
-                            );
-                            let galley = ui.painter().layout_no_wrap(
-                                label.clone(),
-                                FontId::proportional(12.0),
-                                p.text,
-                            );
-                            ui.painter().galley(
-                                Pos2::new(x + 16.0, rect.center().y - galley.size().y * 0.5),
-                                galley.clone(),
-                                p.text,
-                            );
-                            ui.painter().text(
-                                Pos2::new(x + 22.0 + galley.size().x, rect.center().y),
-                                Align2::LEFT_CENTER,
-                                format!("{count} {count_suffix}"),
+                                branch,
                                 FontId::proportional(10.5),
-                                p.text3,
-                            );
-                            if response.clicked() {
-                                toggle = Some(key.clone());
-                            }
-                            if response.secondary_clicked() {
-                                // 目录 / 树根与文件共用同一套右键菜单。
-                                let payload = match kind {
-                                    Some(kind) => stash_menu_payload(stash, kind, ""),
-                                    None => match row {
-                                        StashRow::Dir { path, .. } => {
-                                            stash_menu_payload(stash, "d", path)
-                                        }
-                                        _ => String::new(),
-                                    },
-                                };
-                                rt.open_menu(
-                                    crate::runtime::MenuKind::StashFileMenu {
-                                        project: project_index,
-                                    },
-                                    rect,
-                                    Some(payload),
-                                );
-                            }
-                        }
-                        StashRow::File {
-                            stash,
-                            path,
-                            name,
-                            depth,
-                        } => {
-                            let (rect, response) = ui.allocate_exact_size(
-                                Vec2::new(ui.available_width(), 24.0),
-                                Sense::click(),
-                            );
-                            let selected = rt.stash_selected.as_deref() == Some(stash.as_str())
-                                && rt.stash_file_sel.as_deref() == Some(path.as_str());
-                            if selected || response.hovered() {
-                                ui.painter().rect_filled(
-                                    rect.shrink2(Vec2::new(2.0, 1.0)),
-                                    egui::CornerRadius::same(4),
-                                    if selected { p.selected_row } else { p.hover },
-                                );
-                            }
-                            let x = rect.left() + 10.0 + *depth as f32 * 12.0 + 12.0;
-                            paint_icon(
-                                ui.painter(),
-                                Rect::from_center_size(
-                                    Pos2::new(x + 4.0, rect.center().y),
-                                    Vec2::splat(11.0),
-                                ),
-                                Icon::File,
-                                p.text3,
-                            );
-                            let text_rect = Rect::from_min_max(
-                                Pos2::new(x + 14.0, rect.top()),
-                                Pos2::new(rect.right() - 6.0, rect.bottom()),
-                            );
-                            text_clipped(
-                                ui.painter(),
-                                text_rect,
-                                name,
-                                FontId::proportional(12.0),
-                                if selected { p.text_bright } else { p.text2 },
+                                p.text2,
                                 Align2::LEFT_CENTER,
                             );
-                            if response.clicked() {
-                                select_file = Some((stash.clone(), path.clone()));
-                            }
-                            if response.double_clicked() {
-                                open_diff = Some((stash.clone(), path.clone()));
-                            }
-                            if response.secondary_clicked() {
-                                rt.stash_selected = Some(stash.clone());
-                                rt.stash_file_sel = Some(path.clone());
-                                rt.open_menu(
-                                    crate::runtime::MenuKind::StashFileMenu {
-                                        project: project_index,
-                                    },
-                                    rect,
-                                    Some(stash_menu_payload(stash, "f", path)),
-                                );
-                            }
+                        }
+                        if response.clicked() {
+                            select_stash = Some(name.clone());
+                            toggle = Some(name.clone());
+                        }
+                        if response.secondary_clicked() {
+                            rt.stash_selected = Some(name.clone());
+                            rt.stash_file_sel = None;
+                            rt.open_menu(
+                                crate::runtime::MenuKind::StashEntryMenu {
+                                    project: project_index,
+                                },
+                                rect,
+                                Some(name.clone()),
+                            );
+                        }
+                    }
+                    StashRow::Root { .. } | StashRow::Dir { .. } => {
+                        let (stash, key, kind, label, count, depth, expanded) = match row {
+                            StashRow::Root {
+                                stash,
+                                key,
+                                kind,
+                                label,
+                                count,
+                                expanded,
+                            } => (stash, key, Some(kind), label, count, 0usize, expanded),
+                            StashRow::Dir {
+                                stash,
+                                key,
+                                label,
+                                count,
+                                depth,
+                                expanded,
+                                ..
+                            } => (stash, key, None, label, count, *depth, expanded),
+                            _ => unreachable!(),
+                        };
+                        let (rect, response) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 24.0),
+                            Sense::click(),
+                        );
+                        if response.hovered() {
+                            ui.painter().rect_filled(
+                                rect.shrink2(Vec2::new(2.0, 1.0)),
+                                egui::CornerRadius::same(4),
+                                p.hover,
+                            );
+                        }
+                        let x = rect.left() + 10.0 + depth as f32 * 12.0;
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(x + 4.0, rect.center().y),
+                                Vec2::splat(11.0),
+                            ),
+                            if *expanded {
+                                Icon::ChevronDown
+                            } else {
+                                Icon::ChevronRight
+                            },
+                            p.text3,
+                        );
+                        let galley = ui.painter().layout_no_wrap(
+                            label.clone(),
+                            FontId::proportional(12.0),
+                            p.text,
+                        );
+                        ui.painter().galley(
+                            Pos2::new(x + 16.0, rect.center().y - galley.size().y * 0.5),
+                            galley.clone(),
+                            p.text,
+                        );
+                        ui.painter().text(
+                            Pos2::new(x + 22.0 + galley.size().x, rect.center().y),
+                            Align2::LEFT_CENTER,
+                            format!("{count} {count_suffix}"),
+                            FontId::proportional(10.5),
+                            p.text3,
+                        );
+                        if response.clicked() {
+                            toggle = Some(key.clone());
+                        }
+                        if response.secondary_clicked() {
+                            // 目录 / 树根与文件共用同一套右键菜单。
+                            let payload = match kind {
+                                Some(kind) => stash_menu_payload(stash, kind, ""),
+                                None => match row {
+                                    StashRow::Dir { path, .. } => {
+                                        stash_menu_payload(stash, "d", path)
+                                    }
+                                    _ => String::new(),
+                                },
+                            };
+                            rt.open_menu(
+                                crate::runtime::MenuKind::StashFileMenu {
+                                    project: project_index,
+                                },
+                                rect,
+                                Some(payload),
+                            );
+                        }
+                    }
+                    StashRow::File {
+                        stash,
+                        path,
+                        name,
+                        depth,
+                    } => {
+                        let (rect, response) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 24.0),
+                            Sense::click(),
+                        );
+                        let selected = rt.stash_selected.as_deref() == Some(stash.as_str())
+                            && rt.stash_file_sel.as_deref() == Some(path.as_str());
+                        if selected || response.hovered() {
+                            ui.painter().rect_filled(
+                                rect.shrink2(Vec2::new(2.0, 1.0)),
+                                egui::CornerRadius::same(4),
+                                if selected { p.selected_row } else { p.hover },
+                            );
+                        }
+                        let x = rect.left() + 10.0 + *depth as f32 * 12.0 + 12.0;
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(x + 4.0, rect.center().y),
+                                Vec2::splat(11.0),
+                            ),
+                            Icon::File,
+                            p.text3,
+                        );
+                        let text_rect = Rect::from_min_max(
+                            Pos2::new(x + 14.0, rect.top()),
+                            Pos2::new(rect.right() - 6.0, rect.bottom()),
+                        );
+                        text_clipped(
+                            ui.painter(),
+                            text_rect,
+                            name,
+                            FontId::proportional(12.0),
+                            if selected { p.text_bright } else { p.text2 },
+                            Align2::LEFT_CENTER,
+                        );
+                        if response.clicked() {
+                            select_file = Some((stash.clone(), path.clone()));
+                        }
+                        if response.double_clicked() {
+                            open_diff = Some((stash.clone(), path.clone()));
+                        }
+                        if response.secondary_clicked() {
+                            rt.stash_selected = Some(stash.clone());
+                            rt.stash_file_sel = Some(path.clone());
+                            rt.open_menu(
+                                crate::runtime::MenuKind::StashFileMenu {
+                                    project: project_index,
+                                },
+                                rect,
+                                Some(stash_menu_payload(stash, "f", path)),
+                            );
                         }
                     }
                 }
-            });
+            }
+        });
     });
 
     if let Some(key) = toggle {

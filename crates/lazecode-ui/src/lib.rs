@@ -10,6 +10,7 @@ pub mod icons;
 pub mod icons_svg;
 pub mod image_cache;
 pub mod keybindings;
+mod list_nav;
 pub mod log_refs;
 pub mod lsp_ui;
 pub mod overlays;

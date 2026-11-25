@@ -183,6 +183,31 @@ pub(super) fn draw_tree(
                     .unwrap_or_else(|_| std::path::PathBuf::from(path))
             })
         });
+    // Keyboard: with the pointer over the tree, ↑/↓/Home/End move the single
+    // selection and scroll the row into view. Typing surfaces (editor,
+    // console, filter fields) keep their own arrow keys.
+    let keys_free = !rt.blocks_input(model) && !rt.typing_surface_owns_keys(model, ui.ctx());
+    if keys_free {
+        if let Some(mv) = crate::list_nav::hovered_move(ui, list_rect) {
+            let current = model
+                .ui
+                .tree_selected
+                .as_ref()
+                .and_then(|sel| rows.iter().position(|row| &row.path == sel))
+                .or_else(|| {
+                    active_rel
+                        .as_ref()
+                        .and_then(|rel| rows.iter().position(|row| rel == &row.path))
+                });
+            if let Some(next) = crate::list_nav::stepped(current, rows.len(), mv) {
+                let path = rows[next].path.clone();
+                model.ui.tree_selected = Some(path.clone());
+                model.ui.tree_selection.clear();
+                model.ui.tree_selection.insert(path.clone());
+                model.ui.tree_reveal = Some((path, true));
+            }
+        }
+    }
     let target_reveal = model.ui.tree_reveal.clone();
     // `show_rows` only builds visible rows, so scroll before virtualization
     // and clear the request after the frame.

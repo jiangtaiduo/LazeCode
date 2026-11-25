@@ -251,6 +251,30 @@ pub fn compare_drawer(
         }
     }
 
+    // Keyboard: ↑/↓ step the file rows (directories stay click-only). The
+    // change lands in the model, so the existing reveal-on-change logic
+    // scrolls the new file into view on the next frame.
+    let keys_free = !rt.blocks_input(model) && !rt.typing_surface_owns_keys(model, ui.ctx());
+    if keys_free {
+        if let Some(mv) = crate::list_nav::hovered_move(ui, body) {
+            let files: Vec<&str> = rows
+                .iter()
+                .filter(|row| row.dir.is_none() && !row.is_root)
+                .map(|row| row.path.as_str())
+                .collect();
+            let current = session
+                .selected
+                .as_deref()
+                .and_then(|sel| files.iter().position(|path| *path == sel));
+            if let Some(next) = crate::list_nav::stepped(current, files.len(), mv) {
+                let path = files[next].to_string();
+                if let Some(session) = model.projects[index].compare_session.as_mut() {
+                    session.selected = Some(path);
+                }
+            }
+        }
+    }
+
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(body)

@@ -939,489 +939,514 @@ pub(super) fn source_control(
     let mut confirm_discard: Option<Vec<String>> = None;
     let modifiers = ui.input(|input| input.modifiers);
 
+    // Keyboard: ↑/↓/Home/End move the single file selection while the pointer
+    // is over the list. Group and directory rows stay mouse-only (clicking a
+    // group selects the whole changelist), so only file rows are stepped.
+    let keys_free = !rt.blocks_input(model) && !rt.typing_surface_owns_keys(model, ui.ctx());
+    let mut nav_scroll: Option<f32> = None;
+    if keys_free {
+        if let Some(mv) = crate::list_nav::hovered_move(ui, rows_rect) {
+            let current = {
+                let project = active(model);
+                flat_order.iter().position(|index| {
+                    let path = &changes[*index].path;
+                    project.change_anchor.as_deref() == Some(path.as_str())
+                        || project.change_selection.contains(path)
+                })
+            };
+            if let Some(next) = crate::list_nav::stepped(current, flat_order.len(), mv) {
+                let path = changes[flat_order[next]].path.clone();
+                let project = active_mut(model);
+                project.change_selection.clear();
+                project.change_selection.insert(path.clone());
+                project.change_anchor = Some(path);
+                nav_scroll = Some((next as f32 * 21.0 - rows_rect.height() * 0.5 + 10.5).max(0.0));
+            }
+        }
+    }
+
     crate::app_ui::region(ui, rows_rect, "sc-rows", |ui| {
-        egui::ScrollArea::vertical()
+        let mut area = egui::ScrollArea::vertical()
             .id_salt("changes")
-            .auto_shrink([false, false])
-            .show_rows(ui, 21.0, rows.len(), |ui, range| {
-                for row_index in range {
-                    let Some(row) = rows.get(row_index) else {
-                        continue;
-                    };
-                    let group = &groups[row.group];
-                    match row.kind {
-                        RowKind::Header => {
-                            let (rect, _) = ui.allocate_exact_size(
-                                Vec2::new(ui.available_width(), 21.0),
-                                Sense::hover(),
+            .auto_shrink([false, false]);
+        if let Some(offset) = nav_scroll {
+            area = area.vertical_scroll_offset(offset);
+        }
+        area.show_rows(ui, 21.0, rows.len(), |ui, range| {
+            for row_index in range {
+                let Some(row) = rows.get(row_index) else {
+                    continue;
+                };
+                let group = &groups[row.group];
+                match row.kind {
+                    RowKind::Header => {
+                        let (rect, _) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 21.0),
+                            Sense::hover(),
+                        );
+                        let draw_rect = Rect::from_min_max(
+                            Pos2::new(rect.left() + 4.0, rect.top()),
+                            Pos2::new(rect.right() - 4.0, rect.bottom()),
+                        );
+                        let is_group_selected = selection.contains(&group.name);
+                        let response = ui.interact(
+                            rect,
+                            ui.scope_id().with(("sc_header_row", row_index)),
+                            Sense::click(),
+                        );
+                        if is_group_selected {
+                            ui.painter().rect_filled(
+                                draw_rect,
+                                egui::CornerRadius::same(3),
+                                p.selected_row,
                             );
-                            let draw_rect = Rect::from_min_max(
-                                Pos2::new(rect.left() + 4.0, rect.top()),
-                                Pos2::new(rect.right() - 4.0, rect.bottom()),
+                        } else if response.hovered() {
+                            ui.painter().rect_filled(
+                                draw_rect,
+                                egui::CornerRadius::same(3),
+                                p.hover,
                             );
-                            let is_group_selected = selection.contains(&group.name);
-                            let response = ui.interact(
+                        }
+                        let group_paths: Vec<String> = group
+                            .files
+                            .iter()
+                            .chain(group.conflicts.iter())
+                            .map(|index| changes[*index].path.clone())
+                            .collect();
+                        if response.secondary_clicked() {
+                            menu_open = Some((
+                                crate::runtime::MenuKind::ChangelistHeaderContext {
+                                    project: model.active_project.unwrap_or(0),
+                                },
                                 rect,
-                                ui.scope_id().with(("sc_header_row", row_index)),
-                                Sense::click(),
-                            );
-                            if is_group_selected {
-                                ui.painter().rect_filled(
-                                    draw_rect,
-                                    egui::CornerRadius::same(3),
-                                    p.selected_row,
-                                );
-                            } else if response.hovered() {
-                                ui.painter().rect_filled(
-                                    draw_rect,
-                                    egui::CornerRadius::same(3),
-                                    p.hover,
-                                );
-                            }
-                            let group_paths: Vec<String> = group
-                                .files
-                                .iter()
-                                .chain(group.conflicts.iter())
-                                .map(|index| changes[*index].path.clone())
-                                .collect();
-                            if response.secondary_clicked() {
-                                menu_open = Some((
-                                    crate::runtime::MenuKind::ChangelistHeaderContext {
-                                        project: model.active_project.unwrap_or(0),
-                                    },
-                                    rect,
-                                    std::iter::once(group.name.clone())
-                                        .chain(group_paths.iter().cloned())
-                                        .collect::<Vec<_>>()
-                                        .join("\u{1}"),
-                                ));
-                            }
-                            // 组头三态勾选：有未勾项→全勾，否则全不勾。
-                            let mut paths: Vec<String> = group_paths;
-                            let state = group_check_state(&checked, &paths);
-                            let checkbox_rect = Rect::from_center_size(
-                                Pos2::new(rect.left() + 26.0, rect.center().y),
-                                Vec2::splat(16.0),
-                            );
-                            let chk_resp = checkbox_tri(ui, checkbox_rect, state, theme);
-                            if chk_resp.clicked() {
-                                paths.sort();
-                                group_toggle = Some((paths, state != TriState::Checked));
-                            }
-                            let expanded = !collapsed_lists.contains(&group.key);
-                            let chevron = if expanded {
-                                Icon::ChevronDown
-                            } else {
-                                Icon::ChevronRight
-                            };
-                            let chevron_rect = Rect::from_center_size(
+                                std::iter::once(group.name.clone())
+                                    .chain(group_paths.iter().cloned())
+                                    .collect::<Vec<_>>()
+                                    .join("\u{1}"),
+                            ));
+                        }
+                        // 组头三态勾选：有未勾项→全勾，否则全不勾。
+                        let mut paths: Vec<String> = group_paths;
+                        let state = group_check_state(&checked, &paths);
+                        let checkbox_rect = Rect::from_center_size(
+                            Pos2::new(rect.left() + 26.0, rect.center().y),
+                            Vec2::splat(16.0),
+                        );
+                        let chk_resp = checkbox_tri(ui, checkbox_rect, state, theme);
+                        if chk_resp.clicked() {
+                            paths.sort();
+                            group_toggle = Some((paths, state != TriState::Checked));
+                        }
+                        let expanded = !collapsed_lists.contains(&group.key);
+                        let chevron = if expanded {
+                            Icon::ChevronDown
+                        } else {
+                            Icon::ChevronRight
+                        };
+                        let chevron_rect = Rect::from_center_size(
+                            Pos2::new(rect.left() + 10.0, rect.center().y),
+                            Vec2::splat(14.0),
+                        );
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
                                 Pos2::new(rect.left() + 10.0, rect.center().y),
-                                Vec2::splat(14.0),
-                            );
-                            paint_icon(
-                                ui.painter(),
-                                Rect::from_center_size(
-                                    Pos2::new(rect.left() + 10.0, rect.center().y),
-                                    Vec2::splat(12.0),
-                                ),
-                                chevron,
-                                p.text3,
-                            );
-                            let chev_resp = ui.interact(
-                                chevron_rect,
-                                ui.scope_id().with(("sc_chev", row_index)),
-                                Sense::click(),
-                            );
-                            if chev_resp.clicked() {
+                                Vec2::splat(12.0),
+                            ),
+                            chevron,
+                            p.text3,
+                        );
+                        let chev_resp = ui.interact(
+                            chevron_rect,
+                            ui.scope_id().with(("sc_chev", row_index)),
+                            Sense::click(),
+                        );
+                        if chev_resp.clicked() {
+                            let project = active_mut(model);
+                            if !project.collapsed_lists.remove(&group.key) {
+                                project.collapsed_lists.insert(group.key.clone());
+                            }
+                        }
+                        let name_color = if group.unversioned { p.orange } else { p.text2 };
+                        ui.painter().text(
+                            Pos2::new(rect.left() + 40.0, rect.center().y),
+                            Align2::LEFT_CENTER,
+                            &group.name,
+                            FontId::proportional(12.5),
+                            name_color,
+                        );
+                        let total = group.files.len() + group.conflicts.len();
+                        ui.painter().text(
+                            Pos2::new(rect.right() - 12.0, rect.center().y),
+                            Align2::RIGHT_CENTER,
+                            total.to_string(),
+                            FontId::monospace(11.0),
+                            p.text3,
+                        );
+                        if response.clicked() && !chk_resp.clicked() && !chev_resp.clicked() {
+                            if response.double_clicked() {
                                 let project = active_mut(model);
                                 if !project.collapsed_lists.remove(&group.key) {
                                     project.collapsed_lists.insert(group.key.clone());
                                 }
+                            } else {
+                                let project = active_mut(model);
+                                project.change_selection.clear();
+                                project.change_selection.insert(group.name.clone());
                             }
-                            let name_color = if group.unversioned { p.orange } else { p.text2 };
-                            ui.painter().text(
-                                Pos2::new(rect.left() + 40.0, rect.center().y),
-                                Align2::LEFT_CENTER,
-                                &group.name,
-                                FontId::proportional(12.5),
-                                name_color,
-                            );
-                            let total = group.files.len() + group.conflicts.len();
-                            ui.painter().text(
-                                Pos2::new(rect.right() - 12.0, rect.center().y),
-                                Align2::RIGHT_CENTER,
-                                total.to_string(),
-                                FontId::monospace(11.0),
-                                p.text3,
-                            );
-                            if response.clicked() && !chk_resp.clicked() && !chev_resp.clicked() {
-                                if response.double_clicked() {
-                                    let project = active_mut(model);
-                                    if !project.collapsed_lists.remove(&group.key) {
-                                        project.collapsed_lists.insert(group.key.clone());
-                                    }
-                                } else {
-                                    let project = active_mut(model);
-                                    project.change_selection.clear();
-                                    project.change_selection.insert(group.name.clone());
+                        }
+                    }
+                    RowKind::ConflictHeader => {
+                        let conflict_key = format!("__conflicts__::{}", group.key);
+                        let (rect, _) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 21.0),
+                            Sense::hover(),
+                        );
+                        let response = ui.interact(
+                            rect,
+                            ui.scope_id().with(("sc_conf_hdr", row_index)),
+                            Sense::click(),
+                        );
+                        let mut paths: Vec<String> = group
+                            .conflicts
+                            .iter()
+                            .map(|index| changes[*index].path.clone())
+                            .collect();
+                        let state = group_check_state(&checked, &paths);
+                        let checkbox_rect = Rect::from_center_size(
+                            Pos2::new(rect.left() + 40.0, rect.center().y),
+                            Vec2::splat(16.0),
+                        );
+                        let chk_resp = checkbox_tri(ui, checkbox_rect, state, theme);
+                        if chk_resp.clicked() {
+                            paths.sort();
+                            group_toggle = Some((paths, state != TriState::Checked));
+                        }
+                        let expanded = !collapsed_lists.contains(&conflict_key);
+                        let chevron = if expanded {
+                            Icon::ChevronDown
+                        } else {
+                            Icon::ChevronRight
+                        };
+                        paint_icon(
+                            ui.painter(),
+                            Rect::from_center_size(
+                                Pos2::new(rect.left() + 24.0, rect.center().y),
+                                Vec2::splat(12.0),
+                            ),
+                            chevron,
+                            p.text3,
+                        );
+                        ui.painter().text(
+                            Pos2::new(rect.left() + 54.0, rect.center().y),
+                            Align2::LEFT_CENTER,
+                            format!(
+                                "{} {}",
+                                crate::tr!(model, "Merge Conflicts", "合并冲突"),
+                                group.conflicts.len()
+                            ),
+                            FontId::proportional(12.5),
+                            p.rose,
+                        );
+                        // Resolve 链接：打开首个冲突的三方解决对话框。
+                        let resolve_right = rect.right() - 12.0;
+                        let resolve_rect = Rect::from_min_size(
+                            Pos2::new(resolve_right - 60.0, rect.center().y - 9.0),
+                            Vec2::new(60.0, 18.0),
+                        );
+                        if ui
+                            .interact(
+                                resolve_rect,
+                                ui.scope_id().with(("resolve", group.key.clone())),
+                                Sense::click(),
+                            )
+                            .clicked()
+                        {
+                            if let Some(first) = group.conflicts.first() {
+                                let path = changes[*first].path.clone();
+                                let root = active(model).active_root().to_path_buf();
+                                if let Ok(content) = lazecode_git::merge_file_content(&root, &path)
+                                {
+                                    rt.dialog = crate::runtime::DialogState::ConflictResolve {
+                                        path,
+                                        ours: content.ours,
+                                        theirs: content.theirs,
+                                        worktree: content.worktree,
+                                    };
                                 }
                             }
                         }
-                        RowKind::ConflictHeader => {
-                            let conflict_key = format!("__conflicts__::{}", group.key);
-                            let (rect, _) = ui.allocate_exact_size(
+                        ui.painter().text(
+                            Pos2::new(resolve_rect.center().x, resolve_rect.center().y),
+                            Align2::CENTER_CENTER,
+                            crate::tr!(model, "Resolve…", "解决…"),
+                            FontId::proportional(11.5),
+                            p.accent,
+                        );
+                        if response.clicked() && !chk_resp.clicked() {
+                            let project = active_mut(model);
+                            if !project.collapsed_lists.remove(&conflict_key) {
+                                project.collapsed_lists.insert(conflict_key);
+                            }
+                        }
+                    }
+                    RowKind::File => {
+                        let Some(change_index) = row.change else {
+                            // 树视图目录行（稳定版 commit-dir-row）。
+                            let (rect, response) = ui.allocate_exact_size(
                                 Vec2::new(ui.available_width(), 21.0),
-                                Sense::hover(),
-                            );
-                            let response = ui.interact(
-                                rect,
-                                ui.scope_id().with(("sc_conf_hdr", row_index)),
                                 Sense::click(),
                             );
-                            let mut paths: Vec<String> = group
-                                .conflicts
-                                .iter()
-                                .map(|index| changes[*index].path.clone())
-                                .collect();
-                            let state = group_check_state(&checked, &paths);
-                            let checkbox_rect = Rect::from_center_size(
-                                Pos2::new(rect.left() + 40.0, rect.center().y),
-                                Vec2::splat(16.0),
-                            );
-                            let chk_resp = checkbox_tri(ui, checkbox_rect, state, theme);
-                            if chk_resp.clicked() {
-                                paths.sort();
-                                group_toggle = Some((paths, state != TriState::Checked));
-                            }
-                            let expanded = !collapsed_lists.contains(&conflict_key);
-                            let chevron = if expanded {
-                                Icon::ChevronDown
-                            } else {
-                                Icon::ChevronRight
-                            };
-                            paint_icon(
-                                ui.painter(),
-                                Rect::from_center_size(
-                                    Pos2::new(rect.left() + 24.0, rect.center().y),
-                                    Vec2::splat(12.0),
-                                ),
-                                chevron,
-                                p.text3,
-                            );
-                            ui.painter().text(
-                                Pos2::new(rect.left() + 54.0, rect.center().y),
-                                Align2::LEFT_CENTER,
-                                format!(
-                                    "{} {}",
-                                    crate::tr!(model, "Merge Conflicts", "合并冲突"),
-                                    group.conflicts.len()
-                                ),
-                                FontId::proportional(12.5),
-                                p.rose,
-                            );
-                            // Resolve 链接：打开首个冲突的三方解决对话框。
-                            let resolve_right = rect.right() - 12.0;
-                            let resolve_rect = Rect::from_min_size(
-                                Pos2::new(resolve_right - 60.0, rect.center().y - 9.0),
-                                Vec2::new(60.0, 18.0),
-                            );
-                            if ui
-                                .interact(
-                                    resolve_rect,
-                                    ui.scope_id().with(("resolve", group.key.clone())),
-                                    Sense::click(),
-                                )
-                                .clicked()
-                            {
-                                if let Some(first) = group.conflicts.first() {
-                                    let path = changes[*first].path.clone();
-                                    let root = active(model).active_root().to_path_buf();
-                                    if let Ok(content) =
-                                        lazecode_git::merge_file_content(&root, &path)
-                                    {
-                                        rt.dialog = crate::runtime::DialogState::ConflictResolve {
-                                            path,
-                                            ours: content.ours,
-                                            theirs: content.theirs,
-                                            worktree: content.worktree,
-                                        };
-                                    }
-                                }
-                            }
-                            ui.painter().text(
-                                Pos2::new(resolve_rect.center().x, resolve_rect.center().y),
-                                Align2::CENTER_CENTER,
-                                crate::tr!(model, "Resolve…", "解决…"),
-                                FontId::proportional(11.5),
-                                p.accent,
-                            );
-                            if response.clicked() && !chk_resp.clicked() {
-                                let project = active_mut(model);
-                                if !project.collapsed_lists.remove(&conflict_key) {
-                                    project.collapsed_lists.insert(conflict_key);
-                                }
-                            }
-                        }
-                        RowKind::File => {
-                            let Some(change_index) = row.change else {
-                                // 树视图目录行（稳定版 commit-dir-row）。
-                                let (rect, response) = ui.allocate_exact_size(
-                                    Vec2::new(ui.available_width(), 21.0),
-                                    Sense::click(),
+                            if response.hovered() {
+                                ui.painter().rect_filled(
+                                    rect.shrink2(Vec2::new(4.0, 0.0)),
+                                    egui::CornerRadius::same(4),
+                                    p.hover,
                                 );
-                                if response.hovered() {
-                                    ui.painter().rect_filled(
-                                        rect.shrink2(Vec2::new(4.0, 0.0)),
-                                        egui::CornerRadius::same(4),
-                                        p.hover,
-                                    );
-                                }
-                                if let Some(key) = &row.dir_key {
-                                    let indent = rect.left() + 6.0 + row.depth as f32 * 14.0;
-                                    let expanded = !collapsed_lists.contains(key);
-                                    let chevron = if expanded {
-                                        Icon::ChevronDown
-                                    } else {
-                                        Icon::ChevronRight
-                                    };
-                                    let chevron_rect = Rect::from_center_size(
-                                        Pos2::new(indent + 4.0, rect.center().y),
-                                        Vec2::splat(14.0),
-                                    );
-                                    paint_icon(
-                                        ui.painter(),
-                                        Rect::from_center_size(
-                                            Pos2::new(indent + 4.0, rect.center().y),
-                                            Vec2::splat(11.0),
-                                        ),
-                                        chevron,
-                                        p.text3,
-                                    );
-                                    let chev_resp = ui.interact(
-                                        chevron_rect,
-                                        ui.scope_id().with(("dir_chev", row_index)),
-                                        Sense::click(),
-                                    );
-                                    if chev_resp.clicked() {
-                                        let project = active_mut(model);
-                                        if !project.collapsed_lists.remove(key) {
-                                            project.collapsed_lists.insert(key.clone());
-                                        }
-                                    }
-
-                                    let mut chk_clicked = false;
-                                    let chk_offset = if !group.is_ignored {
-                                        if let Some(paths) = &row.dir_file_paths {
-                                            let state = group_check_state(&checked, paths);
-                                            let chk_rect = Rect::from_center_size(
-                                                Pos2::new(indent + 18.0, rect.center().y),
-                                                Vec2::splat(14.0),
-                                            );
-                                            let chk_resp = checkbox_tri(ui, chk_rect, state, theme);
-                                            if chk_resp.clicked() {
-                                                chk_clicked = true;
-                                                let mut sorted_paths = paths.clone();
-                                                sorted_paths.sort();
-                                                group_toggle = Some((
-                                                    sorted_paths,
-                                                    state != TriState::Checked,
-                                                ));
-                                            }
-                                        }
-                                        16.0
-                                    } else {
-                                        0.0
-                                    };
-
-                                    let icon_x = indent + 18.0 + chk_offset;
-                                    paint_icon(
-                                        ui.painter(),
-                                        Rect::from_center_size(
-                                            Pos2::new(icon_x, rect.center().y),
-                                            Vec2::splat(13.0),
-                                        ),
-                                        if expanded {
-                                            Icon::FolderOpen
-                                        } else {
-                                            Icon::Folder
-                                        },
-                                        p.text3,
-                                    );
-
-                                    let dir_name = row.dir_name.as_deref().unwrap_or("");
-                                    let text_x = icon_x + 12.0;
-                                    ui.painter().text(
-                                        Pos2::new(text_x, rect.center().y),
-                                        Align2::LEFT_CENTER,
-                                        dir_name,
-                                        FontId::proportional(12.0),
-                                        p.text,
-                                    );
-
-                                    let count = row.dir_count;
-                                    ui.painter().text(
-                                        Pos2::new(rect.right() - 12.0, rect.center().y),
-                                        Align2::RIGHT_CENTER,
-                                        if model.settings.language.is_zh() {
-                                            format!("{count} 个文件")
-                                        } else if count == 1 {
-                                            "1 file".to_string()
-                                        } else {
-                                            format!("{count} files")
-                                        },
-                                        FontId::proportional(11.0),
-                                        p.text3,
-                                    );
-
-                                    if response.clicked() && !chk_clicked && !chev_resp.clicked() {
-                                        let project = active_mut(model);
-                                        if !project.collapsed_lists.remove(key) {
-                                            project.collapsed_lists.insert(key.clone());
-                                        }
-                                    }
-                                }
-                                continue;
-                            };
-
-                            let change = &changes[change_index];
-                            let (rect, _) = ui.allocate_exact_size(
-                                Vec2::new(ui.available_width(), 21.0),
-                                Sense::hover(),
-                            );
-                            let rect = Rect::from_min_max(
-                                Pos2::new(rect.left() + 4.0, rect.top()),
-                                Pos2::new(rect.right() - 4.0, rect.bottom()),
-                            );
-                            let path = change.path.clone();
-                            let is_checked = checked.contains(&path);
-                            let is_selected = selection.contains(&path);
-                            let prev_selected = if row_index > 0 {
-                                rows.get(row_index - 1)
-                                    .and_then(|r| r.change)
-                                    .is_some_and(|idx| selection.contains(&changes[idx].path))
-                            } else {
-                                false
-                            };
-                            let next_selected = if row_index + 1 < rows.len() {
-                                rows.get(row_index + 1)
-                                    .and_then(|r| r.change)
-                                    .is_some_and(|idx| selection.contains(&changes[idx].path))
-                            } else {
-                                false
-                            };
-                            let radius = match (prev_selected, next_selected) {
-                                (true, true) => egui::CornerRadius::ZERO,
-                                (false, true) => egui::CornerRadius {
-                                    nw: 3,
-                                    ne: 3,
-                                    sw: 0,
-                                    se: 0,
-                                },
-                                (true, false) => egui::CornerRadius {
-                                    nw: 0,
-                                    ne: 0,
-                                    sw: 3,
-                                    se: 3,
-                                },
-                                (false, false) => egui::CornerRadius::same(3),
-                            };
-                            let is_ignored = groups.get(row.group).is_some_and(|g| g.is_ignored);
-                            let (new_checked, clicked, double_clicked, secondary, discard) =
-                                change_row(
-                                    ui,
-                                    theme,
-                                    rect,
-                                    change,
-                                    is_checked,
-                                    is_selected,
-                                    radius,
-                                    row.depth,
-                                    show_dir_hint,
-                                    is_ignored,
-                                );
-                            if secondary {
-                                // 右键行不在多选内→只选中它（稳定版规则）；
-                                // 在多选内→对整个选择生效。
-                                let mut payload_paths: Vec<String> = Vec::new();
-                                if is_selected && selection.len() > 1 {
-                                    for index in &flat_order {
-                                        let candidate = &changes[*index].path;
-                                        if selection.contains(candidate) {
-                                            payload_paths.push(candidate.clone());
-                                        }
-                                    }
+                            }
+                            if let Some(key) = &row.dir_key {
+                                let indent = rect.left() + 6.0 + row.depth as f32 * 14.0;
+                                let expanded = !collapsed_lists.contains(key);
+                                let chevron = if expanded {
+                                    Icon::ChevronDown
                                 } else {
-                                    payload_paths.push(path.clone());
+                                    Icon::ChevronRight
+                                };
+                                let chevron_rect = Rect::from_center_size(
+                                    Pos2::new(indent + 4.0, rect.center().y),
+                                    Vec2::splat(14.0),
+                                );
+                                paint_icon(
+                                    ui.painter(),
+                                    Rect::from_center_size(
+                                        Pos2::new(indent + 4.0, rect.center().y),
+                                        Vec2::splat(11.0),
+                                    ),
+                                    chevron,
+                                    p.text3,
+                                );
+                                let chev_resp = ui.interact(
+                                    chevron_rect,
+                                    ui.scope_id().with(("dir_chev", row_index)),
+                                    Sense::click(),
+                                );
+                                if chev_resp.clicked() {
                                     let project = active_mut(model);
-                                    project.change_selection.clear();
-                                    project.change_selection.insert(path.clone());
-                                    project.change_anchor = Some(path.clone());
+                                    if !project.collapsed_lists.remove(key) {
+                                        project.collapsed_lists.insert(key.clone());
+                                    }
                                 }
-                                menu_open = Some((
-                                    crate::runtime::MenuKind::ChangeFileContext {
-                                        project: model.active_project.unwrap_or(0),
+
+                                let mut chk_clicked = false;
+                                let chk_offset = if !group.is_ignored {
+                                    if let Some(paths) = &row.dir_file_paths {
+                                        let state = group_check_state(&checked, paths);
+                                        let chk_rect = Rect::from_center_size(
+                                            Pos2::new(indent + 18.0, rect.center().y),
+                                            Vec2::splat(14.0),
+                                        );
+                                        let chk_resp = checkbox_tri(ui, chk_rect, state, theme);
+                                        if chk_resp.clicked() {
+                                            chk_clicked = true;
+                                            let mut sorted_paths = paths.clone();
+                                            sorted_paths.sort();
+                                            group_toggle =
+                                                Some((sorted_paths, state != TriState::Checked));
+                                        }
+                                    }
+                                    16.0
+                                } else {
+                                    0.0
+                                };
+
+                                let icon_x = indent + 18.0 + chk_offset;
+                                paint_icon(
+                                    ui.painter(),
+                                    Rect::from_center_size(
+                                        Pos2::new(icon_x, rect.center().y),
+                                        Vec2::splat(13.0),
+                                    ),
+                                    if expanded {
+                                        Icon::FolderOpen
+                                    } else {
+                                        Icon::Folder
                                     },
-                                    rect,
-                                    payload_paths.join("\u{1}"),
-                                ));
+                                    p.text3,
+                                );
+
+                                let dir_name = row.dir_name.as_deref().unwrap_or("");
+                                let text_x = icon_x + 12.0;
+                                ui.painter().text(
+                                    Pos2::new(text_x, rect.center().y),
+                                    Align2::LEFT_CENTER,
+                                    dir_name,
+                                    FontId::proportional(12.0),
+                                    p.text,
+                                );
+
+                                let count = row.dir_count;
+                                ui.painter().text(
+                                    Pos2::new(rect.right() - 12.0, rect.center().y),
+                                    Align2::RIGHT_CENTER,
+                                    if model.settings.language.is_zh() {
+                                        format!("{count} 个文件")
+                                    } else if count == 1 {
+                                        "1 file".to_string()
+                                    } else {
+                                        format!("{count} files")
+                                    },
+                                    FontId::proportional(11.0),
+                                    p.text3,
+                                );
+
+                                if response.clicked() && !chk_clicked && !chev_resp.clicked() {
+                                    let project = active_mut(model);
+                                    if !project.collapsed_lists.remove(key) {
+                                        project.collapsed_lists.insert(key.clone());
+                                    }
+                                }
                             }
-                            if discard {
-                                confirm_discard = Some(vec![path.clone()]);
-                            }
-                            if new_checked != is_checked {
-                                toggled = Some((path.clone(), new_checked));
-                            }
-                            if double_clicked {
-                                open_diff = Some(path.clone());
-                            } else if clicked {
-                                // 单击只选中行（对齐稳定版）：Cmd/Ctrl 增减，
-                                // Shift 自锚点范围选择，普通点击重置为单选。
+                            continue;
+                        };
+
+                        let change = &changes[change_index];
+                        let (rect, _) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), 21.0),
+                            Sense::hover(),
+                        );
+                        let rect = Rect::from_min_max(
+                            Pos2::new(rect.left() + 4.0, rect.top()),
+                            Pos2::new(rect.right() - 4.0, rect.bottom()),
+                        );
+                        let path = change.path.clone();
+                        let is_checked = checked.contains(&path);
+                        let is_selected = selection.contains(&path);
+                        let prev_selected = if row_index > 0 {
+                            rows.get(row_index - 1)
+                                .and_then(|r| r.change)
+                                .is_some_and(|idx| selection.contains(&changes[idx].path))
+                        } else {
+                            false
+                        };
+                        let next_selected = if row_index + 1 < rows.len() {
+                            rows.get(row_index + 1)
+                                .and_then(|r| r.change)
+                                .is_some_and(|idx| selection.contains(&changes[idx].path))
+                        } else {
+                            false
+                        };
+                        let radius = match (prev_selected, next_selected) {
+                            (true, true) => egui::CornerRadius::ZERO,
+                            (false, true) => egui::CornerRadius {
+                                nw: 3,
+                                ne: 3,
+                                sw: 0,
+                                se: 0,
+                            },
+                            (true, false) => egui::CornerRadius {
+                                nw: 0,
+                                ne: 0,
+                                sw: 3,
+                                se: 3,
+                            },
+                            (false, false) => egui::CornerRadius::same(3),
+                        };
+                        let is_ignored = groups.get(row.group).is_some_and(|g| g.is_ignored);
+                        let (new_checked, clicked, double_clicked, secondary, discard) = change_row(
+                            ui,
+                            theme,
+                            rect,
+                            change,
+                            is_checked,
+                            is_selected,
+                            radius,
+                            row.depth,
+                            show_dir_hint,
+                            is_ignored,
+                        );
+                        if secondary {
+                            // 右键行不在多选内→只选中它（稳定版规则）；
+                            // 在多选内→对整个选择生效。
+                            let mut payload_paths: Vec<String> = Vec::new();
+                            if is_selected && selection.len() > 1 {
+                                for index in &flat_order {
+                                    let candidate = &changes[*index].path;
+                                    if selection.contains(candidate) {
+                                        payload_paths.push(candidate.clone());
+                                    }
+                                }
+                            } else {
+                                payload_paths.push(path.clone());
                                 let project = active_mut(model);
-                                if modifiers.shift {
-                                    if let Some(anchor) = project.change_anchor.clone() {
-                                        // lo/hi 是扁平行序中的位置，不是 change 索引
-                                        let start = flat_order
-                                            .iter()
-                                            .position(|index| changes[*index].path == anchor);
-                                        let end = flat_order
-                                            .iter()
-                                            .position(|index| changes[*index].path == path);
-                                        if let (Some(start), Some(end)) = (start, end) {
-                                            let (lo, hi) = if start <= end {
-                                                (start, end)
-                                            } else {
-                                                (end, start)
-                                            };
-                                            project.change_selection.clear();
-                                            for pos in lo..=hi {
-                                                project
-                                                    .change_selection
-                                                    .insert(changes[flat_order[pos]].path.clone());
-                                            }
+                                project.change_selection.clear();
+                                project.change_selection.insert(path.clone());
+                                project.change_anchor = Some(path.clone());
+                            }
+                            menu_open = Some((
+                                crate::runtime::MenuKind::ChangeFileContext {
+                                    project: model.active_project.unwrap_or(0),
+                                },
+                                rect,
+                                payload_paths.join("\u{1}"),
+                            ));
+                        }
+                        if discard {
+                            confirm_discard = Some(vec![path.clone()]);
+                        }
+                        if new_checked != is_checked {
+                            toggled = Some((path.clone(), new_checked));
+                        }
+                        if double_clicked {
+                            open_diff = Some(path.clone());
+                        } else if clicked {
+                            // 单击只选中行（对齐稳定版）：Cmd/Ctrl 增减，
+                            // Shift 自锚点范围选择，普通点击重置为单选。
+                            let project = active_mut(model);
+                            if modifiers.shift {
+                                if let Some(anchor) = project.change_anchor.clone() {
+                                    // lo/hi 是扁平行序中的位置，不是 change 索引
+                                    let start = flat_order
+                                        .iter()
+                                        .position(|index| changes[*index].path == anchor);
+                                    let end = flat_order
+                                        .iter()
+                                        .position(|index| changes[*index].path == path);
+                                    if let (Some(start), Some(end)) = (start, end) {
+                                        let (lo, hi) = if start <= end {
+                                            (start, end)
                                         } else {
-                                            project.change_selection.clear();
-                                            project.change_selection.insert(path.clone());
-                                            project.change_anchor = Some(path.clone());
+                                            (end, start)
+                                        };
+                                        project.change_selection.clear();
+                                        for pos in lo..=hi {
+                                            project
+                                                .change_selection
+                                                .insert(changes[flat_order[pos]].path.clone());
                                         }
                                     } else {
+                                        project.change_selection.clear();
                                         project.change_selection.insert(path.clone());
                                         project.change_anchor = Some(path.clone());
                                     }
-                                } else if modifiers.command || modifiers.ctrl {
-                                    if !project.change_selection.remove(&path) {
-                                        project.change_selection.insert(path.clone());
-                                    }
-                                    project.change_anchor = Some(path.clone());
                                 } else {
-                                    project.change_selection.clear();
                                     project.change_selection.insert(path.clone());
                                     project.change_anchor = Some(path.clone());
                                 }
+                            } else if modifiers.command || modifiers.ctrl {
+                                if !project.change_selection.remove(&path) {
+                                    project.change_selection.insert(path.clone());
+                                }
+                                project.change_anchor = Some(path.clone());
+                            } else {
+                                project.change_selection.clear();
+                                project.change_selection.insert(path.clone());
+                                project.change_anchor = Some(path.clone());
                             }
                         }
                     }
                 }
-            });
+            }
+        });
     });
 
     if let Some((paths, target)) = group_toggle {

@@ -81,6 +81,18 @@ pub(super) fn draw_stash_manager_dialog(
         Pos2::new(rect.left() + 12.0, header.bottom() + 10.0),
         Pos2::new(rect.right() - 12.0, rect.bottom() - 48.0),
     );
+
+    // Keyboard: ↑/↓/Home/End move the selection while the list owns the
+    // keyboard (a focused text field still wins); the rows are all laid out,
+    // so the new one can scroll into view directly.
+    let mut reveal_row = None;
+    if let Some(mv) = crate::list_nav::modal_move(ui) {
+        let current = (!stashes.is_empty()).then_some((*selected).min(stashes.len() - 1));
+        if let Some(next) = crate::list_nav::stepped(current, stashes.len(), mv) {
+            *selected = next;
+            reveal_row = Some(next);
+        }
+    }
     let mut selected_entry = None;
     crate::app_ui::region(ui, list_area, "stash-mgr-list", |ui| {
         egui::ScrollArea::vertical()
@@ -122,11 +134,13 @@ pub(super) fn draw_stash_manager_dialog(
                             FontId::monospace(10.0),
                             if is_sel { p.accent } else { p.text },
                         );
-                        if ui
-                            .interact(row, ui.scope_id().with(("stash-row", i)), Sense::click())
-                            .clicked()
-                        {
+                        let response =
+                            ui.interact(row, ui.scope_id().with(("stash-row", i)), Sense::click());
+                        if response.clicked() {
                             *selected = i;
+                        }
+                        if reveal_row == Some(i) {
+                            response.scroll_to_me(None);
                         }
                     }
                 }
@@ -244,6 +258,18 @@ pub(super) fn draw_shelf_manager_dialog(
         Pos2::new(rect.right() - 12.0, rect.bottom() - 48.0),
     );
     let mut selected_entry = None;
+
+    // Keyboard: ↑/↓/Home/End move the selection while the list owns the
+    // keyboard (a focused text field still wins); the rows are all laid out,
+    // so the new one can scroll into view directly.
+    let mut reveal_row = None;
+    if let Some(mv) = crate::list_nav::modal_move(ui) {
+        let current = (!shelves.is_empty()).then_some((*selected).min(shelves.len() - 1));
+        if let Some(next) = crate::list_nav::stepped(current, shelves.len(), mv) {
+            *selected = next;
+            reveal_row = Some(next);
+        }
+    }
     crate::app_ui::region(ui, list_area, "shelf-mgr-list", |ui| {
         egui::ScrollArea::vertical()
             .id_salt("shelf-scroll")
@@ -278,11 +304,13 @@ pub(super) fn draw_shelf_manager_dialog(
                             FontId::monospace(10.0),
                             if is_sel { p.accent } else { p.text },
                         );
-                        if ui
-                            .interact(row, ui.scope_id().with(("shelf-row", i)), Sense::click())
-                            .clicked()
-                        {
+                        let response =
+                            ui.interact(row, ui.scope_id().with(("shelf-row", i)), Sense::click());
+                        if response.clicked() {
                             *selected = i;
+                        }
+                        if reveal_row == Some(i) {
+                            response.scroll_to_me(None);
                         }
                     }
                 }
@@ -459,6 +487,18 @@ pub(super) fn draw_file_history_dialog(
         Pos2::new(rect.left() + 12.0, header.bottom() + 10.0),
         Pos2::new(rect.right() - 12.0, rect.bottom() - 48.0),
     );
+
+    // Keyboard: ↑/↓/Home/End move the selection while the list owns the
+    // keyboard (a focused text field still wins); the rows are all laid out,
+    // so the new one can scroll into view directly.
+    let mut reveal_row = None;
+    if let Some(mv) = crate::list_nav::modal_move(ui) {
+        let current = (!entries.is_empty()).then_some((*selected).min(entries.len() - 1));
+        if let Some(next) = crate::list_nav::stepped(current, entries.len(), mv) {
+            *selected = next;
+            reveal_row = Some(next);
+        }
+    }
     crate::app_ui::region(ui, list_area, "file-hist-list", |ui| {
         egui::ScrollArea::vertical()
             .id_salt("hist-scroll")
@@ -508,11 +548,13 @@ pub(super) fn draw_file_history_dialog(
                             FontId::proportional(9.0),
                             p.text3,
                         );
-                        if ui
-                            .interact(row, ui.scope_id().with(("hist-row", i)), Sense::click())
-                            .clicked()
-                        {
+                        let response =
+                            ui.interact(row, ui.scope_id().with(("hist-row", i)), Sense::click());
+                        if response.clicked() {
                             *selected = i;
+                        }
+                        if reveal_row == Some(i) {
+                            response.scroll_to_me(None);
                         }
                     }
                 }

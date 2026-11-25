@@ -295,56 +295,75 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     }
     let mut activate: Option<usize> = None;
     let results = state.results.clone();
+
+    // Keyboard: ↑/↓ step the matches while the query field owns the keyboard
+    // (its caret keys are single-line left/right, so vertical arrows are
+    // free); the selected row scrolls into view.
+    let mut nav_scroll: Option<f32> = None;
+    if !results.is_empty() {
+        if let Some(mv) = crate::list_nav::panel_move(ui) {
+            let current = Some(state.selected.min(results.len() - 1));
+            if let Some(next) = crate::list_nav::stepped(current, results.len(), mv) {
+                state.selected = next;
+                nav_scroll =
+                    Some((next as f32 * 34.0 - result_area.height() * 0.5 + 17.0).max(0.0));
+            }
+        }
+    }
+
     super::app_ui::region(ui, result_area, "search-results", |ui| {
-        egui::ScrollArea::vertical()
+        let mut area = egui::ScrollArea::vertical()
             .id_salt("search-results-scroll")
-            .auto_shrink([false, false])
-            .show_rows(ui, 34.0, results.len(), |ui, range| {
-                for index in range {
-                    let hit = &results[index];
-                    let (row, response) = ui
-                        .allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
-                    if index == state.selected || response.hovered() {
-                        ui.painter().rect_filled(
-                            row,
-                            egui::CornerRadius::same(4),
-                            if index == state.selected {
-                                p.active
-                            } else {
-                                p.hover
-                            },
-                        );
-                    }
-                    let (icon, tone) = file_icon(hit.path.to_str().unwrap_or_default(), theme);
-                    paint_icon(
-                        ui.painter(),
-                        Rect::from_center_size(
-                            Pos2::new(row.left() + 14.0, row.top() + 12.0),
-                            Vec2::splat(12.0),
-                        ),
-                        icon,
-                        tone,
+            .auto_shrink([false, false]);
+        if let Some(offset) = nav_scroll {
+            area = area.vertical_scroll_offset(offset);
+        }
+        area.show_rows(ui, 34.0, results.len(), |ui, range| {
+            for index in range {
+                let hit = &results[index];
+                let (row, response) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
+                if index == state.selected || response.hovered() {
+                    ui.painter().rect_filled(
+                        row,
+                        egui::CornerRadius::same(4),
+                        if index == state.selected {
+                            p.active
+                        } else {
+                            p.hover
+                        },
                     );
-                    let location = format!("{}:{}", hit.path.display(), hit.line);
-                    ui.painter().text(
-                        Pos2::new(row.left() + 26.0, row.top() + 11.0),
-                        Align2::LEFT_CENTER,
-                        &location,
-                        FontId::proportional(11.5),
-                        p.text3,
-                    );
-                    ui.painter().text(
-                        Pos2::new(row.left() + 26.0, row.top() + 24.0),
-                        Align2::LEFT_CENTER,
-                        &hit.line_text,
-                        FontId::monospace(12.0),
-                        p.text2,
-                    );
-                    if response.clicked() {
-                        activate = Some(index);
-                    }
                 }
-            });
+                let (icon, tone) = file_icon(hit.path.to_str().unwrap_or_default(), theme);
+                paint_icon(
+                    ui.painter(),
+                    Rect::from_center_size(
+                        Pos2::new(row.left() + 14.0, row.top() + 12.0),
+                        Vec2::splat(12.0),
+                    ),
+                    icon,
+                    tone,
+                );
+                let location = format!("{}:{}", hit.path.display(), hit.line);
+                ui.painter().text(
+                    Pos2::new(row.left() + 26.0, row.top() + 11.0),
+                    Align2::LEFT_CENTER,
+                    &location,
+                    FontId::proportional(11.5),
+                    p.text3,
+                );
+                ui.painter().text(
+                    Pos2::new(row.left() + 26.0, row.top() + 24.0),
+                    Align2::LEFT_CENTER,
+                    &hit.line_text,
+                    FontId::monospace(12.0),
+                    p.text2,
+                );
+                if response.clicked() {
+                    activate = Some(index);
+                }
+            }
+        });
     });
     if let Some(index) = activate {
         if let Some(hit) = results.get(index) {

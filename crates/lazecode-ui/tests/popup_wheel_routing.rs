@@ -6,7 +6,7 @@
 
 use egui::{pos2, vec2, Event, MouseWheelSource, MouseWheelUnit, Pos2, Rect, TouchPhase, Vec2};
 use lazecode_core::{AppModel, PanelTab, Settings, UiState};
-use lazecode_git::BranchInfo;
+use lazecode_git::{BranchInfo, CommitInfo};
 use lazecode_ui::{app_ui, runtime::MenuKind, runtime::MenuState, UiRuntime};
 
 const W: f32 = 1440.0;
@@ -52,6 +52,29 @@ fn project_model(settings: &Settings) -> AppModel {
             tracking: None,
             ahead: 0,
             behind: 0,
+        })
+        .collect();
+    // CI checks out with depth 1; a real log can be a single row there. Both
+    // tests need a scrollable commit list regardless of the local history.
+    model.projects[0].log = (0..40)
+        .map(|i| CommitInfo {
+            id: format!("{i:040x}"),
+            short: format!("{i:07x}"),
+            message: format!("commit {i:02}"),
+            body: String::new(),
+            author: "Tester".to_string(),
+            email: "tester@example.com".to_string(),
+            time: 1_700_000_000 - i * 60,
+            parents: if i + 1 < 40 {
+                vec![format!("{:040x}", i + 1)]
+            } else {
+                vec![]
+            },
+            in_head: Some(true),
+            refs: Vec::new(),
+            lane: 0,
+            lane_count: 1,
+            edges: Vec::new(),
         })
         .collect();
     model

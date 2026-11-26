@@ -6,7 +6,13 @@ All notable changes to LazeCode are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.13] - 2026-11-26
+
+### Added
+
+- Lists that own a selection (explorer tree, source-control changes, stash,
+  shelf, Git log, compare drawer, search results and manager dialogs) now
+  support Up/Down/Home/End keyboard navigation and reveal the moved row.
 
 ### Fixed
 
@@ -52,19 +58,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   just saved.
 - The updater re-hashes the staged artifact immediately before installing it
   and keeps only the two newest `.app` backups.
-
-### Security
-
-- LFS pointers now validate the SHA-256 oid and keep object paths inside
-  `<gitdir>/lfs/objects`; a crafted pointer can no longer make checkout or
-  stash apply read arbitrary local files.
-- The updater creates staged artifacts with a random name in a private 0700
-  directory using `create_new`/`O_NOFOLLOW`, and hashes and installs the same
-  file descriptor; swapping the staged file between verification and install
-  can no longer replace the running app.
-
-### Fixed
-
 - Renaming now retargets checkout-relative tree state (selection, multi-select,
   reveal, flash and expanded folders) instead of comparing it with absolute paths.
 - Merge/rebase fast-forward and hard reset refuse to overwrite untracked files,
@@ -95,6 +88,16 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   mouse coordinates outside the 255-byte range are not sent.
 - An unknown OS version no longer bypasses a manifest `min_os` check.
 
+### Security
+
+- LFS pointers now validate the SHA-256 oid and keep object paths inside
+  `<gitdir>/lfs/objects`; a crafted pointer can no longer make checkout or
+  stash apply read arbitrary local files.
+- The updater creates staged artifacts with a random name in a private 0700
+  directory using `create_new`/`O_NOFOLLOW`, and hashes and installs the same
+  file descriptor; swapping the staged file between verification and install
+  can no longer replace the running app.
+
 ### Performance
 
 - Find in terminal scans on a worker after a 120 ms input debounce instead of
@@ -118,7 +121,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instead of spawning a thread per 16 ms window.
 - LSP document reconciliation runs only when the open document set or a buffer
   revision changes; protocol events still drain every frame.
-
 - Background jobs now use a bounded worker pool with bounded result and
   watcher queues; bursts coalesce instead of creating unbounded threads.
 - Compare filtering caches matcher/index per query and generation, and details

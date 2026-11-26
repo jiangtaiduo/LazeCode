@@ -589,7 +589,7 @@ fn build(seed: ModeSpec, dark: bool) -> Palette {
         menu_bg: raised,
         menu_border: border,
         menu_item_hover: hover,
-        menu_item_text: text,
+        menu_item_text: text_bright,
         scrim_subtle,
         scrim,
         scrim_strong,

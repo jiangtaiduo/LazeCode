@@ -2399,7 +2399,24 @@ impl JobQueue {
             }
             Command::SelectCommit(id) => {
                 if let Some(project) = model.active_project_mut() {
-                    if project
+                    if let Some(range) = lazecode_core::selected_commit_range(
+                        &project.log,
+                        &project.selected_commits,
+                    ) {
+                        if project
+                            .commit_range
+                            .as_ref()
+                            .map(|loaded| loaded.key.as_str())
+                            != Some(range.key.as_str())
+                        {
+                            let root = project.active_root().to_path_buf();
+                            if let Some(cached) = project.commit_range.take() {
+                                project.commit_range = Some(cached.rekey_from(&range));
+                            }
+                            project.commit_range_attempted = Some(range.key.clone());
+                            self.commit_range_details(root, &range);
+                        }
+                    } else if project
                         .commit_details
                         .as_ref()
                         .map(|details| details.info.id.as_str())

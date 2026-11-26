@@ -57,6 +57,7 @@ pub(super) fn draw_commit_detail(
     rt: &mut UiRuntime,
     lang: lazecode_core::Language,
     index: usize,
+    range: Option<&lazecode_core::CommitRangeDetails>,
 ) {
     let p = theme.palette;
     ui.painter().rect_filled(rect, 0.0, p.panel);
@@ -84,19 +85,21 @@ pub(super) fn draw_commit_detail(
         Icon::File,
         p.text3,
     );
-    let count_text = if details.files.len() == 1 {
+    let count_text = if let Some(range) = range {
+        crate::tr!(model, "{n} commits selected", "已选择 {n} 个提交")
+            .replace("{n}", &range.count.to_string())
+    } else if details.files.len() == 1 {
         if lang.is_zh() {
             "1 个文件变更".to_string()
         } else {
             "1 file changed".to_string()
         }
+    } else if lang.is_zh() {
+        format!("{} 个文件变更", details.files.len())
     } else {
-        if lang.is_zh() {
-            format!("{} 个文件变更", details.files.len())
-        } else {
-            format!("{} files changed", details.files.len())
-        }
+        format!("{} files changed", details.files.len())
     };
+
     ui.painter().text(
         Pos2::new(header_rect.left() + 26.0, header_rect.center().y),
         Align2::LEFT_CENTER,
@@ -104,6 +107,15 @@ pub(super) fn draw_commit_detail(
         FontId::proportional(12.5),
         p.text,
     );
+    // A new selection keeps the previous rows painted; mark the short reload
+    // with an accent underline instead of clearing the whole detail column.
+    if range.is_some_and(|range| range.loading) {
+        ui.painter().hline(
+            header_rect.x_range(),
+            header_rect.bottom() - 0.5,
+            Stroke::new(2.0, p.accent),
+        );
+    }
 
     // Top action buttons from right to left (stable order: CollapseAll, ExpandAll, ViewOptions, Diff, Undo):
     let mut rx = header_rect.right() - 6.0;
@@ -154,26 +166,38 @@ pub(super) fn draw_commit_detail(
         diff_resp.show_tooltip_text(crate::tr!(model, "View Commit Diff", "查看完整提交差异"));
     }
     if diff_resp.clicked() {
-        model.queue(Command::OpenCommitDiff {
-            commit: details.info.id.clone(),
-            path: String::new(),
-        });
+        if let Some(range) = range {
+            model.queue(Command::OpenCompareCommitsDiff {
+                from: range.from.clone(),
+                to: range.to.clone(),
+                path: String::new(),
+            });
+        } else {
+            model.queue(Command::OpenCommitDiff {
+                commit: details.info.id.clone(),
+                path: String::new(),
+            });
+        }
     }
+
     rx -= 22.0;
 
-    // 1. Revert commit (Undo)
-    let revert_rect = Rect::from_min_size(
-        Pos2::new(rx - 20.0, header_rect.top() + 5.0),
-        Vec2::splat(20.0),
-    );
-    let revert_resp = icon_button(ui, revert_rect, Icon::Undo, false, theme);
-    if revert_resp.hovered() {
-        revert_resp.show_tooltip_text(crate::tr!(model, "Revert Commit", "回滚提交"));
-    }
-    if revert_resp.clicked() {
-        model.queue(Command::RevertCommit {
-            hash: details.info.id.clone(),
-        });
+    // Reverting a range would need a replay of several commits; never let
+    // this button act on an arbitrary member of a multi-selection.
+    if range.is_none() {
+        let revert_rect = Rect::from_min_size(
+            Pos2::new(rx - 20.0, header_rect.top() + 5.0),
+            Vec2::splat(20.0),
+        );
+        let revert_resp = icon_button(ui, revert_rect, Icon::Undo, false, theme);
+        if revert_resp.hovered() {
+            revert_resp.show_tooltip_text(crate::tr!(model, "Revert Commit", "回滚提交"));
+        }
+        if revert_resp.clicked() {
+            model.queue(Command::RevertCommit {
+                hash: details.info.id.clone(),
+            });
+        }
     }
 
     // Bottom Summary Card and Draggable Resizer (height clamped between 60.0 and panel height - 90.0)
@@ -365,11 +389,7 @@ pub(super) fn draw_commit_detail(
                         Pos2::new(root_row.left() + 24.0, root_row.center().y),
                         Vec2::splat(13.0),
                     ),
-                    if root_collapsed {
-                        Icon::Folder
-                    } else {
-                        Icon::FolderOpen
-                    },
+                    Icon::Folder,
                     Color32::from_rgb(0xdc, 0xd7, 0xaa),
                 );
                 let root_name = model.projects[index].name.clone();
@@ -437,11 +457,7 @@ pub(super) fn draw_commit_detail(
                                     Pos2::new(row.left() + indent + 12.0, row.center().y),
                                     Vec2::splat(12.0),
                                 ),
-                                if is_expanded {
-                                    Icon::FolderOpen
-                                } else {
-                                    Icon::Folder
-                                },
+                                Icon::Folder,
                                 Color32::from_rgb(0xdc, 0xd7, 0xaa),
                             );
                             ui.painter().text(
@@ -544,18 +560,34 @@ pub(super) fn draw_commit_detail(
                                 );
                             }
                             if response.double_clicked() {
-                                model.queue(Command::OpenCommitDiff {
-                                    commit: details.info.id.clone(),
-                                    path: file.path.clone(),
-                                });
+                                if let Some(range) = range {
+                                    model.queue(Command::OpenCompareCommitsDiff {
+                                        from: range.from.clone(),
+                                        to: range.to.clone(),
+                                        path: file.path.clone(),
+                                    });
+                                } else {
+                                    model.queue(Command::OpenCommitDiff {
+                                        commit: details.info.id.clone(),
+                                        path: file.path.clone(),
+                                    });
+                                }
                             }
+
                             if response.secondary_clicked() {
                                 rt.open_menu(
                                     crate::runtime::MenuKind::CommitDetailsFileContext {
                                         project: index,
                                     },
                                     row,
-                                    Some(format!("{}\u{1}{}", details.info.id, file.path)),
+                                    Some(if let Some(range) = range {
+                                        format!(
+                                            "r\u{1}{}\u{1}{}\u{1}{}",
+                                            range.from, range.to, file.path
+                                        )
+                                    } else {
+                                        format!("{}\u{1}{}", details.info.id, file.path)
+                                    }),
                                 );
                             }
                         }

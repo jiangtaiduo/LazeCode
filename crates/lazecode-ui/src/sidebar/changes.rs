@@ -1276,11 +1276,7 @@ pub(super) fn source_control(
                                         Pos2::new(icon_x, rect.center().y),
                                         Vec2::splat(13.0),
                                     ),
-                                    if expanded {
-                                        Icon::FolderOpen
-                                    } else {
-                                        Icon::Folder
-                                    },
+                                    Icon::Folder,
                                     p.text3,
                                 );
 

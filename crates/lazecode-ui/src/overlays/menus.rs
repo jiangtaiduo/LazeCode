@@ -26,6 +26,11 @@ pub(super) fn draw_menu(
     theme: &Theme,
     screen: Rect,
 ) {
+    // Menus float above dense content, so their labels need brighter ink than
+    // ordinary rows. Shadowing `theme` upgrades every menu renderer at once.
+    let mut menu_theme = *theme;
+    menu_theme.palette.text = menu_theme.palette.menu_item_text;
+    let theme = &menu_theme;
     if let Some(menu) = rt.menu.take() {
         match menu.kind {
             MenuKind::Project => draw_project_menu(ui, model, rt, theme, screen, menu),

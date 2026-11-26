@@ -196,6 +196,13 @@ pub enum JobResult {
         id: String,
         result: Result<Box<CommitDetails>, String>,
     },
+    /// Git-log multi-selection detail list. `key` is the selection signature;
+    /// results whose key no longer matches the current selection are dropped.
+    CommitRangeDetails {
+        root: PathBuf,
+        key: String,
+        result: Result<Vec<lazecode_git::CompareFile>, String>,
+    },
     DiffLoaded {
         root: PathBuf,
         source: DiffSource,

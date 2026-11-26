@@ -127,7 +127,7 @@ pub(crate) fn menu_frame(ui: &Ui, rect: Rect, theme: &Theme) {
     ui.painter().rect_stroke(
         rect,
         egui::CornerRadius::same(8),
-        Stroke::new(1.0, p.menu_border),
+        Stroke::new(1.0, p.border_strong),
         StrokeKind::Inside,
     );
 }
@@ -185,6 +185,26 @@ pub(crate) fn dialog_shadow(
 
 /// Stable context-menu row height (12px text + 2×5px padding).
 pub(crate) const MENU_ROW_H: f32 = 24.0;
+/// Width that fits every label at the menu row font, including the left text
+/// inset and the right check/submenu gutter. Callers keep their own minimum.
+pub(crate) fn menu_width(
+    ui: &Ui,
+    labels: impl IntoIterator<Item = impl AsRef<str>>,
+    min: f32,
+) -> f32 {
+    let font = FontId::proportional(12.0);
+    labels
+        .into_iter()
+        .fold(min, |width, label| {
+            let measured = ui
+                .painter()
+                .layout_no_wrap(label.as_ref().to_owned(), font.clone(), Color32::WHITE)
+                .size()
+                .x;
+            width.max(measured + 34.0)
+        })
+        .min(420.0)
+}
 
 /// One stable CtxMenuShell row: 12px text, radius 6, macOS hover = solid
 /// accent fill + white text; danger rows use `--git-del`. Returns clicked.
@@ -221,12 +241,16 @@ pub(crate) fn menu_row(
     } else {
         p.text
     };
-    ui.painter().text(
-        Pos2::new(row.left() + 10.0, row.center().y),
-        Align2::LEFT_CENTER,
+    crate::widgets::text_clipped(
+        ui.painter(),
+        Rect::from_min_max(
+            Pos2::new(row.left() + 10.0, row.top()),
+            Pos2::new(row.right() - 8.0, row.bottom()),
+        ),
         label,
         FontId::proportional(12.0),
         color,
+        Align2::LEFT_CENTER,
     );
     response.clicked() && enabled
 }

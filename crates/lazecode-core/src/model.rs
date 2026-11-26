@@ -224,6 +224,37 @@ pub struct CompareDetail {
     pub files: Vec<lazecode_git::CompareFile>,
 }
 
+/// Git-log detail column cache for a multi-commit selection. The `key` covers
+/// both the diff endpoints and the selected commits, so changing the
+/// selection invalidates even a range with identical endpoints.
+#[derive(Clone, Debug, Default)]
+pub struct CommitRangeDetails {
+    pub key: String,
+    pub from: String,
+    pub to: String,
+    pub count: usize,
+    pub files: Vec<lazecode_git::FileStat>,
+    pub error: Option<String>,
+    pub loading: bool,
+}
+
+impl CommitRangeDetails {
+    /// Re-key an already loaded file list for a new selection. The detail
+    /// column keeps painting the previous rows while the new range is fetched,
+    /// and every action still uses the new endpoints.
+    pub fn rekey_from(&self, next: &Self) -> Self {
+        Self {
+            key: next.key.clone(),
+            from: next.from.clone(),
+            to: next.to.clone(),
+            count: next.count,
+            files: self.files.clone(),
+            error: None,
+            loading: true,
+        }
+    }
+}
+
 /// 日期过滤（对齐稳定版 compareBranches 的 Date 菜单）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompareDateFilter {
@@ -558,6 +589,96 @@ pub fn compare_nav_order(files: &[lazecode_git::CompareFile]) -> Vec<String> {
     out
 }
 
+/// Empty tree id (SHA-1), matching the existing Compare-panel range rule: a
+/// selection whose oldest commit is a root diffs from the empty tree so the
+/// root commit's files are included.
+pub const EMPTY_TREE_ID: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// Resolve a Git-log multi-selection to the diff range shown in the detail
+/// column: parent of the oldest selected commit → newest selected commit.
+/// `Project.log` is newest-first, so the smallest position is the newest
+/// endpoint. Selections outside the loaded log are ignored.
+pub fn selected_commit_range(
+    log: &[CommitInfo],
+    selected: &[String],
+) -> Option<CommitRangeDetails> {
+    if selected.len() < 2 {
+        return None;
+    }
+    let mut positions: Vec<usize> = selected
+        .iter()
+        .filter_map(|id| log.iter().position(|commit| &commit.id == id))
+        .collect();
+    positions.sort_unstable();
+    positions.dedup();
+    if positions.len() < 2 {
+        return None;
+    }
+    let newest = positions[0];
+    let oldest = *positions.last()?;
+    let from = log[oldest]
+        .parents
+        .first()
+        .cloned()
+        .unwrap_or_else(|| EMPTY_TREE_ID.to_string());
+    let to = log[newest].id.clone();
+    let ids = positions
+        .iter()
+        .map(|position| log[*position].id.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    Some(CommitRangeDetails {
+        key: format!("r:{from}..{to}|{ids}"),
+        from,
+        to,
+        count: positions.len(),
+        ..CommitRangeDetails::default()
+    })
+}
+
+fn kind_rank(kind: lazecode_git::ChangeKind) -> u8 {
+    match kind {
+        lazecode_git::ChangeKind::Modified => 0,
+        lazecode_git::ChangeKind::Renamed | lazecode_git::ChangeKind::TypeChanged => 1,
+        lazecode_git::ChangeKind::Added => 2,
+        lazecode_git::ChangeKind::Deleted => 3,
+    }
+}
+
+/// Merge a range file list by path. `compare_commits` already emits one row
+/// per path, but the detail tree must never duplicate a path even when the
+/// input comes from several diff sources.
+pub fn aggregate_commit_files(files: &[lazecode_git::CompareFile]) -> Vec<lazecode_git::FileStat> {
+    let mut merged: HashMap<String, lazecode_git::FileStat> = HashMap::new();
+    let mut order = Vec::new();
+    for file in files {
+        let kind = lazecode_git::ChangeKind::from_status(file.status);
+        if let Some(stat) = merged.get_mut(&file.path) {
+            stat.additions = stat.additions.saturating_add(file.additions);
+            stat.deletions = stat.deletions.saturating_add(file.deletions);
+            if kind_rank(kind) > kind_rank(stat.kind) {
+                stat.kind = kind;
+            }
+        } else {
+            merged.insert(
+                file.path.clone(),
+                lazecode_git::FileStat {
+                    path: file.path.clone(),
+                    kind,
+                    additions: file.additions,
+                    deletions: file.deletions,
+                    binary: false,
+                },
+            );
+            order.push(file.path.clone());
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|path| merged.remove(&path))
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 pub struct CompareTab {
     pub left: String,
@@ -883,10 +1004,10 @@ fn log_ancestor_set(root: &Path) -> Option<std::collections::HashSet<String>> {
 /// All directory prefixes of the given branch names.
 fn expanded_ref_dirs(branches: &[lazecode_git::BranchInfo]) -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
+    set.insert("Local".to_string());
+    set.insert("Remote".to_string());
+    set.insert("Tags".to_string());
     for branch in branches {
-        if !branch.name.contains('/') {
-            continue;
-        }
         let mut path = String::new();
         for part in branch.name.split('/').filter(|part| !part.is_empty()) {
             path = if path.is_empty() {
@@ -956,6 +1077,12 @@ pub struct ProjectState {
     pub is_single_file: bool,
     pub commit_details: Option<CommitDetails>,
     pub commit_details_attempted: Option<String>,
+    /// Cached file list for a multi-commit Git-log selection.
+    pub commit_range: Option<CommitRangeDetails>,
+    /// Key of the last requested range, so the detail poll does not re-spawn
+    /// a failed job for the same selection every frame.
+    pub commit_range_attempted: Option<String>,
+
     pub tabs: Vec<Tab>,
     pub active_tab: Option<u64>,
     pub commit_message: String,
@@ -1301,5 +1428,131 @@ mod workspace_restore_tests {
         assert!(!model.ui.panel_visible);
         assert_eq!(model.ui.sidebar_view, SidebarView::Git);
         assert_eq!(model.ui.panel_tab, PanelTab::Git);
+    }
+}
+
+#[cfg(test)]
+mod commit_range_tests {
+    use super::*;
+
+    fn commit(id: &str, parent: &str) -> CommitInfo {
+        CommitInfo {
+            id: id.to_string(),
+            short: id.to_string(),
+            message: id.to_string(),
+            body: String::new(),
+            author: "test".to_string(),
+            email: "test@example.com".to_string(),
+            time: 0,
+            parents: if parent.is_empty() {
+                Vec::new()
+            } else {
+                vec![parent.to_string()]
+            },
+            in_head: None,
+            refs: Vec::new(),
+            lane: 0,
+            lane_count: 1,
+            edges: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn selection_uses_parent_of_oldest_to_newest_in_log_order() {
+        // Log is newest-first: c is the newest of these three, a the oldest.
+        let log = [
+            commit("c", "b"),
+            commit("b", "a"),
+            commit("a", "root"),
+            commit("root", ""),
+        ];
+        let selected = vec!["b".to_string(), "a".to_string()];
+        let range = selected_commit_range(&log, &selected).unwrap();
+        assert_eq!(range.from, "root");
+        assert_eq!(range.to, "b");
+        assert_eq!(range.count, 2);
+        // Click order must not affect the endpoints or the signature.
+        let reversed = selected_commit_range(&log, &["a".to_string(), "b".to_string()]).unwrap();
+        assert_eq!(reversed.key, range.key);
+
+        let widened =
+            selected_commit_range(&log, &["c".to_string(), "b".to_string(), "a".to_string()])
+                .unwrap();
+        assert_eq!(widened.from, "root");
+        assert_eq!(widened.to, "c");
+        assert_ne!(widened.key, range.key);
+
+        assert!(selected_commit_range(&log, &["b".to_string()]).is_none());
+    }
+
+    #[test]
+    fn root_selection_starts_at_the_empty_tree() {
+        let log = [commit("b", "a"), commit("a", "")];
+        let range = selected_commit_range(&log, &["b".to_string(), "a".to_string()]).unwrap();
+        assert_eq!(range.from, EMPTY_TREE_ID);
+        assert_eq!(range.to, "b");
+    }
+
+    #[test]
+    fn aggregation_dedupes_paths_and_sums_change_stats() {
+        let files = [
+            lazecode_git::CompareFile {
+                path: "src/a.rs".to_string(),
+                status: 'A',
+                additions: 4,
+                deletions: 0,
+            },
+            lazecode_git::CompareFile {
+                path: "src/a.rs".to_string(),
+                status: 'M',
+                additions: 2,
+                deletions: 1,
+            },
+            lazecode_git::CompareFile {
+                path: "src/b.rs".to_string(),
+                status: 'D',
+                additions: 0,
+                deletions: 7,
+            },
+        ];
+        let stats = aggregate_commit_files(&files);
+        assert_eq!(stats.len(), 2);
+        assert_eq!(stats[0].path, "src/a.rs");
+        assert_eq!(stats[0].kind, lazecode_git::ChangeKind::Added);
+        assert_eq!((stats[0].additions, stats[0].deletions), (6, 1));
+        assert_eq!(stats[1].kind, lazecode_git::ChangeKind::Deleted);
+    }
+
+    #[test]
+    fn rekeying_keeps_the_previous_file_list_visible_while_loading() {
+        let log = [commit("c", "b"), commit("b", "a"), commit("a", "")];
+        let first = selected_commit_range(&log, &["b".into(), "a".into()]).unwrap();
+        let second = selected_commit_range(&log, &["c".into(), "b".into()]).unwrap();
+        let loaded = CommitRangeDetails {
+            key: first.key.clone(),
+            from: first.from.clone(),
+            to: first.to.clone(),
+            count: first.count,
+            files: aggregate_commit_files(&[lazecode_git::CompareFile {
+                path: "src/a.rs".into(),
+                status: 'M',
+                additions: 3,
+                deletions: 1,
+            }]),
+            error: None,
+            loading: false,
+        };
+
+        let pending = loaded.rekey_from(&second);
+        assert_eq!(pending.files.len(), loaded.files.len());
+        assert_eq!(pending.files[0].path, "src/a.rs");
+        assert_eq!(
+            (pending.files[0].additions, pending.files[0].deletions),
+            (3, 1)
+        );
+        assert_eq!(pending.key, second.key);
+        assert_eq!((pending.from.as_str(), pending.to.as_str()), ("a", "c"));
+        assert!(pending.loading);
+        assert!(pending.error.is_none());
     }
 }

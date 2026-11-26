@@ -2,6 +2,7 @@
 
 use super::prelude::*;
 use super::{file_tone, side_head, SideAction, HEAD_H, ROW_H};
+use egui::Key;
 use std::path::Path;
 
 pub(super) fn explorer(
@@ -75,6 +76,35 @@ pub(super) fn explorer(
     let list = Rect::from_min_max(Pos2::new(rect.left(), head.bottom()), rect.max);
     ui.painter().rect_filled(list, 0.0, p.sidebar);
     draw_tree(ui, model, rt, theme, list);
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TreeKeyOutcome {
+    ToggleFolder,
+    Select(usize),
+    None,
+}
+
+/// Right expands a closed folder or steps into an open one; Left collapses an
+/// open folder or steps out to its parent. Matches PyCharm's tree behaviour.
+fn tree_key_outcome(rows: &[VisibleRow], index: usize, right: bool) -> TreeKeyOutcome {
+    let row = &rows[index];
+    if right {
+        if row.kind == NodeKind::Folder && !row.expanded {
+            TreeKeyOutcome::ToggleFolder
+        } else if index + 1 < rows.len() && rows[index + 1].depth > row.depth {
+            TreeKeyOutcome::Select(index + 1)
+        } else {
+            TreeKeyOutcome::None
+        }
+    } else if row.kind == NodeKind::Folder && row.expanded {
+        TreeKeyOutcome::ToggleFolder
+    } else {
+        rows[..index]
+            .iter()
+            .rposition(|candidate| candidate.depth < row.depth)
+            .map_or(TreeKeyOutcome::None, TreeKeyOutcome::Select)
+    }
 }
 
 pub(super) fn draw_tree(
@@ -209,6 +239,51 @@ pub(super) fn draw_tree(
             }
         }
     }
+
+    // PyCharm-style horizontal moves: Right expands a collapsed folder or
+    // steps into it; Left collapses an open folder or steps out to its parent.
+    if keys_free && ui.rect_contains_pointer(list_rect) && !ui.ctx().text_edit_focused() {
+        let horizontal = ui.input(|input| {
+            let plain = !input.modifiers.command && !input.modifiers.ctrl && !input.modifiers.alt;
+            if !plain {
+                None
+            } else if input.key_pressed(Key::ArrowRight) {
+                Some(true)
+            } else if input.key_pressed(Key::ArrowLeft) {
+                Some(false)
+            } else {
+                None
+            }
+        });
+        if let Some(right) = horizontal {
+            let current = model
+                .ui
+                .tree_selected
+                .as_ref()
+                .and_then(|sel| rows.iter().position(|row| &row.path == sel))
+                .or_else(|| {
+                    active_rel
+                        .as_ref()
+                        .and_then(|rel| rows.iter().position(|row| rel == &row.path))
+                });
+            if let Some(index) = current {
+                match tree_key_outcome(&rows, index, right) {
+                    TreeKeyOutcome::ToggleFolder => {
+                        toggle_folder(model, active_index, &rows[index].path);
+                    }
+                    TreeKeyOutcome::Select(next) => {
+                        let path = rows[next].path.clone();
+                        model.ui.tree_selected = Some(path.clone());
+                        model.ui.tree_selection.clear();
+                        model.ui.tree_selection.insert(path.clone());
+                        model.ui.tree_reveal = Some((path, true));
+                    }
+                    TreeKeyOutcome::None => {}
+                }
+            }
+        }
+    }
+    let mut chevron_click: Option<std::path::PathBuf> = None;
     let target_reveal = model.ui.tree_reveal.clone();
     // `show_rows` only builds visible rows, so scroll before virtualization
     // and clear the request after the frame.
@@ -304,6 +379,15 @@ pub(super) fn draw_tree(
                             p.text3
                         },
                     );
+                    let hit = twisty.expand(1.0);
+                    let chevron = ui.interact(
+                        hit,
+                        ui.scope_id().with(("tree-chevron", row.path.clone())),
+                        Sense::click(),
+                    );
+                    if chevron.clicked() {
+                        chevron_click = Some(row.path.clone());
+                    }
                 }
                 let icon_rect = Rect::from_center_size(
                     Pos2::new(draw_rect.left() + pad + 24.0, draw_rect.center().y),
@@ -313,11 +397,7 @@ pub(super) fn draw_tree(
                     NodeKind::Folder => paint_icon(
                         ui.painter(),
                         icon_rect,
-                        if row.expanded {
-                            Icon::FolderOpen
-                        } else {
-                            Icon::Folder
-                        },
+                        Icon::Folder,
                         if is_git_ignored {
                             p.git_ignored
                         } else {
@@ -532,19 +612,21 @@ pub(super) fn draw_tree(
                         model.ui.tree_selection.clear();
                         model.ui.tree_selection.insert(row.path.clone());
                         model.ui.tree_selected = Some(row.path.clone());
-                        if row.kind == NodeKind::Folder {
-                            if row.path.as_os_str().is_empty() {
-                                let project = &mut model.projects[active_index];
-                                project.root_expanded = !project.root_expanded;
-                            } else {
-                                toggle_folder(model, active_index, &row.path);
-                            }
-                        }
+                        // Plain click selects; expansion is driven by the
+                        // chevron, double-click or the arrow keys.
                     }
                 }
             }
         });
     });
+    if let Some(path) = chevron_click {
+        if path.as_os_str().is_empty() {
+            let project = &mut model.projects[active_index];
+            project.root_expanded = !project.root_expanded;
+        } else {
+            toggle_folder(model, active_index, &path);
+        }
+    }
     if target_reveal.is_some() {
         model.ui.tree_reveal = None;
     }
@@ -590,6 +672,40 @@ fn collect_matches(
 mod tests {
     use super::*;
     use lazecode_core::{ProjectState, Settings, UiState};
+
+    fn row(path: &str, kind: NodeKind, depth: usize, expanded: bool) -> VisibleRow {
+        VisibleRow {
+            path: std::path::PathBuf::from(path),
+            name: path.to_string(),
+            kind,
+            depth,
+            expanded,
+        }
+    }
+
+    #[test]
+    fn arrow_keys_follow_pycharm_tree_rules() {
+        let rows = vec![
+            row("", NodeKind::Folder, 0, true),
+            row("backup", NodeKind::Folder, 1, false),
+            row("backup/file.txt", NodeKind::File, 2, false),
+            row("theme", NodeKind::File, 1, false),
+        ];
+        assert_eq!(tree_key_outcome(&rows, 0, true), TreeKeyOutcome::Select(1));
+        assert_eq!(
+            tree_key_outcome(&rows, 1, true),
+            TreeKeyOutcome::ToggleFolder
+        );
+        assert_eq!(tree_key_outcome(&rows, 2, false), TreeKeyOutcome::Select(1));
+        assert_eq!(tree_key_outcome(&rows, 3, false), TreeKeyOutcome::Select(0));
+
+        let open = [rows[0].clone(), row("backup", NodeKind::Folder, 1, true)];
+        assert_eq!(
+            tree_key_outcome(&open, 1, false),
+            TreeKeyOutcome::ToggleFolder
+        );
+        assert_eq!(tree_key_outcome(&open, 1, true), TreeKeyOutcome::None);
+    }
 
     #[test]
     fn expanding_a_folder_loads_its_skipped_children() {

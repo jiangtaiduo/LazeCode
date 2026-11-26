@@ -35,8 +35,9 @@ pub struct FlatRefRow {
     pub is_tag: bool,
 }
 
-/// Build the tree from branch/tag rows. Order of input is preserved within
-/// each directory level; directories appear where their first member sits.
+/// Fold every `/` segment into a directory node, matching the file tree. A
+/// branch `origin/dependabot/cargo/x` becomes three collapsible groups with
+/// `x` as the leaf; the full ref name stays available on the row's tooltip.
 pub fn build_ref_tree(refs: &[BranchInfo]) -> RefTreeNode {
     let mut root = RefTreeNode::default();
     for branch in refs {
@@ -78,7 +79,37 @@ pub fn build_ref_tree(refs: &[BranchInfo]) -> RefTreeNode {
         }
         current.entries.push(RefTreeEntry::Ref(branch.clone()));
     }
+    sort_entries(&mut root);
     root
+}
+
+fn sort_entries(node: &mut RefTreeNode) {
+    node.entries.sort_by(|a, b| {
+        let key = |entry: &RefTreeEntry| match entry {
+            RefTreeEntry::Dir(dir) => (0u8, dir.name.clone()),
+            RefTreeEntry::Ref(branch) => (1, branch.name.clone()),
+            RefTreeEntry::Tag { name, .. } => (2, name.clone()),
+        };
+        key(a).cmp(&key(b))
+    });
+    for entry in &mut node.entries {
+        if let RefTreeEntry::Dir(child) = entry {
+            sort_entries(child);
+        }
+    }
+}
+
+fn ref_label(branch: &BranchInfo, depth: usize) -> String {
+    if depth > 0 {
+        branch
+            .name
+            .rsplit('/')
+            .next()
+            .unwrap_or(&branch.name)
+            .to_string()
+    } else {
+        branch.name.clone()
+    }
 }
 
 /// Push tag rows into the tree root as individual entries (PyCharm shows tags
@@ -98,8 +129,8 @@ pub fn push_tags(root: &mut RefTreeNode, tags: &[String], targets: &[(String, St
 }
 
 /// Flatten for rendering, expanding only directories in `expanded` (full
-/// paths, matching the UI's set). Favourite branches always surface first at
-/// the root, then current, then alphabetically (PyCharm's local ordering).
+/// paths, matching the UI's set). Entries are sorted by the tree builder:
+/// groups first, then refs and tags, each alphabetically.
 pub fn flatten_ref_tree(
     root: &RefTreeNode,
     expanded: &std::collections::HashSet<String>,
@@ -135,12 +166,7 @@ fn walk(
                 depth,
                 dir: false,
                 path: branch.name.clone(),
-                label: branch
-                    .name
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&branch.name)
-                    .to_string(),
+                label: ref_label(branch, depth),
                 branch: Some(branch.clone()),
                 tag: None,
                 is_tag: false,
@@ -176,4 +202,101 @@ pub fn sort_local_branches(
             })
             .then_with(|| a.name.cmp(&b.name))
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn branch(name: &str) -> BranchInfo {
+        BranchInfo {
+            name: name.into(),
+            full_name: format!("refs/remotes/{name}"),
+            remote: true,
+            current: false,
+            target: String::new(),
+            tracking: None,
+            ahead: 0,
+            behind: 0,
+        }
+    }
+
+    #[test]
+    fn deep_remote_paths_fold_into_collapsible_dirs() {
+        let refs = [
+            branch("origin/dependabot/cargo/notify-8.2.2"),
+            branch("origin/dependabot/cargo/png-0.18.1"),
+            branch("origin/feat-ui-redesign"),
+            branch("upstream/actions/checkout-7"),
+        ];
+        let tree = build_ref_tree(&refs);
+        assert_eq!(tree.entries.len(), 2, "one group per remote");
+        assert!(matches!(&tree.entries[0], RefTreeEntry::Dir(dir) if dir.name == "origin"));
+
+        let expanded = [
+            "origin",
+            "origin/dependabot",
+            "origin/dependabot/cargo",
+            "upstream",
+            "upstream/actions",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let rows = flatten_ref_tree(&tree, &expanded);
+        let labels: Vec<_> = rows.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "origin",
+                "dependabot",
+                "cargo",
+                "notify-8.2.2",
+                "png-0.18.1",
+                "feat-ui-redesign",
+                "upstream",
+                "actions",
+                "checkout-7",
+            ]
+        );
+        let depths: Vec<_> = rows.iter().map(|row| row.depth).collect();
+        assert_eq!(depths, [0, 1, 2, 3, 3, 1, 0, 1, 2]);
+
+        // A collapsed directory still shows as a row but hides its children.
+        let collapsed = ["origin".to_string()].into_iter().collect();
+        let rows = flatten_ref_tree(&tree, &collapsed);
+        let labels: Vec<_> = rows.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["origin", "dependabot", "feat-ui-redesign", "upstream"]
+        );
+
+        let fully_collapsed = std::collections::HashSet::new();
+        let rows = flatten_ref_tree(&tree, &fully_collapsed);
+        let labels: Vec<_> = rows.iter().map(|row| row.label.as_str()).collect();
+        assert_eq!(labels, ["origin", "upstream"]);
+    }
+
+    #[test]
+    fn groups_and_leaves_are_sorted() {
+        let refs = [
+            branch("origin/zebra"),
+            branch("origin/alpha"),
+            branch("upstream/beta"),
+        ];
+        let tree = build_ref_tree(&refs);
+        let expanded = ["origin".into(), "upstream".into()].into_iter().collect();
+        let rows = flatten_ref_tree(&tree, &expanded);
+        let paths: Vec<_> = rows.iter().map(|row| row.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "origin",
+                "origin/alpha",
+                "origin/zebra",
+                "upstream",
+                "upstream/beta",
+            ]
+        );
+    }
 }

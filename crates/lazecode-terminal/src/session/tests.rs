@@ -1488,3 +1488,64 @@ fn real_ris_clears_cold_history_but_not_a_csi_c_query() {
     session.snapshot_into(&mut snap);
     assert_eq!(snap.cold_lines, 0);
 }
+
+#[test]
+fn scrolled_viewport_keeps_its_distance_when_cold_rows_are_evicted() {
+    // A hidden console keeps producing output. The bounded cold tier evicts
+    // its oldest rows, so a viewport that keeps counting them outgrows the
+    // addressable window and the next snapshot clamps it to the oldest
+    // retained row — the console jumps to the top when its project is shown
+    // again. The offset must follow the live window instead.
+    let options = SpawnOptions {
+        cwd: std::env::temp_dir(),
+        cols: 40,
+        rows: 6,
+        command: Some("stty raw -echo; cat".to_string()),
+        scrollback: 16,
+        cold_lines: 40,
+        cold_bytes: 8 << 20,
+        ..Default::default()
+    };
+    let session = spawn(options).expect("spawn");
+    let mut snap = Snapshot::default();
+    await_echo(&session, &mut snap);
+
+    let mut blob = String::new();
+    for line in 1..=100 {
+        blob.push_str(&format!("row-{line}\r\n"));
+    }
+    session.write(blob.as_bytes());
+    assert!(wait_until(
+        || !session.search("row-100").is_empty(),
+        std::time::Duration::from_secs(10)
+    ));
+
+    session.scroll_delta(10);
+    session.snapshot_into(&mut snap);
+    assert_eq!(snap.display_offset, 10);
+
+    // No snapshots in between: the pane belongs to another project.
+    let mut more = String::new();
+    for line in 101..=400 {
+        more.push_str(&format!("row-{line}\r\n"));
+    }
+    session.write(more.as_bytes());
+    assert!(wait_until(
+        || !session.search("row-400").is_empty(),
+        std::time::Duration::from_secs(15)
+    ));
+
+    session.snapshot_into(&mut snap);
+    assert!(
+        snap.display_offset <= 12,
+        "viewport must keep its distance from live output: offset={} history={}",
+        snap.display_offset,
+        snap.history_size
+    );
+    let text = snapshot_text(&snap);
+    let first = text.lines().next().unwrap_or("");
+    assert!(
+        first.contains("row-38") || first.contains("row-39"),
+        "viewport should show recent history, not the oldest retained row: {first:?}"
+    );
+}

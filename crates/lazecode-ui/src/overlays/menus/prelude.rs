@@ -13,6 +13,6 @@ pub(super) use crate::theme::Theme;
 pub(super) use crate::widgets::{primary_button, secondary_button, text_clipped};
 
 pub(super) use super::super::{
-    menu_frame, menu_row, popover_rect, push_dialog_state, should_dismiss, used_worktree_branches,
-    MENU_ROW_H,
+    menu_frame, menu_row, menu_width, popover_rect, push_dialog_state, should_dismiss,
+    used_worktree_branches, MENU_ROW_H,
 };

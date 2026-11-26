@@ -15,10 +15,11 @@ pub use lsp::{
     LspRange, ServerKey, WorkspaceEdit,
 };
 pub use model::{
-    is_json_path, is_snapshot_ignored, AppModel, CompareBranchesSideView, CompareBranchesState,
-    CompareDateFilter, CompareDetail, CompareSession, DatePreset, DiffSource, DiffTab,
-    DiffViewMode, FileTab, GitSubtab, ImageTab, LogQuery, MarkdownViewMode, PaneSplit, PanelTab,
-    ProjectState, SidebarView, Tab, TabKind, TerminalPane, TerminalPlacement, TerminalTab, Toast,
-    ToastKind, UiState, WorktreeState, MAX_PANES_PER_TAB,
+    aggregate_commit_files, is_json_path, is_snapshot_ignored, selected_commit_range, AppModel,
+    CommitRangeDetails, CompareBranchesSideView, CompareBranchesState, CompareDateFilter,
+    CompareDetail, CompareSession, DatePreset, DiffSource, DiffTab, DiffViewMode, FileTab,
+    GitSubtab, ImageTab, LogQuery, MarkdownViewMode, PaneSplit, PanelTab, ProjectState,
+    SidebarView, Tab, TabKind, TerminalPane, TerminalPlacement, TerminalTab, Toast, ToastKind,
+    UiState, WorktreeState, MAX_PANES_PER_TAB,
 };
 pub use settings::{Language, Settings, ThemeMode, ThemeSkin, WorkspaceFile};

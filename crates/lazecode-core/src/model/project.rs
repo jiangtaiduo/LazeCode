@@ -64,6 +64,8 @@ impl ProjectState {
             is_single_file: true,
             commit_details: None,
             commit_details_attempted: None,
+            commit_range: None,
+            commit_range_attempted: None,
             tabs: Vec::new(),
             active_tab: None,
             commit_message: String::new(),
@@ -185,6 +187,8 @@ impl ProjectState {
             is_single_file,
             commit_details: None,
             commit_details_attempted: None,
+            commit_range: None,
+            commit_range_attempted: None,
             tabs: Vec::new(),
             active_tab: None,
             commit_message: String::new(),
@@ -494,7 +498,15 @@ impl ProjectState {
                     .any(|commit| Some(&commit.id) == self.selected_commit.as_ref())
                 {
                     self.selected_commit = self.log.first().map(|commit| commit.id.clone());
+                    self.selected_commits = self
+                        .log
+                        .first()
+                        .map(|commit| vec![commit.id.clone()])
+                        .unwrap_or_default();
                     self.commit_details = None;
+                    self.commit_details_attempted = None;
+                    self.commit_range = None;
+                    self.commit_range_attempted = None;
                 }
             }
             Err(err) => self.log_error = Some(err.to_string()),

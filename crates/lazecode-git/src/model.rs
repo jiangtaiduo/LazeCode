@@ -22,6 +22,18 @@ impl ChangeKind {
         }
     }
 
+    /// Status letter from `CompareFile`/`--name-status` to the same kinds used
+    /// by commit-detail file trees. `?` (untracked) is treated as added.
+    pub fn from_status(status: char) -> Self {
+        match status.to_ascii_uppercase() {
+            'A' | '?' => ChangeKind::Added,
+            'D' => ChangeKind::Deleted,
+            'R' => ChangeKind::Renamed,
+            'T' => ChangeKind::TypeChanged,
+            _ => ChangeKind::Modified,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             ChangeKind::Added => "Added",

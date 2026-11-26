@@ -210,8 +210,15 @@ impl JobQueue {
                         {
                             project.selected_commit =
                                 project.log.first().map(|commit| commit.id.clone());
+                            project.selected_commits = project
+                                .log
+                                .first()
+                                .map(|commit| vec![commit.id.clone()])
+                                .unwrap_or_default();
                             project.commit_details = None;
                             project.commit_details_attempted = None;
+                            project.commit_range = None;
+                            project.commit_range_attempted = None;
                         }
                     }
                     Err(err) => {
@@ -265,6 +272,53 @@ impl JobQueue {
                     }
                 }
             }
+
+            JobResult::CommitRangeDetails { root, key, result } => {
+                if let Some(project) = model.project_mut_for_git_root(&root) {
+                    let Some(current) = lazecode_core::selected_commit_range(
+                        &project.log,
+                        &project.selected_commits,
+                    ) else {
+                        return;
+                    };
+                    // `project_mut_for_git_root` matches the checkout; the key
+                    // also matches the exact selection, so a range completed
+                    // after the user changed selection is discarded.
+                    if current.key != key {
+                        return;
+                    }
+                    let mut error = None;
+                    match result {
+                        Ok(files) => {
+                            project.commit_range = Some(lazecode_core::CommitRangeDetails {
+                                key: current.key,
+                                from: current.from,
+                                to: current.to,
+                                count: current.count,
+                                files: lazecode_core::aggregate_commit_files(&files),
+                                error: None,
+                                loading: false,
+                            });
+                        }
+                        Err(err) => {
+                            project.commit_range = Some(lazecode_core::CommitRangeDetails {
+                                key: current.key,
+                                from: current.from,
+                                to: current.to,
+                                count: current.count,
+                                files: Vec::new(),
+                                error: Some(err.clone()),
+                                loading: false,
+                            });
+                            error = Some(err);
+                        }
+                    }
+                    if let Some(err) = error {
+                        model.toast(err, ToastKind::Error);
+                    }
+                }
+            }
+
             JobResult::DiffLoaded {
                 root,
                 source,
@@ -544,6 +598,8 @@ impl JobQueue {
                     // this the details column stays blank after stage/fetch/
                     // commit until the user re-clicks the commit.
                     project.commit_details_attempted = None;
+                    project.commit_range = None;
+                    project.commit_range_attempted = None;
                     if clear_commit_message {
                         if ok {
                             // 提交成功：入历史（去重、上限 10 条，对齐

@@ -4,7 +4,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use lazecode_core::{AppModel, DiffSource};
+use lazecode_core::{AppModel, CommitRangeDetails, DiffSource};
+
 use lazecode_terminal::Notifier;
 
 use super::*;
@@ -127,6 +128,24 @@ impl JobQueue {
         });
     }
 
+    /// Load the combined changed-file list for a Git-log multi-selection.
+    pub fn commit_range_details(&mut self, root: PathBuf, range: &CommitRangeDetails) {
+        let key = format!("details-range:{}:{}", root.display(), range.key);
+        let job_root = root.clone();
+        let job_key = range.key.clone();
+        let from = range.from.clone();
+        let to = range.to.clone();
+        self.spawn("commit-range", key, move || {
+            let result =
+                lazecode_git::compare_commits(&job_root, &from, &to).map_err(|err| err.to_string());
+            JobResult::CommitRangeDetails {
+                root: job_root,
+                key: job_key,
+                result,
+            }
+        });
+    }
+
     pub fn diff_source(&mut self, root: PathBuf, source: DiffSource) {
         let key = format!("diff:{}:{source:?}", root.display());
         let job_root = root.clone();
@@ -206,6 +225,24 @@ impl JobQueue {
         let Some(project) = model.active_project_mut() else {
             return;
         };
+        if let Some(range) =
+            lazecode_core::selected_commit_range(&project.log, &project.selected_commits)
+        {
+            if project
+                .commit_range
+                .as_ref()
+                .is_some_and(|loaded| loaded.key == range.key)
+                || project.commit_range_attempted.as_deref() == Some(range.key.as_str())
+            {
+                return;
+            }
+            let root = project.active_root().to_path_buf();
+            if let Some(cached) = project.commit_range.take() {
+                project.commit_range = Some(cached.rekey_from(&range));
+            }
+            project.commit_range_attempted = Some(range.key.clone());
+            self.commit_range_details(root, &range);
+        }
         let Some(id) = project.selected_commit.clone() else {
             return;
         };

@@ -1110,6 +1110,18 @@ pub(super) fn draw_commit_details_file_menu(
     project_idx: usize,
     payload: &str,
 ) {
+    // Multi-commit detail rows carry `r\x01from\x01to\x01path`; only a range
+    // diff makes sense there, so use a dedicated one-item menu.
+    if let Some(rest) = payload.strip_prefix("r\u{1}") {
+        let mut parts = rest.splitn(3, '\u{1}');
+        if let (Some(from), Some(to), Some(path)) = (parts.next(), parts.next(), parts.next()) {
+            if !from.is_empty() && !to.is_empty() && !path.is_empty() {
+                draw_commit_range_file_menu(ui, model, rt, theme, screen, menu, from, to, path);
+            }
+        }
+        return;
+    }
+
     let Some((commit_id, file_path)) = payload.split_once('\u{1}') else {
         return;
     };
@@ -1241,6 +1253,61 @@ pub(super) fn draw_commit_details_file_menu(
             }
             _ => {}
         }
+        close = true;
+    }
+    if should_dismiss(ui, rect, menu.opened_frame, rt.frame_count) {
+        close = true;
+    }
+    if !close {
+        rt.menu = Some(menu);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_commit_range_file_menu(
+    ui: &mut Ui,
+    model: &mut AppModel,
+    rt: &mut UiRuntime,
+    theme: &Theme,
+    screen: Rect,
+    menu: MenuState,
+    from: &str,
+    to: &str,
+    path: &str,
+) {
+    let zh = model.settings.language.is_zh();
+    let items = [(if zh { "查看差异" } else { "Show Diff" }, 0u8)];
+    let height = items.len() as f32 * MENU_ROW_H + 8.0;
+    let rect = popover_rect(rt, screen, menu.anchor, 220.0, height);
+    menu_frame(ui, rect, theme);
+    let mut action = None;
+    for (index, (label, code)) in items.iter().enumerate() {
+        let row = Rect::from_min_size(
+            Pos2::new(
+                rect.left() + 4.0,
+                rect.top() + 4.0 + index as f32 * MENU_ROW_H,
+            ),
+            Vec2::new(rect.width() - 8.0, MENU_ROW_H),
+        );
+        if menu_row(
+            ui,
+            theme,
+            row,
+            ui.scope_id().with(("cd_range_ctx", index)),
+            label,
+            false,
+            true,
+        ) {
+            action = Some(*code);
+        }
+    }
+    let mut close = false;
+    if action == Some(0) {
+        model.queue(Command::OpenCompareCommitsDiff {
+            from: from.to_string(),
+            to: to.to_string(),
+            path: path.to_string(),
+        });
         close = true;
     }
     if should_dismiss(ui, rect, menu.opened_frame, rt.frame_count) {

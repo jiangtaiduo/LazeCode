@@ -703,6 +703,12 @@ fn spool_scrollback(
     let Some(store) = spool.store.as_mut() else {
         return;
     };
+    // Rows evicted from the bounded cold tier shift the oldest addressable
+    // id forward. A scrolled viewport must not keep counting them: otherwise
+    // the offset outgrows `history_span()` and the next snapshot clamps it to
+    // the oldest retained row (the console jumps to the top after the pane
+    // was hidden while output kept arriving).
+    let mut dropped = 0usize;
     let hot = term.history_size();
     if hot > spool.hot_cap {
         let floor = evicted + (hot - spool.hot_cap) as u64;
@@ -732,7 +738,10 @@ fn spool_scrollback(
             spool.main.spooled_through = id;
         }
         if !rows.is_empty() {
+            let first_before = store.first_id().unwrap_or(first);
             store.append_rows(first, &rows);
+            let first_after = store.first_id().unwrap_or(first_before);
+            dropped = first_after.saturating_sub(first_before) as usize;
             spool.main.spooled_through = first + rows.len() as u64;
         }
         // Shrink the ring back to the hot budget. `update_history` also resets
@@ -742,10 +751,15 @@ fn spool_scrollback(
     }
     // `evicted + history` (the first screen row's id) is unchanged by
     // shrinking, so this counts only lines pushed into history; a scrolled-back
-    // viewport follows that growth to stay pinned.
+    // viewport follows that growth to stay pinned. Cold-tier evictions remove
+    // lines from the same window, so they cancel the growth out.
     let total_after = term.grid.lines_evicted() + term.history_size() as u64;
-    if total_after > total_before && view_offset.load(Ordering::Relaxed) > 0 {
-        view_offset.fetch_add((total_after - total_before) as usize, Ordering::Relaxed);
+    let offset = view_offset.load(Ordering::Relaxed);
+    if offset > 0 && total_after > total_before {
+        let next = offset
+            .saturating_add((total_after - total_before) as usize)
+            .saturating_sub(dropped);
+        view_offset.store(next, Ordering::Relaxed);
     }
 }
 

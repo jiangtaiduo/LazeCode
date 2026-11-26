@@ -282,18 +282,28 @@ pub(super) fn draw_git_log(
     // via model.projects[index] elsewhere. The commit list itself is not
     // cloned: the derived view below is cached and only the filtered subset
     // is cloned when the inputs change.
-    let (branches, current_branch, selected, details, _log_branch, query, error) = {
+    let (branches, current_branch, selected, details, commit_range, _log_branch, query, error) = {
         let project = &model.projects[index];
         (
             project.branches.clone(),
             project.branch(),
             project.selected_commit.clone(),
             project.commit_details.clone(),
+            project.commit_range.clone(),
             project.log_branch.clone(),
             project.log_query.clone(),
             project.log_error.clone(),
         )
     };
+    // A multi-selection can be loaded before any single-commit details exist;
+    // keep the detail column visible for it as well.
+    let range_active = commit_range.as_ref().filter(|range| {
+        lazecode_core::selected_commit_range(
+            &model.projects[index].log,
+            &model.projects[index].selected_commits,
+        )
+        .is_some_and(|current| current.key == range.key)
+    });
 
     // Filter constants and the derived view (filtered list + lane layout +
     // author chip list) are recomputed only when the log, the filter or the
@@ -564,7 +574,9 @@ pub(super) fn draw_git_log(
     );
 
     // 3. Column 4: Commit details & changed files column
-    let show_detail = model.ui.git_details_visible && details.is_some() && body.width() > 700.0;
+    let show_detail = model.ui.git_details_visible
+        && (details.is_some() || range_active.is_some())
+        && body.width() > 700.0;
     let detail_w = if show_detail {
         model.ui.git_details_width.clamp(220.0, 500.0)
     } else {
@@ -1261,7 +1273,23 @@ pub(super) fn draw_git_log(
             model.ui.git_details_width =
                 (model.ui.git_details_width - resp.drag_delta().x).clamp(220.0, 500.0);
         }
-        if let Some(details) = details.as_ref() {
+        // The range tree reuses the single-commit renderer; its metadata card
+        // shows the newest commit in the selection.
+        let mut range_info = None;
+        if let Some(range) = range_active {
+            if let Some(info) = model.projects[index]
+                .log
+                .iter()
+                .find(|commit| commit.id == range.to)
+                .cloned()
+            {
+                range_info = Some(lazecode_git::CommitDetails {
+                    info,
+                    files: range.files.clone(),
+                });
+            }
+        }
+        if let Some(details) = range_info.as_ref().or(details.as_ref()) {
             draw_commit_detail(
                 ui,
                 model,
@@ -1271,8 +1299,10 @@ pub(super) fn draw_git_log(
                 rt,
                 model.settings.language,
                 index,
+                range_active,
             );
         }
+
         ui.painter().vline(
             detail_rect.left() + 0.5,
             body.y_range(),
@@ -1552,6 +1582,8 @@ pub(super) fn draw_git_log(
                         }
                     }
                 } else if response.clicked() {
+                    let before_selection = model.projects[index].selected_commits.clone();
+
                     let cmd_ctrl = ui.input(|i| i.modifiers.command || i.modifiers.ctrl);
                     let shift = ui.input(|i| i.modifiers.shift);
                     if cmd_ctrl {
@@ -1584,6 +1616,13 @@ pub(super) fn draw_git_log(
                             &commit.id,
                             false,
                         );
+                    }
+                    // Cmd-clicking a non-active row can change the range
+                    // without changing the active commit; reload either way.
+                    if select_commit.is_none()
+                        && model.projects[index].selected_commits != before_selection
+                    {
+                        select_commit = model.projects[index].selected_commit.clone();
                     }
                 }
                 if response.double_clicked() {

@@ -1005,7 +1005,15 @@ pub(super) fn draw_change_file_menu(
     let (items, ctx) = change_menu_items(model, project, &paths);
 
     let height = items.len() as f32 * MENU_ROW_H + 8.0;
-    let rect = popover_rect(rt, screen, menu.anchor, 260.0, height);
+    let width = menu_width(
+        ui,
+        items
+            .iter()
+            .filter(|item| item.code != CHANGE_MENU_SEP)
+            .map(|item| item.label.as_str()),
+        260.0,
+    );
+    let rect = popover_rect(rt, screen, menu.anchor, width, height);
     menu_frame(ui, rect, theme);
 
     // 稳定版右键菜单没有标题行，直接列菜单项。

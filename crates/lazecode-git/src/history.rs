@@ -13,7 +13,8 @@ use gix::refs::transaction::{PreviousValue, RefEdit};
 use gix::refs::{FullName, Target};
 
 use crate::ops::{
-    open_conflicted_index, remove_empty_parents, safe_worktree_join, write_index, CheckoutBackup,
+    ensure_no_untracked_overwrite, open_conflicted_index, remove_empty_parents, restore_index,
+    safe_worktree_join, CheckoutBackup, IndexLock,
 };
 use crate::tree::{
     blob_bytes, commit_tree_map, head_tree_map, index_state_from_tree, materialize_tree,
@@ -127,6 +128,8 @@ pub fn merge(root: &Path, ref_name: &str) -> Result<String> {
     let head = repo.head_id()?.detach();
     let base = repo.merge_base(head, target)?.map(|id| id.detach());
     if base == Some(head) {
+        // `reset(Hard)` owns the shared untracked-overwrite guard, so a
+        // fast-forward cannot silently replace an untracked same-named file.
         reset(root, &target.to_string(), ResetMode::Hard)?;
         return Ok("fast-forwarded".to_string());
     }
@@ -152,6 +155,7 @@ pub fn merge(root: &Path, ref_name: &str) -> Result<String> {
         safe_worktree_join(&workdir, path)?;
     }
     let backup = CheckoutBackup::capture(&repo, &workdir, merged.keys().chain(head_map.keys()))?;
+    let lock = IndexLock::acquire(&repo)?;
     let old_index = std::fs::read(repo.index_path()).ok();
     let result = (|| -> Result<()> {
         for path in head_map.keys() {
@@ -183,24 +187,14 @@ pub fn merge(root: &Path, ref_name: &str) -> Result<String> {
                 gix::merge::tree::apply_index_entries::RemovalMode::Prune,
             );
         }
-        write_index(gix::index::File::from_state(state, repo.index_path()))?;
+        let index_path = lock.path();
+        lock.commit(&gix::index::File::from_state(state, index_path))?;
         Ok(())
     })();
     if let Err(error) = result {
-        if let Err(restore_error) = backup.restore() {
-            log::error!("merge rollback failed: {restore_error}");
-        }
-        match old_index {
-            Some(bytes) => {
-                let _ = lazecode_fs::file::write_atomic_locked(&repo.index_path(), &bytes);
-            }
-            None => {
-                let _ = std::fs::remove_file(repo.index_path());
-            }
-        }
+        rollback_merge(&repo, &backup, &old_index, head);
         return Err(error);
     }
-    backup.discard();
 
     if unresolved {
         let git_dir = repo.git_dir();
@@ -219,11 +213,18 @@ pub fn merge(root: &Path, ref_name: &str) -> Result<String> {
         return Err(anyhow!("merge conflict: resolve the unmerged files"));
     }
 
-    let commit = repo
-        .new_commit(message, tree_id, [head, target])?
-        .id()
-        .detach();
-    update_head(&repo, commit, "merge")?;
+    let commit = match repo.new_commit(message, tree_id, [head, target]) {
+        Ok(commit) => commit.id().detach(),
+        Err(error) => {
+            rollback_merge(&repo, &backup, &old_index, head);
+            return Err(error.into());
+        }
+    };
+    if let Err(error) = update_head(&repo, commit, "merge") {
+        rollback_merge(&repo, &backup, &old_index, head);
+        return Err(error);
+    }
+    backup.discard();
     Ok("merged".to_string())
 }
 
@@ -388,6 +389,8 @@ pub fn rebase(root: &Path, onto: &str) -> Result<String> {
         anyhow::bail!("cannot rebase: no common ancestor with {onto_name}");
     };
     if base == head {
+        // Same shared guard as `merge` fast-forward: `reset(Hard)` refuses
+        // to overwrite untracked paths present in the target tree.
         reset(root, &onto_id.to_string(), ResetMode::Hard)?;
         return Ok("fast-forwarded".to_string());
     }
@@ -395,9 +398,14 @@ pub fn rebase(root: &Path, onto: &str) -> Result<String> {
         return Ok("Already up to date".to_string());
     }
 
+    // Like `git rebase`, replay the commits reached through first parents in
+    // topological order. Without this, the merge commit's other parents are
+    // also enqueued and replayed as unrelated commits.
     let mut commits: Vec<ObjectId> = repo
         .rev_walk([head])
         .with_hidden([base])
+        .first_parent_only()
+        .sorting(gix::revision::walk::Sorting::BreadthFirst)
         .all()?
         .map(|info| Ok(info?.id))
         .collect::<Result<Vec<_>>>()?;
@@ -660,6 +668,7 @@ fn write_conflict_state(
         safe_worktree_join(&workdir, path)?;
     }
     let backup = CheckoutBackup::capture(repo, &workdir, old_paths.iter().chain(merged.keys()))?;
+    let lock = IndexLock::acquire(repo)?;
     let old_index = std::fs::read(repo.index_path()).ok();
     let result = (|| -> Result<()> {
         for path in &old_paths {
@@ -688,7 +697,8 @@ fn write_conflict_state(
             &mut state,
             gix::merge::tree::apply_index_entries::RemovalMode::Prune,
         );
-        write_index(gix::index::File::from_state(state, repo.index_path()))?;
+        let index_path = lock.path();
+        lock.commit(&gix::index::File::from_state(state, index_path))?;
         Ok(())
     })();
     if let Err(error) = result {
@@ -930,7 +940,8 @@ pub fn reset(root: &Path, target: &str, mode: ResetMode) -> Result<String> {
     // `reset` is also how an aborted cherry-pick/rebase restores the pre-
     // operation state, so unmerged stages must be accepted here: they are
     // discarded along with the rest of the old index.
-    let index = open_conflicted_index(&repo)?;
+    let lock = IndexLock::acquire(&repo)?;
+    let index = lock.open_conflicted()?;
     if index
         .entries()
         .iter()
@@ -947,13 +958,23 @@ pub fn reset(root: &Path, target: &str, mode: ResetMode) -> Result<String> {
         ResetMode::Soft => unreachable!("handled above"),
         ResetMode::Mixed => {
             let old_index = std::fs::read(repo.index_path()).ok();
-            write_index_from_state(index_state_from_tree(&repo, &target_map), &repo)?;
+            let index_path = lock.path();
+            lock.commit(&gix::index::File::from_state(
+                index_state_from_tree(&repo, &target_map),
+                index_path,
+            ))?;
             if let Err(error) = update_head(&repo, target_id, &message) {
                 restore_index(&repo, old_index);
                 return Err(error);
             }
         }
         ResetMode::Hard => {
+            // Hard reset overwrites on-disk files; never take a path that is
+            // only present as an untracked file in a target tree.
+            let head_map = head_tree_map(&repo)?;
+            ensure_no_untracked_overwrite(&workdir, &target_map, |path| {
+                old_paths.contains(path) || head_map.contains_key(path)
+            })?;
             for path in target_map.keys().chain(old_paths.iter()) {
                 safe_worktree_join(&workdir, path)?;
             }
@@ -986,7 +1007,11 @@ pub fn reset(root: &Path, target: &str, mode: ResetMode) -> Result<String> {
                     }
                 }
                 materialize_tree(&repo, &target_map)?;
-                write_index_from_state(index_state_from_tree(&repo, &target_map), &repo)?;
+                let index_path = lock.path();
+                lock.commit(&gix::index::File::from_state(
+                    index_state_from_tree(&repo, &target_map),
+                    index_path,
+                ))?;
                 update_head(&repo, target_id, &message)?;
                 Ok(())
             })();
@@ -1007,25 +1032,6 @@ pub fn reset(root: &Path, target: &str, mode: ResetMode) -> Result<String> {
     })
 }
 
-fn write_index_from_state(state: gix::index::State, repo: &gix::Repository) -> Result<()> {
-    write_index(gix::index::File::from_state(state, repo.index_path()))
-}
-
-fn restore_index(repo: &gix::Repository, old_index: Option<Vec<u8>>) {
-    match old_index {
-        Some(bytes) => {
-            // index.lock semantics: a concurrent stage/commit job must not be
-            // silently overwritten by this rollback.
-            if let Err(error) = lazecode_fs::file::write_atomic_locked(&repo.index_path(), &bytes) {
-                log::error!("reset index rollback failed: {error}");
-            }
-        }
-        None => {
-            let _ = std::fs::remove_file(repo.index_path());
-        }
-    }
-}
-
 fn update_head(repo: &gix::Repository, target: ObjectId, message: &str) -> Result<()> {
     let head = repo.head()?;
     let name: FullName = match head.referent_name() {
@@ -1041,6 +1047,26 @@ fn update_head(repo: &gix::Repository, target: ObjectId, message: &str) -> Resul
     edit.deref = false;
     repo.edit_reference(edit)?;
     Ok(())
+}
+
+/// Undo a merge that reached the index/ref stage. The worktree backup and
+/// pre-operation index are restored through their respective locks, and HEAD
+/// is moved back only if the failed ref transaction actually changed it.
+fn rollback_merge(
+    repo: &gix::Repository,
+    backup: &CheckoutBackup,
+    old_index: &Option<Vec<u8>>,
+    head: ObjectId,
+) {
+    if let Err(error) = backup.restore() {
+        log::error!("merge rollback failed: {error}");
+    }
+    restore_index(repo, old_index.clone());
+    if repo.head_id().ok().map(|id| id.detach()) != Some(head) {
+        if let Err(error) = update_head(repo, head, "merge rollback") {
+            log::error!("merge HEAD rollback failed: {error}");
+        }
+    }
 }
 
 /// Drop a single commit: HEAD via reset, otherwise rebase --onto with a
@@ -1248,8 +1274,9 @@ pub fn resolve_take(root: &Path, path: &str, ours: bool) -> Result<()> {
     let path = relative.to_string_lossy().into_owned();
     let stage = if ours { Stage::Ours } else { Stage::Theirs };
 
-    let file = open_conflicted_index(&repo)?;
-    let index_path = file.path().to_path_buf();
+    let lock = IndexLock::acquire(&repo)?;
+    let file = lock.open_conflicted()?;
+    let index_path = lock.path();
     let (mut state, _) = file.into_parts();
     let conflicted = state.entries().iter().any(|entry| {
         entry.stage() != Stage::Unconflicted
@@ -1304,7 +1331,7 @@ pub fn resolve_take(root: &Path, path: &str, ours: bool) -> Result<()> {
 
     state.remove_tree();
     state.sort_entries();
-    write_index(gix::index::File::from_state(state, index_path))?;
+    lock.commit(&gix::index::File::from_state(state, index_path))?;
     Ok(())
 }
 

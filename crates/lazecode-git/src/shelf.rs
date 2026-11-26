@@ -10,9 +10,7 @@ use gix::index::entry::{Flags, Mode, Stage, Stat};
 use gix::refs::transaction::{LogChange, PreviousValue, RefEdit, RefLog};
 use gix::refs::Target;
 
-use crate::ops::{
-    open_index, remove_empty_parents, safe_worktree_join, write_index, CheckoutBackup,
-};
+use crate::ops::{open_index, remove_empty_parents, safe_worktree_join, CheckoutBackup, IndexLock};
 use crate::tree::{
     blob_bytes, commit_tree_map, head_tree_map, index_map, index_state_from_tree, materialize_tree,
     write_tree_from_index, TreeEntry, TreeMap,
@@ -484,10 +482,13 @@ fn lfs_entry(
     let Some((oid, size)) = filters.lfs_pointer_info(path, &data)? else {
         return Ok(None);
     };
-    if filters.lfs_object_path(&oid).is_file() {
-        Ok(Some((data, oid, size)))
-    } else {
-        Ok(None)
+    match filters.lfs_object_path(&oid) {
+        Ok(path) if path.is_file() => Ok(Some((data, oid, size))),
+        Ok(_) => Ok(None),
+        Err(error) => {
+            log::warn!("LFS object path is unsafe ({error}); leaving pointer text");
+            Ok(None)
+        }
     }
 }
 
@@ -564,8 +565,9 @@ fn ours_entry(
 }
 
 fn write_conflict_index(repo: &gix::Repository, conflicts: &[StashConflict]) -> Result<()> {
-    let file = open_index(repo)?;
-    let index_path = file.path().to_path_buf();
+    let lock = IndexLock::acquire(repo)?;
+    let file = lock.open()?;
+    let index_path = lock.path();
     let (mut state, _) = file.into_parts();
     for conflict in conflicts {
         state.remove_entries(|_, candidate, _| {
@@ -592,7 +594,7 @@ fn write_conflict_index(repo: &gix::Repository, conflicts: &[StashConflict]) -> 
     }
     state.remove_tree();
     state.sort_entries();
-    write_index(gix::index::File::from_state(state, index_path))
+    lock.commit(&gix::index::File::from_state(state, index_path))
 }
 
 fn merge_contents(ancestor: &[u8], current: &[u8], other: &[u8]) -> Option<(Vec<u8>, bool)> {
@@ -885,8 +887,9 @@ fn write_stash_index(
     if relevant.is_empty() {
         return Ok(());
     }
-    let file = open_index(repo)?;
-    let index_path = file.path().to_path_buf();
+    let lock = IndexLock::acquire(repo)?;
+    let file = lock.open()?;
+    let index_path = lock.path();
     let (mut state, _) = file.into_parts();
     for path in relevant {
         state.remove_entries(|_, candidate, _| candidate.to_str().ok() == Some(path.as_str()));
@@ -902,7 +905,7 @@ fn write_stash_index(
     }
     state.remove_tree();
     state.sort_entries();
-    write_index(gix::index::File::from_state(state, index_path))
+    lock.commit(&gix::index::File::from_state(state, index_path))
 }
 
 /// A stashed file's "before" version (the stash base blob) against the

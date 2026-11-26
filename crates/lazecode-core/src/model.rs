@@ -906,7 +906,6 @@ pub struct ProjectState {
     pub name: String,
     pub initials: String,
     pub tone: (u8, u8, u8),
-    pub tree: FileTree,
     pub root_expanded: bool,
     pub expanded: HashSet<PathBuf>,
     pub git: Option<RepoSnapshot>,
@@ -1021,6 +1020,21 @@ fn retarget_absolute(path: &Path, old: &Path, new: &Path) -> Option<PathBuf> {
         return Some(new.to_path_buf());
     }
     path.strip_prefix(old).ok().map(|rest| new.join(rest))
+}
+/// Retarget a checkout-relative tree path after `old` became `new`.
+///
+/// Tree rows, `expanded` and the one-shot navigation state are relative to the
+/// checkout root. Comparing them with absolute paths (as `retarget_absolute`
+/// does) can never match, so keep both sides relative to the same root.
+fn retarget_checkout_relative(path: &Path, old: &Path, new: &Path, root: &Path) -> Option<PathBuf> {
+    let old_rel = old.strip_prefix(root).ok()?;
+    let new_rel = new.strip_prefix(root).ok()?;
+    if path == old_rel {
+        return Some(new_rel.to_path_buf());
+    }
+    path.strip_prefix(old_rel)
+        .ok()
+        .map(|rest| new_rel.join(rest))
 }
 
 /// Canonicalise the surviving parent and re-attach the *original* file name.

@@ -23,9 +23,9 @@ pub use fetch::*;
 pub use install::*;
 
 use fetch::{current_os_version, ensure_platform, open_source, read_limited};
-use install::temp_path;
+use install::{create_new_no_follow, open_no_follow, private_dir, temp_path, TempTree};
 #[cfg(test)]
-use install::{install_with, prune_bundle_backups};
+use install::{install_with, prune_bundle_backups, verify_and_install_with};
 use version::{compare_versions, Version};
 
 use std::cmp::Ordering;
@@ -317,11 +317,12 @@ pub fn download_and_verify_limited(
     let parent = dest
         .parent()
         .ok_or_else(|| UpdateError::Install("staging path has no parent".into()))?;
-    std::fs::create_dir_all(parent).map_err(io_error)?;
-    let temp = temp_path(dest);
-    let _ = std::fs::remove_file(&temp);
+    let work = private_dir(parent, ".LazeCode-download-").map_err(io_error)?;
+    // Removes the directory (and any partial file) on success and failure.
+    let _cleanup = TempTree(work.clone());
+    let temp = temp_path(&work.join("artifact")).map_err(io_error)?;
     let result = (|| -> Result<(), UpdateError> {
-        let mut file = std::fs::File::create(&temp).map_err(io_error)?;
+        let mut file = create_new_no_follow(&temp).map_err(io_error)?;
         let mut hasher = ring::digest::Context::new(&SHA256);
         let mut buffer = vec![0u8; DOWNLOAD_CHUNK];
         let mut total = 0u64;
@@ -341,19 +342,10 @@ pub fn download_and_verify_limited(
         file.flush().map_err(io_error)?;
         file.sync_all().map_err(io_error)?;
         drop(file);
-        let actual = to_hex(hasher.finish().as_ref());
-        if actual != manifest.sha256 {
-            return Err(UpdateError::ChecksumMismatch {
-                expected: manifest.sha256.clone(),
-                actual,
-            });
-        }
+        ensure_digest(manifest, &to_hex(hasher.finish().as_ref()))?;
         std::fs::rename(&temp, dest).map_err(io_error)?;
         Ok(())
     })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
     result
 }
 
@@ -365,24 +357,35 @@ pub fn download_and_verify_limited(
 /// (one streaming read) closes that window for the price of reading the file
 /// once more on the worker thread.
 pub fn verify_staged_artifact(manifest: &Manifest, staged: &Path) -> Result<(), UpdateError> {
-    let mut file = std::fs::File::open(staged).map_err(io_error)?;
+    // Never follow a symlink planted at the staging path: the verified bytes
+    // must come from the artifact our own download wrote.
+    let file = open_no_follow(staged).map_err(io_error)?;
+    ensure_digest(manifest, &hash_reader(file)?)
+}
+
+/// Stream-hash a reader without rewinding it.
+fn hash_reader(mut reader: impl Read) -> Result<String, UpdateError> {
     let mut hasher = ring::digest::Context::new(&SHA256);
     let mut buffer = vec![0u8; DOWNLOAD_CHUNK];
     loop {
-        let read = file.read(&mut buffer).map_err(io_error)?;
+        let read = reader.read(&mut buffer).map_err(io_error)?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
     }
-    let actual = to_hex(hasher.finish().as_ref());
-    if actual != manifest.sha256 {
-        return Err(UpdateError::ChecksumMismatch {
+    Ok(to_hex(hasher.finish().as_ref()))
+}
+
+fn ensure_digest(manifest: &Manifest, actual: &str) -> Result<(), UpdateError> {
+    if actual == manifest.sha256 {
+        Ok(())
+    } else {
+        Err(UpdateError::ChecksumMismatch {
             expected: manifest.sha256.clone(),
-            actual,
-        });
+            actual: actual.to_string(),
+        })
     }
-    Ok(())
 }
 
 /// Where downloaded artifacts are staged.
@@ -760,10 +763,13 @@ mod tests {
         assert_eq!(std::fs::read(&dest).unwrap(), payload);
         assert!(progress.last().unwrap().0 >= payload.len() as u64);
         assert!(progress.last().unwrap().1.is_some());
-        // The partial file is gone.
-        assert!(!dest
-            .with_file_name(format!(".LazeCode.{}.part", std::process::id()))
-            .exists());
+        // No partial file or private work directory survives the download.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.join("staging"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(leftovers, vec!["LazeCode".to_string()], "{leftovers:?}");
     }
 
     #[test]
@@ -1224,5 +1230,227 @@ mod tests {
         assert_eq!(remaining.len(), 2, "{remaining:?}");
         assert!(remaining.contains(&backups[2]));
         assert!(remaining.contains(&backups[3]));
+    }
+
+    #[test]
+    fn unknown_os_version_rejects_a_min_os_release() {
+        let dir = TempDir::new();
+        let artifact = dir.join("payload");
+        std::fs::write(&artifact, b"binary").unwrap();
+        let (mut manifest, key) = signed_manifest("0.9.0", &artifact);
+        manifest.min_os = Some("14.0".into());
+        let signature = keypair().sign(&manifest.signing_payload());
+        manifest.signature = base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
+        let manifest_path = dir.join("manifest.json");
+        write_manifest(&manifest_path, &manifest);
+
+        let unknown = Platform {
+            os: "macos".into(),
+            arch: std::env::consts::ARCH.into(),
+            os_version: None,
+        };
+        let err = check_platform(manifest_path.to_str().unwrap(), "0.8.0", &key, &unknown)
+            .expect_err("min_os must reject an unknown OS version");
+        assert!(
+            matches!(err, UpdateError::UnsupportedPlatform { .. }),
+            "got {err}"
+        );
+
+        let known = Platform {
+            os_version: Some("15.0".into()),
+            ..unknown
+        };
+        assert!(check_platform(manifest_path.to_str().unwrap(), "0.8.0", &key, &known).is_ok());
+    }
+
+    #[test]
+    fn temp_names_are_random_not_pid_based() {
+        let dest = PathBuf::from("/tmp/LazeCode-0.5.0");
+        let first = temp_path(&dest).unwrap();
+        let second = temp_path(&dest).unwrap();
+        assert_ne!(first, second, "temporary names must be unpredictable");
+        let predictable =
+            dest.with_file_name(format!(".LazeCode-0.5.0.{}.part", std::process::id()));
+        assert_ne!(first, predictable);
+        assert!(first
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".part"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_never_follows_a_planted_part_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new();
+        let artifact = dir.join("payload");
+        let payload = b"verified payload";
+        std::fs::write(&artifact, payload).unwrap();
+        let (manifest, key) = signed_manifest("0.7.0", &artifact);
+        let staging = dir.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        let victim = staging.join("victim");
+        std::fs::write(&victim, b"do not touch").unwrap();
+        symlink(
+            &victim,
+            staging.join(format!(".LazeCode.{}.part", std::process::id())),
+        )
+        .unwrap();
+
+        let dest = staging.join("LazeCode");
+        download_and_verify(&manifest, &key, &dest, &mut |_, _| {}).unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"do not touch");
+        assert_eq!(std::fs::read(&dest).unwrap(), payload.to_vec());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_symlinks_are_refused_by_verification_and_install() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new();
+        let artifact = dir.join("payload");
+        std::fs::write(&artifact, b"new binary").unwrap();
+        let (manifest, key) = signed_manifest("0.8.0", &artifact);
+        let staged = dir.join("staged-link");
+        symlink(&artifact, &staged).unwrap();
+        let target = dir.join("LazeCode");
+        std::fs::write(&target, b"old binary").unwrap();
+
+        assert!(matches!(
+            verify_staged_artifact(&manifest, &staged),
+            Err(UpdateError::Io(_)) | Err(UpdateError::Install(_))
+        ));
+        assert!(matches!(
+            verify_and_install_artifact(&manifest, &key, &staged, &target),
+            Err(UpdateError::Io(_)) | Err(UpdateError::Install(_))
+        ));
+        assert_eq!(std::fs::read(&target).unwrap(), b"old binary");
+        assert!(!dir.join("LazeCode.bak").exists());
+    }
+
+    #[test]
+    fn tampered_staged_file_is_refused_without_touching_the_target() {
+        let dir = TempDir::new();
+        let artifact = dir.join("payload");
+        let payload = b"new binary";
+        std::fs::write(&artifact, payload).unwrap();
+        let (manifest, key) = signed_manifest("0.8.0", &artifact);
+        let staged = dir.join("staged");
+        std::fs::write(&staged, payload).unwrap();
+        let target = dir.join("LazeCode");
+        std::fs::write(&target, b"old binary").unwrap();
+
+        std::fs::write(&staged, b"tampered after verification").unwrap();
+        let err = verify_and_install_artifact(&manifest, &key, &staged, &target)
+            .expect_err("a replaced staged file must not install");
+        assert!(
+            matches!(err, UpdateError::ChecksumMismatch { .. }),
+            "got {err}"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"old binary");
+        assert!(!dir.join("LazeCode.bak").exists());
+        assert!(!std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains(".LazeCode-install-")));
+    }
+
+    #[test]
+    fn verified_install_uses_the_hashed_descriptor_after_a_path_swap() {
+        let dir = TempDir::new();
+        let artifact = dir.join("payload");
+        let payload = b"verified bytes";
+        std::fs::write(&artifact, payload).unwrap();
+        let (manifest, key) = signed_manifest("0.8.0", &artifact);
+        let staged = dir.join("staged");
+        std::fs::write(&staged, payload).unwrap();
+        let replacement = dir.join("replacement");
+        std::fs::write(&replacement, b"tampered bytes").unwrap();
+        let target = dir.join("LazeCode");
+        std::fs::write(&target, b"old binary").unwrap();
+
+        let staged_path = staged.clone();
+        let report = verify_and_install_with(&manifest, &key, &staged, &target, || {
+            std::fs::rename(&replacement, &staged_path).unwrap();
+        })
+        .expect("install must consume the verified descriptor");
+        assert_eq!(std::fs::read(&target).unwrap(), payload.to_vec());
+        assert_eq!(std::fs::read(&staged).unwrap(), b"tampered bytes");
+        assert_eq!(
+            std::fs::read(report.backup.expect("backup kept")).unwrap(),
+            b"old binary"
+        );
+    }
+
+    #[test]
+    fn failed_reverification_keeps_an_existing_backup() {
+        let dir = TempDir::new();
+        let artifact = dir.join("payload");
+        std::fs::write(&artifact, b"first version").unwrap();
+        let (manifest, key) = signed_manifest("0.8.0", &artifact);
+        let staged = dir.join("staged");
+        std::fs::write(&staged, b"first version").unwrap();
+        let target = dir.join("LazeCode");
+        std::fs::write(&target, b"original version").unwrap();
+
+        let first = verify_and_install_artifact(&manifest, &key, &staged, &target).unwrap();
+        let backup = first.backup.expect("first install keeps a backup");
+        std::fs::write(&staged, b"tampered second attempt").unwrap();
+        assert!(matches!(
+            verify_and_install_artifact(&manifest, &key, &staged, &target),
+            Err(UpdateError::ChecksumMismatch { .. })
+        ));
+        assert_eq!(std::fs::read(&backup).unwrap(), b"original version");
+        assert_eq!(std::fs::read(&target).unwrap(), b"first version");
+    }
+
+    #[test]
+    fn verified_install_swaps_an_app_bundle_and_keeps_the_backup() {
+        let dir = TempDir::new();
+        let staged = dir.join("staged.tar.gz");
+        let mut builder = tar::Builder::new(Vec::new());
+        let binary = b"updated binary bytes";
+        let mut header = tar::Header::new_gnu();
+        header.set_size(binary.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(
+                &mut header,
+                "LazeCode.app/Contents/MacOS/LazeCode",
+                &binary[..],
+            )
+            .unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&builder.into_inner().unwrap()).unwrap();
+        std::fs::write(&staged, encoder.finish().unwrap()).unwrap();
+
+        let (mut manifest, key) = signed_manifest("0.9.0", &staged);
+        manifest.kind = "app-bundle".into();
+        let signature = keypair().sign(&manifest.signing_payload());
+        manifest.signature = base64::engine::general_purpose::STANDARD.encode(signature.as_ref());
+
+        let target = dir.join("Applications/LazeCode.app/Contents/MacOS/LazeCode");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"old binary").unwrap();
+
+        let report = verify_and_install_artifact(&manifest, &key, &staged, &target).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), binary.to_vec());
+        assert_eq!(
+            std::fs::read(
+                report
+                    .backup
+                    .expect("bundle backup kept")
+                    .join("Contents/MacOS/LazeCode")
+            )
+            .unwrap(),
+            b"old binary"
+        );
     }
 }

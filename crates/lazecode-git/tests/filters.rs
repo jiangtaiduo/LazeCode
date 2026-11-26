@@ -231,3 +231,152 @@ fn text_auto_normalizes_text_but_not_binary() {
         "one\r\n\x00two"
     );
 }
+
+fn lfs_pointer(oid: &str, size: usize) -> String {
+    format!("version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {size}\n")
+}
+
+#[test]
+fn lfs_pointer_with_absolute_or_parent_oid_never_reads_outside_objects() {
+    let dir = init();
+    std::fs::write(
+        dir.path().join(".gitattributes"),
+        "*.bin filter=lfs -text\n",
+    )
+    .unwrap();
+    let secret = dir.path().join("secret.txt");
+    std::fs::write(&secret, "TOP SECRET").unwrap();
+    let size = std::fs::metadata(&secret).unwrap().len() as usize;
+
+    let malicious = [
+        secret.to_string_lossy().into_owned(),
+        "../secret.txt".to_string(),
+        format!("{}/../secret.txt", dir.path().display()),
+        "a".repeat(64),
+    ];
+    for oid in malicious {
+        let pointer = lfs_pointer(&oid, size);
+        let smudged = lazecode_git::filter::smudge(
+            dir.path(),
+            "data.bin",
+            "0000000000000000000000000000000000000000",
+            pointer.as_bytes().to_vec(),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(smudged).unwrap(),
+            pointer,
+            "a rejected pointer must be left as pointer text"
+        );
+
+        let target = dir.path().join("materialized.bin");
+        let _ = std::fs::remove_file(&target);
+        let handled = lazecode_git::filter::smudge_lfs_to_file(
+            dir.path(),
+            "data.bin",
+            pointer.as_bytes(),
+            &target,
+        )
+        .unwrap();
+        assert!(!handled, "object outside lfs/objects must not be used");
+        assert!(!target.exists(), "no materialised file for a rejected oid");
+    }
+}
+
+#[test]
+fn lfs_object_symlink_outside_objects_is_not_followed() {
+    let dir = init();
+    std::fs::write(
+        dir.path().join(".gitattributes"),
+        "*.bin filter=lfs -text\n",
+    )
+    .unwrap();
+    let secret = dir.path().join("secret.txt");
+    std::fs::write(&secret, "TOP SECRET").unwrap();
+    let oid = "b".repeat(64);
+    let object = dir
+        .path()
+        .join(".git/lfs/objects")
+        .join(&oid[..2])
+        .join(&oid[2..4])
+        .join(&oid);
+    std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&secret, &object).unwrap();
+
+    let pointer = lfs_pointer(&oid, 10);
+    let smudged = lazecode_git::filter::smudge(
+        dir.path(),
+        "data.bin",
+        "0000000000000000000000000000000000000000",
+        pointer.as_bytes().to_vec(),
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8(smudged).unwrap(),
+        pointer,
+        "symlinked object must not be followed"
+    );
+
+    let target = dir.path().join("materialized.bin");
+    let handled = lazecode_git::filter::smudge_lfs_to_file(
+        dir.path(),
+        "data.bin",
+        pointer.as_bytes(),
+        &target,
+    )
+    .unwrap();
+    assert!(!handled);
+    assert!(!target.exists());
+}
+
+#[test]
+fn touching_filtered_files_keeps_status_clean() {
+    let dir = init();
+    let root = dir.path();
+    std::fs::write(
+        root.join(".gitattributes"),
+        "*.txt text eol=crlf\n*.id ident\n*.bin filter=lfs -text\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("a.txt"), "one\r\ntwo\r\n").unwrap();
+    std::fs::write(root.join("a.id"), "$Id$\n").unwrap();
+    std::fs::write(root.join("data.bin"), b"\x00binary\xffpayload").unwrap();
+    lazecode_git::stage(
+        root,
+        &[
+            ".gitattributes".into(),
+            "a.txt".into(),
+            "a.id".into(),
+            "data.bin".into(),
+        ],
+    )
+    .unwrap();
+    lazecode_git::commit(root, "filtered", false).unwrap();
+
+    // Mirror a smudged ident worktree file; staging collapses it to `$Id$`
+    // while recording the expanded on-disk size in the index stat cache.
+    let oid = git(root, &["rev-parse", "HEAD:a.id"]);
+    std::fs::write(root.join("a.id"), format!("$Id: {oid} $\n")).unwrap();
+    lazecode_git::stage(root, &["a.id".into()]).unwrap();
+    assert!(
+        lazecode_git::snapshot(root).unwrap().changes.is_empty(),
+        "filtered files must be clean before the touch"
+    );
+
+    for name in ["a.txt", "a.id", "data.bin"] {
+        assert!(Command::new("touch")
+            .arg(root.join(name))
+            .status()
+            .unwrap()
+            .success());
+    }
+    let snap = lazecode_git::snapshot(root).unwrap();
+    assert!(
+        snap.changes.is_empty(),
+        "touch must not report Modified: {:?}",
+        snap.changes
+            .iter()
+            .map(|change| (&change.path, change.staged, change.unstaged))
+            .collect::<Vec<_>>()
+    );
+}

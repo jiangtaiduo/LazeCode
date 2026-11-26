@@ -34,7 +34,6 @@ impl ProjectState {
             name,
             initials,
             tone,
-            tree: lazecode_fs::tree::FileTree::default(),
             root_expanded: false,
             expanded: HashSet::new(),
             git: None,
@@ -155,7 +154,6 @@ impl ProjectState {
             name,
             initials,
             tone,
-            tree,
             root_expanded: true,
             expanded: HashSet::new(),
             git,
@@ -213,7 +211,7 @@ impl ProjectState {
             "main".to_string(),
             project.root.clone(),
             true,
-            project.tree.clone(),
+            tree,
             None,
             project.git.clone(),
             project.git_error.clone(),
@@ -738,6 +736,15 @@ impl ProjectState {
     pub fn retarget_path(&mut self, old: &Path, new: &Path) -> bool {
         let old = canonical_after_rename(old);
         let new = new.canonicalize().unwrap_or_else(|_| new.to_path_buf());
+
+        // Tree-relative state belongs to the checkout that owns the renamed
+        // path; linked worktrees are not under `self.root`.
+        let owner_root = self
+            .worktrees
+            .iter()
+            .find(|worktree| old.starts_with(&worktree.path))
+            .map(|worktree| worktree.path.clone())
+            .unwrap_or_else(|| self.root.clone());
         if old == new {
             return false;
         }
@@ -788,8 +795,8 @@ impl ProjectState {
                 TabKind::Compare(_) => {}
             }
         }
-        let old_rel = relative_slash(&old, &self.root);
-        let new_rel = relative_slash(&new, &self.root);
+        let old_rel = relative_slash(&old, &owner_root);
+        let new_rel = relative_slash(&new, &owner_root);
         let retarget_set = |set: &mut HashSet<String>| {
             if old_rel.is_none() || new_rel.is_none() {
                 return false;
@@ -814,7 +821,8 @@ impl ProjectState {
         changed |= retarget_set(&mut self.change_selection);
         let mut expanded = HashSet::with_capacity(self.expanded.len());
         for path in self.expanded.drain() {
-            expanded.insert(retarget_absolute(&path, &old, &new).unwrap_or(path));
+            expanded
+                .insert(retarget_checkout_relative(&path, &old, &new, &owner_root).unwrap_or(path));
         }
         self.expanded = expanded;
         changed

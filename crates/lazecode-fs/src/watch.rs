@@ -1,5 +1,7 @@
+use crossbeam_channel::{Receiver, TrySendError};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Debounced batch of filesystem changes for a project.
@@ -20,7 +22,7 @@ pub struct WatchBatch {
 /// Owns a recursive watcher for one project. Drop to stop watching.
 pub struct ProjectWatcher {
     _watcher: notify::RecommendedWatcher,
-    rx: Receiver<WatchBatch>,
+    rx: Arc<Receiver<WatchBatch>>,
     root: PathBuf,
 }
 
@@ -52,30 +54,55 @@ impl ProjectWatcher {
     }
 }
 
+fn merge_batches(mut first: WatchBatch, second: WatchBatch) -> WatchBatch {
+    first.changed.extend(second.changed);
+    first.git_changed |= second.git_changed;
+    first.ignored_touched |= second.ignored_touched;
+    first.structure_changed |= second.structure_changed;
+    first.changed.sort();
+    first.changed.dedup();
+    first
+}
+
 /// Watch `root` recursively on a background thread and coalesce events into
 /// roughly 200 ms batches. `ignored_patterns` is the project's effective ignore
-/// list; matching paths never enter `changed`. Errors are reported through the
-/// returned option.
+/// list; matching paths never enter `changed`. Queues are bounded; bursts are
+/// merged instead of growing without limit.
 pub fn watch_project(root: &Path, ignored_patterns: &[String]) -> anyhow::Result<ProjectWatcher> {
     use notify::{RecursiveMode, Watcher};
 
-    let (raw_tx, raw_rx) = mpsc::channel::<notify::Result<notify::Event>>();
+    const RAW_CAP: usize = 1024;
+    const BATCH_CAP: usize = 256;
+
+    let (raw_tx, raw_rx) = crossbeam_channel::bounded::<notify::Result<notify::Event>>(RAW_CAP);
+    let overflow = Arc::new(AtomicBool::new(false));
+    let overflow_writer = overflow.clone();
     let mut watcher = notify::RecommendedWatcher::new(
         move |event| {
-            let _ = raw_tx.send(event);
+            if raw_tx.try_send(event).is_err() {
+                // Events are coalesced by the batching thread; record one
+                // structural refresh instead of losing the burst silently.
+                overflow_writer.store(true, Ordering::Release);
+            }
         },
         notify::Config::default().with_poll_interval(Duration::from_millis(500)),
     )?;
     watcher.watch(root, RecursiveMode::Recursive)?;
 
-    let (tx, rx) = mpsc::channel::<WatchBatch>();
+    let (tx, rx) = crossbeam_channel::bounded::<WatchBatch>(BATCH_CAP);
     let batch_root = root.to_path_buf();
     let ignored_patterns = ignored_patterns.to_vec();
+    let batch_overflow = overflow.clone();
+    let batch_rx = rx.clone();
     std::thread::Builder::new()
         .name("lazecode-fs-watch".into())
         .spawn(move || {
             while let Ok(first) = raw_rx.recv() {
                 let mut batch = WatchBatch::default();
+                if batch_overflow.swap(false, Ordering::Acquire) {
+                    batch.structure_changed = true;
+                    batch.ignored_touched = true;
+                }
                 push_event(&mut batch, first, &batch_root, &ignored_patterns);
                 let deadline = std::time::Instant::now() + Duration::from_millis(200);
                 loop {
@@ -85,26 +112,40 @@ pub fn watch_project(root: &Path, ignored_patterns: &[String]) -> anyhow::Result
                     }
                     match raw_rx.recv_timeout(remaining) {
                         Ok(event) => push_event(&mut batch, event, &batch_root, &ignored_patterns),
-                        Err(mpsc::RecvTimeoutError::Timeout) => break,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                        Err(crossbeam_channel::RecvTimeoutError::Timeout) => break,
+                        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
                     }
                 }
                 batch.changed.sort();
                 batch.changed.dedup();
-                if (!batch.changed.is_empty()
-                    || batch.git_changed
-                    || batch.ignored_touched
-                    || batch.structure_changed)
-                    && tx.send(batch).is_err()
+                if batch.changed.is_empty()
+                    && !batch.git_changed
+                    && !batch.ignored_touched
+                    && !batch.structure_changed
                 {
-                    return;
+                    continue;
+                }
+                // If the UI has stopped draining, merge the newest batch into
+                // the oldest queued one so the queue stays bounded and no
+                // structural change is dropped.
+                loop {
+                    match tx.try_send(batch) {
+                        Ok(()) => break,
+                        Err(TrySendError::Full(returned)) => {
+                            batch = match batch_rx.try_recv() {
+                                Ok(old) => merge_batches(old, returned),
+                                Err(_) => returned,
+                            };
+                        }
+                        Err(TrySendError::Disconnected(_)) => return,
+                    }
                 }
             }
         })?;
 
     Ok(ProjectWatcher {
         _watcher: watcher,
-        rx,
+        rx: Arc::new(rx),
         root: root.to_path_buf(),
     })
 }
@@ -353,5 +394,31 @@ mod tests {
         );
         assert_eq!(batch.changed, [PathBuf::from("/repo/src/lib.rs")]);
         assert!(!batch.structure_changed);
+    }
+
+    #[test]
+    fn batch_merge_preserves_flags_and_deduplicates_paths() {
+        let first = WatchBatch {
+            changed: vec![PathBuf::from("/repo/a"), PathBuf::from("/repo/b")],
+            git_changed: false,
+            ignored_touched: true,
+            structure_changed: false,
+        };
+        let second = WatchBatch {
+            changed: vec![PathBuf::from("/repo/b"), PathBuf::from("/repo/c")],
+            git_changed: true,
+            ignored_touched: false,
+            structure_changed: true,
+        };
+        let merged = merge_batches(first, second);
+        assert_eq!(
+            merged.changed,
+            [
+                PathBuf::from("/repo/a"),
+                PathBuf::from("/repo/b"),
+                PathBuf::from("/repo/c")
+            ]
+        );
+        assert!(merged.git_changed && merged.ignored_touched && merged.structure_changed);
     }
 }

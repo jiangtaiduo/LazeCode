@@ -3924,6 +3924,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "tempfile",
  "wgpu",
  "winit",
 ]

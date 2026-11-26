@@ -9,7 +9,6 @@ use crate::widgets::secondary_button;
 pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme) {
     let p = theme.palette;
     let now = ui.input(|input| input.time);
-    let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
     let screen = ui.max_rect();
     ui.painter()
         .rect_filled(screen, 0.0, Color32::from_black_alpha(120));
@@ -28,6 +27,8 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         Stroke::new(1.0, p.border_strong),
         StrokeKind::Inside,
     );
+    let other_overlay = rt.other_overlay_open(model);
+    let esc_overlay_owns_key = rt.overlay_snapshot.had_esc_overlay();
     let state = &mut rt.search;
     let replace_open = state.replace_mode;
     let bar_height = if replace_open { 74.0 } else { 36.0 };
@@ -75,6 +76,10 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         response.request_focus();
         state.focus_requested = false;
     }
+    // Arrows/Enter belong to the panel only when its own query field is the
+    // focused surface and no other overlay is stacked on top of it.
+    let query_owns_keys = response.has_focus() && !other_overlay;
+    let enter_pressed = query_owns_keys && ui.input(|input| input.key_pressed(egui::Key::Enter));
 
     // Flags: Aa, ab, .*
     let mut flag_x = row1.right() - 200.0;
@@ -242,10 +247,11 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
         state.searched = false;
         state.searching = false;
         state.dirty_since = None;
-    } else if enter_pressed
-        || state
-            .dirty_since
-            .is_some_and(|since| (now - since).max(0.0) >= 0.16)
+    } else if query_owns_keys
+        && (enter_pressed
+            || state
+                .dirty_since
+                .is_some_and(|since| (now - since).max(0.0) >= 0.16))
     {
         run(model, state);
     } else if let Some(since) = state.dirty_since {
@@ -301,12 +307,15 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
     // free); the selected row scrolls into view.
     let mut nav_scroll: Option<f32> = None;
     if !results.is_empty() {
-        if let Some(mv) = crate::list_nav::panel_move(ui) {
+        if let Some(mv) = crate::list_nav::panel_move(ui, query_owns_keys) {
             let current = Some(state.selected.min(results.len() - 1));
             if let Some(next) = crate::list_nav::stepped(current, results.len(), mv) {
                 state.selected = next;
-                nav_scroll =
-                    Some((next as f32 * 34.0 - result_area.height() * 0.5 + 17.0).max(0.0));
+                nav_scroll = Some(crate::list_nav::centered_scroll(
+                    next,
+                    34.0,
+                    result_area.height(),
+                ));
             }
         }
     }
@@ -391,7 +400,8 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             rt.search.open = false;
         }
     }
-    if ui.input(|input| input.key_pressed(egui::Key::Escape))
+    let escape_pressed = ui.input(|input| input.key_pressed(egui::Key::Escape));
+    if (escape_pressed && !esc_overlay_owns_key)
         || (rt.search.opened_frame != rt.frame_count
             && ui.input(|input| {
                 input.pointer.any_click()
@@ -402,6 +412,9 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime, theme: &Theme
             }))
     {
         rt.search.open = false;
+        if escape_pressed {
+            rt.escape_handled_frame = rt.frame_count;
+        }
     }
 }
 

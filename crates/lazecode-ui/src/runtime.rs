@@ -25,11 +25,76 @@ pub use search::*;
 pub use terminal::*;
 use terminal::{PendingCloseProbe, PendingQuitProbe};
 
+/// Overlay state remembered after the previous frame's shortcut pass. Escape
+/// is often consumed while an overlay is drawn (search, menus, dialogs);
+/// comparing this snapshot keeps the shared handler from closing two layers
+/// on one key press.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct OverlaySnapshot {
+    initialized: bool,
+    palette: bool,
+    update: bool,
+    dialog: bool,
+    menu: bool,
+    agent_menu: bool,
+    settings: bool,
+    about: bool,
+    search: bool,
+    find: bool,
+}
+
+impl OverlaySnapshot {
+    pub(crate) fn capture(model: &AppModel, rt: &UiRuntime) -> Self {
+        Self {
+            initialized: true,
+            palette: model.ui.command_palette_open,
+            update: rt.update_open,
+            dialog: !matches!(rt.dialog, DialogState::None),
+            menu: rt.menu.is_some() || rt.tree_submenu.is_some() || rt.branch_submenu.is_some(),
+            agent_menu: rt.agent_menu.is_some(),
+            settings: rt.settings_open,
+            about: rt.about_open,
+            search: rt.search.open,
+            find: rt.find.open,
+        }
+    }
+
+    /// True when an overlay that was open at the last shortcut pass has since
+    /// closed itself (typically by handling Escape while being drawn).
+    pub(crate) fn closed_since(&self, model: &AppModel, rt: &UiRuntime) -> bool {
+        let previous = if self.initialized {
+            *self
+        } else {
+            return false;
+        };
+        (previous.palette && !model.ui.command_palette_open)
+            || (previous.update && !rt.update_open)
+            || (previous.dialog && matches!(rt.dialog, DialogState::None))
+            || (previous.menu
+                && rt.menu.is_none()
+                && rt.tree_submenu.is_none()
+                && rt.branch_submenu.is_none())
+            || (previous.agent_menu && rt.agent_menu.is_none())
+            || (previous.settings && !rt.settings_open)
+            || (previous.about && !rt.about_open)
+            || (previous.search && !rt.search.open)
+            || (previous.find && !rt.find.open)
+    }
+
+    /// Menus, dialogs, the palette and the updater dismiss themselves on
+    /// Escape while being drawn. Search must leave the key to them instead of
+    /// closing itself in the same frame.
+    pub(crate) fn had_esc_overlay(&self) -> bool {
+        self.initialized
+            && (self.palette || self.update || self.dialog || self.menu || self.agent_menu)
+    }
+}
+
 pub struct UiRuntime {
-    pub lsp: LspUiState,
-    pub palette: PaletteState,
+    pub(crate) lsp: LspUiState,
+    pub(crate) palette: PaletteState,
     pub search: SearchState,
-    pub find: FindState,
+    pub(crate) find: FindState,
     pub menu: Option<MenuState>,
     pub dialog: DialogState,
     /// One-off close/quit `ps` probes running off-thread, drained by the
@@ -39,53 +104,50 @@ pub struct UiRuntime {
     pub terminal_snapshots: HashMap<u64, Snapshot>,
     pub terminal_selections: HashMap<u64, Option<TermSelection>>,
     pub terminal_focus: Option<u64>,
-    pub terminal_search: HashMap<u64, TermSearchState>,
-    pub terminal_drag: Option<u64>,
-    pub terminal_scroll_fraction: HashMap<u64, f32>,
+    pub(crate) terminal_search: HashMap<u64, TermSearchState>,
+    pub(crate) terminal_scroll_fraction: HashMap<u64, f32>,
     pub terminal_preedit: HashMap<u64, String>,
     /// Fractional trackpad wheel remainder per terminal session.
     pub terminal_wheel: HashMap<u64, f32>,
     /// Reflow debounce per pane (a drag must not rewrap the scrollback per frame).
-    pub terminal_resize: HashMap<u64, TermResizeGate>,
+    pub(crate) terminal_resize: HashMap<u64, TermResizeGate>,
     /// Last snapshot wake counter per terminal; skips rebuilding unchanged grids.
-    pub terminal_wake: HashMap<u64, u64>,
+    pub(crate) terminal_wake: HashMap<u64, u64>,
     /// egui textures for each pane's kitty graphics images.
-    pub terminal_graphics: HashMap<u64, crate::terminal::GraphicsCache>,
+    pub(crate) terminal_graphics: HashMap<u64, crate::terminal::GraphicsCache>,
     /// Per-pane process activity from the 2s background probe.
     pub terminal_busy: HashMap<u64, TerminalBusyState>,
     /// Filtered Git-log view + lane layout, reused until its inputs change.
-    pub git_log_cache: Option<GitLogCache>,
+    pub(crate) git_log_cache: Option<GitLogCache>,
     /// Set by the app shell: wakes the event loop when an off-thread close/
     /// quit probe finishes, so the confirmation dialog lands next frame
     /// instead of waiting for the next poll deadline.
     pub wake_notifier: Option<std::sync::Arc<dyn lazecode_terminal::Notifier>>,
     pub editor_focus: Option<u64>,
-    pub editor_drag: bool,
+    pub(crate) editor_drag: bool,
     /// Vertical scroll offset of the project rail (0 = newest/top).
-    pub project_rail_scroll: f32,
+    pub(crate) project_rail_scroll: f32,
     /// Lazily uploaded titlebar copy of the packaged application icon.
-    pub app_icon: Option<egui::TextureHandle>,
+    pub(crate) app_icon: Option<egui::TextureHandle>,
     /// Titlebar control rectangles in egui/window coordinates. The macOS
     /// native `zoom:` guard uses these to keep double-clicks on buttons from
     /// reaching AppKit's titlebar zoom.
     pub titlebar_controls: Vec<egui::Rect>,
-    pub sidebar_drag: bool,
-    pub panel_drag: bool,
+    pub(crate) sidebar_drag: bool,
+    pub(crate) panel_drag: bool,
     /// 分支比较页：pane 高度分隔条拖拽中（松手时落盘 settings）。
     /// Diff 页边缘气球：文案 + 出现时刻（1.8s 后消失）。
-    pub diff_balloon: Option<(String, std::time::Instant)>,
+    pub(crate) diff_balloon: Option<(String, std::time::Instant)>,
     /// Diff 页导航后的滚动定位请求（tab id, 组序号）。
     pub diff_scroll: Option<(u64, usize)>,
     /// Diff 视图模式下拉打开中的 tab。
-    pub diff_mode_open: Option<u64>,
-    /// Compare 抽屉视图选项弹层。
-    pub cmp_view_menu_open: bool,
+    pub(crate) diff_mode_open: Option<u64>,
     /// 分支比较页：每侧的 DAG 图开关与详情根行折叠（会话内瞬时态）。
-    pub cb_show_graph: [bool; 2],
-    pub cb_root_collapsed: [bool; 2],
-    pub compare_split_drag: bool,
+    pub(crate) cb_show_graph: [bool; 2],
+    pub(crate) cb_root_collapsed: [bool; 2],
+    pub(crate) compare_split_drag: bool,
     /// 分支比较页：详情列宽度分隔条拖拽中。
-    pub compare_details_drag: bool,
+    pub(crate) compare_details_drag: bool,
     pub settings_open: bool,
     /// Settings changed the UI/editor/terminal font: reinstall before the
     /// next frame so egui does not keep galleys from the old atlas.
@@ -95,38 +157,34 @@ pub struct UiRuntime {
     pub update_open: bool,
     /// Update endpoint results, in-flight job and staging status.
     pub update: UpdateState,
-    pub applied_theme: Option<(lazecode_core::ThemeMode, lazecode_core::ThemeSkin)>,
-    pub last_frame: Instant,
-    pub md_cache: egui_commonmark::CommonMarkCache,
+    pub(crate) applied_theme: Option<(lazecode_core::ThemeMode, lazecode_core::ThemeSkin)>,
+    pub(crate) last_frame: Instant,
+    pub(crate) md_cache: egui_commonmark::CommonMarkCache,
     /// Per-tab rendered-Markdown scroll offset, in points.
-    pub md_scroll: HashMap<u64, f32>,
+    pub(crate) md_scroll: HashMap<u64, f32>,
     /// Bounded decoded-image cache for image tabs (not `egui_extras`' global
     /// loader cache, which never evicts).
-    pub image_cache: crate::image_cache::ImageCache,
+    pub(crate) image_cache: crate::image_cache::ImageCache,
     /// Open image paths, used to drop textures as soon as a tab closes.
-    pub media_project_roots: Vec<PathBuf>,
-    pub media_markdown_paths: HashSet<PathBuf>,
-    pub media_gif_paths: HashSet<PathBuf>,
-    pub image_zoom: HashMap<u64, f32>,
-    pub cursor_epoch: f64,
-    pub agent_menu: Option<egui::Rect>,
-    pub agent_menu_frame: u64,
+    pub(crate) media_project_roots: Vec<PathBuf>,
+    pub(crate) media_markdown_paths: HashSet<PathBuf>,
+    pub(crate) media_gif_paths: HashSet<PathBuf>,
+    pub(crate) agent_menu: Option<egui::Rect>,
+    pub(crate) agent_menu_frame: u64,
     /// Per-frame rects of open popovers, pushed by the overlay draw code and
     /// taken by the shell at the start of the next frame: egui routes the
     /// wheel by rect containment only (no z-order test), so panels need to
     /// know where an overlay drawn later in the frame will land.
-    pub menu_hit_rects: Vec<egui::Rect>,
-    pub frame_count: u64,
-    pub branch_create_error: Option<String>,
-    pub pending_open: Option<(std::path::PathBuf, usize, usize)>,
-    pub toast_created: f64,
-    pub last_revealed_tab: Option<u64>,
-    pub last_revealed_cmp_file: Option<String>,
-    pub ime_preedit: String,
+    pub(crate) menu_hit_rects: Vec<egui::Rect>,
+    pub(crate) frame_count: u64,
+    pub(crate) branch_create_error: Option<String>,
+    pub(crate) last_revealed_tab: Option<u64>,
+    pub(crate) last_revealed_cmp_file: Option<String>,
+    pub(crate) ime_preedit: String,
     /// True while a Chinese/Japanese/Korean IME owns an uncommitted
     /// composition. Enter must select the candidate, not confirm the dialog
     /// or insert a newline.
-    pub ime_composing: bool,
+    pub(crate) ime_composing: bool,
     /// Whether the previous frame had a surface asking egui for IME input.
     /// A composition cannot outlive that focus: winit clears its marked text
     /// on `set_ime_allowed(false)` (and on input-source changes) without
@@ -137,11 +195,9 @@ pub struct UiRuntime {
     /// Commit / Shelf 页签。
     pub commit_tab: CommitTab,
     /// 稳定版 ^P：Group by Directory（树视图）。
-    pub commit_tree_view: bool,
+    pub(crate) commit_tree_view: bool,
     /// 稳定版：是否展示被 .gitignore 忽略的文件。
-    pub commit_show_ignored: bool,
-    /// 工具栏眼睛视图选项弹层开关。
-    pub commit_view_menu_open: bool,
+    pub(crate) commit_show_ignored: bool,
     /// Shelf 页签数据（页签激活时同步加载：读本地补丁文件，无子进程）。
     pub shelf_entries: Vec<lazecode_git::ShelfEntry>,
     pub shelf_deleted: Vec<lazecode_git::ShelfEntry>,
@@ -167,15 +223,19 @@ pub struct UiRuntime {
     pub stash_collapsed: std::collections::HashSet<String>,
     /// 选中的贮藏文件（仓库相对路径）。
     pub stash_file_sel: Option<String>,
-    pub commit_view_menu_frame: u64,
-    pub cmp_view_menu_frame: u64,
-    pub new_ignore_pattern: String,
-    pub tree_submenu: Option<(String, egui::Rect)>,
-    pub branch_submenu: Option<BranchSubmenuState>,
-    pub branch_sections_collapsed: std::collections::HashSet<String>,
+    pub(crate) new_ignore_pattern: String,
+    pub(crate) tree_submenu: Option<(String, egui::Rect)>,
+    pub(crate) branch_submenu: Option<BranchSubmenuState>,
+    pub(crate) branch_sections_collapsed: std::collections::HashSet<String>,
     /// 控制台侧栏两级分组的折叠键（`p:<项目根>` / `w:<worktree 路径>`；
     /// 默认为空，即全部展开）。
-    pub consoles_collapsed: std::collections::HashSet<String>,
+    pub(crate) consoles_collapsed: std::collections::HashSet<String>,
+    /// Overlay state from the previous shortcut pass (Escape guard).
+    pub(crate) overlay_snapshot: OverlaySnapshot,
+    /// Frame in which an overlay already consumed Escape while being drawn.
+    pub(crate) escape_handled_frame: u64,
+    /// Compare filter cache, one entry per side.
+    pub(crate) compare_filter_cache: [Option<crate::compare::CompareFilterCache>; 2],
     /// 设置页快捷键录入态：`Some(动作)` = 等待用户按下新组合键。
     pub keybind_capture: Option<crate::keybindings::Action>,
 }
@@ -190,11 +250,13 @@ impl Default for UiRuntime {
             dialog: DialogState::None,
             pending_close_probe: None,
             pending_quit_probe: None,
+            overlay_snapshot: OverlaySnapshot::default(),
+            escape_handled_frame: 0,
+            compare_filter_cache: std::array::from_fn(|_| None),
             terminal_snapshots: HashMap::new(),
             terminal_selections: HashMap::new(),
             terminal_focus: None,
             terminal_search: HashMap::new(),
-            terminal_drag: None,
             terminal_scroll_fraction: HashMap::new(),
             terminal_preedit: HashMap::new(),
             terminal_wheel: HashMap::new(),
@@ -205,8 +267,6 @@ impl Default for UiRuntime {
             git_log_cache: None,
             wake_notifier: None,
             new_ignore_pattern: String::new(),
-            commit_view_menu_frame: 0,
-            cmp_view_menu_frame: 0,
             editor_focus: None,
             editor_drag: false,
             project_rail_scroll: 0.0,
@@ -217,7 +277,6 @@ impl Default for UiRuntime {
             diff_balloon: None,
             diff_scroll: None,
             diff_mode_open: None,
-            cmp_view_menu_open: false,
             cb_show_graph: [true, true],
             cb_root_collapsed: [false, false],
             compare_split_drag: false,
@@ -229,21 +288,17 @@ impl Default for UiRuntime {
             update: UpdateState::default(),
             applied_theme: None,
             last_frame: Instant::now(),
-            cursor_epoch: 0.0,
             md_cache: egui_commonmark::CommonMarkCache::default(),
             md_scroll: HashMap::new(),
             image_cache: crate::image_cache::ImageCache::default(),
             media_project_roots: Vec::new(),
             media_markdown_paths: HashSet::new(),
             media_gif_paths: HashSet::new(),
-            image_zoom: HashMap::new(),
             agent_menu: None,
             agent_menu_frame: 0,
             menu_hit_rects: Vec::new(),
             frame_count: 0,
             branch_create_error: None,
-            pending_open: None,
-            toast_created: 0.0,
             last_revealed_tab: None,
             last_revealed_cmp_file: None,
             ime_preedit: String::new(),
@@ -252,7 +307,6 @@ impl Default for UiRuntime {
             commit_tab: CommitTab::Commit,
             commit_tree_view: false,
             commit_show_ignored: false,
-            commit_view_menu_open: false,
             shelf_entries: Vec::new(),
             shelf_deleted: Vec::new(),
             shelf_loaded: None,
@@ -400,6 +454,21 @@ impl UiRuntime {
             || self.menu.is_some()
             || self.agent_menu.is_some()
             || self.update_open
+            || !matches!(self.dialog, DialogState::None)
+    }
+
+    /// True when any overlay *other than the search panel* owns input. Search
+    /// itself must not suppress its own query field's keys.
+    pub(crate) fn other_overlay_open(&self, model: &AppModel) -> bool {
+        self.settings_open
+            || self.about_open
+            || model.ui.command_palette_open
+            || self.menu.is_some()
+            || self.tree_submenu.is_some()
+            || self.branch_submenu.is_some()
+            || self.agent_menu.is_some()
+            || self.update_open
+            || self.find.open
             || !matches!(self.dialog, DialogState::None)
     }
 

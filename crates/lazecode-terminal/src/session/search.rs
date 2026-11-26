@@ -16,13 +16,21 @@ pub(super) fn search_all(
     if cancel.load(Ordering::Relaxed) {
         return matches;
     }
-    let needle = query.to_lowercase();
-    let mut spool = spool.lock();
-    if let Some(store) = spool.store.as_mut() {
+    // Only the index and a cloned fd are copied under the lock. Disk reads,
+    // decoding and regex matching run on this worker without blocking the
+    // reader that appends rows and polls compaction.
+    let snapshot = {
+        let spool = spool.lock();
+        spool
+            .store
+            .as_ref()
+            .and_then(|store| store.search_snapshot().ok())
+    };
+    if let Some(snapshot) = snapshot {
         let remaining = 2_000usize.saturating_sub(matches.len());
         if remaining > 0 {
-            store.search(
-                &needle,
+            snapshot.search(
+                query,
                 remaining,
                 |id, col, len| {
                     let line = id as i64 - hot_base;

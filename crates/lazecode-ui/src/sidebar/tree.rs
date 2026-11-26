@@ -187,7 +187,7 @@ pub(super) fn draw_tree(
     // Keyboard: with the pointer over the tree, ↑/↓/Home/End move the single
     // selection and scroll the row into view. Typing surfaces (editor,
     // console, filter fields) keep their own arrow keys.
-    let keys_free = !rt.blocks_input(model) && !rt.typing_surface_owns_keys(model, ui.ctx());
+    let keys_free = crate::list_nav::keys_free(ui, model, rt);
     if keys_free {
         if let Some(mv) = crate::list_nav::hovered_move(ui, list_rect) {
             let current = model
@@ -215,7 +215,7 @@ pub(super) fn draw_tree(
     let reveal_offset = target_reveal
         .as_ref()
         .and_then(|(rel, _)| rows.iter().position(|row| &row.path == rel))
-        .map(|index| (index as f32 * ROW_H - list_rect.height() * 0.5 + ROW_H * 0.5).max(0.0));
+        .map(|index| crate::list_nav::centered_scroll(index, ROW_H, list_rect.height()));
     crate::app_ui::region(ui, list_rect, "tree-scroll", |ui| {
         // `show_rows` adds item spacing between virtual rows; the rows already
         // have a fixed height, so drop the gap.

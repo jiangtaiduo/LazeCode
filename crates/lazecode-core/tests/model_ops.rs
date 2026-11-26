@@ -80,7 +80,7 @@ fn project_lifecycle_opens_files_and_terminals() {
     std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
     let settings = Settings::default();
     let mut project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
-    assert_eq!(project.tree.file_count, 2);
+    assert_eq!(project.active_tree().file_count, 2);
     assert!(
         project.worktrees[0].watcher.is_none(),
         "the main checkout watcher is owned by ProjectState"
@@ -197,7 +197,7 @@ fn bad_shell_setting_does_not_drop_the_project() {
     let mut settings = Settings::default();
     settings.terminal.shell = Some("/definitely/not/a/shell".to_string());
     let project = ProjectState::open(dir.path().to_path_buf(), &settings, None).unwrap();
-    assert_eq!(project.tree.file_count, 1);
+    assert_eq!(project.active_tree().file_count, 1);
     // An unknown shell falls back to /bin/zsh instead of dropping the project.
     assert_eq!(project.active_worktree().terminals.len(), 1);
 }
@@ -1201,4 +1201,58 @@ fn locating_the_active_tab_keeps_the_tree_multi_selection() {
     );
     assert_eq!(model.ui.tree_reveal, Some((PathBuf::from("a.txt"), true)));
     let _ = b;
+}
+
+#[test]
+fn renaming_retargets_relative_tree_navigation_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    std::fs::create_dir(&config).unwrap();
+    // Retarget persists the workspace; keep that write inside the fixture.
+    std::env::set_var("LAZECODE_CONFIG_DIR", &config);
+
+    let root = dir.path().join("project");
+    let old_dir = root.join("old");
+    let new_dir = root.join("new");
+    std::fs::create_dir_all(&old_dir).unwrap();
+    std::fs::write(old_dir.join("note.txt"), "hello\n").unwrap();
+
+    let settings = Settings::default();
+    let mut model = model();
+    model
+        .projects
+        .push(ProjectState::open(root.clone(), &settings, None).unwrap());
+    model.active_project = Some(0);
+
+    let old_rel = PathBuf::from("old");
+    let file_rel = PathBuf::from("old/note.txt");
+    model.projects[0].expanded.insert(old_rel.clone());
+    model.ui.tree_selected = Some(file_rel.clone());
+    model.ui.tree_selection.insert(file_rel.clone());
+    model.ui.tree_reveal = Some((file_rel.clone(), true));
+    model.ui.locate_flash = Some((old_rel.clone(), std::time::Instant::now()));
+
+    std::fs::rename(&old_dir, &new_dir).unwrap();
+    model.retarget_path(&old_dir, &new_dir);
+
+    let new_rel = PathBuf::from("new");
+    let new_file = PathBuf::from("new/note.txt");
+    assert!(
+        model.projects[0].expanded.contains(&new_rel),
+        "expanded folders are checkout-relative and must follow the rename"
+    );
+    assert!(!model.projects[0].expanded.contains(&old_rel));
+    assert_eq!(model.ui.tree_selected.as_deref(), Some(new_file.as_path()));
+    assert!(model.ui.tree_selection.contains(&new_file));
+    assert!(!model.ui.tree_selection.contains(&file_rel));
+    assert_eq!(
+        model.ui.tree_reveal.as_ref().map(|(path, _)| path),
+        Some(&new_file)
+    );
+    assert_eq!(
+        model.ui.locate_flash.as_ref().map(|(path, _)| path),
+        Some(&new_rel)
+    );
+
+    std::env::remove_var("LAZECODE_CONFIG_DIR");
 }

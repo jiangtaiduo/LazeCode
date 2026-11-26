@@ -810,3 +810,113 @@ fn native_delete_by_us_conflict_takes_the_deletion() {
     assert!(git(root, true, &["ls-files", "gone.txt"]).is_empty());
     assert!(conflict_list(root).unwrap().is_empty());
 }
+
+#[test]
+fn merge_fast_forward_refuses_to_overwrite_an_untracked_file() {
+    let dir = repo();
+    let root = dir.path();
+    commit(root, "base.txt", "base\n", "base");
+    git(root, true, &["checkout", "-qb", "feature"]);
+    commit(root, "u.txt", "from feature\n", "add u");
+    git(root, true, &["checkout", "-q", "main"]);
+
+    std::fs::write(root.join("u.txt"), "DO NOT OVERWRITE\n").unwrap();
+    let head = git(root, true, &["rev-parse", "HEAD"]);
+    let error = merge(root, "feature").unwrap_err().to_string();
+    assert!(
+        error.contains("untracked") || error.contains("overwrite"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("u.txt")).unwrap(),
+        "DO NOT OVERWRITE\n"
+    );
+    assert_eq!(git(root, true, &["rev-parse", "HEAD"]), head);
+    assert!(!git(root, true, &["ls-files", "u.txt"]).contains("u.txt"));
+}
+
+#[test]
+fn hard_reset_refuses_to_overwrite_an_untracked_file() {
+    let dir = repo();
+    let root = dir.path();
+    commit(root, "a.txt", "a\n", "base");
+    git(root, true, &["checkout", "-qb", "later"]);
+    commit(root, "u.txt", "from later\n", "add u");
+    let later = git(root, true, &["rev-parse", "HEAD"]);
+    git(root, true, &["checkout", "-q", "main"]);
+
+    std::fs::write(root.join("u.txt"), "keep me\n").unwrap();
+    let head = git(root, true, &["rev-parse", "HEAD"]);
+    let error = reset(root, &later, ResetMode::Hard)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("untracked") || error.contains("overwrite"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("u.txt")).unwrap(),
+        "keep me\n"
+    );
+    assert_eq!(git(root, true, &["rev-parse", "HEAD"]), head);
+}
+
+#[test]
+fn failed_merge_ref_update_restores_worktree_index_and_head() {
+    let dir = repo();
+    let root = dir.path();
+    commit(root, "a.txt", "base\n", "base");
+    git(root, true, &["checkout", "-qb", "feature"]);
+    commit(root, "feature.txt", "feature\n", "feature");
+    git(root, true, &["checkout", "-q", "main"]);
+    commit(root, "main.txt", "main\n", "main");
+    let head = git(root, true, &["rev-parse", "HEAD"]);
+
+    let lock = root.join(".git/refs/heads/main.lock");
+    std::fs::write(&lock, "held by another writer\n").unwrap();
+    let error = merge(root, "feature").unwrap_err().to_string();
+    std::fs::remove_file(&lock).unwrap();
+    assert!(!error.is_empty(), "ref lock must fail the merge");
+    assert_eq!(git(root, true, &["rev-parse", "HEAD"]), head);
+    assert!(!root.join("feature.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("main.txt")).unwrap(),
+        "main\n"
+    );
+    assert_eq!(
+        git(root, true, &["status", "--porcelain"]),
+        "",
+        "rollback must leave a clean worktree"
+    );
+}
+
+#[test]
+fn rebase_replays_only_the_first_parent_chain() {
+    let dir = repo();
+    let root = dir.path();
+    commit(root, "base.txt", "base\n", "base");
+    let base = git(root, true, &["rev-parse", "HEAD"]);
+
+    git(root, true, &["checkout", "-qb", "side"]);
+    commit(root, "side.txt", "side\n", "side-only");
+    git(root, true, &["checkout", "-q", "main"]);
+    commit(root, "main.txt", "main\n", "onto");
+
+    git(root, true, &["checkout", "-qb", "feature", &base]);
+    git(
+        root,
+        true,
+        &["merge", "-q", "--no-ff", "side", "-m", "merge side"],
+    );
+    commit(root, "feature.txt", "feature\n", "feature-tip");
+
+    rebase(root, "main").unwrap();
+    let subjects = git(root, true, &["log", "--format=%s", "main..feature"]);
+    assert!(
+        !subjects.contains("side-only"),
+        "a merge commit's second parent must not be replayed: {subjects}"
+    );
+    assert!(subjects.contains("merge side"), "{subjects}");
+    assert!(subjects.contains("feature-tip"), "{subjects}");
+    assert!(root.join("side.txt").exists());
+}

@@ -53,6 +53,48 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The updater re-hashes the staged artifact immediately before installing it
   and keeps only the two newest `.app` backups.
 
+### Security
+
+- LFS pointers now validate the SHA-256 oid and keep object paths inside
+  `<gitdir>/lfs/objects`; a crafted pointer can no longer make checkout or
+  stash apply read arbitrary local files.
+- The updater creates staged artifacts with a random name in a private 0700
+  directory using `create_new`/`O_NOFOLLOW`, and hashes and installs the same
+  file descriptor; swapping the staged file between verification and install
+  can no longer replace the running app.
+
+### Fixed
+
+- Renaming now retargets checkout-relative tree state (selection, multi-select,
+  reveal, flash and expanded folders) instead of comparing it with absolute paths.
+- Merge/rebase fast-forward and hard reset refuse to overwrite untracked files,
+  matching branch checkout.
+- Entering an alternate screen no longer discards the main screen's cold
+  scrollback; RIS still starts a new epoch.
+- A language server that crashes is reconciled again on the next frame even if
+  no document changed, while keeping the spawn backoff.
+- Quitting waits for in-flight save and Git jobs instead of killing them.
+- Checked commits write the index before moving HEAD and roll back on failure;
+  merge ref updates stay inside the checkout transaction.
+- Watcher-driven tree reloads keep already-expanded folders populated; Expand
+  All loads skipped children and Reload from Disk keeps custom ignore patterns.
+- Tree root rows can no longer rename or trash the whole project.
+- Cmd+F no longer steals keys from modals/menus, and search navigation only
+  runs when the search field owns focus.
+- Autosave no longer blocks the UI thread on fsync; saves queued while another
+  tool changes the same file report a conflict instead of overwriting it.
+- Git fingerprinting runs off the UI thread; no-terminal and occluded windows
+  no longer wake the event loop every millisecond.
+- Dropped projects open through the bounded job pool instead of blocking a
+  frame with a full tree/Git/log scan.
+- CRLF/ident/LFS files are cleaned before status, diff and hunk-apply compare
+  worktree bytes with Git blobs, so touching them no longer shows phantom changes.
+- Rebase replays first-parent commits in topological order and cached patches
+  carry mode changes into the index.
+- Terminal hot and cold search use the same smart-case regex rules, and X10
+  mouse coordinates outside the 255-byte range are not sent.
+- An unknown OS version no longer bypasses a manifest `min_os` check.
+
 ### Performance
 
 - Find in terminal scans on a worker after a 120 ms input debounce instead of
@@ -76,6 +118,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   instead of spawning a thread per 16 ms window.
 - LSP document reconciliation runs only when the open document set or a buffer
   revision changes; protocol events still drain every frame.
+
+- Background jobs now use a bounded worker pool with bounded result and
+  watcher queues; bursts coalesce instead of creating unbounded threads.
+- Compare filtering caches matcher/index per query and generation, and details
+  no longer clone large lists every frame.
 
 ## [0.4.12] - 2026-11-24
 

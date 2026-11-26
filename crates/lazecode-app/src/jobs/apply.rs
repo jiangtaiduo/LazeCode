@@ -90,12 +90,18 @@ impl JobQueue {
                                 .position(|worktree| worktree.path == root)
                                 .map(|wt| (project_index, wt))
                         });
+                let expanded: Vec<PathBuf> = position
+                    .as_ref()
+                    .map(|(index, _)| model.projects[*index].expanded.iter().cloned().collect())
+                    .unwrap_or_default();
                 if let Some((project_index, wt_index)) = position {
                     let project = &mut model.projects[project_index];
-                    if wt_index == 0 {
-                        project.tree = tree.clone();
-                    }
                     project.worktrees[wt_index].tree = tree;
+                    // A fresh bounded scan can skip folders that are already
+                    // open; keep their children loaded after a watcher refresh.
+                    for rel in &expanded {
+                        project.ensure_tree_children(rel, &model.settings.ignored_patterns);
+                    }
                 }
                 if self.pending_trees.remove(&root) {
                     self.refresh_tree(root, Arc::new(model.settings.ignored_patterns.clone()));

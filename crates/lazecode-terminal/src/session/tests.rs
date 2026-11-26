@@ -1338,3 +1338,153 @@ fn keyboard_protocol_stack_and_modify_other_keys_are_parsed() {
         std::time::Duration::from_secs(5)
     ));
 }
+
+#[test]
+fn alt_screen_does_not_rewind_or_clear_cold_history() {
+    let options = SpawnOptions {
+        cwd: std::env::temp_dir(),
+        cols: 40,
+        rows: 6,
+        command: Some(
+            "for i in $(seq 1 600); do echo pre-$i; done; \
+             printf '\\033[?1049h'; for i in $(seq 1 300); do echo alt-$i; done; \
+             printf '\\033[?1049l'; echo POST-MARKER; sleep 30"
+                .to_string(),
+        ),
+        scrollback: 24,
+        cold_lines: 10_000,
+        cold_bytes: 8 << 20,
+        ..Default::default()
+    };
+    let session = spawn(options).expect("spawn");
+    let mut snap = Snapshot::default();
+    assert!(
+        wait_until(
+            || {
+                session.snapshot_into(&mut snap);
+                session
+                    .search("POST-MARKER")
+                    .iter()
+                    .any(|hit| hit.line >= 0)
+                    && snap.cold_lines > 100
+            },
+            std::time::Duration::from_secs(15)
+        ),
+        "alt screen round trip did not finish: {:?}",
+        session.history_stats()
+    );
+    let hot = snap.hot_history_size as i32;
+    let before = session.history_stats();
+    assert!(before.cold_lines > 100, "no cold history: {before:?}");
+    let pre = session.search("pre-100");
+    assert!(
+        pre.iter().any(|hit| hit.line < -hot),
+        "pre-alt rows must survive the screen swap: {pre:?} (hot = {hot})"
+    );
+    assert!(
+        !session.search("alt-250").iter().any(|hit| hit.line < -hot),
+        "alt-screen rows must not be archived into main-screen history"
+    );
+    assert!(
+        session.history_stats().cold_lines >= before.cold_lines,
+        "leaving alt screen must not clear the cold store"
+    );
+    session.clear_scrollback();
+    assert_eq!(session.history_stats().cold_lines, 0);
+}
+
+#[test]
+fn cold_search_matches_hot_smart_case_regex() {
+    let options = SpawnOptions {
+        cwd: std::env::temp_dir(),
+        cols: 60,
+        rows: 6,
+        command: Some(
+            "printf 'COLD-CASE-MARKER\\n'; for i in $(seq 1 1200); do echo cold-row-$i; done; sleep 20"
+                .to_string(),
+        ),
+        scrollback: 16,
+        cold_lines: 10_000,
+        cold_bytes: 8 << 20,
+        ..Default::default()
+    };
+    let session = spawn(options).expect("spawn");
+    let mut snap = Snapshot::default();
+    assert!(
+        wait_until(
+            || {
+                session.snapshot_into(&mut snap);
+                snap.cold_lines > 500 && !session.search("cold-row-1190").is_empty()
+            },
+            std::time::Duration::from_secs(15)
+        ),
+        "cold history did not fill: {:?}",
+        session.history_stats()
+    );
+    let hot = snap.hot_history_size as i32;
+    let regex_hits = session.search("cold-row-1[0-9]{2}");
+    assert!(
+        regex_hits.iter().any(|hit| hit.line < -hot),
+        "regex classes must match in the cold tier: {regex_hits:?} (hot = {hot})"
+    );
+    let folded = session.search("cold-case-marker");
+    assert!(
+        folded.iter().any(|hit| hit.line < -hot),
+        "lowercase queries fold case in the cold tier: {folded:?}"
+    );
+    let sensitive = session.search("cold-case-MARKER");
+    assert!(
+        sensitive.is_empty(),
+        "uppercase queries are case-sensitive in the cold tier: {sensitive:?}"
+    );
+}
+
+#[test]
+fn real_ris_clears_cold_history_but_not_a_csi_c_query() {
+    let options = SpawnOptions {
+        cwd: std::env::temp_dir(),
+        cols: 40,
+        rows: 6,
+        command: Some(
+            "for i in $(seq 1 300); do echo before-$i; done; \
+             printf '\\033[c'; echo CSI-QUERY-KEPT; sleep 1; \
+             printf '\\033c'; echo AFTER-RIS; sleep 20"
+                .to_string(),
+        ),
+        scrollback: 24,
+        cold_lines: 10_000,
+        cold_bytes: 8 << 20,
+        ..Default::default()
+    };
+    let session = spawn(options).expect("spawn");
+    let mut snap = Snapshot::default();
+    assert!(
+        wait_until(
+            || {
+                session.snapshot_into(&mut snap);
+                snap.cold_lines > 100 && !session.search("CSI-QUERY-KEPT").is_empty()
+            },
+            std::time::Duration::from_secs(15)
+        ),
+        "rows before the device query were not spooled: {:?}",
+        session.history_stats()
+    );
+    assert!(
+        wait_until(
+            || !session.search("AFTER-RIS").is_empty(),
+            std::time::Duration::from_secs(5)
+        ),
+        "real RIS output was not observed"
+    );
+    // The device query `CSI c` must not reset anything: rows before it stay
+    // addressable, while the following real RIS drops the cold tier.
+    assert_eq!(
+        session.history_stats().cold_lines,
+        0,
+        "stats: {:?}",
+        session.history_stats()
+    );
+    let mut snap = Snapshot::default();
+    session.snapshot_into(&mut snap);
+    assert_eq!(snap.cold_lines, 0);
+}

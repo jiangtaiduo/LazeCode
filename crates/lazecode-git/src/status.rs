@@ -168,6 +168,7 @@ pub(crate) fn collect_changes(
     repo: &gix::Repository,
     workdir: &Path,
     head_map: &TreeMap,
+    filters: &mut crate::filter::FilterContext<'_>,
 ) -> Result<Vec<Change>> {
     let index = repo.index_or_empty()?;
     let index_entries = index.entries();
@@ -222,12 +223,19 @@ pub(crate) fn collect_changes(
             }
             Some(_) => None,
         };
-        let unstaged =
-            match worktree_status(repo, workdir, path, *index_oid, *index_mode, index_stat)? {
-                WorktreeStatus::Clean => None,
-                WorktreeStatus::Deleted => Some(ChangeKind::Deleted),
-                WorktreeStatus::Modified => Some(ChangeKind::Modified),
-            };
+        let unstaged = match worktree_status(
+            repo,
+            workdir,
+            path,
+            *index_oid,
+            *index_mode,
+            index_stat,
+            filters,
+        )? {
+            WorktreeStatus::Clean => None,
+            WorktreeStatus::Deleted => Some(ChangeKind::Deleted),
+            WorktreeStatus::Modified => Some(ChangeKind::Modified),
+        };
         if staged.is_none() && unstaged.is_none() {
             continue;
         }
@@ -324,13 +332,14 @@ pub fn changed_paths(root: &Path) -> Result<Vec<Change>> {
     let repo = discover(root)?;
     let workdir = workdir(&repo)?;
     let head_map = head_tree_map(&repo)?;
-    collect_changes(&repo, &workdir, &head_map)
+    let mut filters = crate::filter::FilterContext::new(&repo)?;
+    collect_changes(&repo, &workdir, &head_map, &mut filters)
 }
 
 pub(crate) fn changes(repo: &gix::Repository, workdir: &Path) -> Result<Vec<Change>> {
     let head_map = head_tree_map(repo)?;
-    let mut changes = collect_changes(repo, workdir, &head_map)?;
     let mut filters = crate::filter::FilterContext::new(repo)?;
+    let mut changes = collect_changes(repo, workdir, &head_map, &mut filters)?;
     for change in &mut changes {
         let (old, new) = file_sides(repo, workdir, &change.path, &head_map, &mut filters)?;
         let (additions, deletions, binary) = compute_stats(&old, &new);
@@ -354,6 +363,7 @@ fn worktree_status(
     index_oid: ObjectId,
     index_mode: u32,
     index_stat: &Stat,
+    filters: &mut crate::filter::FilterContext<'_>,
 ) -> Result<WorktreeStatus> {
     if index_mode == 0o160000 {
         // Submodule: report changed only when the recorded commit differs.
@@ -408,14 +418,24 @@ fn worktree_status(
         return Ok(WorktreeStatus::Modified);
     }
     let bytes = match std::fs::read(&abs) {
-        Ok(b) => b,
+        Ok(bytes) => bytes,
         Err(_) => return Ok(WorktreeStatus::Modified),
     };
     let recorded = match blob_bytes(repo, index_oid) {
-        Ok(b) => b,
+        Ok(bytes) => bytes,
         Err(_) => return Ok(WorktreeStatus::Modified),
     };
-    Ok(if bytes == recorded {
+    if bytes == recorded {
+        return Ok(WorktreeStatus::Clean);
+    }
+    // A stat miss only says the cache is stale. Compare canonical bytes so a
+    // mere touch of a CRLF/ident/LFS file does not masquerade as a change.
+    let canonical = if filters.filter_driver(path)?.as_deref() == Some("lfs") {
+        filters.clean_file(path, &abs)?
+    } else {
+        filters.clean(path, bytes)?
+    };
+    Ok(if canonical == recorded {
         WorktreeStatus::Clean
     } else {
         WorktreeStatus::Modified

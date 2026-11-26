@@ -116,6 +116,10 @@ pub struct LspManager {
     /// Signature of the document set/revisions that was last reconciled, so
     /// `sync_lsp` can skip per-frame key building and full-text syncs.
     reconcile_signature: Option<u64>,
+    /// Test-only command override so restart paths can be exercised without
+    /// relying on an installed language server.
+    #[cfg(test)]
+    spawn_override: Option<(PathBuf, Vec<String>)>,
 }
 
 impl LspManager {
@@ -137,6 +141,8 @@ impl LspManager {
             last_error: None,
             diagnostics_generation: 0,
             reconcile_signature: None,
+            #[cfg(test)]
+            spawn_override: None,
         }
     }
 
@@ -181,6 +187,13 @@ impl LspManager {
         }
         self.reconcile_signature = Some(signature);
         true
+    }
+
+    /// Force the next `sync_lsp` to reconcile again. Used when a server
+    /// disappears without any document/revision change, so `ensure_server`
+    /// gets another chance (subject to the normal spawn backoff).
+    fn invalidate_reconcile(&mut self) {
+        self.reconcile_signature = None;
     }
 
     pub fn server_count(&self) -> usize {
@@ -381,6 +394,12 @@ impl LspManager {
                 LspEvent::Message { key, value } => self.handle_message(&key, value, now),
                 LspEvent::ReaderClosed { key } => {
                     log::debug!("LSP[{}] stdout closed", key.language);
+                    if self.servers.contains_key(&key) {
+                        // The server is gone (or going). The next frame must
+                        // reconcile even if no buffer changed, otherwise a
+                        // crash would leave the editor without a server.
+                        self.invalidate_reconcile();
+                    }
                 }
                 LspEvent::WriterClosed { key, error } => {
                     log::warn!("LSP[{}] writer stopped: {error}", key.language);
@@ -416,7 +435,20 @@ impl LspManager {
                         doc.pending_text = None;
                     }
                 }
+                // A crashed server must be reconsidered by `sync_lsp` even
+                // when the document set and revisions are unchanged.
+                self.invalidate_reconcile();
             }
+        }
+        // The first reconcile after a crash lands inside the 30s backoff and
+        // does not spawn. Schedule another reconcile when that backoff
+        // expires, but only for keys still wanted by a document: a manager
+        // with no buffers must not restart servers forever.
+        let retry_due = self.failed.iter().any(|(key, (at, _))| {
+            at.elapsed() >= SPAWN_BACKOFF && self.documents.values().any(|doc| doc.key == *key)
+        });
+        if retry_due {
+            self.invalidate_reconcile();
         }
 
         // Expire unanswered requests.
@@ -534,6 +566,22 @@ impl LspManager {
     }
 
     fn spawn_server(&mut self, key: &ServerKey) -> bool {
+        #[cfg(test)]
+        if let Some((command, args)) = self.spawn_override.clone() {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            match self.spawn_command(
+                key,
+                command.to_str().unwrap_or_default(),
+                &args,
+                &augmented_path(),
+            ) {
+                Ok(()) => return true,
+                Err(error) => {
+                    self.record_spawn_failure(key, error);
+                    return false;
+                }
+            }
+        }
         let path_env = augmented_path();
         let mut last_error = String::new();
         for candidate in candidates(&key.language) {
@@ -547,6 +595,11 @@ impl LspManager {
         } else {
             last_error
         };
+        self.record_spawn_failure(key, message);
+        false
+    }
+
+    fn record_spawn_failure(&mut self, key: &ServerKey, message: String) {
         log::info!(
             "LSP[{}] unavailable in {}: {message}",
             key.language,
@@ -555,7 +608,6 @@ impl LspManager {
         self.failed
             .insert(key.clone(), (Instant::now(), message.clone()));
         self.last_error = Some(message);
-        false
     }
 
     fn spawn_command(
@@ -1238,6 +1290,8 @@ fn terminate(mut child: Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn language_table_matches_stable_scope() {
@@ -1387,6 +1441,191 @@ mod tests {
         assert!(manager.server_ready(&key), "initialize must complete");
         manager.shutdown_all();
         assert_eq!(manager.server_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    fn spin_until(mut condition: impl FnMut() -> bool) -> bool {
+        for _ in 0..300 {
+            if condition() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    #[cfg(unix)]
+    /// Mock server: log one JSON-RPC request, answer `initialize`, then exit.
+    fn exiting_mock_lsp(dir: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = format!(
+            "#!/bin/sh\nlog='{}'\nIFS= read -r header || exit 1\nIFS= read -r blank || exit 1\nlength=$(printf '%s' \"$header\" | tr -dc '0-9')\nbody=$(head -c \"$length\")\nprintf '%s\\n' \"$body\" >> \"$log\"\nid=$(printf '%s' \"$body\" | sed -n 's/.*\"id\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p')\nresp=$(printf '{{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{{\"capabilities\":{{}}}}}}' \"$id\")\nprintf 'Content-Length: %s\\r\\n\\r\\n%s' \"${{#resp}}\" \"$resp\"\nsleep 0.2\nexit 0\n",
+            log.display()
+        );
+        let script_path = dir.join("mock-lsp");
+        std::fs::write(&script_path, script).expect("write mock server");
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+        script_path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exited_server_reconciles_with_the_same_signature_and_restarts() {
+        let dir = std::env::temp_dir().join(format!(
+            "lazecode-lsp-restart-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp root");
+        let log = dir.join("requests.log");
+        let script = exiting_mock_lsp(&dir, &log);
+        let key = ServerKey::new(&dir, "mock");
+        let path = dir.join("sample.py");
+
+        let mut manager = LspManager::new(true, None);
+        manager.spawn_override = Some((script, vec![log.display().to_string()]));
+        let signature = 77;
+        assert!(manager.note_reconcile_signature(signature));
+        assert!(!manager.note_reconcile_signature(signature));
+        assert!(manager.ensure_server(&key), "server must start");
+        manager.note_document(
+            key.clone(),
+            path.clone(),
+            "python",
+            1,
+            "print(1)".to_string(),
+        );
+        assert!(
+            spin_until(|| {
+                manager.poll();
+                manager.server_ready(&key)
+            }),
+            "initialize must finish"
+        );
+        assert!(
+            spin_until(|| {
+                manager.poll();
+                manager.server_count() == 0
+            }),
+            "mock server must exit"
+        );
+        assert!(
+            manager.failed.contains_key(&key),
+            "exit must record backoff"
+        );
+        assert!(
+            manager.document_needs_text(&key, &path, 1),
+            "the crashed server's document must be reopened"
+        );
+
+        // The document set/revisions did not change: only the process died.
+        assert!(
+            manager.note_reconcile_signature(signature),
+            "an exit must invalidate the reconciliation signature"
+        );
+        assert!(!manager.note_reconcile_signature(signature));
+        assert!(
+            !manager.ensure_server(&key),
+            "the 30s backoff must not be bypassed"
+        );
+        manager.note_document(
+            key.clone(),
+            path.clone(),
+            "python",
+            1,
+            "print(1)".to_string(),
+        );
+
+        // Simulate the backoff expiring without waiting half a minute.
+        manager.failed.insert(
+            key.clone(),
+            (
+                Instant::now() - SPAWN_BACKOFF - Duration::from_secs(1),
+                "backoff expired".into(),
+            ),
+        );
+        manager.poll();
+        assert!(
+            manager.note_reconcile_signature(signature),
+            "an expired backoff must schedule a retry without a new signature"
+        );
+        assert!(manager.ensure_server(&key), "replacement server must start");
+        assert_eq!(manager.server_count(), 1);
+        assert!(
+            manager
+                .pending
+                .values()
+                .any(|request| request.method == "initialize" && request.key == key),
+            "the replacement must get a fresh initialize request"
+        );
+        assert!(spin_until(|| {
+            manager.poll();
+            manager.server_ready(&key)
+        }));
+        assert!(
+            !manager.document_needs_text(&key, &path, 1),
+            "the document must be re-sent to the replacement server"
+        );
+        let requests = std::fs::read_to_string(&log).expect("request log");
+        assert_eq!(
+            requests.matches(r#""method":"initialize""#).count(),
+            2,
+            "both servers must be initialized: {requests}"
+        );
+        manager.shutdown_all();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expired_backoff_does_not_restart_a_server_without_documents() {
+        let dir = std::env::temp_dir().join(format!(
+            "lazecode-lsp-idle-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp root");
+        let log = dir.join("requests.log");
+        let script = exiting_mock_lsp(&dir, &log);
+        let key = ServerKey::new(&dir, "mock");
+
+        let mut manager = LspManager::new(true, None);
+        manager.spawn_override = Some((script, vec![log.display().to_string()]));
+        let signature = 91;
+        assert!(manager.note_reconcile_signature(signature));
+        assert!(manager.ensure_server(&key));
+        assert!(spin_until(|| {
+            manager.poll();
+            manager.server_count() == 0
+        }));
+        assert!(manager.note_reconcile_signature(signature));
+        assert!(!manager.note_reconcile_signature(signature));
+
+        manager.failed.insert(
+            key.clone(),
+            (
+                Instant::now() - SPAWN_BACKOFF - Duration::from_secs(1),
+                "backoff expired".into(),
+            ),
+        );
+        for _ in 0..5 {
+            manager.poll();
+        }
+        assert!(
+            !manager.note_reconcile_signature(signature),
+            "an idle manager must not keep re-reconciling"
+        );
+        assert_eq!(manager.server_count(), 0, "no buffer means no restart");
+        manager.shutdown_all();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

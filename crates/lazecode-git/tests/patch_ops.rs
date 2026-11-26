@@ -142,3 +142,57 @@ fn mode_only_patch_reverses() {
         .mode();
     assert_eq!(mode & 0o777, 0o644);
 }
+
+#[test]
+fn worktree_patch_cleans_crlf_before_apply_and_smudges_after() {
+    let dir = init();
+    std::fs::write(dir.path().join(".gitattributes"), "*.txt text eol=crlf\n").unwrap();
+    std::fs::write(dir.path().join("a.txt"), "one\r\ntwo\r\n").unwrap();
+    lazecode_git::stage(dir.path(), &[".gitattributes".into(), "a.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "base", false).unwrap();
+
+    // Shelf patches are generated from canonical (LF) blobs; the worktree has
+    // CRLF bytes, so the patch context must be matched after cleaning.
+    let patch =
+        "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n";
+    lazecode_git::apply_patch(dir.path(), patch, false, false).unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("a.txt")).unwrap(),
+        b"one\r\nTWO\r\n"
+    );
+    let snap = lazecode_git::snapshot(dir.path()).unwrap();
+    let change = snap
+        .changes
+        .iter()
+        .find(|change| change.path == "a.txt")
+        .expect("patched file is listed");
+    assert_eq!(change.unstaged, Some(lazecode_git::ChangeKind::Modified));
+    assert_eq!(
+        git(dir.path(), &["cat-file", "-p", "HEAD:a.txt"]),
+        "one\ntwo"
+    );
+}
+
+#[test]
+fn cached_mode_only_patch_updates_the_index_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = init();
+    std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    lazecode_git::stage(dir.path(), &["a.txt".into()]).unwrap();
+    lazecode_git::commit(dir.path(), "base", false).unwrap();
+
+    let patch = "diff --git a/a.txt b/a.txt\nold mode 100644\nnew mode 100755\n";
+    lazecode_git::apply_patch(dir.path(), patch, true, false).unwrap();
+    let indexed = git(dir.path(), &["ls-files", "-s", "a.txt"]);
+    assert!(indexed.starts_with("100755"), "{indexed}");
+    let worktree_mode = std::fs::metadata(dir.path().join("a.txt"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(worktree_mode & 0o777, 0o644);
+
+    lazecode_git::apply_patch(dir.path(), patch, true, true).unwrap();
+    let indexed = git(dir.path(), &["ls-files", "-s", "a.txt"]);
+    assert!(indexed.starts_with("100644"), "{indexed}");
+}

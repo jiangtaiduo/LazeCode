@@ -255,6 +255,27 @@ pub(super) fn selection_text(snapshot: &Snapshot, selection: &TermSelection) -> 
     out
 }
 
+/// X10 reports encode each coordinate as a 32-biased byte, so 223 is the
+/// largest representable 1-based column/row. Clamping wider coordinates to
+/// 255 would silently report the wrong cell, so skip the report instead;
+/// SGR reports have no such limit and are still sent unchanged.
+fn x10_report(button: u16, col: usize, row: usize, press: bool) -> Option<[u8; 6]> {
+    const MAX_X10: usize = u8::MAX as usize - 32;
+    if col > MAX_X10 || row > MAX_X10 || button as usize > MAX_X10 {
+        return None;
+    }
+    // A release is button 3 regardless of which button was held.
+    let legacy_button = if press { button } else { 3 };
+    Some([
+        0x1b,
+        b'[',
+        b'M',
+        (32 + legacy_button) as u8,
+        (32 + col) as u8,
+        (32 + row) as u8,
+    ])
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn send_mouse(
     session: &Session,
@@ -275,18 +296,7 @@ pub(super) fn send_mouse(
         let suffix = if press { 'M' } else { 'm' };
         let sequence = format!("\x1b[<{button};{col};{row}{suffix}");
         session.write(sequence.as_bytes());
-    } else {
-        // Legacy X10 encoding: ESC [ M Cb Cx Cy with 32-biased bytes. A
-        // release is button 3 regardless of which button was held.
-        let legacy_button = if press { button } else { 3 };
-        let bytes = [
-            0x1b,
-            b'[',
-            b'M',
-            (32 + legacy_button).min(255) as u8,
-            (32 + col).min(255) as u8,
-            (32 + row).min(255) as u8,
-        ];
+    } else if let Some(bytes) = x10_report(button, col, row, press) {
         session.write(&bytes);
     }
 }
@@ -309,19 +319,42 @@ pub(super) fn send_wheel(
     if snapshot.modes.sgr_mouse {
         let sequence = format!("\x1b[<{button};{col};{row}M");
         session.write(sequence.as_bytes());
-    } else {
-        let bytes = [
-            0x1b,
-            b'[',
-            b'M',
-            (32 + button).min(255) as u8,
-            (32 + col).min(255) as u8,
-            (32 + row).min(255) as u8,
-        ];
+    } else if let Some(bytes) = x10_report(button, col, row, true) {
         session.write(&bytes);
     }
 }
 
 pub(super) fn pos_or(pos: Option<Pos2>, inner: Rect) -> Pos2 {
     pos.unwrap_or_else(|| inner.center())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn x10_reports_stop_at_the_largest_representable_coordinate() {
+        // Column 223 is the last cell an X10 byte can express (32 + 223 =
+        // 255). Column 224 must not be reported as a saturated 255, which
+        // programs would decode as column 223.
+        assert_eq!(
+            x10_report(0, 223, 10, true),
+            Some([0x1b, b'[', b'M', 32, 255, 42])
+        );
+        assert_eq!(x10_report(0, 224, 10, true), None);
+        assert_eq!(x10_report(0, 10, 224, true), None);
+        assert_eq!(x10_report(224, 10, 10, true), None);
+    }
+
+    #[test]
+    fn x10_release_uses_button_three_and_press_keeps_the_button() {
+        assert_eq!(
+            x10_report(2, 5, 7, false),
+            Some([0x1b, b'[', b'M', 35, 37, 39])
+        );
+        assert_eq!(
+            x10_report(2, 5, 7, true),
+            Some([0x1b, b'[', b'M', 34, 37, 39])
+        );
+    }
 }

@@ -321,17 +321,25 @@ pub struct TerminalMatch {
     pub col: usize,
     pub len: usize,
 }
+/// Cursor into the absolute row-id space for one grid. The main and alt
+/// grids have independent eviction counters, so their cursors must not share
+/// an epoch: swapping screens rewinds `lines_evicted` to the alt grid's zero
+/// without any terminal reset.
+#[derive(Default)]
+struct ScreenEpoch {
+    spooled_through: u64,
+    last_evicted: u64,
+}
 
 /// Hot/cold split: `hot_cap` lines stay in RAM, older rows go to `store`;
 /// `slack` is headroom so no row is evicted before it is spooled.
 struct SpoolState {
     store: Option<ColdStore>,
-    spooled_through: u64,
+    main: ScreenEpoch,
+    alt: ScreenEpoch,
+    in_alt: bool,
     hot_cap: usize,
     slack: usize,
-    /// Last `lines_evicted` observed. A decrease means the VT grid was reset
-    /// (`RIS`) and the absolute row-id space restarted at zero.
-    last_evicted: u64,
 }
 
 /// Textures awaiting upload/drop, bounded by the graphics budget (only the
@@ -531,18 +539,143 @@ impl EventListener for Proxy {
 }
 
 // OSC 4-style color query coding (OSC 4 replies) stays in rio-vt's handler;
-// this palette is kept for the future OSC 4 mapping.
+/// Select the epoch belonging to the currently visible grid. Screen swaps
+/// swap the whole grid (including its eviction counter), so the alt grid
+/// starts at zero without resetting the main grid's history.
+fn sync_screen(spool: &mut SpoolState, in_alt: bool) {
+    spool.in_alt = in_alt;
+}
+
+/// Detect a reset of the *current* grid's row-id space. A rewind caused by a
+/// screen swap is filtered out by [`sync_screen`]: each grid keeps its own
+/// epoch, so only a genuine grid reset (RIS) reaches this branch.
 fn reset_epoch_if_rewound(spool: &mut SpoolState, evicted: u64) -> bool {
-    if evicted >= spool.last_evicted {
-        spool.last_evicted = evicted;
+    let epoch = if spool.in_alt {
+        &mut spool.alt
+    } else {
+        &mut spool.main
+    };
+    if evicted >= epoch.last_evicted {
+        epoch.last_evicted = evicted;
         return false;
     }
     if let Some(store) = spool.store.as_mut() {
         store.clear();
     }
-    spool.spooled_through = evicted;
-    spool.last_evicted = evicted;
+    epoch.spooled_through = evicted;
+    epoch.last_evicted = evicted;
     true
+}
+
+/// Minimal ECMA-48 escape-state tracker used to locate a real `ESC c` (RIS)
+/// in the PTY byte stream. `CSI c` is a device query, and bytes inside OSC/
+/// DCS strings must never be mistaken for a reset.
+#[derive(Default)]
+struct RisScanner {
+    state: RisScanState,
+    /// Index of the ESC byte within the current scan call, when seen here.
+    escape_at: Option<usize>,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum RisScanState {
+    #[default]
+    Ground,
+    Escape,
+    Csi,
+    String,
+    StringEscape,
+    Intermediate,
+}
+
+impl RisScanner {
+    /// Consume `bytes`, returning the byte range of the first RIS (if any).
+    /// State carries across slices so split escape sequences work.
+    fn scan(&mut self, bytes: &[u8]) -> Option<std::ops::Range<usize>> {
+        self.escape_at = None;
+        for (index, &byte) in bytes.iter().enumerate() {
+            match self.state {
+                RisScanState::Ground => {
+                    if byte == 0x1b {
+                        self.escape_at = Some(index);
+                        self.state = RisScanState::Escape;
+                    }
+                }
+                RisScanState::Escape => {
+                    if self.dispatch_escape(byte) {
+                        return Some(self.escape_at.unwrap_or(0)..index + 1);
+                    }
+                }
+                RisScanState::Csi => {
+                    if byte == 0x1b {
+                        self.escape_at = Some(index);
+                        self.state = RisScanState::Escape;
+                    } else if (0x40..=0x7e).contains(&byte) {
+                        self.state = RisScanState::Ground;
+                    }
+                }
+                RisScanState::String => match byte {
+                    0x07 => self.state = RisScanState::Ground,
+                    0x1b => {
+                        self.escape_at = Some(index);
+                        self.state = RisScanState::StringEscape;
+                    }
+                    _ => {}
+                },
+                RisScanState::StringEscape => {
+                    if byte == b'\\' {
+                        self.state = RisScanState::Ground;
+                    } else if self.dispatch_escape(byte) {
+                        return Some(self.escape_at.unwrap_or(0)..index + 1);
+                    }
+                }
+                RisScanState::Intermediate => {
+                    if byte == 0x1b {
+                        self.escape_at = Some(index);
+                        self.state = RisScanState::Escape;
+                    } else if (0x30..=0x7e).contains(&byte) {
+                        self.state = RisScanState::Ground;
+                    }
+                }
+            }
+        }
+        None
+    }
+    /// Dispatch a byte seen right after `ESC`; returns true for RIS.
+    fn dispatch_escape(&mut self, byte: u8) -> bool {
+        match byte {
+            b'c' => {
+                self.state = RisScanState::Ground;
+                return true;
+            }
+            b'[' => self.state = RisScanState::Csi,
+            b']' | b'P' | b'X' | b'^' | b'_' => self.state = RisScanState::String,
+            b'('..=b'/' => self.state = RisScanState::Intermediate,
+            0x1b => self.state = RisScanState::Escape,
+            _ => self.state = RisScanState::Ground,
+        }
+        false
+    }
+}
+
+/// A real RIS clears both grids. Only this path (and the explicit
+/// `clear_scrollback` command) may discard cold rows.
+fn reset_history_for_ris(
+    term: &Crosswords<Proxy>,
+    spool: &mut SpoolState,
+    view_offset: &AtomicUsize,
+) {
+    if let Some(store) = spool.store.as_mut() {
+        store.clear();
+    }
+    let evicted = term.grid.lines_evicted();
+    spool.main = ScreenEpoch {
+        spooled_through: evicted,
+        last_evicted: evicted,
+    };
+    spool.alt = ScreenEpoch::default();
+    spool.in_alt = term.mode().contains(RioMode::ALT_SCREEN);
+    view_offset.store(0, Ordering::Relaxed);
 }
 
 /// Max bytes fed to the parser between spool observations; one byte scrolls at
@@ -558,19 +691,27 @@ fn spool_scrollback(
     total_before: u64,
 ) {
     let evicted = term.grid.lines_evicted();
+    let in_alt = term.mode().contains(RioMode::ALT_SCREEN);
+    sync_screen(spool, in_alt);
     reset_epoch_if_rewound(spool, evicted);
+    if in_alt {
+        // The alt grid has its own zero-based row-id space and no history.
+        // Archiving it would overwrite the main grid's cursor, and swapping
+        // back would then look like a grid reset and clear real cold rows.
+        return;
+    }
     let Some(store) = spool.store.as_mut() else {
         return;
     };
     let hot = term.history_size();
     if hot > spool.hot_cap {
         let floor = evicted + (hot - spool.hot_cap) as u64;
-        if spool.spooled_through < evicted {
-            // A burst outran the slack (or the alt screen was active): jump
-            // the cursor forward so ids stay ordered, leaving a blank gap.
-            spool.spooled_through = evicted;
+        if spool.main.spooled_through < evicted {
+            // A burst outran the slack: jump the cursor forward so ids stay
+            // ordered, leaving a blank gap.
+            spool.main.spooled_through = evicted;
         }
-        let first = spool.spooled_through;
+        let first = spool.main.spooled_through;
         let cols = term.grid.columns();
         let mut rows: Vec<Vec<u8>> = Vec::with_capacity(floor.saturating_sub(first) as usize);
         {
@@ -588,11 +729,11 @@ fn spool_scrollback(
                 rows.push(crate::cold::encode_row(&cells));
                 id += 1;
             }
-            spool.spooled_through = id;
+            spool.main.spooled_through = id;
         }
         if !rows.is_empty() {
             store.append_rows(first, &rows);
-            spool.spooled_through = first + rows.len() as u64;
+            spool.main.spooled_through = first + rows.len() as u64;
         }
         // Shrink the ring back to the hot budget. `update_history` also resets
         // the growth limit, so restore the slack headroom right after.
@@ -1239,16 +1380,24 @@ impl Session {
     /// Drop hot and cold scrollback (used by the "clear history" command and
     /// verified by the close path, which removes the spool file).
     pub fn clear_scrollback(&self) {
-        let evicted = {
+        let (evicted, in_alt) = {
             let mut term = self.term.lock();
             term.grid.clear_history();
-            term.grid.lines_evicted()
+            (
+                term.grid.lines_evicted(),
+                term.mode().contains(RioMode::ALT_SCREEN),
+            )
         };
         let mut spool = self.spool.lock();
         if let Some(store) = spool.store.as_mut() {
             store.clear();
         }
-        spool.spooled_through = evicted;
+        spool.main = ScreenEpoch {
+            spooled_through: evicted,
+            last_evicted: evicted,
+        };
+        spool.alt = ScreenEpoch::default();
+        spool.in_alt = in_alt;
         drop(spool);
         self.shared.view_offset.store(0, Ordering::Relaxed);
         self.shared.notify();
@@ -1572,10 +1721,11 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
     };
     let spool = Arc::new(Mutex::new(SpoolState {
         store,
-        spooled_through: 0,
+        main: ScreenEpoch::default(),
+        alt: ScreenEpoch::default(),
+        in_alt: false,
         hot_cap,
         slack,
-        last_evicted: 0,
     }));
     let mut term = Crosswords::new(
         CrosswordsSize::new(cols as usize, rows as usize),
@@ -1603,6 +1753,7 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
         .name("lazecode-term-read".to_string())
         .spawn(move || {
             let mut processor: Processor = Processor::default();
+            let mut ris_scanner = RisScanner::default();
             let mut reader = reader;
             let mut buffer = vec![0u8; 64 * 1024];
             loop {
@@ -1664,18 +1815,43 @@ pub fn spawn(options: SpawnOptions) -> anyhow::Result<Session> {
                         let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             let mut term = reader_term.lock();
                             let mut spool = reader_spool.lock();
-                            for slice in buffer[..n].chunks(PARSE_SLICE) {
-                                let total_before =
-                                    term.grid.lines_evicted() + term.history_size() as u64;
-                                processor.advance(&mut *term, slice);
-                                // Spool rows that fell out of the hot window
-                                // before the ring needs to evict them itself.
-                                spool_scrollback(
-                                    &mut term,
-                                    &mut spool,
-                                    &reader_shared.view_offset,
-                                    total_before,
-                                );
+                            let mut pending = &buffer[..n];
+                            while !pending.is_empty() {
+                                let take = pending.len().min(PARSE_SLICE);
+                                let (chunk, remaining) = pending.split_at(take);
+                                let mut slice = chunk;
+                                loop {
+                                    let ris = ris_scanner.scan(slice);
+                                    let (part, rest, is_ris) = match ris {
+                                        Some(range) => {
+                                            (&slice[..range.end], &slice[range.end..], true)
+                                        }
+                                        None => (slice, &[][..], false),
+                                    };
+                                    let total_before =
+                                        term.grid.lines_evicted() + term.history_size() as u64;
+                                    processor.advance(&mut *term, part);
+                                    // Spool rows that fell out of the hot window
+                                    // before the ring needs to evict them itself.
+                                    spool_scrollback(
+                                        &mut term,
+                                        &mut spool,
+                                        &reader_shared.view_offset,
+                                        total_before,
+                                    );
+                                    if is_ris {
+                                        reset_history_for_ris(
+                                            &term,
+                                            &mut spool,
+                                            &reader_shared.view_offset,
+                                        );
+                                    }
+                                    slice = rest;
+                                    if !is_ris {
+                                        break;
+                                    }
+                                }
+                                pending = remaining;
                             }
                         }));
                         if parsed.is_err() {
@@ -1852,23 +2028,78 @@ fn vt_reset_restarts_the_cold_epoch() {
     store.append_rows(0, &[crate::cold::encode_row(&row)]);
     let mut spool = SpoolState {
         store: Some(store),
-        spooled_through: 5_000,
+        main: ScreenEpoch {
+            spooled_through: 5_000,
+            last_evicted: 5_000,
+        },
+        alt: ScreenEpoch::default(),
+        in_alt: false,
         hot_cap: 10,
         slack: 4,
-        last_evicted: 5_000,
     };
-    // `RIS` rewinds `lines_evicted`: the spool must start a new epoch instead
-    // of waiting for ids to catch up past the old watermark.
+    // A rewind inside the same grid generation is a real reset: the spool
+    // must start a new epoch instead of waiting for ids to catch up.
     assert!(reset_epoch_if_rewound(&mut spool, 3));
-    assert_eq!(spool.spooled_through, 3);
-    assert_eq!(spool.last_evicted, 3);
+    assert_eq!(spool.main.spooled_through, 3);
+    assert_eq!(spool.main.last_evicted, 3);
     assert_eq!(
         spool.store.as_ref().map(|store| store.len()),
         Some(0),
         "pre-reset cold rows must be dropped"
     );
     // Monotonic progress keeps the watermark and the store.
+    spool
+        .store
+        .as_mut()
+        .expect("store")
+        .append_rows(3, &[crate::cold::encode_row(&row)]);
     assert!(!reset_epoch_if_rewound(&mut spool, 9));
-    assert_eq!(spool.spooled_through, 3);
-    assert_eq!(spool.last_evicted, 9);
+    assert_eq!(spool.main.spooled_through, 3);
+    assert_eq!(spool.main.last_evicted, 9);
+    assert_eq!(spool.store.as_ref().map(|store| store.len()), Some(1));
+}
+
+#[test]
+fn alt_screen_rewind_does_not_clear_cold_history() {
+    let mut store = crate::cold::ColdStore::create(10, 1 << 20).expect("create");
+    let row = vec![CellData::default(); 4];
+    for id in 0..4 {
+        store.append_rows(id, &[crate::cold::encode_row(&row)]);
+    }
+    let mut spool = SpoolState {
+        store: Some(store),
+        main: ScreenEpoch {
+            spooled_through: 5_000,
+            last_evicted: 5_000,
+        },
+        alt: ScreenEpoch::default(),
+        in_alt: false,
+        hot_cap: 10,
+        slack: 4,
+    };
+    // Swapping grids makes `lines_evicted` fall from a large value to the
+    // alt grid's zero. Each grid has its own epoch, so no reset is inferred.
+    sync_screen(&mut spool, true);
+    assert!(!reset_epoch_if_rewound(&mut spool, 0));
+    assert_eq!(spool.store.as_ref().map(|store| store.len()), Some(4));
+    assert_eq!(spool.main.spooled_through, 5_000);
+    assert_eq!(spool.main.last_evicted, 5_000);
+    // Swapping back restores the main grid's counter; still no reset.
+    sync_screen(&mut spool, false);
+    assert!(!reset_epoch_if_rewound(&mut spool, 5_000));
+    assert_eq!(spool.store.as_ref().map(|store| store.len()), Some(4));
+    assert_eq!(spool.main.spooled_through, 5_000);
+}
+
+#[test]
+fn ris_scanner_ignores_csi_and_string_payloads() {
+    let mut scanner = RisScanner::default();
+    assert_eq!(scanner.scan(b"\x1bc"), Some(0..2));
+    assert_eq!(scanner.scan(b"\x1b[c"), None, "CSI c is a device query");
+    assert_eq!(scanner.scan(b"\x1b]0;title\x07hello"), None);
+    assert_eq!(scanner.scan(b"\x1bPdata\x1b\\done"), None);
+    // An escape sequence split across reads is still recognised.
+    let mut split = RisScanner::default();
+    assert_eq!(split.scan(b"text\x1b"), None);
+    assert_eq!(split.scan(b"c"), Some(0..1));
 }

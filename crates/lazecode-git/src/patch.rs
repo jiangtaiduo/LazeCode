@@ -89,7 +89,13 @@ pub fn parse(patch: &str) -> Result<Vec<FilePatch>> {
 
     fn flush(files: &mut Vec<FilePatch>, current: &mut Option<FilePatch>) -> Result<()> {
         if let Some(file) = current.take() {
-            if file.old_path.is_none() && file.new_path.is_none() && file.hunks.is_empty() {
+            // A header with neither a hunk nor a mode operation is a no-op;
+            // mode-only patches carry no `---`/`+++` lines at all.
+            if file.hunks.is_empty()
+                && file.old_mode == file.new_mode
+                && !file.is_new
+                && !file.is_delete
+            {
                 return Ok(());
             }
             files.push(file);
@@ -105,18 +111,16 @@ pub fn parse(patch: &str) -> Result<Vec<FilePatch>> {
             .unwrap_or(line);
         if let Some(rest) = raw.strip_prefix("diff --git ") {
             flush(&mut files, &mut current)?;
+            let (old_path, new_path) = parse_diff_header(rest)?;
             current = Some(FilePatch {
-                old_path: None,
-                new_path: None,
+                old_path,
+                new_path,
                 old_mode: None,
                 new_mode: None,
                 is_new: false,
                 is_delete: false,
                 hunks: Vec::new(),
             });
-            // The ---/+++ headers carry the authoritative paths; without a
-            // b-side path fail loudly instead of guessing from the diff header.
-            let _ = rest;
             continue;
         }
         if current.is_none() {
@@ -177,6 +181,49 @@ pub fn parse(patch: &str) -> Result<Vec<FilePatch>> {
         bail!("patch contains no file changes");
     }
     Ok(files)
+}
+
+fn parse_diff_header(rest: &str) -> Result<(Option<String>, Option<String>)> {
+    let rest = rest.trim_end();
+    let mut tokens: Vec<&str> = Vec::with_capacity(2);
+    let mut offset = 0usize;
+    while tokens.len() < 2 {
+        let tail = &rest[offset..];
+        let trimmed = tail.trim_start();
+        offset += tail.len() - trimmed.len();
+        if trimmed.is_empty() {
+            break;
+        }
+        let token = if trimmed.starts_with('"') {
+            let mut escaped = false;
+            let mut end = None;
+            for (index, ch) in trimmed.char_indices().skip(1) {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                match ch {
+                    '\\' => escaped = true,
+                    '"' => {
+                        end = Some(index + ch.len_utf8());
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            let end = end.ok_or_else(|| anyhow!("unterminated quoted path in diff header"))?;
+            &trimmed[..end]
+        } else {
+            let end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+            &trimmed[..end]
+        };
+        offset += token.len();
+        tokens.push(token);
+    }
+    if tokens.len() != 2 {
+        bail!("malformed diff --git header");
+    }
+    Ok((parse_header_path(tokens[0])?, parse_header_path(tokens[1])?))
 }
 
 fn parse_mode(text: &str) -> Result<Option<u32>> {

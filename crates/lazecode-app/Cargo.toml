@@ -45,3 +45,6 @@ objc2-app-kit = { version = "0.3.2", features = ["NSPasteboard", "NSEvent", "blo
 objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSData", "NSURL", "NSString", "NSGeometry", "objc2-core-foundation"] }
 block2 = "0.6"
 raw-window-handle = "0.6"
+
+[dev-dependencies]
+tempfile = "3"

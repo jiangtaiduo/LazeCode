@@ -781,3 +781,90 @@ fn index_only_divergence_matching_disk_is_hidden() {
     assert_eq!(snap.changes.len(), 1);
     assert!(snap.changes[0].staged.is_some() && snap.changes[0].unstaged.is_none());
 }
+
+#[test]
+fn checked_commit_rolls_back_index_when_ref_update_fails() {
+    let dir = init();
+    let root = dir.path();
+    std::fs::write(root.join("a.txt"), "one\n").unwrap();
+    lazecode_git::stage(root, &["a.txt".into()]).unwrap();
+    lazecode_git::commit(root, "base", false).unwrap();
+    let base = git(root, &["rev-parse", "HEAD"]);
+
+    std::fs::write(root.join("a.txt"), "two\n").unwrap();
+    lazecode_git::stage(root, &["a.txt".into()]).unwrap();
+
+    let lock = root.join(".git/refs/heads/main.lock");
+    std::fs::write(&lock, "held by another writer\n").unwrap();
+    let error = lazecode_git::commit_checked(root, &["a.txt".into()], &[], "checked", false)
+        .unwrap_err()
+        .to_string();
+    std::fs::remove_file(&lock).unwrap();
+    assert!(!error.is_empty(), "ref update must fail");
+    assert_eq!(git(root, &["rev-parse", "HEAD"]), base);
+    assert!(
+        git(root, &["diff", "--cached", "a.txt"]).contains("+two"),
+        "the staged change must survive a failed ref update"
+    );
+    assert!(
+        git(root, &["diff", "a.txt"]).is_empty(),
+        "worktree must still match the restored index"
+    );
+}
+
+#[test]
+fn stage_holds_the_index_lock_across_read_modify_write() {
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let dir = init();
+    let root = dir.path();
+    std::fs::write(root.join("base.txt"), "base\n").unwrap();
+    lazecode_git::stage(root, &["base.txt".into()]).unwrap();
+    lazecode_git::commit(root, "base", false).unwrap();
+
+    // A slow clean filter gives deterministic visibility into the window
+    // between reading the index and writing it back.
+    git(root, &["config", "filter.slow.clean", "sleep 3; cat"]);
+    std::fs::write(root.join(".gitattributes"), "*.slow filter=slow\n").unwrap();
+    std::fs::write(root.join("a.slow"), "a\n").unwrap();
+    std::fs::write(root.join("b.txt"), "b\n").unwrap();
+    lazecode_git::stage(root, &[".gitattributes".into()]).unwrap();
+
+    let root_path = root.to_string_lossy().into_owned();
+    let first = thread::spawn(move || {
+        lazecode_git::stage(Path::new(&root_path), &["a.slow".into()]).unwrap();
+    });
+
+    let lock = root.join(".git/index.lock");
+    let start = Instant::now();
+    while !lock.exists() && start.elapsed() < Duration::from_secs(2) {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(lock.exists(), "stage must hold index.lock while filtering");
+
+    let second = lazecode_git::stage(root, &["b.txt".into()]);
+    assert!(
+        second.is_err(),
+        "a concurrent writer must fail instead of losing one of the updates"
+    );
+    first.join().unwrap();
+
+    let snap = lazecode_git::snapshot(root).unwrap();
+    let staged: Vec<&str> = snap
+        .changes
+        .iter()
+        .filter(|change| change.staged.is_some())
+        .map(|change| change.path.as_str())
+        .collect();
+    assert!(
+        staged.contains(&"a.slow"),
+        "the first writer's index update must survive: {:?}",
+        staged
+    );
+    assert!(
+        !staged.contains(&"b.txt"),
+        "the rejected writer must not mutate the index: {:?}",
+        staged
+    );
+}

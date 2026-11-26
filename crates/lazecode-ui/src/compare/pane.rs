@@ -1,7 +1,7 @@
 //! Compare pane: toolbar, commit list, splitter and the details dock.
 
 use super::prelude::*;
-use super::{cb_filter_btn, cb_icon_btn, draw_details, filter_commits};
+use super::{cb_filter_btn, cb_icon_btn, draw_details, filtered_commits};
 
 const BANNER_H: f32 = 28.0;
 const TOOLBAR_H: f32 = 30.0;
@@ -417,22 +417,18 @@ pub(super) fn draw_pane(
     }
 
     // ---- 过滤后的可见提交（搜索/作者/日期/引用过滤，保持显示顺序）----
-    let visible: Vec<usize> = {
+    let visible: &[usize] = {
         let view = if side_index == 0 {
             &model.ui.compare_branches.left_view
         } else {
             &model.ui.compare_branches.right_view
         };
-        let mut indices = filter_commits(&side.commits, view, now);
-        if let Some(filter_ref) = &view.selected_ref_filter {
-            indices.retain(|index| {
-                side.commits[*index]
-                    .refs
-                    .iter()
-                    .any(|reference| &reference.label == filter_ref)
-            });
-        }
-        indices
+        filtered_commits(
+            &side.commits,
+            view,
+            now,
+            &mut rt.compare_filter_cache[side_index_us],
+        )
     };
 
     let body = Rect::from_min_max(Pos2::new(rect.left(), toolbar.bottom()), rect.max);

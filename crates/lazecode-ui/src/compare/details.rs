@@ -26,25 +26,28 @@ pub(super) fn draw_details(
     // .cb-details：bg-sidebar + 左缘分隔。
     ui.painter().rect_filled(rect, 0.0, p.sidebar);
 
-    let view = if side_index == 0 {
-        &model.ui.compare_branches.left_view
+    let detail = if side_index == 0 {
+        &model.ui.compare_branches.left_view.detail
     } else {
-        &model.ui.compare_branches.right_view
+        &model.ui.compare_branches.right_view.detail
     };
-    let detail = view.detail.clone();
-    let _ = view;
-
-    // 详情文件清单：⌘A = 整侧；单选/范围 = detail.files。
-    let details_files: Vec<lazecode_git::CompareFile> = if select_all {
-        side.files.clone()
+    let detail = detail.as_ref();
+    // 详情文件清单：⌘A = 整侧；单选/范围 = detail.files。Borrow the cached
+    // lists: the compare pane redraws every frame and must not copy them.
+    let details_files: &[lazecode_git::CompareFile] = if select_all {
+        &side.files
     } else {
-        match &detail {
-            Some(detail) if !detail.loading && detail.error.is_none() => detail.files.clone(),
-            _ => Vec::new(),
+        match detail {
+            Some(detail) if !detail.loading && detail.error.is_none() => &detail.files,
+            _ => &[],
         }
     };
     let files_loading =
-        !select_all && matches!(&detail, Some(detail) if detail.loading) && !selected.is_empty();
+        !select_all && detail.is_some_and(|detail| detail.loading) && !selected.is_empty();
+    // Mutations are applied after the borrowed lists are done being drawn.
+    let mut diff_click: Option<String> = None;
+    let mut collapse_all_click: Option<Vec<String>> = None;
+    let mut expand_all_click = false;
 
     // 头部 26px。
     let head = Rect::from_min_size(rect.min, Vec2::new(rect.width(), DETAILS_HEAD_H));
@@ -76,7 +79,7 @@ pub(super) fn draw_details(
             format!("{} selected · ", selected.len())
         };
         format!("{all}{files_label}")
-    } else if selected.len() == 1 && detail.as_ref().is_some_and(|d| d.error.is_some()) {
+    } else if selected.len() == 1 && detail.is_some_and(|detail| detail.error.is_some()) {
         crate::tr!(model, "Load failed", "加载失败").to_string()
     } else {
         files_label
@@ -94,7 +97,7 @@ pub(super) fn draw_details(
     );
     // 展开全部目录路径（禁用判定：无目录时 Expand/Collapse 置灰）。
     let all_rows =
-        crate::compare::flatten_file_tree(&details_files, &std::collections::HashSet::new());
+        crate::compare::flatten_file_tree(details_files, &std::collections::HashSet::new());
     let has_dirs = all_rows.iter().any(|row| row.is_dir);
     let mut rx = head.right() - 4.0;
     let diff_rect = Rect::from_min_size(
@@ -120,15 +123,7 @@ pub(super) fn draw_details(
         false,
         diff_enabled,
     ) {
-        if let Some(path) = selected_file {
-            open_file_diff(
-                model, side_index, side, merge_base, select_all, selected, path, other_ref,
-            );
-        } else {
-            open_file_diff(
-                model, side_index, side, merge_base, select_all, selected, "", other_ref,
-            );
-        }
+        diff_click = Some(selected_file.clone().unwrap_or_default());
     }
     if cb_icon_btn(
         ui,
@@ -138,16 +133,13 @@ pub(super) fn draw_details(
         false,
         has_dirs,
     ) {
-        let view = if side_index == 0 {
-            &mut model.ui.compare_branches.left_view
-        } else {
-            &mut model.ui.compare_branches.right_view
-        };
-        view.collapsed_dirs = all_rows
-            .iter()
-            .filter(|row| row.is_dir)
-            .map(|row| row.key.clone())
-            .collect();
+        collapse_all_click = Some(
+            all_rows
+                .iter()
+                .filter(|row| row.is_dir)
+                .map(|row| row.key.clone())
+                .collect(),
+        );
         rt.cb_root_collapsed[side_index_us] = true;
     }
     if cb_icon_btn(
@@ -158,12 +150,7 @@ pub(super) fn draw_details(
         false,
         has_dirs,
     ) {
-        let view = if side_index == 0 {
-            &mut model.ui.compare_branches.left_view
-        } else {
-            &mut model.ui.compare_branches.right_view
-        };
-        view.collapsed_dirs.clear();
+        expand_all_click = true;
         rt.cb_root_collapsed[side_index_us] = false;
     }
 
@@ -190,8 +177,11 @@ pub(super) fn draw_details(
     let root_collapsed = rt.cb_root_collapsed[side_index_us];
     let mut rows: Vec<crate::compare::FileRow> = Vec::new();
     if !details_files.is_empty() && !root_collapsed {
-        rows = crate::compare::flatten_file_tree(&details_files, collapsed);
+        rows = crate::compare::flatten_file_tree(details_files, collapsed);
     }
+    let mut toggle_click_action: Option<String> = None;
+    let mut select_click_action: Option<String> = None;
+    let mut open_click_action: Option<String> = None;
     crate::app_ui::region(ui, list_rect, "cb-tree", |ui| {
         if details_files.is_empty() && !files_loading {
             ui.painter().text(
@@ -402,32 +392,59 @@ pub(super) fn draw_details(
                     }
                 },
             );
-        if let Some(key) = toggle_click {
-            let view = if side_index == 0 {
-                &mut model.ui.compare_branches.left_view
-            } else {
-                &mut model.ui.compare_branches.right_view
-            };
-            if view.collapsed_dirs.contains(&key) {
-                view.collapsed_dirs.remove(&key);
-            } else {
-                view.collapsed_dirs.insert(key);
-            }
-        }
-        if let Some(path) = select_click {
-            let view = if side_index == 0 {
-                &mut model.ui.compare_branches.left_view
-            } else {
-                &mut model.ui.compare_branches.right_view
-            };
-            view.selected_file = Some(path);
-        }
-        if let Some(path) = open_click {
-            open_file_diff(
-                model, side_index, side, merge_base, select_all, selected, &path, other_ref,
-            );
-        }
+        toggle_click_action = toggle_click;
+        select_click_action = select_click;
+        open_click_action = open_click;
     });
+
+    // Apply model mutations only after the borrowed file lists are no longer
+    // used by the drawing closure.
+    if let Some(keys) = collapse_all_click {
+        let view = if side_index == 0 {
+            &mut model.ui.compare_branches.left_view
+        } else {
+            &mut model.ui.compare_branches.right_view
+        };
+        view.collapsed_dirs = keys.into_iter().collect();
+    }
+    if expand_all_click {
+        let view = if side_index == 0 {
+            &mut model.ui.compare_branches.left_view
+        } else {
+            &mut model.ui.compare_branches.right_view
+        };
+        view.collapsed_dirs.clear();
+    }
+    if let Some(path) = diff_click {
+        open_file_diff(
+            model, side_index, side, merge_base, select_all, selected, &path, other_ref,
+        );
+    }
+    if let Some(key) = toggle_click_action {
+        let view = if side_index == 0 {
+            &mut model.ui.compare_branches.left_view
+        } else {
+            &mut model.ui.compare_branches.right_view
+        };
+        if view.collapsed_dirs.contains(&key) {
+            view.collapsed_dirs.remove(&key);
+        } else {
+            view.collapsed_dirs.insert(key);
+        }
+    }
+    if let Some(path) = select_click_action {
+        let view = if side_index == 0 {
+            &mut model.ui.compare_branches.left_view
+        } else {
+            &mut model.ui.compare_branches.right_view
+        };
+        view.selected_file = Some(path);
+    }
+    if let Some(path) = open_click_action {
+        open_file_diff(
+            model, side_index, side, merge_base, select_all, selected, &path, other_ref,
+        );
+    }
 
     // ---- 元信息（cb-details-meta：message/hash/email/date/inBranches）----
     if meta_h > 0.0 {

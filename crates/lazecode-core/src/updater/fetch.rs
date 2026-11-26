@@ -76,16 +76,24 @@ pub(super) fn ensure_platform(manifest: &Manifest, platform: &Platform) -> Resul
         });
     }
     let min_os = manifest.min_os.as_deref().map(str::trim).unwrap_or("");
-    let Some(current) = platform.os_version.as_deref() else {
-        return Ok(());
-    };
-    if min_os.is_empty() || compare_versions(min_os, current)? != Ordering::Greater {
+    if min_os.is_empty() {
         return Ok(());
     }
-    Err(UpdateError::UnsupportedPlatform {
-        required: format!("{} {min_os}", platform.os),
-        actual: format!("{} {current}", platform.os),
-    })
+    let Some(current) = platform.os_version.as_deref() else {
+        // A release that requires a minimum OS cannot be accepted when the
+        // running version is unknown: "maybe compatible" is not a gate.
+        return Err(UpdateError::UnsupportedPlatform {
+            required: format!("{} {min_os}", platform.os),
+            actual: format!("{} version unknown", platform.os),
+        });
+    };
+    if compare_versions(min_os, current)? == Ordering::Greater {
+        return Err(UpdateError::UnsupportedPlatform {
+            required: format!("{} {min_os}", platform.os),
+            actual: format!("{} {current}", platform.os),
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn normalise_arch(arch: &str) -> String {

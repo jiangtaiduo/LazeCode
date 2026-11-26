@@ -123,6 +123,23 @@ pub(crate) fn safe_worktree_join(workdir: &Path, path: &str) -> Result<PathBuf> 
     Ok(workdir.join(relative))
 }
 
+/// Reject a target tree that would overwrite a file the caller does not own.
+/// `tracked` covers both the index and HEAD: a path present in either is safe
+/// to replace even if one side currently sees it as deleted.
+pub(crate) fn ensure_no_untracked_overwrite(
+    workdir: &Path,
+    target_map: &TreeMap,
+    tracked: impl Fn(&str) -> bool,
+) -> Result<()> {
+    for path in target_map.keys() {
+        let relative = validate_repo_path(path)?;
+        if std::fs::symlink_metadata(workdir.join(relative)).is_ok() && !tracked(path) {
+            anyhow::bail!("untracked file '{path}' would be overwritten");
+        }
+    }
+    Ok(())
+}
+
 fn ensure_safe_ancestors(workdir: &Path, path: &str) -> Result<()> {
     let relative = validate_repo_path(path)?;
     let mut current = workdir.to_path_buf();
@@ -164,9 +181,59 @@ pub(crate) fn remove_empty_parents(workdir: &Path, relative: &Path) {
     }
 }
 
-pub(crate) fn write_index(mut file: gix::index::File) -> Result<()> {
-    file.write(gix::index::write::Options::default())?;
-    Ok(())
+/// Hold git's `index.lock` for the entire read-modify-write sequence. A
+/// plain `File::write()` only locks the final rename, which lets two writers
+/// read the same stale index and silently drop one another's entries.
+pub(crate) struct IndexLock<'repo> {
+    repo: &'repo gix::Repository,
+    lock: gix::lock::File,
+}
+
+impl<'repo> IndexLock<'repo> {
+    pub(crate) fn acquire(repo: &'repo gix::Repository) -> Result<Self> {
+        let lock = gix::lock::File::acquire_to_update_resource(
+            repo.index_path(),
+            gix::lock::acquire::Fail::Immediately,
+            None,
+            0,
+        )?;
+        Ok(Self { repo, lock })
+    }
+
+    /// Read the current index while this lock is held.
+    pub(crate) fn open(&self) -> Result<gix::index::File> {
+        open_index(self.repo)
+    }
+
+    pub(crate) fn open_conflicted(&self) -> Result<gix::index::File> {
+        open_conflicted_index(self.repo)
+    }
+
+    pub(crate) fn path(&self) -> std::path::PathBuf {
+        self.repo.index_path()
+    }
+
+    /// Serialize into the held lock file and publish it atomically.
+    pub(crate) fn commit(mut self, file: &gix::index::File) -> Result<()> {
+        file.write_to(&mut self.lock, gix::index::write::Options::default())?;
+        self.lock.commit()?;
+        Ok(())
+    }
+}
+
+/// Restore a pre-operation index through the git lock protocol so a
+/// concurrent writer cannot be clobbered by a rollback.
+pub(crate) fn restore_index(repo: &gix::Repository, old_index: Option<Vec<u8>>) {
+    match old_index {
+        Some(bytes) => {
+            if let Err(error) = lazecode_fs::file::write_atomic_locked(&repo.index_path(), &bytes) {
+                log::error!("index rollback failed: {error}");
+            }
+        }
+        None => {
+            let _ = std::fs::remove_file(repo.index_path());
+        }
+    }
 }
 
 /// Stage the given worktree-relative paths.
@@ -183,17 +250,29 @@ pub(crate) fn stage_resolving_conflicts(root: &Path, paths: &[String]) -> Result
 fn stage_impl(root: &Path, paths: &[String], allow_unmerged: bool) -> Result<()> {
     let repo = discover(root)?;
     let workdir = workdir(&repo)?;
+    let lock = IndexLock::acquire(&repo)?;
     let file = if allow_unmerged {
-        open_conflicted_index(&repo)?
+        lock.open_conflicted()?
     } else {
-        open_index(&repo)?
+        lock.open()?
     };
-    let index_path = file.path().to_path_buf();
+    let index_path = lock.path();
+    let state = stage_state(&repo, &workdir, file, paths)?;
+    lock.commit(&gix::index::File::from_state(state, index_path))?;
+    Ok(())
+}
+
+fn stage_state(
+    repo: &gix::Repository,
+    workdir: &Path,
+    file: gix::index::File,
+    paths: &[String],
+) -> Result<gix::index::State> {
     let (mut state, _) = file.into_parts();
-    let mut filters = crate::filter::FilterContext::new(&repo)?;
+    let mut filters = crate::filter::FilterContext::new(repo)?;
     for path in paths {
         validate_repo_path(path)?;
-        let abs = safe_worktree_join(&workdir, path)?;
+        let abs = safe_worktree_join(workdir, path)?;
         let meta = match std::fs::symlink_metadata(&abs) {
             Ok(meta) => meta,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -252,16 +331,16 @@ fn stage_impl(root: &Path, paths: &[String], allow_unmerged: bool) -> Result<()>
     }
     state.remove_tree();
     state.sort_entries();
-    write_index(gix::index::File::from_state(state, index_path))?;
-    Ok(())
+    Ok(state)
 }
 
 /// Reset the index entries for `paths` back to HEAD.
 pub fn unstage(root: &Path, paths: &[String]) -> Result<()> {
     let repo = discover(root)?;
+    let lock = IndexLock::acquire(&repo)?;
     let head_map = head_tree_map(&repo)?;
-    let file = open_index(&repo)?;
-    let index_path = file.path().to_path_buf();
+    let file = lock.open()?;
+    let index_path = lock.path();
     let (mut state, _) = file.into_parts();
     for path in paths {
         validate_repo_path(path)?;
@@ -298,7 +377,7 @@ pub fn unstage(root: &Path, paths: &[String]) -> Result<()> {
     }
     state.remove_tree();
     state.sort_entries();
-    write_index(gix::index::File::from_state(state, index_path))?;
+    lock.commit(&gix::index::File::from_state(state, index_path))?;
     Ok(())
 }
 
@@ -341,8 +420,10 @@ fn commit_checked_inner(
             anyhow::bail!("cannot commit during a rebase: rebase is not implemented");
         }
     }
-    let index_file = open_index(&repo)?;
-    let index_path = index_file.path().to_path_buf();
+    let lock = IndexLock::acquire(&repo)?;
+    let index_path = lock.path();
+    let old_index = std::fs::read(&index_path).ok();
+    let index_file = lock.open()?;
     let (mut real_state, _) = index_file.into_parts();
     if real_state
         .entries()
@@ -428,15 +509,6 @@ fn commit_checked_inner(
             None => PreviousValue::MustNotExist,
         }
     };
-    let name: FullName = "HEAD".try_into()?;
-    let mut edit = RefEdit::update(
-        name,
-        new_id,
-        expected,
-        format!("commit{}: {subject}", if amend { " (amend)" } else { "" }),
-    );
-    edit.deref = true;
-    repo.edit_reference(edit)?;
 
     // Make the checked paths clean relative to the new HEAD while leaving
     // every other index entry (including staged files) exactly as it was.
@@ -469,7 +541,22 @@ fn commit_checked_inner(
     }
     real_state.remove_tree();
     real_state.sort_entries();
-    write_index(gix::index::File::from_state(real_state, index_path))?;
+    lock.commit(&gix::index::File::from_state(real_state, index_path))?;
+
+    // Publish HEAD only after the index is durable. A failed ref update must
+    // not leave the checked paths looking committed in the index.
+    let name: FullName = "HEAD".try_into()?;
+    let mut edit = RefEdit::update(
+        name,
+        new_id,
+        expected,
+        format!("commit{}: {subject}", if amend { " (amend)" } else { "" }),
+    );
+    edit.deref = true;
+    if let Err(error) = repo.edit_reference(edit) {
+        restore_index(&repo, old_index);
+        return Err(error.into());
+    }
     Ok(new_id.to_string())
 }
 
@@ -947,16 +1034,13 @@ pub fn checkout_branch(root: &Path, name: &str) -> Result<()> {
     for path in target_map.keys().chain(old_map.keys()) {
         ensure_safe_ancestors(&workdir, path)?;
     }
-    for path in target_map.keys() {
-        let relative = validate_repo_path(path)?;
-        let abs = workdir.join(&relative);
-        if std::fs::symlink_metadata(&abs).is_ok()
-            && !old_map.contains_key(path)
-            && !head_map.contains_key(path)
-        {
-            anyhow::bail!("untracked file '{path}' would be overwritten by checkout");
-        }
-    }
+    ensure_no_untracked_overwrite(&workdir, &target_map, |path| {
+        old_map.contains_key(path) || head_map.contains_key(path)
+    })?;
+
+    // Hold the index lock from here through the index write: a concurrent
+    // stage must not be folded into this checkout from a stale snapshot.
+    let lock = IndexLock::acquire(&repo)?;
 
     // Delete stale paths, then prune empty dirs; this handles file↔directory
     // changes without removing untracked content. Paths touched are recorded
@@ -996,8 +1080,8 @@ pub fn checkout_branch(root: &Path, name: &str) -> Result<()> {
         }
         materialize_tree(&repo, &target_map)?;
         let state = index_state_from_tree(&repo, &target_map);
-        let mut index_file = gix::index::File::from_state(state, repo.index_path());
-        index_file.write(gix::index::write::Options::default())?;
+        let index_file = gix::index::File::from_state(state, lock.path());
+        lock.commit(&index_file)?;
 
         let message = format!("checkout: moving to {checkout_name}");
         let mut edit = RefEdit::update(
@@ -1014,18 +1098,7 @@ pub fn checkout_branch(root: &Path, name: &str) -> Result<()> {
         if let Err(restore_error) = backup.restore() {
             log::error!("checkout rollback failed: {restore_error}");
         }
-        match old_index_bytes {
-            Some(bytes) => {
-                if let Err(restore_error) =
-                    lazecode_fs::file::write_atomic_locked(&repo.index_path(), &bytes)
-                {
-                    log::error!("checkout index rollback failed: {restore_error}");
-                }
-            }
-            None => {
-                let _ = std::fs::remove_file(repo.index_path());
-            }
-        }
+        restore_index(&repo, old_index_bytes);
         return Err(error);
     }
     backup.discard();
@@ -1154,7 +1227,8 @@ pub fn apply_patch(root: &Path, patch: &str, cached: bool, reverse: bool) -> Res
     let mut planned = Vec::with_capacity(files.len());
 
     if cached {
-        let index = open_index(&repo)?;
+        let lock = IndexLock::acquire(&repo)?;
+        let index = lock.open()?;
         for file in &files {
             let (path, create, delete) = file.operation(reverse)?;
             let relative = validate_repo_path(path)?;
@@ -1174,11 +1248,10 @@ pub fn apply_patch(root: &Path, patch: &str, cached: bool, reverse: bool) -> Res
             if delete && !data.is_empty() {
                 anyhow::bail!("deletion patch for '{path}' does not remove the whole file");
             }
-            let mode = if create {
-                file.mode(reverse).unwrap_or(0o100644)
-            } else {
-                entry.map(|entry| entry.mode.bits()).unwrap_or(0o100644)
-            };
+            let mode = file
+                .mode(reverse)
+                .or_else(|| entry.map(|entry| entry.mode.bits()))
+                .unwrap_or(0o100644);
             planned.push(Planned {
                 path,
                 update: if delete {
@@ -1188,9 +1261,8 @@ pub fn apply_patch(root: &Path, patch: &str, cached: bool, reverse: bool) -> Res
                 },
             });
         }
-        let file = open_index(&repo)?;
-        let index_path = file.path().to_path_buf();
-        let (mut state, _) = file.into_parts();
+        let index_path = lock.path();
+        let (mut state, _) = index.into_parts();
         for item in planned {
             state.remove_entries(|_, candidate, _| {
                 candidate
@@ -1211,10 +1283,13 @@ pub fn apply_patch(root: &Path, patch: &str, cached: bool, reverse: bool) -> Res
         }
         state.remove_tree();
         state.sort_entries();
-        write_index(gix::index::File::from_state(state, index_path))?;
+        lock.commit(&gix::index::File::from_state(state, index_path))?;
         return Ok(());
     }
 
+    // Shelf patches are generated from canonical blobs, so compare and apply
+    // them to cleaned bytes, then convert the result back for the worktree.
+    let mut filters = crate::filter::FilterContext::new(&repo)?;
     for file in &files {
         let (path, create, delete) = file.operation(reverse)?;
         let relative = validate_repo_path(path)?;
@@ -1234,14 +1309,17 @@ pub fn apply_patch(root: &Path, patch: &str, cached: bool, reverse: bool) -> Res
             }
             Ok(metadata) if metadata.is_file() => {
                 use std::os::unix::fs::PermissionsExt;
-                (
-                    std::fs::read(&abs)?,
-                    if metadata.permissions().mode() & 0o111 != 0 {
-                        0o100755
-                    } else {
-                        0o100644
-                    },
-                )
+                let mode = if metadata.permissions().mode() & 0o111 != 0 {
+                    0o100755
+                } else {
+                    0o100644
+                };
+                let canonical = if filters.filter_driver(&path)?.as_deref() == Some("lfs") {
+                    filters.clean_file(&path, &abs)?
+                } else {
+                    filters.clean(&path, std::fs::read(&abs)?)?
+                };
+                (canonical, mode)
             }
             Ok(_) => anyhow::bail!("patch target '{path}' is not a regular file"),
             Err(_) if create => (Vec::new(), 0o100644),
@@ -1251,15 +1329,19 @@ pub fn apply_patch(root: &Path, patch: &str, cached: bool, reverse: bool) -> Res
         if delete && !data.is_empty() {
             anyhow::bail!("deletion patch for '{path}' does not remove the whole file");
         }
+        let mode = file.mode(reverse).unwrap_or(old_mode);
+        let data = if delete || mode == 0o120000 {
+            data
+        } else {
+            let oid = repo.write_blob(&data)?.detach().to_string();
+            filters.smudge(&path, &oid, data)?
+        };
         planned.push(Planned {
             path,
             update: if delete {
                 Update::Delete
             } else {
-                Update::Write {
-                    data,
-                    mode: file.mode(reverse).unwrap_or(old_mode),
-                }
+                Update::Write { data, mode }
             },
         });
     }
@@ -1319,11 +1401,18 @@ pub fn discard_file_changes(root: &Path, rel_path: &str) -> Result<()> {
     let relative = validate_repo_path(rel_path)?;
     let rel_path = relative.to_string_lossy().to_string();
     let head_map = head_tree_map(&repo)?;
-    if let Some(entry) = head_map.get(rel_path.as_str()) {
+    let lock = IndexLock::acquire(&repo)?;
+    let index_path = lock.path();
+    let mut state = if let Some(entry) = head_map.get(rel_path.as_str()) {
         let mut map = TreeMap::new();
         map.insert(rel_path.clone(), *entry);
         materialize_tree(&repo, &map)?;
-        stage(root, &[rel_path])?;
+        stage_state(
+            &repo,
+            &workdir,
+            lock.open()?,
+            std::slice::from_ref(&rel_path),
+        )?
     } else {
         ensure_safe_ancestors(&workdir, &rel_path)?;
         let full = workdir.join(&relative);
@@ -1332,9 +1421,7 @@ pub fn discard_file_changes(root: &Path, rel_path: &str) -> Result<()> {
         } else if full.exists() || std::fs::symlink_metadata(&full).is_ok() {
             std::fs::remove_file(&full)?;
         }
-        let file = open_index(&repo)?;
-        let index_path = file.path().to_path_buf();
-        let (mut state, _) = file.into_parts();
+        let (mut state, _) = lock.open()?.into_parts();
         let prefix = format!("{rel_path}/");
         state.remove_entries(|_, candidate, _| {
             candidate
@@ -1342,9 +1429,10 @@ pub fn discard_file_changes(root: &Path, rel_path: &str) -> Result<()> {
                 .map(|candidate| candidate == rel_path || candidate.starts_with(&prefix))
                 .unwrap_or(false)
         });
-        state.remove_tree();
-        state.sort_entries();
-        write_index(gix::index::File::from_state(state, index_path))?;
-    }
+        state
+    };
+    state.remove_tree();
+    state.sort_entries();
+    lock.commit(&gix::index::File::from_state(state, index_path))?;
     Ok(())
 }

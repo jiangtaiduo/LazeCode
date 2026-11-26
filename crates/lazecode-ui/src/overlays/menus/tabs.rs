@@ -15,6 +15,7 @@ pub(super) fn draw_tree_context_menu(
     is_dir: bool,
 ) {
     let p = theme.palette;
+    let is_root = rel_path.is_empty();
     let project = &model.projects[project_idx];
     let abs_path = if rel_path.is_empty() {
         project.active_root().to_path_buf()
@@ -53,13 +54,13 @@ pub(super) fn draw_tree_context_menu(
             Item::Sub("Copy Path/Reference...", "复制路径/引用…", "copy-path"),
             Item::Row("Paste", "粘贴", 103, false, true),
             Item::Sep,
-            Item::Row("Rename...", "重命名…", 4, false, false),
+            Item::Row("Rename...", "重命名…", 4, false, is_root),
             Item::Sep,
             Item::Row("Find in Files...", "在文件中查找…", 104, false, false),
             Item::Sep,
             Item::Sub("Git", "Git", "git"),
             Item::Sep,
-            Item::Row("Delete", "删除", 5, true, false),
+            Item::Row("Delete", "删除", 5, true, is_root),
             Item::Sep,
         ];
         if is_dir {
@@ -298,22 +299,26 @@ pub(super) fn draw_tree_context_menu(
                 );
             }
             4 => {
-                let name = abs_path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                rt.dialog = DialogState::RenamePath {
-                    old_path: abs_path,
-                    value: name,
-                    error: None,
-                };
+                if !is_root {
+                    let name = abs_path
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    rt.dialog = DialogState::RenamePath {
+                        old_path: abs_path,
+                        value: name,
+                        error: None,
+                    };
+                }
             }
             5 => {
-                rt.dialog = DialogState::DeletePath {
-                    path: abs_path,
-                    is_dir,
-                };
+                if !is_root {
+                    rt.dialog = DialogState::DeletePath {
+                        path: abs_path,
+                        is_dir,
+                    };
+                }
             }
             6 => {
                 #[cfg(target_os = "macos")]
@@ -421,7 +426,9 @@ pub(super) fn draw_tree_context_menu(
                     .ui
                     .tree_selection
                     .iter()
+                    .filter(|p| !p.as_os_str().is_empty())
                     .map(|p| project.active_root().join(p))
+                    .filter(|path| path != project.active_root())
                     .collect();
                 rt.dialog = DialogState::ConfirmDeleteUntracked { paths };
             }
@@ -434,22 +441,46 @@ pub(super) fn draw_tree_context_menu(
                 rt.search.file_mask = rel_path.to_string();
             }
             105 => {
-                if let Some(project) = model.projects.get_mut(project_idx) {
-                    fn expand_rec(
-                        nodes: &[lazecode_fs::tree::TreeNode],
-                        expanded: &mut std::collections::HashSet<std::path::PathBuf>,
-                    ) {
-                        for node in nodes {
-                            if node.kind == lazecode_fs::tree::NodeKind::Folder {
-                                expanded.insert(node.path.clone());
-                                expand_rec(&node.children, expanded);
-                            }
+                fn folder_paths(
+                    nodes: &[lazecode_fs::tree::TreeNode],
+                    out: &mut Vec<std::path::PathBuf>,
+                ) {
+                    for node in nodes {
+                        if node.kind == lazecode_fs::tree::NodeKind::Folder {
+                            out.push(node.path.clone());
+                            folder_paths(&node.children, out);
                         }
                     }
+                }
+                let ignored = model.settings.ignored_patterns.clone();
+                if let Some(project) = model.projects.get_mut(project_idx) {
                     let base = std::path::Path::new(rel_path);
                     project.expanded.insert(base.to_path_buf());
-                    let nodes = project.active_tree().nodes.clone();
-                    expand_rec(&nodes, &mut project.expanded);
+                    let mut pending = Vec::new();
+                    folder_paths(&project.active_tree().nodes, &mut pending);
+                    if !base.as_os_str().is_empty() {
+                        pending.push(base.to_path_buf());
+                    }
+                    // Bounded scans defer subtrees; expanding them must load
+                    // their children, including folders discovered on the way.
+                    while let Some(path) = pending.pop() {
+                        project.expanded.insert(path.clone());
+                        if !project.ensure_tree_children(&path, &ignored) {
+                            continue;
+                        }
+                        let discovered = {
+                            let tree = &mut project.active_worktree_mut().tree;
+                            let mut found = Vec::new();
+                            if let Some(node) = lazecode_fs::tree::find_mut(tree, &path) {
+                                folder_paths(&node.children, &mut found);
+                            }
+                            found
+                        };
+                        for child in discovered {
+                            project.expanded.insert(child.clone());
+                            pending.push(child);
+                        }
+                    }
                 }
             }
             106 => {
@@ -462,9 +493,9 @@ pub(super) fn draw_tree_context_menu(
                 }
             }
             107 => {
+                let settings = model.settings.clone();
                 if let Some(project) = model.projects.get_mut(project_idx) {
-                    let root = project.active_root().to_path_buf();
-                    project.active_worktree_mut().tree = lazecode_fs::tree::load_tree(&root);
+                    project.reload_tree(&settings);
                     model.queue(Command::ReloadGit);
                 }
             }

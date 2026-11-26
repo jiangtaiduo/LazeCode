@@ -38,6 +38,8 @@ use std::sync::OnceLock;
 
 use jobs::JobQueue;
 
+type GitFingerprint = Option<Vec<(std::path::PathBuf, u64, u64)>>;
+
 /// Cheap fingerprint of the `.git` files that determine status: top-level
 /// metadata files, `refs/`, and the sequencer dirs. `objects/`, `logs/` and
 /// `hooks/` are excluded because they never change a status result.
@@ -536,7 +538,10 @@ struct LazeApp {
     last_watch_poll: std::time::Instant,
     last_vcs_poll: std::time::Instant,
     last_full_vcs_poll: std::time::Instant,
-    git_fingerprint: Option<Vec<(std::path::PathBuf, u64, u64)>>,
+    git_fingerprint: GitFingerprint,
+    fingerprint_tx: Sender<(std::path::PathBuf, GitFingerprint)>,
+    fingerprint_rx: Receiver<(std::path::PathBuf, GitFingerprint)>,
+    fingerprint_in_flight: bool,
     last_busy_poll: std::time::Instant,
     busy_tx: Sender<Vec<TerminalBusyRow>>,
     busy_rx: Receiver<Vec<TerminalBusyRow>>,
@@ -557,7 +562,8 @@ struct LazeApp {
 
 impl LazeApp {
     fn new(model: AppModel, jobs: JobQueue) -> Self {
-        let (busy_tx, busy_rx) = crossbeam_channel::unbounded();
+        let (busy_tx, busy_rx) = crossbeam_channel::bounded(64);
+        let (fingerprint_tx, fingerprint_rx) = crossbeam_channel::bounded(8);
         let mut runtime = UiRuntime::default();
         // Close/quit probes notify this when they finish so the confirmation
         // dialog is not delayed until the next poll deadline.
@@ -579,6 +585,9 @@ impl LazeApp {
                 .checked_sub(Duration::from_secs(31))
                 .unwrap_or_else(std::time::Instant::now),
             git_fingerprint: None,
+            fingerprint_tx,
+            fingerprint_rx,
+            fingerprint_in_flight: false,
             last_busy_poll: std::time::Instant::now()
                 .checked_sub(Duration::from_secs(3))
                 .unwrap_or_else(std::time::Instant::now),
@@ -1128,67 +1137,109 @@ impl LazeApp {
     /// active checkout. A cheap `.git` fingerprint gates the expensive full
     /// `snapshot()`; a slow unconditional backstop covers missed cases.
     fn poll_vcs(&mut self) -> bool {
-        if self.last_vcs_poll.elapsed() < std::time::Duration::from_secs(2) {
-            return false;
+        let mut changed = false;
+        while let Ok((root, fingerprint)) = self.fingerprint_rx.try_recv() {
+            self.fingerprint_in_flight = false;
+            self.wants_frame = true;
+            if !self
+                .model
+                .projects
+                .iter()
+                .any(|project| project.worktrees.iter().any(|wt| wt.path == root))
+            {
+                continue;
+            }
+            let slow_due = self.last_full_vcs_poll.elapsed() >= Duration::from_secs(30);
+            match fingerprint {
+                // No cheap signature (linked worktree pointer): rely on the
+                // unconditional backstop alone.
+                None => {
+                    if slow_due {
+                        self.last_full_vcs_poll = Instant::now();
+                        self.jobs.refresh_git(root, self.model.notifier.clone());
+                        changed = true;
+                    }
+                }
+                Some(signature) => {
+                    let fingerprint_changed = self.git_fingerprint.as_ref() != Some(&signature);
+                    self.git_fingerprint = Some(signature);
+                    if fingerprint_changed || slow_due {
+                        if slow_due {
+                            self.last_full_vcs_poll = Instant::now();
+                        }
+                        self.jobs.refresh_git(root, self.model.notifier.clone());
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if self.last_vcs_poll.elapsed() < Duration::from_secs(2) {
+            return changed;
         }
         // Advance the schedule even when there is nothing to poll; otherwise
         // the next idle deadline stays in the past and turns WaitUntil into a
         // 1 ms wake loop.
-        self.last_vcs_poll = std::time::Instant::now();
+        self.last_vcs_poll = Instant::now();
         let Some(project) = self.model.active_project() else {
-            return false;
+            return changed;
         };
         if project.is_single_file {
-            return false;
+            return changed;
         }
         let root = project.active_root().to_path_buf();
-        let slow_due = self.last_full_vcs_poll.elapsed() >= std::time::Duration::from_secs(30);
-        let fingerprint = git_fingerprint(&root);
-        match fingerprint {
-            // No cheap signature (linked worktree whose .git is a pointer
-            // file): rely on the slow backstop alone.
-            None => {
-                if slow_due {
-                    self.last_full_vcs_poll = std::time::Instant::now();
-                    self.jobs.refresh_git(root, self.model.notifier.clone());
-                    return true;
-                }
-                false
-            }
-            Some(signature) => {
-                let changed = self.git_fingerprint.as_ref() != Some(&signature);
-                self.git_fingerprint = Some(signature);
-                if changed || slow_due {
-                    if slow_due {
-                        self.last_full_vcs_poll = std::time::Instant::now();
-                    }
-                    self.jobs.refresh_git(root, self.model.notifier.clone());
-                    true
-                } else {
-                    false
+        if !self.fingerprint_in_flight {
+            self.fingerprint_in_flight = true;
+            let tx = self.fingerprint_tx.clone();
+            match std::thread::Builder::new()
+                .name("lazecode-git-fingerprint".into())
+                .spawn(move || {
+                    let fingerprint = git_fingerprint(&root);
+                    let _ = tx.send((root, fingerprint));
+                }) {
+                Ok(_) => {}
+                Err(err) => {
+                    self.fingerprint_in_flight = false;
+                    log::warn!("cannot start Git fingerprint probe: {err}");
                 }
             }
         }
+        changed
     }
 
     fn autosave(&mut self) {
         if !self.model.settings.editor.auto_save
-            || self.last_autosave.elapsed() < std::time::Duration::from_secs(2)
+            || self.last_autosave.elapsed() < Duration::from_secs(2)
         {
             return;
         }
-        self.last_autosave = std::time::Instant::now();
-        for project in &mut self.model.projects {
-            for tab in &mut project.tabs {
-                let TabKind::File(file) = &mut tab.kind else {
+        self.last_autosave = Instant::now();
+        // Snapshot buffers on the UI thread, but do the fsync/rename in the
+        // bounded job pool so a slow disk cannot stall input or painting.
+        let mut saves = Vec::new();
+        for project in &self.model.projects {
+            let root = project.active_root().to_path_buf();
+            for tab in &project.tabs {
+                let TabKind::File(file) = &tab.kind else {
                     continue;
                 };
-                if file.doc.dirty {
-                    if let Err(err) = file.doc.save() {
-                        log::warn!("auto-save failed for {}: {err}", file.doc.path.display());
-                    }
+                if !file.doc.dirty || file.doc.read_only || file.doc.lossy {
+                    continue;
                 }
+                saves.push((
+                    root.clone(),
+                    file.doc.path.clone(),
+                    file.doc.text(),
+                    file.doc.encoding,
+                    file.doc.eol,
+                    file.doc.had_bom,
+                    file.doc.revision,
+                ));
             }
+        }
+        for (root, path, text, encoding, eol, bom, revision) in saves {
+            let stamp = JobQueue::disk_stamp(&path);
+            self.jobs
+                .queue_save(root, path, text, encoding, eol, bom, revision, stamp);
         }
     }
 
@@ -1249,6 +1300,9 @@ impl LazeApp {
         // The dots only exist on screen; an occluded window must not keep
         // walking the process table every two seconds.
         if self.pacer.occluded {
+            // Advance the schedule here too, or the stale timestamp keeps
+            // pulling the idle deadline into the past (1 ms wake loop).
+            self.last_busy_poll = Instant::now();
             return;
         }
         self.last_busy_poll = std::time::Instant::now();
@@ -1342,12 +1396,25 @@ impl LazeApp {
                 );
             }
             DroppedPaths::Projects(projects) => {
+                let settings = self.model.settings.clone();
+                let notifier = self.model.notifier.clone();
                 let mut opened = false;
                 for project in projects {
-                    match self.model.open_project(project) {
-                        Ok(_) => opened = true,
-                        Err(err) => self.model.toast(err, lazecode_core::ToastKind::Error),
+                    let canonical = project.canonicalize().unwrap_or_else(|_| project.clone());
+                    if let Some(index) =
+                        self.model.projects.iter().position(|existing| {
+                            existing.root == canonical && !existing.is_single_file
+                        })
+                    {
+                        self.model.active_project = Some(index);
+                        opened = true;
+                        continue;
                     }
+                    // The tree scan, Git snapshot and log walk run in the
+                    // bounded job pool; only the finished project is applied.
+                    self.jobs
+                        .load_project(project, settings.clone(), notifier.clone());
+                    opened = true;
                 }
                 if opened {
                     self.runtime.clear_terminal_cache();
@@ -1615,10 +1682,17 @@ impl ApplicationHandler<AppEvent> for LazeApp {
                 let had_commands = self.process_commands();
                 self.poll_jobs();
                 if self.model.should_quit {
-                    self.model.save_workspace();
-                    self.model.save_settings();
-                    self.model.shutdown_lsp();
-                    event_loop.exit();
+                    if self.jobs.has_in_flight() {
+                        // Do not kill the process in the middle of a save or
+                        // Git write; keep polling until the queue drains.
+                        self.wants_frame = true;
+                        window.request_redraw();
+                    } else {
+                        self.model.save_workspace();
+                        self.model.save_settings();
+                        self.model.shutdown_lsp();
+                        event_loop.exit();
+                    }
                 }
                 if had_commands || self.repaint_after.is_zero() {
                     if self.pacer.due(Instant::now()) {
@@ -1673,7 +1747,9 @@ impl ApplicationHandler<AppEvent> for LazeApp {
         }
         deadline = deadline.min(self.last_watch_poll + std::time::Duration::from_millis(600));
         deadline = deadline.min(self.last_vcs_poll + std::time::Duration::from_secs(2));
-        deadline = deadline.min(self.last_busy_poll + std::time::Duration::from_secs(2));
+        if !self.busy_in_flight {
+            deadline = deadline.min(self.last_busy_poll + std::time::Duration::from_secs(2));
+        }
         if let Some(at) = self.drop_deadline {
             deadline = deadline.min(at);
         }
@@ -2112,6 +2188,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Dropped folders are opened in the bounded job pool; wait for the
+    /// background tree/Git/log work before asserting on the model.
+    fn wait_for_dropped_project(app: &mut LazeApp, expected: &std::path::Path) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            app.poll_jobs();
+            if app.model.active_project().is_some_and(|project| {
+                !project.is_single_file && project.root.as_path() == expected
+            }) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("dropped project did not finish loading");
+    }
     #[test]
     fn dropped_paths_open_files_and_projects_by_batch_type() {
         struct NoopNotifier;
@@ -2154,10 +2245,12 @@ mod tests {
         assert_eq!(files.tabs.len(), 2);
 
         app.open_dropped_paths(vec![project_one.clone()]);
+        wait_for_dropped_project(&mut app, &project_one);
         assert!(!app.model.active_project().unwrap().is_single_file);
         assert_eq!(app.model.active_project().unwrap().root, project_one);
 
         app.open_dropped_paths(vec![project_two.clone()]);
+        wait_for_dropped_project(&mut app, &project_two);
         assert_eq!(app.model.active_project().unwrap().root, project_two);
         let project_count = app.model.projects.len();
 

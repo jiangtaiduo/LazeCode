@@ -209,7 +209,6 @@ impl UpdateState {
         }
         let public_key = public_key.to_string();
         let version = manifest.version.clone();
-        let kind = manifest.artifact_kind();
         self.error = None;
         self.start(UpdatePhase::Downloading, move |job| {
             let result = updater::download_and_verify(
@@ -231,15 +230,10 @@ impl UpdateState {
                 progress.phase = Some(UpdatePhase::Installing);
                 progress.staged = Some(dest.clone());
             });
-            // Hash what is actually on disk right before installing: the
-            // download hashed its own bytes, but the installer is a separate
-            // step and a retry may reuse a file staged earlier.
-            if let Err(err) = updater::verify_staged_artifact(&manifest, &dest) {
-                job.with(|progress| progress.error = Some(err.to_string()));
-                return;
-            }
             let target = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("LazeCode"));
-            match updater::install_artifact(&dest, &target, kind) {
+            // Hash and install the same opened descriptor: the staged path
+            // cannot be swapped between verification and replacement.
+            match updater::verify_and_install_artifact(&manifest, &public_key, &dest, &target) {
                 Ok(report) => {
                     if let Some(backup) = &report.backup {
                         log::info!("previous build kept at {}", backup.display());
@@ -256,7 +250,7 @@ impl UpdateState {
     }
 
     /// Install a previously verified staged artifact (retry path).
-    fn install_staged(&mut self) {
+    fn install_staged(&mut self, public_key: &str) {
         if self.busy() {
             return;
         }
@@ -266,19 +260,13 @@ impl UpdateState {
         let Some(outcome) = self.available.as_ref() else {
             return;
         };
-        let kind = outcome.manifest.artifact_kind();
         let version = outcome.manifest.version.clone();
         let manifest = outcome.manifest.clone();
+        let public_key = public_key.to_string();
         self.error = None;
         self.start(UpdatePhase::Installing, move |job| {
-            // The staged file may have been written minutes ago; re-hash it
-            // before it replaces the running bundle.
-            if let Err(err) = updater::verify_staged_artifact(&manifest, &staged) {
-                job.with(|progress| progress.error = Some(err.to_string()));
-                return;
-            }
             let target = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("LazeCode"));
-            match updater::install_artifact(&staged, &target, kind) {
+            match updater::verify_and_install_artifact(&manifest, &public_key, &staged, &target) {
                 Ok(report) => {
                     if let Some(backup) = &report.backup {
                         log::info!("previous build kept at {}", backup.display());
@@ -301,7 +289,7 @@ impl UpdateState {
             return;
         }
         if self.staged.is_some() {
-            self.install_staged();
+            self.install_staged(&settings.update_public_key);
         } else if let Some(outcome) = self
             .available
             .as_ref()

@@ -4,10 +4,21 @@
 use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
-use crate::session::{CellData, ColorSpec};
+use rio_vt::ansi::CursorShape as RioCursorShape;
+use rio_vt::crosswords::grid::Dimensions;
+use rio_vt::crosswords::pos::{Column, Line, Pos};
+use rio_vt::crosswords::search::RegexSearch;
+use rio_vt::crosswords::square::{CellFlags, Square};
+use rio_vt::crosswords::{Crosswords, CrosswordsSize};
+use rio_vt::event::{VoidListener, WindowId};
+
+use crate::session::{CellData, ColorSpec, ATTR_LEADING_SPACER, ATTR_SPACER};
 
 /// Compact once the dead bytes in the file exceed this and outnumber the live
 /// rows.
@@ -37,11 +48,23 @@ struct CompactCopy {
     written: u64,
     /// `(row id, offset in the new file)`, ordered by id.
     rows: Vec<(u64, u64)>,
+    /// Generation the snapshot was taken in; a later reset invalidates it.
+    generation: u64,
 }
 
 /// A rewrite copying live rows off the reader's critical path.
 struct CompactJob {
     handle: std::thread::JoinHandle<std::io::Result<CompactCopy>>,
+    generation: u64,
+    cancel: Arc<AtomicBool>,
+}
+
+/// Immutable index + file-handle snapshot for a search running without the
+/// spool lock. The cloned handle keeps the exact inode the offsets refer to
+/// even if compaction swaps the live file mid-scan.
+pub(crate) struct ColdSearchSnapshot {
+    file: File,
+    entries: Vec<Entry>,
 }
 
 /// A bounded, disk-backed row store.
@@ -58,8 +81,43 @@ pub struct ColdStore {
     line_budget: usize,
     byte_budget: usize,
     first_id: u64,
+    /// Bumped on every reset/swap; stale compaction results are discarded.
+    generation: u64,
     /// Rewrite in flight; finished by `poll_compaction`.
     compact_job: Option<CompactJob>,
+}
+
+fn compact_tmp(path: &Path, generation: u64) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "lazecode-cold".to_string());
+    path.with_file_name(format!("{name}.compact-{generation}"))
+}
+
+/// POSIX rename replaces the destination atomically. Platforms whose rename
+/// refuses an existing file keep a backup so a failed swap restores the old
+/// spool instead of losing it.
+#[cfg(unix)]
+fn replace_spool_file(tmp: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::rename(tmp, dest)
+}
+
+#[cfg(not(unix))]
+fn replace_spool_file(tmp: &Path, dest: &Path) -> std::io::Result<()> {
+    let backup = dest.with_extension("replace-backup");
+    match std::fs::rename(dest, &backup) {
+        Ok(()) => {
+            if let Err(err) = std::fs::rename(tmp, dest) {
+                let _ = std::fs::rename(&backup, dest);
+                return Err(err);
+            }
+            let _ = std::fs::remove_file(&backup);
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => std::fs::rename(tmp, dest),
+        Err(err) => Err(err),
+    }
 }
 
 impl ColdStore {
@@ -92,6 +150,7 @@ impl ColdStore {
             line_budget,
             byte_budget,
             first_id: 0,
+            generation: 1,
             compact_job: None,
         })
     }
@@ -234,14 +293,24 @@ impl ColdStore {
             return;
         }
         // The worker reads through its own handle: the store keeps serving
-        // rows and appending to the old file while the copy runs.
+        // rows and appending to the old file while the copy runs. The temp
+        // name carries the generation so a reset can never adopt its result.
         let source = self.path.clone();
-        let tmp = self.path.with_extension("compact");
+        let tmp = compact_tmp(&self.path, self.generation);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let generation = self.generation;
         let spawned = std::thread::Builder::new()
             .name("lazecode-cold-compact".to_string())
-            .spawn(move || copy_live_rows(&source, &tmp, &entries));
+            .spawn(move || copy_live_rows(&source, &tmp, &entries, &worker_cancel, generation));
         match spawned {
-            Ok(handle) => self.compact_job = Some(CompactJob { handle }),
+            Ok(handle) => {
+                self.compact_job = Some(CompactJob {
+                    handle,
+                    generation,
+                    cancel,
+                })
+            }
             Err(err) => log::warn!("cannot spawn cold spool compaction: {err}"),
         }
     }
@@ -257,18 +326,36 @@ impl ColdStore {
             self.compact_job = Some(job);
             return;
         }
-        let tmp = self.path.with_extension("compact");
+        let stale_tmp = compact_tmp(&self.path, job.generation);
+        if job.generation != self.generation {
+            // A reset happened while the worker copied. Its rows describe a
+            // store that no longer exists; drop the file instead of adopting
+            // it through a reused temp name.
+            match job.handle.join() {
+                Ok(Ok(copy)) => {
+                    let _ = std::fs::remove_file(&copy.tmp);
+                }
+                Ok(Err(_)) | Err(_) => {
+                    let _ = std::fs::remove_file(&stale_tmp);
+                }
+            }
+            return;
+        }
         let mut copy = match job.handle.join() {
-            Ok(Ok(copy)) => copy,
+            Ok(Ok(copy)) if copy.generation == self.generation => copy,
+            Ok(Ok(copy)) => {
+                let _ = std::fs::remove_file(&copy.tmp);
+                return;
+            }
             Ok(Err(err)) => {
                 log::warn!("cold scrollback spool compaction failed: {err}");
-                let _ = std::fs::remove_file(&tmp);
+                let _ = std::fs::remove_file(&stale_tmp);
                 self.dead_bytes /= 2;
                 return;
             }
             Err(_) => {
                 log::warn!("cold scrollback spool compaction panicked");
-                let _ = std::fs::remove_file(&tmp);
+                let _ = std::fs::remove_file(&stale_tmp);
                 self.dead_bytes /= 2;
                 return;
             }
@@ -292,7 +379,7 @@ impl ColdStore {
             // Output outran the worker. Falling back to the in-place copy
             // keeps disk use bounded; it holds the spool lock (not the VT
             // lock), so per-frame screen probe stays cheap.
-            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(&copy.tmp);
             if let Err(err) = self.compact_sync() {
                 log::warn!("cold scrollback spool compaction failed: {err}");
                 self.dead_bytes /= 2;
@@ -301,13 +388,13 @@ impl ColdStore {
         }
         if let Err(err) = self.append_tail(&mut copy, &mut offsets, &tail) {
             log::warn!("cold scrollback spool tail copy failed: {err}");
-            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(&copy.tmp);
             self.dead_bytes /= 2;
             return;
         }
-        if let Err(err) = self.install(&copy.tmp, copy.written, offsets) {
+        if let Err(err) = self.install(&copy, offsets) {
             log::warn!("cold scrollback spool swap failed: {err}");
-            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(&copy.tmp);
             self.dead_bytes /= 2;
             return;
         }
@@ -349,35 +436,37 @@ impl ColdStore {
         Ok(())
     }
 
-    /// Swap the rewritten file in and re-point every row offset.
-    fn install(&mut self, tmp: &Path, written: u64, offsets: Vec<u64>) -> std::io::Result<()> {
-        std::fs::remove_file(&self.path)?;
-        std::fs::rename(tmp, &self.path)?;
-        let file = OpenOptions::new().read(true).write(true).open(&self.path)?;
-        drop(std::mem::replace(&mut self.file, file));
+    /// Swap the rewritten file in and re-point every row offset. The new
+    /// handle is opened before the rename, so a failure leaves the old file
+    /// and its offsets untouched.
+    fn install(&mut self, copy: &CompactCopy, offsets: Vec<u64>) -> std::io::Result<()> {
+        if copy.generation != self.generation {
+            return Err(std::io::Error::other("stale compaction result"));
+        }
         if offsets.len() != self.entries.len() {
-            // The store was reset while the worker ran; keep it consistent
-            // instead of binding rows to unknown offsets.
-            log::warn!("cold scrollback spool changed under compaction; dropping spool");
-            self.clear();
             return Err(std::io::Error::other("entry set changed during compaction"));
         }
+        let file = OpenOptions::new().read(true).write(true).open(&copy.tmp)?;
+        replace_spool_file(&copy.tmp, &self.path)?;
+        drop(std::mem::replace(&mut self.file, file));
         for (entry, offset) in self.entries.iter_mut().zip(offsets) {
             entry.offset = offset;
         }
-        self.file_len = written;
+        self.file_len = copy.written;
+        self.generation = self.generation.wrapping_add(1);
         // The copy also holds rows that were live at snapshot time but have
         // been evicted (or re-spooled) since, plus the re-appended tail, so
         // the file is not garbage-free yet.
-        self.dead_bytes = written.saturating_sub(self.live_bytes as u64);
+        self.dead_bytes = copy.written.saturating_sub(self.live_bytes as u64);
         Ok(())
     }
 
     /// Copy live rows into a fresh file; offsets switch only after success.
     /// Runs on the reader only as the over-budget fallback.
     fn compact_sync(&mut self) -> std::io::Result<()> {
-        let tmp_path = self.path.with_extension("compact");
+        let tmp_path = compact_tmp(&self.path, self.generation);
         let mut tmp = OpenOptions::new()
+            .read(true)
             .write(true)
             .create(true)
             .truncate(true)
@@ -399,30 +488,15 @@ impl ColdStore {
         }
         tmp.flush()?;
         tmp.sync_all()?;
-        drop(tmp);
-        std::fs::remove_file(&self.path)?;
-        std::fs::rename(&tmp_path, &self.path)?;
-        let reopened = OpenOptions::new().read(true).write(true).open(&self.path);
-        match reopened {
-            Ok(file) => {
-                self.file = file;
-                self.file_len = written;
-                self.dead_bytes = 0;
-                for (entry, offset) in self.entries.iter_mut().zip(new_offsets) {
-                    entry.offset = offset;
-                }
-                Ok(())
-            }
-            Err(err) => {
-                // The rename already happened; without a valid handle into the
-                // new file the store cannot serve its rows. Reset to an empty
-                // (consistent) store rather than risking misaligned reads.
-                log::warn!("cold scrollback spool: reopen after compaction failed: {err}");
-                self.clear();
-                let _ = std::fs::remove_file(&tmp_path);
-                Err(err)
-            }
+        replace_spool_file(&tmp_path, &self.path)?;
+        self.file = tmp;
+        self.file_len = written;
+        self.dead_bytes = 0;
+        self.generation = self.generation.wrapping_add(1);
+        for (entry, offset) in self.entries.iter_mut().zip(new_offsets) {
+            entry.offset = offset;
         }
+        Ok(())
     }
 
     /// Decode the row at `index` (0 = oldest retained).
@@ -452,29 +526,90 @@ impl ColdStore {
             .ok()
     }
 
-    /// Case-insensitive scan over retained rows; `emit` gets the absolute row
-    /// id plus column span, stopping after `limit` hits or when `cancel` is
-    /// set (the scan runs on a worker for the find bar).
+    /// Smart-case regex scan over retained rows. The public signature is
+    /// unchanged; the index/handle snapshot is taken here and the scan itself
+    /// runs on the caller's worker without holding the spool lock.
     pub fn search(
         &mut self,
-        needle_lower: &str,
+        needle: &str,
+        limit: usize,
+        emit: impl FnMut(u64, usize, usize),
+        cancel: Option<&AtomicBool>,
+    ) {
+        if let Ok(snapshot) = self.search_snapshot() {
+            snapshot.search(needle, limit, emit, cancel);
+        }
+    }
+
+    /// Copy only what the scan needs: the fd (so offsets keep pointing at the
+    /// right inode across compaction) and the row index. Cheap enough to take
+    /// under the spool lock on every keystroke.
+    pub(crate) fn search_snapshot(&self) -> std::io::Result<ColdSearchSnapshot> {
+        Ok(ColdSearchSnapshot {
+            file: self.file.try_clone()?,
+            entries: self.entries.iter().copied().collect(),
+        })
+    }
+
+    /// Stop an in-flight rewrite and remove its generation-tagged temp file.
+    /// The worker only owns its own handles, so joining under the spool lock
+    /// cannot deadlock with the reader.
+    fn cancel_compaction(&mut self) {
+        let Some(job) = self.compact_job.take() else {
+            return;
+        };
+        job.cancel.store(true, Ordering::Relaxed);
+        let tmp = compact_tmp(&self.path, job.generation);
+        match job.handle.join() {
+            Ok(Ok(copy)) => {
+                let _ = std::fs::remove_file(&copy.tmp);
+            }
+            Ok(Err(_)) | Err(_) => {
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+    }
+
+    /// Drop every retained row and truncate the file. Any rewrite from an
+    /// older generation is cancelled and its result invalidated first.
+    pub fn clear(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.cancel_compaction();
+        self.entries.clear();
+        self.live_bytes = 0;
+        self.dead_bytes = 0;
+        self.file_len = 0;
+        let _ = self.file.set_len(0);
+        let _ = self.file.seek(SeekFrom::Start(0));
+    }
+}
+
+impl ColdSearchSnapshot {
+    /// Same query semantics as the hot grid: rio's `RegexSearch` applies
+    /// smart-case (lowercase queries fold case, uppercase queries do not)
+    /// and accepts the same regex syntax. Invalid patterns fall back to the
+    /// literal scan used by the hot grid's invalid-regex path.
+    pub(crate) fn search(
+        &self,
+        query: &str,
         limit: usize,
         mut emit: impl FnMut(u64, usize, usize),
-        cancel: Option<&std::sync::atomic::AtomicBool>,
+        cancel: Option<&AtomicBool>,
     ) {
-        if needle_lower.is_empty() || limit == 0 {
+        if query.is_empty() || limit == 0 {
             return;
         }
+        let mut regex = RegexSearch::new(query).ok();
+        let mut scratch = regex.as_ref().map(|_| scratch_terminal(1));
+        let folded = query.to_lowercase();
         let mut hits = 0usize;
         let mut row_buffer = vec![0u8; 64 * 1024];
-        for entry in self.entries.iter() {
+        for entry in &self.entries {
             if hits >= limit {
                 break;
             }
-            if let Some(cancel) = cancel {
-                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                    return;
-                }
+            if cancel.is_some_and(|cancel| cancel.load(Ordering::Relaxed)) {
+                return;
             }
             if entry.len == 0 {
                 continue;
@@ -482,50 +617,161 @@ impl ColdStore {
             if row_buffer.len() < entry.len as usize {
                 row_buffer.resize(entry.len as usize, 0);
             }
-            if self.file.seek(SeekFrom::Start(entry.offset)).is_err()
-                || self
-                    .file
-                    .read_exact(&mut row_buffer[..entry.len as usize])
-                    .is_err()
-            {
-                continue;
+            let len = entry.len as usize;
+            match self.file.read_at(&mut row_buffer[..len], entry.offset) {
+                Ok(read) if read == len => {}
+                _ => continue,
             }
             let Some(cells) = decode_row(&row_buffer[..entry.len as usize]) else {
                 continue;
             };
-            let (text, columns) = row_text(&cells);
-            let mut spans = Vec::new();
-            find_matches(&text, &columns, needle_lower, limit - hits, &mut spans);
-            for (col, len) in spans {
-                emit(entry.id, col, len);
-                hits += 1;
-                if hits >= limit {
-                    return;
+            if let Some(regex) = regex.as_mut() {
+                for (col, len) in regex_spans(
+                    &cells,
+                    scratch.as_mut().expect("scratch"),
+                    regex,
+                    limit - hits,
+                ) {
+                    emit(entry.id, col, len);
+                    hits += 1;
+                    if hits >= limit {
+                        return;
+                    }
+                }
+            } else {
+                let (text, columns) = row_text(&cells);
+                let mut spans = Vec::new();
+                find_matches(&text, &columns, &folded, limit - hits, &mut spans);
+                for (col, len) in spans {
+                    emit(entry.id, col, len);
+                    hits += 1;
+                    if hits >= limit {
+                        return;
+                    }
                 }
             }
         }
     }
+}
 
-    /// Drop every retained row and truncate the file.
-    pub fn clear(&mut self) {
-        self.entries.clear();
-        self.live_bytes = 0;
-        self.dead_bytes = 0;
-        self.file_len = 0;
-        // A rewrite that started before this reset must not install rows that
-        // no longer exist. The handle is detached; a rare leftover temp file
-        // is swept at the next launch like any other stale spool.
-        self.compact_job = None;
-        let _ = std::fs::remove_file(self.path.with_extension("compact"));
-        let _ = self.file.set_len(0);
-        let _ = self.file.seek(SeekFrom::Start(0));
+fn scratch_terminal(cols: usize) -> Crosswords<VoidListener> {
+    Crosswords::new(
+        CrosswordsSize::new(cols.max(1), 1),
+        RioCursorShape::Block,
+        VoidListener,
+        WindowId::from(0),
+        0,
+        0,
+    )
+}
+
+/// Run the same DFA the hot grid uses over one row's decoded cells. Scratch
+/// cells are written at their original columns (without wide/spacer flags,
+/// which `row_text` already removed), so reported columns and lengths stay in
+/// the terminal's grid coordinate space.
+fn regex_spans(
+    cells: &[CellData],
+    scratch: &mut Crosswords<VoidListener>,
+    regex: &mut RegexSearch,
+    limit: usize,
+) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    if cells.is_empty() || limit == 0 {
+        return out;
     }
+    let cols = cells.len();
+    if scratch.grid.columns() < cols {
+        scratch.resize(CrosswordsSize::new(cols, 1));
+    }
+    {
+        let row = &mut scratch.grid[Line(0)];
+        for col in 0..row.len() {
+            row[Column(col)] = Square::from_char(' ');
+        }
+    }
+    let mut writes = Vec::with_capacity(cols);
+    for (col, cell) in cells.iter().enumerate() {
+        if cell.attrs & (ATTR_SPACER | ATTR_LEADING_SPACER) != 0 {
+            continue;
+        }
+        let (base, zerowidth) = match cell.text.as_deref() {
+            Some(text) if !text.is_empty() => {
+                let mut chars = text.chars();
+                let base = chars.next().unwrap_or(' ');
+                (
+                    if base == '\0' { ' ' } else { base },
+                    chars.collect::<Vec<char>>(),
+                )
+            }
+            _ => (
+                if cell.ch == '\0' { ' ' } else { cell.ch },
+                Vec::<char>::new(),
+            ),
+        };
+        let mut square = Square::from_char(base);
+        if !zerowidth.is_empty() {
+            let id = scratch
+                .grid
+                .extras_table
+                .alloc(rio_vt::crosswords::square::Extras {
+                    zerowidth,
+                    hyperlink: None,
+                });
+            if id != 0 {
+                square.set_extras_id(Some(id));
+                square.insert_cell_flag(CellFlags::GRAPHEME);
+                scratch.grid[Line(0)].has_extras = true;
+            }
+        }
+        writes.push((col, square));
+    }
+    {
+        let row = &mut scratch.grid[Line(0)];
+        for (col, square) in writes {
+            row[Column(col)] = square;
+        }
+    }
+    let start = Pos {
+        row: Line(0),
+        col: Column(0),
+    };
+    let end = Pos {
+        row: Line(0),
+        col: Column(cols - 1),
+    };
+    let mut origin = start;
+    while out.len() < limit {
+        let Some(hit) = scratch.regex_search_right(regex, origin, end) else {
+            break;
+        };
+        let from = hit.start().col.0;
+        let to = hit.end().col.0;
+        if from >= cols {
+            break;
+        }
+        out.push((from.min(cols - 1), to.saturating_sub(from) + 1));
+        let next = to.saturating_add(1);
+        if next >= cols {
+            break;
+        }
+        origin = Pos {
+            row: Line(0),
+            col: Column(next),
+        };
+    }
+    out
 }
 
 /// Worker side of an asynchronous rewrite: copy the live rows through an
 /// independent read handle so the store keeps serving rows and appending to
-/// the old file meanwhile.
-fn copy_live_rows(source: &Path, tmp: &Path, entries: &[Entry]) -> std::io::Result<CompactCopy> {
+/// the old file meanwhile. `cancel` lets a reset stop the copy promptly.
+fn copy_live_rows(
+    source: &Path,
+    tmp: &Path,
+    entries: &[Entry],
+    cancel: &AtomicBool,
+    generation: u64,
+) -> std::io::Result<CompactCopy> {
     let mut src = File::open(source)?;
     let mut dest = OpenOptions::new()
         .write(true)
@@ -536,6 +782,10 @@ fn copy_live_rows(source: &Path, tmp: &Path, entries: &[Entry]) -> std::io::Resu
     let mut written = 0u64;
     let mut rows = Vec::with_capacity(entries.len());
     for entry in entries {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = std::fs::remove_file(tmp);
+            return Err(std::io::Error::other("compaction cancelled"));
+        }
         src.seek(SeekFrom::Start(entry.offset))?;
         let mut remaining = entry.len as usize;
         rows.push((entry.id, written));
@@ -553,14 +803,17 @@ fn copy_live_rows(source: &Path, tmp: &Path, entries: &[Entry]) -> std::io::Resu
         tmp: tmp.to_path_buf(),
         written,
         rows,
+        generation,
     })
 }
 
 impl Drop for ColdStore {
     fn drop(&mut self) {
+        // A worker outliving the store must not recreate its temp file here.
+        self.cancel_compaction();
         // Session close removes the spooled history from disk.
         let _ = std::fs::remove_file(&self.path);
-        let _ = std::fs::remove_file(self.path.with_extension("compact"));
+        let _ = std::fs::remove_file(compact_tmp(&self.path, self.generation));
     }
 }
 
@@ -929,6 +1182,146 @@ mod tests {
             None,
         );
         assert_eq!(hits, vec![(100, 6, 6), (102, 0, 6)]);
+    }
+
+    #[test]
+    fn cold_search_uses_the_hot_grids_smart_case_regex() {
+        let mut store = ColdStore::create(100, 1 << 20).expect("create");
+        let rows = vec![
+            encode_row(&row("row-17-marker")),
+            encode_row(&row("row-18-MARKER")),
+            encode_row(&row("row-19-marker")),
+            encode_row(&row("[unclosed marker")),
+        ];
+        store.append_rows(10, &rows);
+        let mut hits = |query: &str| {
+            let mut hits = Vec::new();
+            store.search(query, 20, |id, col, len| hits.push((id, col, len)), None);
+            hits
+        };
+        // Regex classes work across cold rows, and a lowercase query folds
+        // case exactly like rio's hot-grid DFA.
+        assert_eq!(
+            hits("row-1[7-9]-marker"),
+            vec![(10, 0, 13), (11, 0, 13), (12, 0, 13)]
+        );
+        // Any uppercase letter opts out of folding for the whole query.
+        assert!(hits("row-17-MARKER").is_empty());
+        assert_eq!(hits("row-18-MARKER"), vec![(11, 0, 13)]);
+        // An invalid regex falls back to the hot path's literal semantics.
+        assert_eq!(hits("[unclosed"), vec![(13, 0, 9)]);
+    }
+
+    #[test]
+    fn snapshot_search_runs_without_the_spool_lock() {
+        let mut store = ColdStore::create(100, 1 << 20).expect("create");
+        store.append_rows(0, &[encode_row(&row("marker row"))]);
+        let snapshot = store.search_snapshot().expect("snapshot");
+        let locked_store = parking_lot::Mutex::new(store);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut hits = Vec::new();
+            snapshot.search("marker", 10, |id, col, len| hits.push((id, col, len)), None);
+            let _ = tx.send(hits);
+        });
+        // If any part of the scan needed the store lock this would deadlock
+        // until the 2s timeout instead of returning hits.
+        let guard = locked_store.lock();
+        let hits = rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("cold scan blocked on the spool lock");
+        drop(guard);
+        worker.join().expect("search worker");
+        assert_eq!(hits, vec![(0, 0, 6)]);
+    }
+
+    #[test]
+    fn clear_cancels_and_invalidates_an_in_flight_rewrite() {
+        let mut store = ColdStore::create(10, 1 << 20).expect("create");
+        store.append_rows(0, &[encode_row(&row("old row"))]);
+        let generation = store.generation;
+        let tmp = compact_tmp(store.path(), generation);
+        std::fs::write(&tmp, b"stale").expect("stale temp");
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let worker_tmp = tmp.clone();
+        let handle = std::thread::spawn(move || {
+            while !worker_cancel.load(Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Ok::<_, std::io::Error>(CompactCopy {
+                tmp: worker_tmp,
+                written: 5,
+                rows: vec![(0, 0)],
+                generation,
+            })
+        });
+        store.compact_job = Some(CompactJob {
+            handle,
+            generation,
+            cancel,
+        });
+        store.clear();
+        assert!(store.compact_job.is_none());
+        assert_eq!(store.len(), 0);
+        assert_eq!(store.file_bytes(), 0);
+        assert!(!tmp.exists(), "the cancelled worker's temp must be removed");
+        store.poll_compaction();
+        assert_eq!(store.len(), 0, "a cleared store must not regain rows");
+        assert!(store.path().exists());
+    }
+
+    #[test]
+    fn stale_compaction_result_is_not_installed() {
+        let mut store = ColdStore::create(10, 1 << 20).expect("create");
+        store.append_rows(0, &[encode_row(&row("kept row"))]);
+        let generation = store.generation;
+        let tmp = compact_tmp(store.path(), generation);
+        // A stale worker's temp holds junk that would destroy the row if the
+        // result were adopted after a reset.
+        std::fs::write(&tmp, b"junk").expect("stale temp");
+        let worker_tmp = tmp.clone();
+        let handle = std::thread::spawn(move || {
+            Ok::<_, std::io::Error>(CompactCopy {
+                tmp: worker_tmp,
+                written: 4,
+                rows: vec![(0, 0)],
+                generation,
+            })
+        });
+        store.compact_job = Some(CompactJob {
+            handle,
+            generation,
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        store.generation = generation + 1;
+        for _ in 0..1000 {
+            store.poll_compaction();
+            if !tmp.exists() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(!tmp.exists());
+        let cells = store.get(0).expect("live row survived");
+        assert_eq!(row_text(&cells).0.trim_end(), "kept row");
+    }
+
+    #[test]
+    fn failed_install_keeps_the_live_spool() {
+        let mut store = ColdStore::create(10, 1 << 20).expect("create");
+        store.append_rows(0, &[encode_row(&row("kept row"))]);
+        let path = store.path().to_path_buf();
+        let copy = CompactCopy {
+            tmp: path.with_file_name("lazecode-cold-missing.compact-9"),
+            written: 0,
+            rows: Vec::new(),
+            generation: store.generation,
+        };
+        assert!(store.install(&copy, vec![0]).is_err());
+        assert!(path.exists(), "a failed swap must not delete the old spool");
+        let cells = store.get(0).expect("old index still valid");
+        assert_eq!(row_text(&cells).0.trim_end(), "kept row");
     }
 
     #[test]

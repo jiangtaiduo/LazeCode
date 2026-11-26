@@ -391,20 +391,31 @@ impl AppModel {
                 project.reload_tree(settings);
             }
         }
+        // Tree rows and one-shot navigation requests are checkout-relative;
+        // recent files below stay absolute.
+        let ui_root = self
+            .active_project
+            .and_then(|index| self.projects.get(index))
+            .map(|project| project.active_root().to_path_buf());
+        let retarget_ui = |path: PathBuf| {
+            ui_root
+                .as_ref()
+                .and_then(|root| retarget_checkout_relative(&path, &old, &new, root))
+                .unwrap_or(path)
+        };
         if let Some(path) = self.ui.tree_selected.take() {
-            self.ui.tree_selected = Some(retarget_absolute(&path, &old, &new).unwrap_or(path));
+            self.ui.tree_selected = Some(retarget_ui(path));
         }
         let mut selection = std::collections::HashSet::with_capacity(self.ui.tree_selection.len());
         for path in self.ui.tree_selection.drain() {
-            selection.insert(retarget_absolute(&path, &old, &new).unwrap_or(path));
+            selection.insert(retarget_ui(path));
         }
         self.ui.tree_selection = selection;
         if let Some((path, center)) = self.ui.tree_reveal.take() {
-            self.ui.tree_reveal =
-                Some((retarget_absolute(&path, &old, &new).unwrap_or(path), center));
+            self.ui.tree_reveal = Some((retarget_ui(path), center));
         }
         if let Some((path, at)) = self.ui.locate_flash.take() {
-            self.ui.locate_flash = Some((retarget_absolute(&path, &old, &new).unwrap_or(path), at));
+            self.ui.locate_flash = Some((retarget_ui(path), at));
         }
         let mut recent = Vec::with_capacity(self.recent_files.len());
         for path in self.recent_files.drain(..) {

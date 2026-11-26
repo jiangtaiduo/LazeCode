@@ -2845,32 +2845,17 @@ impl JobQueue {
                     return;
                 }
                 let path = file.doc.path.clone();
-                let revision = file.doc.revision;
-                let data = SaveData {
-                    text: file.doc.text(),
-                    encoding: file.doc.encoding,
-                    eol: file.doc.eol,
-                    bom: file.doc.had_bom,
-                };
-                let key = format!("save:{}", path.display());
-                let job_root = root.clone();
-                let job_path = path.clone();
-                self.spawn("save", key, move || {
-                    let result = lazecode_fs::file::write_text_file(
-                        &job_path,
-                        &data.text,
-                        data.encoding,
-                        data.eol,
-                        data.bom,
-                    )
-                    .map_err(|err| err.to_string());
-                    JobResult::Saved {
-                        root: job_root,
-                        path: job_path,
-                        revision,
-                        result,
-                    }
-                });
+                let stamp = Self::disk_stamp(&path);
+                self.queue_save(
+                    root,
+                    path,
+                    file.doc.text(),
+                    file.doc.encoding,
+                    file.doc.eol,
+                    file.doc.had_bom,
+                    file.doc.revision,
+                    stamp,
+                );
             }
             Command::SaveAll => {
                 let ids: Vec<u64> = model

@@ -272,10 +272,27 @@ pub struct JobCompletion {
     pub result: JobResult,
 }
 
+const JOB_QUEUE_CAPACITY: usize = 128;
+const JOB_WORKERS: usize = 8;
+
+/// Bounded work item: a burst of searches or SaveAll must not create an
+/// unbounded number of threads or result messages.
+type QueuedJob = (String, Box<dyn FnOnce() -> JobResult + Send>);
+
+fn panicked_result() -> JobResult {
+    JobResult::OpDone {
+        root: PathBuf::new(),
+        message: "background task panicked".to_string(),
+        ok: false,
+        refresh: false,
+        reload_files: false,
+        clear_commit_message: false,
+    }
+}
+
 pub struct JobQueue {
     pub rx: Receiver<JobCompletion>,
-    tx: Sender<JobCompletion>,
-    notifier: Arc<dyn Notifier>,
+    submit_tx: Sender<QueuedJob>,
     in_flight: HashSet<String>,
     pending_git: HashSet<PathBuf>,
     /// Worktrees whose reload was requested mid-scan; re-queued when the running
@@ -297,11 +314,29 @@ pub struct JobQueue {
 
 impl JobQueue {
     pub fn new(notifier: Arc<dyn Notifier>) -> Self {
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (result_tx, rx) = crossbeam_channel::bounded(JOB_QUEUE_CAPACITY);
+        let (submit_tx, submit_rx) = crossbeam_channel::bounded::<QueuedJob>(JOB_QUEUE_CAPACITY);
+        for index in 0..JOB_WORKERS {
+            let worker_rx = submit_rx.clone();
+            let worker_tx = result_tx.clone();
+            let worker_notifier = notifier.clone();
+            if let Err(err) = std::thread::Builder::new()
+                .name(format!("lazecode-job-{index}"))
+                .spawn(move || {
+                    while let Ok((key, job)) = worker_rx.recv() {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
+                            .unwrap_or_else(|_| panicked_result());
+                        let _ = worker_tx.send(JobCompletion { key, result });
+                        worker_notifier.notify();
+                    }
+                })
+            {
+                log::error!("cannot start job worker {index}: {err}");
+            }
+        }
         Self {
             rx,
-            tx,
-            notifier,
+            submit_tx,
             in_flight: HashSet::new(),
             pending_git: HashSet::new(),
             pending_trees: HashSet::new(),
@@ -311,6 +346,69 @@ impl JobQueue {
             pending_compare_local: HashSet::new(),
             search_cancels: HashMap::new(),
         }
+    }
+
+    /// True while a write or refresh job is still running. The quit path uses
+    /// this to avoid ending the process in the middle of an atomic save.
+    pub fn has_in_flight(&self) -> bool {
+        !self.in_flight.is_empty()
+    }
+
+    /// Disk identity captured when a save is queued. A mismatch at job start
+    /// means another process wrote the file in between and the save must not
+    /// silently overwrite it.
+    pub fn disk_stamp(path: &std::path::Path) -> Option<(Option<std::time::SystemTime>, u64)> {
+        let meta = std::fs::metadata(path).ok()?;
+        Some((meta.modified().ok(), meta.len()))
+    }
+
+    /// Queue a buffer save without blocking the UI thread on fsync.
+    #[allow(clippy::too_many_arguments)]
+    pub fn queue_save(
+        &mut self,
+        root: PathBuf,
+        path: PathBuf,
+        text: String,
+        encoding: Option<&'static encoding_rs::Encoding>,
+        eol: lazecode_fs::Eol,
+        bom: bool,
+        revision: u64,
+        disk_stamp: Option<(Option<std::time::SystemTime>, u64)>,
+    ) {
+        let data = SaveData {
+            text,
+            encoding,
+            eol,
+            bom,
+            disk_stamp,
+        };
+        let key = format!("save:{}", path.display());
+        let job_path = path.clone();
+        self.spawn("save", key, move || {
+            let current = Self::disk_stamp(&job_path);
+            if current != data.disk_stamp {
+                return JobResult::Saved {
+                    root,
+                    path: job_path,
+                    revision,
+                    result: Err("file changed on disk while the save was pending".into()),
+                };
+            }
+            let result = lazecode_fs::file::write_text_file(
+                &job_path,
+                &data.text,
+                data.encoding,
+                data.eol,
+                data.bom,
+            )
+            .map_err(|err| err.to_string());
+            JobResult::Saved {
+                root,
+                path: job_path,
+                revision,
+                result,
+            }
+        });
     }
 
     fn spawn(
@@ -323,33 +421,13 @@ impl JobQueue {
             log::debug!("dropping duplicate {name} job for {key}");
             return false;
         }
-        let tx = self.tx.clone();
-        let notifier = self.notifier.clone();
-        let job_key = key.clone();
-        let thread = std::thread::Builder::new()
-            .name(format!("lazecode-{name}"))
-            .spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
-                    .unwrap_or_else(|_| JobResult::OpDone {
-                        root: PathBuf::new(),
-                        message: "background task panicked".to_string(),
-                        ok: false,
-                        refresh: false,
-                        reload_files: false,
-                        clear_commit_message: false,
-                    });
-                let _ = tx.send(JobCompletion {
-                    key: job_key,
-                    result,
-                });
-                notifier.notify();
-            });
-        if let Err(err) = thread {
-            self.in_flight.remove(&key);
-            log::error!("cannot spawn {name} job: {err}");
-            false
-        } else {
-            true
+        match self.submit_tx.try_send((key.clone(), Box::new(job))) {
+            Ok(()) => true,
+            Err(err) => {
+                self.in_flight.remove(&key);
+                log::error!("job queue full, dropping {name} for {key}: {err}");
+                false
+            }
         }
     }
 }
@@ -359,6 +437,7 @@ struct SaveData {
     encoding: Option<&'static encoding_rs::Encoding>,
     eol: lazecode_fs::Eol,
     bom: bool,
+    disk_stamp: Option<(Option<std::time::SystemTime>, u64)>,
 }
 
 /// Move only the selected local changes to `target` using a temporary shelf.
@@ -1213,5 +1292,41 @@ mod tests {
             .is_some_and(|toast| toast.message.contains('2')));
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&remote);
+    }
+
+    #[test]
+    fn queued_save_refuses_to_overwrite_an_external_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("note.txt");
+        std::fs::write(&path, "original\n").unwrap();
+        let stamp = JobQueue::disk_stamp(&path);
+        // Another tool writes between snapshotting the buffer and the worker
+        // starting; the queued save must not replace that content.
+        std::fs::write(&path, "external\n").unwrap();
+
+        let mut queue = JobQueue::new(Arc::new(NoopNotifier));
+        assert!(!queue.has_in_flight());
+        queue.queue_save(
+            dir.path().to_path_buf(),
+            path.clone(),
+            "our buffer\n".into(),
+            None,
+            lazecode_fs::Eol::Lf,
+            false,
+            7,
+            stamp,
+        );
+        assert!(queue.has_in_flight());
+        let completion = queue
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the worker must report the save");
+        match completion.result {
+            JobResult::Saved {
+                result: Err(err), ..
+            } => assert!(err.contains("changed on disk")),
+            _ => panic!("expected a save conflict"),
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "external\n");
     }
 }

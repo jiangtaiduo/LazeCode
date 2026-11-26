@@ -2,7 +2,7 @@
 //! materialise, without invoking the `git` binary.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, Context};
@@ -222,6 +222,12 @@ fn sha256_hex(data: &[u8]) -> String {
     out
 }
 
+const LFS_OID_LEN: usize = 64;
+
+fn valid_lfs_oid(oid: &str) -> bool {
+    oid.len() == LFS_OID_LEN && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn lfs_pointer(data: &[u8]) -> Option<(String, u64)> {
     let text = std::str::from_utf8(data).ok()?;
     let mut version = false;
@@ -236,16 +242,80 @@ fn lfs_pointer(data: &[u8]) -> Option<(String, u64)> {
             size = value.trim().parse::<u64>().ok();
         }
     }
-    (version && oid.is_some() && size.is_some())
-        .then(|| (oid.unwrap_or_default(), size.unwrap_or(0)))
+    let oid = oid?;
+    if !valid_lfs_oid(&oid) {
+        log::warn!("ignoring LFS pointer with a malformed object id");
+        return None;
+    }
+    (version && size.is_some()).then(|| (oid, size.unwrap_or(0)))
 }
 
-fn lfs_object_path(repo: &gix::Repository, oid: &str) -> std::path::PathBuf {
-    repo.common_dir()
-        .join("lfs/objects")
-        .join(&oid[..2.min(oid.len())])
-        .join(&oid[2.min(oid.len())..4.min(oid.len())])
-        .join(oid)
+/// Resolve the deepest existing ancestor of `path`, then append the missing
+/// components. Canonicalising only the existing part keeps symlinked parents
+/// from redirecting a not-yet-created LFS object outside the object store.
+fn canonical_existing_prefix(path: &Path) -> Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::canonicalize(&current) {
+            Ok(resolved) => {
+                let mut resolved = resolved;
+                for component in missing.into_iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = current
+                    .file_name()
+                    .ok_or_else(|| anyhow!("cannot resolve LFS object path"))?
+                    .to_os_string();
+                missing.push(name);
+                current = current
+                    .parent()
+                    .ok_or_else(|| anyhow!("cannot resolve LFS object path"))?
+                    .to_path_buf();
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+/// Resolve an object id strictly inside `<common_dir>/lfs/objects`. Both the
+/// object store itself and each existing path component are canonicalised so
+/// absolute ids, `..`, and symlink escapes are rejected instead of read.
+fn lfs_object_path(repo: &gix::Repository, oid: &str) -> Result<PathBuf> {
+    if !valid_lfs_oid(oid) {
+        return Err(anyhow!("invalid LFS object id '{oid}'"));
+    }
+    let common = std::fs::canonicalize(repo.common_dir())?;
+    let objects = common.join("lfs").join("objects");
+    let root = std::fs::canonicalize(&objects)?;
+    if root != objects {
+        return Err(anyhow!(
+            "LFS object directory resolves outside of {}",
+            objects.display()
+        ));
+    }
+    let candidate = root.join(&oid[..2]).join(&oid[2..4]).join(oid);
+    let parent = candidate
+        .parent()
+        .ok_or_else(|| anyhow!("LFS object has no parent directory"))?;
+    let canonical_parent = canonical_existing_prefix(parent)?;
+    if !canonical_parent.starts_with(&root) {
+        return Err(anyhow!("LFS object path escapes the object directory"));
+    }
+    let resolved = match std::fs::canonicalize(&candidate) {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            canonical_parent.join(candidate.file_name().expect("LFS object has a file name"))
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if !resolved.starts_with(&root) {
+        return Err(anyhow!("LFS object path escapes the object directory"));
+    }
+    Ok(resolved)
 }
 
 fn lfs_clean(repo: &gix::Repository, data: &[u8]) -> Result<Vec<u8>> {
@@ -253,11 +323,10 @@ fn lfs_clean(repo: &gix::Repository, data: &[u8]) -> Result<Vec<u8>> {
         return Ok(data.to_vec());
     }
     let oid = sha256_hex(data);
-    let path = lfs_object_path(repo, &oid);
+    let object_dir = repo.common_dir().join("lfs/objects");
+    std::fs::create_dir_all(&object_dir)?;
+    let path = lfs_object_path(repo, &oid)?;
     if !path.exists() {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         lazecode_fs::file::write_atomic(&path, data)?;
     }
     Ok(format!(
@@ -303,7 +372,7 @@ fn lfs_clean_file(repo: &gix::Repository, source: &Path) -> Result<Vec<u8>> {
         use std::fmt::Write as _;
         let _ = write!(oid, "{byte:02x}");
     }
-    let target = lfs_object_path(repo, &oid);
+    let target = lfs_object_path(repo, &oid)?;
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -319,7 +388,13 @@ fn lfs_smudge(repo: &gix::Repository, data: &[u8]) -> Result<Vec<u8>> {
     let Some((oid, size)) = lfs_pointer(data) else {
         return Ok(data.to_vec());
     };
-    let path = lfs_object_path(repo, &oid);
+    let path = match lfs_object_path(repo, &oid) {
+        Ok(path) => path,
+        Err(error) => {
+            log::warn!("LFS object path is unsafe ({error}); leaving pointer text");
+            return Ok(data.to_vec());
+        }
+    };
     match std::fs::read(&path) {
         Ok(bytes) if bytes.len() as u64 == size => Ok(bytes),
         Ok(bytes) => {
@@ -365,7 +440,13 @@ fn smudge_lfs_to_file_with(
     let Some((oid, expected)) = lfs_pointer(data) else {
         return Ok(false);
     };
-    let object = lfs_object_path(repo, &oid);
+    let object = match lfs_object_path(repo, &oid) {
+        Ok(object) => object,
+        Err(error) => {
+            log::warn!("LFS object path is unsafe ({error}); leaving pointer text");
+            return Ok(false);
+        }
+    };
     let Ok(mut input) = std::fs::File::open(&object) else {
         log::warn!("LFS object {oid} is missing; leaving pointer text");
         return Ok(false);
@@ -520,7 +601,10 @@ impl<'repo> FilterContext<'repo> {
         Ok(lfs_pointer(data))
     }
 
-    pub fn lfs_object_path(&self, oid: &str) -> std::path::PathBuf {
+    /// Resolve an object id inside the repository's LFS object store. A
+    /// malformed or escaping id is an error so callers cannot read unrelated
+    /// files (including through symlinks).
+    pub fn lfs_object_path(&self, oid: &str) -> Result<PathBuf> {
         lfs_object_path(self.stack.repo, oid)
     }
 

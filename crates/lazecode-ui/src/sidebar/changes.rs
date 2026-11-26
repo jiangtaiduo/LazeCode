@@ -4,6 +4,14 @@
 use super::prelude::*;
 use super::{active, active_mut};
 
+/// Position of a file-only index among all rendered rows. Group headers and
+/// directory rows have no change index and are skipped by the position count.
+fn file_row_index(
+    mut rows: impl Iterator<Item = Option<usize>>,
+    file_index: usize,
+) -> Option<usize> {
+    rows.position(|change| change == Some(file_index))
+}
 #[allow(clippy::too_many_arguments)]
 pub(super) fn change_row(
     ui: &mut Ui,
@@ -942,9 +950,8 @@ pub(super) fn source_control(
     // Keyboard: ↑/↓/Home/End move the single file selection while the pointer
     // is over the list. Group and directory rows stay mouse-only (clicking a
     // group selects the whole changelist), so only file rows are stepped.
-    let keys_free = !rt.blocks_input(model) && !rt.typing_surface_owns_keys(model, ui.ctx());
     let mut nav_scroll: Option<f32> = None;
-    if keys_free {
+    if crate::list_nav::keys_free(ui, model, rt) {
         if let Some(mv) = crate::list_nav::hovered_move(ui, rows_rect) {
             let current = {
                 let project = active(model);
@@ -960,7 +967,10 @@ pub(super) fn source_control(
                 project.change_selection.clear();
                 project.change_selection.insert(path.clone());
                 project.change_anchor = Some(path);
-                nav_scroll = Some((next as f32 * 21.0 - rows_rect.height() * 0.5 + 10.5).max(0.0));
+                // `show_rows` counts headers and directory rows, so scrolling
+                // must use the row position, not the file-only index.
+                nav_scroll = file_row_index(rows.iter().map(|row| row.change), flat_order[next])
+                    .map(|row| crate::list_nav::centered_scroll(row, 21.0, rows_rect.height()));
             }
         }
     }
@@ -1717,5 +1727,20 @@ pub(super) fn draw_commit_dock(
             project.open_push_after_commit = true;
         }
         model.queue(Command::Commit);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn navigation_row_index_skips_header_and_directory_rows() {
+        // Header, file 0, directory, file 1, file 2.
+        let rows = [None, Some(0), None, Some(1), Some(2)];
+        assert_eq!(file_row_index(rows.iter().copied(), 0), Some(1));
+        assert_eq!(file_row_index(rows.iter().copied(), 1), Some(3));
+        assert_eq!(file_row_index(rows.iter().copied(), 2), Some(4));
+        assert_eq!(file_row_index(rows.iter().copied(), 7), None);
     }
 }

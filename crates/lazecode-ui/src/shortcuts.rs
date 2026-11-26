@@ -5,7 +5,7 @@ use egui::{InputState, Key, Ui};
 use lazecode_core::{AppModel, Command};
 
 use crate::keybindings::{self, Action};
-use crate::runtime::{DialogState, UiRuntime};
+use crate::runtime::{DialogState, OverlaySnapshot, UiRuntime};
 
 /// 命中 `action` 当前绑定的组合键（含用户覆盖）。
 fn consumed(input: &mut InputState, model: &AppModel, action: Action) -> bool {
@@ -16,9 +16,10 @@ fn consumed(input: &mut InputState, model: &AppModel, action: Action) -> bool {
 pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
     let ctx = ui.ctx();
 
-    // 设置页正在录入新快捷键：吞掉这一帧按键并跳过正常分发（Esc 取消）。
     if rt.keybind_capture.is_some() {
         keybindings::capture_tick(ctx, model, rt);
+        let snapshot = OverlaySnapshot::capture(model, rt);
+        rt.overlay_snapshot = snapshot;
         return;
     }
 
@@ -123,7 +124,7 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         if !blocked && consumed(input, model, Action::OpenProject) {
             open_project = true;
         }
-        if consumed(input, model, Action::Search) {
+        if !blocked && consumed(input, model, Action::Search) {
             search = true;
         }
         if !blocked && active_json_tab.is_some() && consumed(input, model, Action::FormatJson) {
@@ -147,7 +148,7 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
         if !blocked && consumed(input, model, Action::NewFile) {
             new_file = true;
         }
-        if input.key_pressed(Key::Escape) {
+        if input.key_pressed(Key::Escape) && rt.escape_handled_frame != rt.frame_count {
             close_overlay = true;
         }
     });
@@ -297,7 +298,7 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
             };
         }
     }
-    if close_overlay {
+    if close_overlay && !search && !rt.overlay_snapshot.closed_since(model, rt) {
         rt.close_overlay(model);
     }
     if (unshelve_silent || unshelve_dialog) && rt.commit_tab == crate::runtime::CommitTab::Shelf {
@@ -347,4 +348,6 @@ pub fn handle(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
             }
         }
     }
+    let snapshot = OverlaySnapshot::capture(model, rt);
+    rt.overlay_snapshot = snapshot;
 }

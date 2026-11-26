@@ -10,7 +10,9 @@ use details::*;
 use pane::*;
 use pane::{DETAILS_HEAD_H, FILE_ROW_H, ROOT_ROW_H};
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 
 use lazecode_core::{CompareBranchesSideView, CompareDateFilter};
 use lazecode_git::CommitInfo;
@@ -130,6 +132,137 @@ pub fn filter_commits(
         })
         .map(|(index, _)| index)
         .collect()
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct MatcherKey {
+    query: String,
+    use_regex: bool,
+    match_case: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct FilterKey {
+    matcher: MatcherKey,
+    author: Option<String>,
+    cutoff: Option<i64>,
+    ref_filter: Option<String>,
+    commits: u64,
+}
+
+/// Reused matcher + filtered index list for one compare side. Each frame's
+/// key covers every input to the filter, including a cheap fingerprint of the
+/// commit list (Load More / job refresh replace it).
+pub(crate) struct CompareFilterCache {
+    key: FilterKey,
+    matcher: Option<Matcher>,
+    indices: Vec<usize>,
+}
+
+fn commits_fingerprint(commits: &[CommitInfo]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    (commits.len() as u64).hash(&mut hasher);
+    for commit in commits {
+        commit.id.hash(&mut hasher);
+        commit.time.hash(&mut hasher);
+        commit.author.hash(&mut hasher);
+        commit.email.hash(&mut hasher);
+        for reference in &commit.refs {
+            reference.label.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn filter_indices(
+    commits: &[CommitInfo],
+    author: &Option<String>,
+    cutoff: Option<i64>,
+    ref_filter: &Option<String>,
+    matcher: Option<&Matcher>,
+) -> Vec<usize> {
+    commits
+        .iter()
+        .enumerate()
+        .filter(|(_, commit)| {
+            if author
+                .as_ref()
+                .is_some_and(|author| &commit.author != author)
+            {
+                return false;
+            }
+            if cutoff.is_some_and(|cutoff| commit.time < cutoff) {
+                return false;
+            }
+            if ref_filter.as_ref().is_some_and(|filter| {
+                !commit
+                    .refs
+                    .iter()
+                    .any(|reference| &reference.label == filter)
+            }) {
+                return false;
+            }
+            matcher.is_none_or(|matcher| commit_matches(commit, matcher))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Cached variant of `filter_commits` for the per-frame compare pane. Returns
+/// a borrowed index list so unchanged frames allocate nothing.
+pub(crate) fn filtered_commits<'a>(
+    commits: &[CommitInfo],
+    view: &CompareBranchesSideView,
+    now: i64,
+    cache: &'a mut Option<CompareFilterCache>,
+) -> &'a [usize] {
+    let matcher_key = MatcherKey {
+        query: view.query.trim().to_string(),
+        use_regex: view.regex,
+        match_case: view.match_case,
+    };
+    let key = FilterKey {
+        matcher: matcher_key.clone(),
+        author: view.author.clone(),
+        cutoff: date_cutoff(view.date, now),
+        ref_filter: view.selected_ref_filter.clone(),
+        commits: commits_fingerprint(commits),
+    };
+    if cache.is_none() {
+        let matcher = build_matcher(&view.query, view.regex, view.match_case);
+        let indices = filter_indices(
+            commits,
+            &view.author,
+            key.cutoff,
+            &view.selected_ref_filter,
+            matcher.as_ref(),
+        );
+        *cache = Some(CompareFilterCache {
+            matcher,
+            key: key.clone(),
+            indices,
+        });
+    } else if cache
+        .as_ref()
+        .is_some_and(|slot| slot.key.matcher != matcher_key)
+    {
+        let slot = cache.as_mut().unwrap();
+        slot.matcher = build_matcher(&view.query, view.regex, view.match_case);
+        slot.key.matcher = matcher_key;
+    }
+    let slot = cache.as_mut().unwrap();
+    if slot.key != key {
+        let indices = filter_indices(
+            commits,
+            &view.author,
+            key.cutoff,
+            &view.selected_ref_filter,
+            slot.matcher.as_ref(),
+        );
+        slot.key = key;
+        slot.indices = indices;
+    }
+    &cache.as_ref().unwrap().indices
 }
 
 /// 提交侧里出现过的作者名（首见序），供 User 过滤菜单。
@@ -544,4 +677,75 @@ fn cb_filter_btn(
         if active { p.blue } else { p.text2 },
     );
     response.clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lazecode_git::{RefKind, RefLabel};
+
+    fn commit(id: &str, message: &str, author: &str, time: i64, reference: &str) -> CommitInfo {
+        CommitInfo {
+            id: id.to_string(),
+            short: id.chars().take(7).collect(),
+            message: message.to_string(),
+            body: String::new(),
+            author: author.to_string(),
+            email: "dev@example.com".to_string(),
+            time,
+            parents: Vec::new(),
+            in_head: None,
+            refs: vec![RefLabel {
+                label: reference.to_string(),
+                kind: RefKind::LocalBranch,
+            }],
+            lane: 0,
+            lane_count: 1,
+            edges: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn cached_filter_reuses_indices_until_an_input_changes() {
+        let commits = vec![
+            commit("1111111", "fix login", "Ada", 100, "main"),
+            commit("2222222", "docs update", "Ada", 200, "main"),
+            commit("3333333", "fix build", "Lin", 300, "dev"),
+        ];
+        let mut view = CompareBranchesSideView {
+            query: "fix".to_string(),
+            ..Default::default()
+        };
+        let mut cache = None;
+
+        let first = filtered_commits(&commits, &view, 400, &mut cache).to_vec();
+        assert_eq!(first, vec![0, 2]);
+        assert_eq!(first, filter_commits(&commits, &view, 400));
+
+        view.path = "unrelated-ui-state".to_string();
+        let reused = filtered_commits(&commits, &view, 401, &mut cache);
+        assert_eq!(reused, first.as_slice());
+        assert!(
+            std::ptr::eq(reused.as_ptr(), cache.as_ref().unwrap().indices.as_ptr()),
+            "an unchanged frame must reuse the cached index list"
+        );
+
+        view.author = Some("Lin".to_string());
+        let by_author = filtered_commits(&commits, &view, 401, &mut cache).to_vec();
+        assert_eq!(by_author, vec![2]);
+
+        view.author = None;
+        view.selected_ref_filter = Some("main".to_string());
+        assert_eq!(filtered_commits(&commits, &view, 401, &mut cache), &[0]);
+        view.selected_ref_filter = None;
+
+        view.query = "f.x".to_string();
+        view.regex = true;
+        assert_eq!(filtered_commits(&commits, &view, 401, &mut cache), &[0, 2]);
+
+        view.query = "fix".to_string();
+        view.regex = false;
+        let shorter = commits[..2].to_vec();
+        assert_eq!(filtered_commits(&shorter, &view, 401, &mut cache), &[0]);
+    }
 }

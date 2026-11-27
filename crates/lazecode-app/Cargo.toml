@@ -34,7 +34,7 @@ lazecode-terminal.workspace = true
 lazecode-ui.workspace = true
 dirs.workspace = true
 rfd = "0.16"
-png = "0.17"
+png = "0.18"
 encoding_rs.workspace = true
 libc.workspace = true
 

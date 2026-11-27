@@ -478,6 +478,12 @@ impl WorkspaceFile {
         Settings::config_dir().join("workspace.toml")
     }
 
+    /// A first launch has no workspace file yet. Everything after that has a
+    /// saved file, even when it only holds defaults.
+    pub fn exists() -> bool {
+        Self::path().exists()
+    }
+
     pub fn load() -> Self {
         let path = Self::path();
         let Ok(text) = std::fs::read_to_string(&path) else {

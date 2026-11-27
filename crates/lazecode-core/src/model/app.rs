@@ -9,8 +9,25 @@ use crate::settings::{Language, ThemeMode, WorkspaceFile};
 
 use super::*;
 
+/// First launch shows only the home screen: no restored projects, drawers,
+/// terminal dock or overlays. Subsequent launches restore the saved workspace.
+fn apply_first_run_layout(model: &mut AppModel) {
+    model.projects.clear();
+    model.active_project = None;
+    model.recent.clear();
+    model.recent_files.clear();
+    model.ui.worktree_views.clear();
+    model.ui.view_target = None;
+    model.ui.sidebar_visible = false;
+    model.ui.panel_visible = false;
+    model.ui.terminal_visible = false;
+    model.ui.settings_open = false;
+    model.ui.command_palette_open = false;
+}
+
 impl AppModel {
     pub fn new(settings: Settings, notifier: Option<Arc<dyn Notifier>>) -> Self {
+        let first_run = !WorkspaceFile::exists();
         let workspace = WorkspaceFile::load();
         let lsp = LspManager::new(settings.lsp_enabled, notifier.clone());
         let mut model = Self {
@@ -52,7 +69,9 @@ impl AppModel {
         };
         model.restore_workspace(workspace);
         model.migrate_favorite_branches();
-        if model.projects.is_empty() {
+        if first_run {
+            apply_first_run_layout(&mut model);
+        } else if model.projects.is_empty() {
             model.ui.sidebar_visible = false;
             model.ui.panel_visible = false;
         }
@@ -1033,5 +1052,53 @@ impl AppModel {
         if self.git_cmd_log.len() > 1000 {
             self.git_cmd_log.drain(0..100);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_run_layout_clears_restored_state() {
+        let root = std::env::temp_dir().join(format!("lazecode-first-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let settings = Settings::default();
+        let project = ProjectState::open(root.clone(), &settings, None).unwrap();
+        let ui = UiState {
+            sidebar_visible: true,
+            panel_visible: true,
+            terminal_visible: true,
+            command_palette_open: true,
+            ..Default::default()
+        };
+        let mut model = AppModel {
+            settings: settings.clone(),
+            projects: vec![project],
+            active_project: Some(0),
+            ui,
+            toasts: Vec::new(),
+            recent: vec![root.clone()],
+            recent_files: vec![root.join("file.txt")],
+            commands: Vec::new(),
+            notifier: None,
+            lsp: lsp::LspManager::new(false, None),
+            should_quit: false,
+            version: "test",
+            favorite_branches: HashSet::new(),
+            git_cmd_log: Vec::new(),
+        };
+
+        apply_first_run_layout(&mut model);
+
+        assert!(model.projects.is_empty());
+        assert_eq!(model.active_project, None);
+        assert!(model.recent.is_empty() && model.recent_files.is_empty());
+        assert!(!model.ui.sidebar_visible);
+        assert!(!model.ui.panel_visible);
+        assert!(!model.ui.terminal_visible);
+        assert!(!model.ui.command_palette_open);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

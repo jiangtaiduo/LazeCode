@@ -87,7 +87,7 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
         if model.ui.panel_maximised {
             stage.height()
         } else {
-            let max_height = (stage.height() - TABBAR_H - 120.0).max(120.0);
+            let max_height = drag_limit(stage.height());
             model.ui.panel_height.clamp(120.0, max_height)
         }
     } else {
@@ -110,7 +110,7 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
                     pos2(stage.right(), status.top()),
                 ))
             } else {
-                let max_width = (stage.width() - 320.0).max(240.0);
+                let max_width = drag_limit(stage.width());
                 let dock_width = model.ui.terminal_width.clamp(240.0, max_width);
                 let upper_limit = panel
                     .as_ref()
@@ -125,7 +125,7 @@ pub fn compute_layout(full: Rect, model: &AppModel) -> Layout {
             let dock_height = if model.ui.terminal_maximised {
                 stage.height()
             } else {
-                let max_height = (stage.height() - TABBAR_H - 120.0).max(120.0);
+                let max_height = drag_limit(stage.height());
                 model.ui.terminal_height.clamp(120.0, max_height)
             };
             Some(Rect::from_min_max(
@@ -326,6 +326,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
                     &theme,
                     dock.y_range(),
                     dock.left() - SPLITTER * 0.5,
+                    layout.stage,
                 );
             }
         } else {
@@ -338,6 +339,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
                     &theme,
                     dock.x_range(),
                     dock.top() - SPLITTER * 0.5,
+                    layout.stage,
                 );
             }
         }
@@ -352,6 +354,7 @@ pub fn draw(ui: &mut Ui, model: &mut AppModel, rt: &mut UiRuntime) {
                 &theme,
                 panel.x_range(),
                 panel.top() - SPLITTER * 0.5,
+                layout.stage,
             );
         }
         crate::panel::draw(ui, model, rt, &theme, panel);
@@ -448,10 +451,11 @@ fn splitter_terminal(
     theme: &Theme,
     x_range: egui::Rangef,
     y: f32,
+    stage: Rect,
 ) {
     let rect = Rect::from_min_max(
-        pos2(x_range.min, y - 2.0),
-        pos2(x_range.max, y + SPLITTER + 2.0),
+        pos2(x_range.min, y - 6.0),
+        pos2(x_range.max, y + SPLITTER + 6.0),
     );
     let response = ui.interact(
         rect,
@@ -468,8 +472,12 @@ fn splitter_terminal(
         );
     }
     if response.dragged() {
-        model.ui.terminal_height =
-            (model.ui.terminal_height - response.drag_delta().y).clamp(120.0, 900.0);
+        model.ui.terminal_height = dock_drag_target(
+            model.ui.terminal_height,
+            response.drag_delta().y,
+            120.0,
+            drag_limit(stage.height()),
+        );
         rt.panel_drag = true;
     } else if rt.panel_drag {
         // 与面板共用拖拽标志；面板自身不在拖拽时才落盘终端高度。
@@ -485,10 +493,11 @@ fn splitter_terminal_vertical(
     theme: &Theme,
     y_range: egui::Rangef,
     x: f32,
+    stage: Rect,
 ) {
     let rect = Rect::from_min_max(
-        pos2(x - 2.0, y_range.min),
-        pos2(x + SPLITTER + 2.0, y_range.max),
+        pos2(x - 6.0, y_range.min),
+        pos2(x + SPLITTER + 6.0, y_range.max),
     );
     let response = ui.interact(
         rect,
@@ -505,13 +514,33 @@ fn splitter_terminal_vertical(
         );
     }
     if response.dragged() {
-        model.ui.terminal_width =
-            (model.ui.terminal_width - response.drag_delta().x).clamp(240.0, 1200.0);
+        model.ui.terminal_width = dock_drag_target(
+            model.ui.terminal_width,
+            response.drag_delta().x,
+            240.0,
+            drag_limit(stage.width()),
+        );
         rt.panel_drag = true;
     } else if rt.panel_drag {
         rt.panel_drag = false;
         model.save_workspace();
     }
+}
+
+/// Largest dock size reachable by dragging: leaves the splitter just inside
+/// the stage. Button-maximised docks bypass this and use the whole stage.
+fn drag_limit(stage_size: f32) -> f32 {
+    (stage_size - SPLITTER).max(120.0)
+}
+
+/// A drag only changes the size. It never enters the maximise state, so the
+/// splitter stays available to drag the dock back down.
+fn dock_drag_target(current: f32, drag: f32, min: f32, max: f32) -> f32 {
+    (current - drag).clamp(min, max)
+}
+
+fn panel_drag_target(current: f32, drag_y: f32, stage: Rect) -> f32 {
+    dock_drag_target(current, drag_y, 120.0, drag_limit(stage.height()))
 }
 
 fn splitter_horizontal(
@@ -521,10 +550,11 @@ fn splitter_horizontal(
     theme: &Theme,
     x_range: egui::Rangef,
     y: f32,
+    stage: Rect,
 ) {
     let rect = Rect::from_min_max(
-        pos2(x_range.min, y - 2.0),
-        pos2(x_range.max, y + SPLITTER + 2.0),
+        pos2(x_range.min, y - 6.0),
+        pos2(x_range.max, y + SPLITTER + 6.0),
     );
     let response = ui.interact(
         rect,
@@ -542,8 +572,7 @@ fn splitter_horizontal(
     }
     if response.dragged() {
         model.ui.panel_height =
-            (model.ui.panel_height - response.drag_delta().y).clamp(120.0, 900.0);
-        model.ui.panel_maximised = false;
+            panel_drag_target(model.ui.panel_height, response.drag_delta().y, stage);
         rt.panel_drag = true;
     } else if rt.panel_drag {
         rt.panel_drag = false;
@@ -575,4 +604,28 @@ pub fn sidebar_view(model: &AppModel) -> SidebarView {
 
 pub fn placeholder_size() -> egui::Vec2 {
     vec2(0.0, 0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drag_reaches_full_size_and_can_return() {
+        let stage = Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 900.0));
+        let full = drag_limit(stage.height());
+        assert!(full >= 880.0);
+        assert_eq!(panel_drag_target(300.0, -1000.0, stage), full);
+        assert_eq!(panel_drag_target(full, 1000.0, stage), 120.0);
+
+        let full_width = drag_limit(stage.width());
+        assert_eq!(
+            dock_drag_target(400.0, -1000.0, 240.0, full_width),
+            full_width
+        );
+        assert_eq!(
+            dock_drag_target(full_width, 1000.0, 240.0, full_width),
+            240.0
+        );
+    }
 }

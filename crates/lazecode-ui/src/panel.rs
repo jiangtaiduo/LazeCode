@@ -244,7 +244,7 @@ pub fn draw_terminal_dock(
         crate::tr!(model, "Maximize height", "最大化")
     };
     let max_rect = Rect::from_center_size(Pos2::new(rx - 10.0, head.center().y), Vec2::splat(20.0));
-    if icon_button(ui, max_rect, max_icon, model.ui.terminal_maximised, theme)
+    if icon_button(ui, max_rect, max_icon, false, theme)
         .on_hover_text(max_tooltip)
         .clicked()
     {
@@ -614,7 +614,7 @@ fn draw_git_panel(
         Icon::Maximize
     };
     let max_rect = Rect::from_min_size(Pos2::new(rx - 24.0, head.top() + 4.0), Vec2::splat(24.0));
-    if icon_button(ui, max_rect, max_icon, model.ui.panel_maximised, theme).clicked() {
+    if icon_button(ui, max_rect, max_icon, false, theme).clicked() {
         model.ui.panel_maximised = !model.ui.panel_maximised;
     }
     rx -= 26.0;

@@ -6,6 +6,42 @@ All notable changes to LazeCode are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.14] - 2026-11-27
+
+### Changed
+
+- A first launch shows only the home screen: no projects, sidebar, bottom
+  panel, terminal dock or overlays are restored. Later launches keep restoring
+  the page and panel state saved at exit.
+- The console dock and Git panel restore buttons no longer keep a pressed
+  background after maximizing; they highlight only on hover. Dragging a
+  splitter can grow a dock to near-fullscreen without entering the maximise
+  state, so it can be dragged back down. Button-maximised docks are restored
+  only by the restore button; the two mechanisms stay independent.
+- The welcome screen no longer shows the running-tasks/project/branch footer,
+  and hides its content when the stage is too short for the home card.
+- The Git-log detail column now shows the combined changed-file list for a
+  multi-commit selection (with aggregated add/delete counts); double-click and
+  context-menu diffs target the same range, and Revert is hidden for multi-selection.
+- The Git branch list matches PyCharm 1:1: 20px rows, 16px indentation, and
+  chevron/folder/branch/text columns aligned to the reference. Folders, the
+  current branch, tags and root-level refs share icon column 0; only refs inside
+  a folder step deeper (`pre-linear` under `backup` is indented, while
+  `feat-rust` and `theme` stay level with `backup`). Chevrons are larger and
+  closer to labels; directories and Local/Remote/Tags fold, favourites are
+  pinned first, and long names elide with a full-name hover.
+- The file tree follows PyCharm: clicking the chevron folds a folder (row clicks
+  only select), Up/Down/Home/End move, Right expands or steps into a child,
+  Left collapses or steps to the parent. Expanded folders keep the closed-folder icon.
+- Context menus now use a dedicated menu ink (pure white in dark mode, black
+  in light mode), clearly brighter than ordinary content text; the menu border
+  is stronger while hovered, danger and disabled items keep their distinct styles.
+  The change-file menu sizes itself from its longest label, and menu rows clip
+  their text, so long items can no longer paint outside the menu.
+- Re-selecting commits keeps the previous change list visible until the new
+  range finishes loading, so the detail column no longer flashes blank; the
+  header underlines itself while the reload is in flight.
+
 ## [0.4.13] - 2026-11-26
 
 ### Added
@@ -57,27 +93,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   output when its project is shown again after other projects were active.
   Evictions from the bounded cold spool now offset the growth of the viewport
   offset, preserving its original distance from live output.
-- The Git-log detail column now shows the combined changed-file list for a
-  multi-commit selection (with aggregated add/delete counts); double-click and
-  context-menu diffs target the same range, and Revert is hidden for multi-selection.
-- The Git branch list matches PyCharm 1:1: 20px rows, 16px indentation, and
-  chevron/folder/branch/text columns aligned to the reference. Folders, the
-  current branch, tags and root-level refs share icon column 0; only refs inside
-  a folder step deeper (`pre-linear` under `backup` is indented, while
-  `feat-rust` and `theme` stay level with `backup`). Chevrons are larger and
-  closer to labels; directories and Local/Remote/Tags fold, favourites are
-  pinned first, and long names elide with a full-name hover.
-- The file tree follows PyCharm: clicking the chevron folds a folder (row clicks
-  only select), Up/Down/Home/End move, Right expands or steps into a child,
-  Left collapses or steps to the parent. Expanded folders keep the closed-folder icon.
-- Context menus now use a dedicated menu ink (pure white in dark mode, black
-  in light mode), clearly brighter than ordinary content text; the menu border
-  is stronger while hovered, danger and disabled items keep their distinct styles.
-  The change-file menu sizes itself from its longest label, and menu rows clip
-  their text, so long items can no longer paint outside the menu.
-- Re-selecting commits keeps the previous change list visible until the new
-  range finishes loading, so the detail column no longer flashes blank; the
-  header underlines itself while the reload is in flight.
 - Editor and settings saves use `F_FULLFSYNC` on macOS and fsync the parent
   directory after the rename, so a power loss cannot lose the file that was
   just saved.

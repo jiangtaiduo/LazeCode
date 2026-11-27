@@ -181,6 +181,11 @@ pub(super) fn draw_welcome(
 ) {
     let p = theme.palette;
     ui.painter().rect_filled(rect, 0.0, p.editor);
+    // A dragged/maximised panel can leave too little stage height for the
+    // home card; show only the editor background instead of clipped content.
+    if rect.height() < 440.0 {
+        return;
+    }
     let card = Rect::from_center_size(
         rect.center(),
         Vec2::new(
@@ -422,39 +427,4 @@ pub(super) fn draw_welcome(
             row_y += 27.0;
         }
     }
-
-    let foot_y = card.bottom() - 20.0;
-    ui.painter().text(
-        Pos2::new(left, foot_y),
-        Align2::LEFT_CENTER,
-        if model.settings.language.is_zh() {
-            format!(
-                "{} 个运行中 · {} 个项目",
-                rt.busy_count(),
-                model.projects.len()
-            )
-        } else {
-            format!(
-                "{} running across {} projects",
-                rt.busy_count(),
-                model.projects.len()
-            )
-        },
-        FontId::proportional(12.0),
-        p.text3,
-    );
-    if let Some(index) = index {
-        ui.painter().text(
-            Pos2::new(card.right() - 34.0, foot_y),
-            Align2::RIGHT_CENTER,
-            format!(
-                "{} · {}",
-                model.projects[index].name,
-                model.projects[index].branch()
-            ),
-            FontId::proportional(10.0),
-            p.text3,
-        );
-    }
-    let _ = rt;
 }
